@@ -25,6 +25,7 @@ from bake_osm_coast import (
     Bounds,
     Watercourse,
     _clip_worker_inline,
+    _polygons_from_osm,
     clip_watercourses,
     encode_lvr,
     snap_bounds_to_tiles,
@@ -137,6 +138,42 @@ class ClipWatercoursesTest(unittest.TestCase):
         self.assertLess(len(thinned), len(plain))
         self.assertAlmostEqual(thinned[0][0], plain[0][0], places=6)
         self.assertAlmostEqual(thinned[-1][0], plain[-1][0], places=6)
+
+
+def _coast_answer(*ways):
+    """An Overpass answer with one natural=coastline way per coordinate list."""
+    elements = []
+    nid = 1
+    for wid, coords in enumerate(ways, start=1):
+        refs = []
+        for lon, lat in coords:
+            elements.append({'type': 'node', 'id': nid, 'lon': lon, 'lat': lat})
+            refs.append(nid)
+            nid += 1
+        if coords[0] == coords[-1]:
+            elements.pop()
+            nid -= 1
+            refs[-1] = refs[0]
+        elements.append({'type': 'way', 'id': wid, 'nodes': refs, 'tags': {'natural': 'coastline'}})
+    return {'elements': elements}
+
+
+class LandFromCoastlineTest(unittest.TestCase):
+    """Which polygonized pieces are land, from the coastline's winding."""
+
+    def test_an_island_closing_inside_the_bbox_is_the_only_land(self):
+        # Counter-clockwise: land on the left, as OSM draws an island. The sea
+        # piece around it is the box with a hole, whose centroid falls on the
+        # island - Gran Canaria baked as land edge to edge through that.
+        island = [(0.4, 0.4), (0.6, 0.4), (0.6, 0.6), (0.4, 0.6), (0.4, 0.4)]
+        land, _, _ = _polygons_from_osm(_coast_answer(island), TILE)
+        self.assertAlmostEqual(land.area, 0.04, places=6)
+
+    def test_a_mainland_coast_leaving_the_bbox_keeps_the_land_side(self):
+        # Running north along x=0.3 with land to the left (west).
+        coast = [(0.3, -0.1), (0.3, 1.1)]
+        land, _, _ = _polygons_from_osm(_coast_answer(coast), TILE)
+        self.assertAlmostEqual(land.area, 0.3, places=6)
 
 
 class EncodeLvrTest(unittest.TestCase):

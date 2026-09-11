@@ -4,7 +4,7 @@ import {
     ecefToEnu, ecefToGeodetic, enuToEcef, geodeticToEcef, makeEnuBasis,
 } from '../../src/script/terrain/geodesy';
 import { padBlendWeight } from '../../src/script/terrain/flattenPad';
-import { decodePtm } from '../../src/script/terrain/ptm';
+import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, decodePtm } from '../../src/script/terrain/ptm';
 import { TerrainClass } from '../../src/script/terrain/tones';
 import { Watercourse } from './lvr';
 import { CoastPolygon, LonLatBounds } from './shoreline';
@@ -226,6 +226,24 @@ describe('buildTile', () => {
         assert.ok(r.waterTriangles > 0);
         const tile = decodePtm(r.bytes);
         assert.equal(tile.landPositions.length, 0);
+    });
+
+    it('draws open sea as one leaf whatever the DEM and cover say under it', () => {
+        // Offshore DEMs carry bathymetry and speckle, and the cover raster
+        // flickers between classes; neither is drawn, so neither may cut the sea.
+        const cover = uniformCover(TerrainClass.Water, [0, 0, 255]);
+        for (let i = 0; i < SIZE * SIZE; i += 3) {
+            cover.classes[i] = TerrainClass.Grass;
+        }
+        const r = buildTile(base({
+            polygons: [],
+            heights: heightsFrom((x, y) => -40 + Math.sin(x * 1.7) * 30 + Math.cos(y * 2.3) * 25),
+            cover,
+            skirtDepthM: 0,
+        }));
+        assert.equal(r.landTriangles, 0);
+        // Two surface triangles plus one skirt quad per border edge.
+        assert.equal(r.waterTriangles, 2 + 4 * 2);
     });
 
     it('produces both streams for a coastal tile', () => {
@@ -808,21 +826,88 @@ describe('buildTile regions', () => {
             maxErrorM: 1e9,
             regions: [west, east],
         }));
-        assert.deepEqual(classesIn(r.bytes), new Set([TerrainClass.Tree, TerrainClass.Crop]),
+        assert.deepEqual(classesIn(r.bytes), new Set([TerrainClass.Unknown, TerrainClass.Tree, TerrainClass.Crop]),
             'both classes must survive - the region cut is not a raster vote to be merged away');
         const tile = decodePtm(r.bytes);
         assert.ok(tile.landAttrs.length / 4 > 6,
             'a real boundary needs more than the two-triangle fan a flat, uniform tile gets');
     });
 
-    it('falls back to the raster cover vote wherever a region carries no landuse class', () => {
+    it('paints untagged land as unknown, not with the raster class, once a tile has regions', () => {
+        // The polygons decide the fill; the raster's blobs must not show
+        // through around them.
         const bare = regionAt(-1, -1, CELLS + 1, CELLS + 1, true, undefined);
         const r = buildTile(base({
             polygons: [coastAt(CELLS + 2)],
             cover: uniformCover(TerrainClass.Shrub, [90, 100, 60]),
             regions: [bare],
         }));
-        assert.deepEqual(classesIn(r.bytes), new Set([TerrainClass.Shrub]));
+        assert.deepEqual(classesIn(r.bytes), new Set([TerrainClass.Unknown]));
+    });
+
+    it('fills each region with one colour and does not cut along raster class edges', () => {
+        // Raster: west half Built, east half Tree, in two different colours.
+        // Regions: one tagged Crop polygon over the whole tile. The mesh must
+        // come out as Crop everywhere, in a single colour, with no split down
+        // the raster's middle.
+        const cover = uniformCover(TerrainClass.Built, [120, 120, 120]);
+        for (let y = 0; y < SIZE; y++) {
+            for (let x = Math.ceil(SIZE / 2); x < SIZE; x++) {
+                const i = y * SIZE + x;
+                cover.classes[i] = TerrainClass.Tree;
+                cover.colors[i * 3] = 40;
+                cover.colors[i * 3 + 1] = 90;
+                cover.colors[i * 3 + 2] = 40;
+            }
+        }
+        const crop = regionAt(-1, -1, CELLS + 1, CELLS + 1, true, TerrainClass.Crop);
+        const r = buildTile(base({
+            polygons: [coastAt(CELLS + 2)],
+            heights: heightsFrom(() => 50),
+            maxErrorM: 1e9,
+            cover,
+            regions: [crop],
+        }));
+        // The mesh underneath is untagged ground; the polygon is the fill on it.
+        assert.deepEqual(classesIn(r.bytes), new Set([TerrainClass.Unknown, TerrainClass.Crop]));
+        const tile = decodePtm(r.bytes);
+        const colours = new Set<string>();
+        for (let v = 0; v * 4 < tile.landAttrs.length; v++) {
+            if (tile.landAttrs[v * 4 + 3] !== TerrainClass.Crop) {
+                continue;
+            }
+            colours.add(`${tile.landAttrs[v * 4]},${tile.landAttrs[v * 4 + 1]},${tile.landAttrs[v * 4 + 2]}`);
+        }
+        assert.equal(colours.size, 1, `region filled with ${colours.size} colours`);
+    });
+
+    it('puts the fill edge where the polygon edge is, not on the grid', () => {
+        // A Crop polygon whose east edge falls between grid nodes, on a tile
+        // coarse enough that a grid cut would snap it a whole cell away.
+        const edgeX = 10.37;
+        const crop = regionAt(-1, -1, edgeX, CELLS + 1, true, TerrainClass.Crop);
+        const r = buildTile(base({
+            polygons: [coastAt(CELLS + 2)],
+            heights: heightsFrom(() => 50),
+            maxErrorM: 1e9,
+            minLeafSize: 8,
+            regions: [crop],
+        }));
+        const tile = decodePtm(r.bytes);
+        const centre = tileCentreEnu(r.centerHeightM);
+        const lat = (BOUNDS.south + BOUNDS.north) / 2;
+        const edgeLon = BOUNDS.west + (edgeX / CELLS) * (BOUNDS.east - BOUNDS.west);
+        const centreLon = (BOUNDS.west + BOUNDS.east) / 2;
+        const edgeE = centre.e + (edgeLon - centreLon) * 111320 * Math.cos(lat * Math.PI / 180);
+        let maxE = -Infinity;
+        for (let v = 0; v * 4 < tile.landAttrs.length; v++) {
+            if (tile.landAttrs[v * 4 + 3] === TerrainClass.Crop) {
+                maxE = Math.max(maxE, centre.e + tile.landPositions[v * 3] * tile.quantScale);
+            }
+        }
+        const cellM = ((BOUNDS.east - BOUNDS.west) / CELLS) * 111320 * Math.cos(lat * Math.PI / 180);
+        assert.ok(Math.abs(maxE - edgeE) < 1.5,
+            `fill reaches ${(maxE - edgeE).toFixed(2)} m past the polygon edge (a cell is ${cellM.toFixed(0)} m)`);
     });
 
     it('does not drop a landuse-only boundary down to sea level', () => {
@@ -847,23 +932,95 @@ describe('buildTile regions', () => {
         }
     });
 
-    it('cuts a cell where the shoreline and a landuse edge cross at once', () => {
-        // Water on the west third; the remaining land is Tree in the north,
-        // Crop in the south - so cells near the middle of that seam face
-        // water, Tree and Crop all at once, the case only cutCellRegions
-        // (not the plain two-region cutter) can resolve.
-        const third = Math.round(SIZE / 3);
-        const water = regionAt(-1, -1, third, CELLS + 1, false, undefined);
-        const north = regionAt(third, -1, CELLS + 1, SIZE / 2, true, TerrainClass.Tree);
-        const south = regionAt(third, SIZE / 2, CELLS + 1, CELLS + 1, true, TerrainClass.Crop);
+    it('fills only over land where a landuse edge meets the shoreline', () => {
+        // Land on the west two thirds (the coast polygon decides that, not
+        // the regions); Tree in the north, Crop in the south, both running
+        // right across the tile. The fill must stop at the shore.
+        const shoreX = Math.round((CELLS * 2) / 3);
+        const north = regionAt(-1, -1, CELLS + 1, SIZE / 2, true, TerrainClass.Tree);
+        const south = regionAt(-1, SIZE / 2, CELLS + 1, CELLS + 1, true, TerrainClass.Crop);
         const r = buildTile(base({
+            polygons: [coastAt(shoreX)],
             heights: heightsFrom(() => 50),
             maxErrorM: 1e9,
             minLeafSize: 1,
-            regions: [water, north, south],
+            regions: [north, south],
         }));
-        assert.ok(r.waterTriangles > 0, 'the water region must still produce water geometry');
-        assert.deepEqual(classesIn(r.bytes), new Set([TerrainClass.Tree, TerrainClass.Crop]));
+        assert.ok(r.waterTriangles > 0, 'the sea east of the coast must still be water');
+        assert.deepEqual(classesIn(r.bytes), new Set([TerrainClass.Unknown, TerrainClass.Tree, TerrainClass.Crop]));
+        const tile = decodePtm(r.bytes);
+        const centre = tileCentreEnu(r.centerHeightM);
+        const lat = (BOUNDS.south + BOUNDS.north) / 2;
+        const metresPerLon = 111320 * Math.cos(lat * Math.PI / 180);
+        const shoreE = centre.e
+            + (BOUNDS.west + (shoreX / CELLS) * (BOUNDS.east - BOUNDS.west) - (BOUNDS.west + BOUNDS.east) / 2)
+            * metresPerLon;
+        const cellM = ((BOUNDS.east - BOUNDS.west) / CELLS) * metresPerLon;
+        for (let v = 0; v * 4 < tile.landAttrs.length; v++) {
+            const cls = tile.landAttrs[v * 4 + 3];
+            if (cls !== TerrainClass.Tree && cls !== TerrainClass.Crop) {
+                continue;
+            }
+            const e = centre.e + tile.landPositions[v * 3] * tile.quantScale;
+            assert.ok(e < shoreE + cellM, `fill vertex ${(e - shoreE).toFixed(1)} m out to sea`);
+        }
+    });
+
+    describe('outlines', () => {
+        const kindsOf = (bytes: Uint8Array): Set<number> => {
+            const tile = decodePtm(bytes);
+            const kinds = new Set<number>();
+            for (let v = 0; v * 4 < tile.riverDirections.length; v++) {
+                kinds.add(tile.riverDirections[v * 4 + 3]);
+            }
+            return kinds;
+        };
+
+        it('strokes the edge of a tagged region, marked as an outline', () => {
+            const west = regionAt(-1, -1, SIZE / 2, CELLS + 1, true, TerrainClass.Tree);
+            const east = regionAt(SIZE / 2, -1, CELLS + 1, CELLS + 1, true, undefined);
+            const r = buildTile(base({
+                polygons: [coastAt(CELLS + 2)],
+                heights: heightsFrom(() => 50),
+                regions: [west, east],
+            }));
+            assert.deepEqual(kindsOf(r.bytes), new Set([PTM_STROKE_KIND_OUTLINE]));
+            assert.equal(r.riverTriangles, 0, 'an outline is not a watercourse');
+        });
+
+        it('draws nothing along the tile border or around untagged land', () => {
+            // A tagged region filling the tile has no edge but the border, and
+            // an untagged one has no edge worth drawing at all.
+            const whole = regionAt(-1, -1, CELLS + 1, CELLS + 1, true, TerrainClass.Crop);
+            const filled = decodePtm(buildTile(base({
+                polygons: [coastAt(CELLS + 2)], regions: [whole],
+            })).bytes);
+            assert.equal(filled.riverIndices.length, 0);
+
+            const bare = regionAt(-1, -1, CELLS + 1, CELLS + 1, true, undefined);
+            const untagged = decodePtm(buildTile(base({
+                polygons: [coastAt(CELLS + 2)], regions: [bare],
+            })).bytes);
+            assert.equal(untagged.riverIndices.length, 0);
+        });
+
+        it('keeps watercourses marked as water beside outlines', () => {
+            const west = regionAt(-1, -1, SIZE / 2, CELLS + 1, true, TerrainClass.Tree);
+            const course: Watercourse = {
+                widthM: 12,
+                points: [
+                    { lon: BOUNDS.west, lat: (BOUNDS.north + BOUNDS.south) / 2 },
+                    { lon: BOUNDS.east, lat: (BOUNDS.north + BOUNDS.south) / 2 },
+                ],
+            };
+            const r = buildTile(base({
+                polygons: [coastAt(CELLS + 2)],
+                regions: [west],
+                watercourses: [course],
+            }));
+            assert.deepEqual(kindsOf(r.bytes), new Set([PTM_STROKE_KIND_WATER, PTM_STROKE_KIND_OUTLINE]));
+            assert.ok(r.riverTriangles > 0);
+        });
     });
 });
 

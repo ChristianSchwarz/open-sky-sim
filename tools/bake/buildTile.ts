@@ -26,11 +26,14 @@ import {
     FlattenPad, applyFlattenPad, padBlendWeight, padReachM,
 } from '../../src/script/terrain/flattenPad';
 import { CLASS_TO_TONE, TerrainClass, TerrainTone } from '../../src/script/terrain/tones';
-import { PTM_MAX_RIVER_VERTS, PtmTileId, encodePtm } from '../../src/script/terrain/ptm';
+import {
+    PTM_MAX_RIVER_VERTS, PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmTileId, encodePtm,
+} from '../../src/script/terrain/ptm';
 import { GridTriangle, decimate } from './decimate';
 import { CoastPolygon, InlandPolygon, LonLatBounds, buildShoreline } from './shoreline';
 import { Watercourse } from './lvr';
 import { RegionPolygon, buildRegionField, regionFieldFromShoreline } from './regions';
+import { GridPoint, landuseFill } from './landuseFill';
 
 /** Heights at or below seaLevel + this are open water. Matches the old bake. */
 export const WATER_HEIGHT_EPS_M = 0.5;
@@ -104,6 +107,13 @@ const RIVER_MAX_SUBDIVISIONS = 512;
 
 /** How far a watercourse stroke floats above the surface, in grid cells. */
 const RIVER_LIFT_CELLS = 0.05;
+
+/**
+ * Half the true width of a landuse outline stroke, metres. Thin on purpose:
+ * RiverVertProgram's pixel floor is what keeps it visible from altitude, and
+ * the baked width only matters once the edge is close enough to outgrow it.
+ */
+export const OUTLINE_HALF_WIDTH_M = 2;
 
 /**
  * Observed ground cover on the tile's own grid, written by
@@ -401,9 +411,17 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // at all yet) falls back to the plain land/water Shoreline reinterpreted
     // as a 2-entry table, so decimate() always sees a region field and the
     // rest of this function never needs to branch on whether one was given.
-    const regionField = input.regions && input.regions.length > 0
-        ? buildRegionField({ regions: input.regions, bounds, size })
-        : regionFieldFromShoreline(shoreline);
+    // The mesh itself is only ever cut at the shoreline. Landuse polygons used
+    // to be cut into it too, but a grid cut coarsened by the triangle budget
+    // put their edges tens of metres off - up to 16% of a polygon's area on
+    // the wrong side, measured on Gran Canaria - so they are laid over the
+    // finished land facets as exact vector fill instead; see landuseFill.ts.
+    const regionField = regionFieldFromShoreline(shoreline);
+    const hasRegions = input.regions !== undefined && input.regions.length > 0;
+    /** Node-level landuse classification, used only to average each polygon's colour. */
+    const landuseField = hasRegions
+        ? buildRegionField({ regions: input.regions!, bounds, size })
+        : undefined;
     const isLandTriangle = (t: GridTriangle): boolean => regionField.regionTable[t.regionId].isLand;
 
     // --- 3. budget-constrained decimation ---------------------------------
@@ -452,18 +470,87 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     if (input.cover && input.cover.size !== size) {
         throw new Error(`cover size ${input.cover.size} != DEM size ${size}`);
     }
-    const coverClasses = input.cover?.classes;
+    // On a tile with OSM landuse regions the polygons decide what the ground
+    // is, not the raster. Letting raster class edges refuse merges as well
+    // cut the mesh along WorldCover's stairsteps, and those stairsteps are
+    // what got painted - the polygons only showed where they happened to
+    // disagree with the raster.
+    const coverClasses = hasRegions ? undefined : input.cover?.classes;
+
+    // One colour per landuse polygon: the mean observed colour over the dry
+    // nodes it covers, so a polygon fills evenly instead of varying facet by
+    // facet with the raster underneath. Untagged ground gets one tile-wide mean
+    // the same way, for the land between polygons. A polygon too small to own
+    // a node falls back to the facet's own sample.
+    let regionColors: Array<readonly [number, number, number] | undefined> | undefined;
+    let baseColor: readonly [number, number, number] | undefined;
+    if (landuseField && input.cover) {
+        const cover = input.cover;
+        const sums = landuseField.regionTable.map(() => [0, 0, 0, 0]);
+        const untagged = [0, 0, 0, 0];
+        for (let i = 0; i < size * size; i++) {
+            if (cover.classes[i] === TerrainClass.Water) {
+                continue;
+            }
+            const id = landuseField.regionNodes[i];
+            const s = landuseField.regionTable[id].landuseClass === undefined ? untagged : sums[id];
+            s[0] += cover.colors[i * 3];
+            s[1] += cover.colors[i * 3 + 1];
+            s[2] += cover.colors[i * 3 + 2];
+            s[3]++;
+        }
+        const mean = (s: number[]) => (s[3] > 0
+            ? [Math.round(s[0] / s[3]), Math.round(s[1] / s[3]), Math.round(s[2] / s[3])] as const
+            : undefined);
+        regionColors = sums.map(mean);
+        baseColor = mean(untagged);
+    }
+
+    // Water is not drawn at the DEM height, so it must not be decimated
+    // against it. Open sea is a flat sheet at the datum, but the DEM out there
+    // carries bathymetry, void fill and speckle, and the landcover raster
+    // flickers between classes over it - either one refused merges and cut
+    // empty ocean down to single cells. Measure water nodes against the
+    // surface `project` will actually give them, and call them all one class.
+    // Land nodes are untouched, and a block is only merged when every node
+    // shares a region, so no land merge can see a flattened node.
+    const waterFlattened = (field: Float32Array): Float32Array => {
+        const out = new Float32Array(field);
+        for (let i = 0; i < size * size; i++) {
+            if (regionField.regionTable[regionField.regionNodes[i]].isLand) {
+                continue;
+            }
+            if (!shoreline.inlandNodes[i]) {
+                out[i] = seaLevel;
+            } else if (Number.isFinite(shoreline.inlandHeights[i])) {
+                out[i] = shoreline.inlandHeights[i];
+            }
+            // A body that follows the DEM keeps the DEM heights.
+        }
+        return out;
+    };
+    const meshHeights = waterFlattened(heights);
+    const meshPadHeights = drawnHeights === heights ? undefined : waterFlattened(drawnHeights);
+    let meshCoverClasses = coverClasses;
+    if (coverClasses) {
+        meshCoverClasses = new Uint8Array(coverClasses);
+        for (let i = 0; i < size * size; i++) {
+            if (!regionField.regionTable[regionField.regionNodes[i]].isLand) {
+                meshCoverClasses[i] = TerrainClass.Water;
+            }
+        }
+    }
 
     let attempts = 0;
     const run = (err: number, leaf: number) => {
         attempts++;
         return decimate({
             size,
-            heights,
-            padHeights: drawnHeights === heights ? undefined : drawnHeights,
+            heights: meshHeights,
+            padHeights: meshPadHeights,
             padErrorM: PAD_ERROR_M,
             regionNodes: regionField.regionNodes,
-            coverClasses,
+            coverClasses: meshCoverClasses,
             maxErrorM: err,
             minLeafSize: leaf,
             edgeCrossing: regionField.edgeCrossing,
@@ -1064,8 +1151,14 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         }
         landPos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
         landNrm.push(nx, ny, nz);
-        landClass.push(regionField.regionTable[t.regionId].landuseClass ?? facet[0]);
-        landColor.push(facet[1], facet[2], facet[3]);
+        // With regions, the mesh is untagged ground: the polygons are laid over
+        // it below, so the raster's own class must not show between them.
+        landClass.push(hasRegions ? TerrainClass.Unknown : facet[0]);
+        if (hasRegions && baseColor) {
+            landColor.push(baseColor[0], baseColor[1], baseColor[2]);
+        } else {
+            landColor.push(facet[1], facet[2], facet[3]);
+        }
     };
 
     for (const t of tris) {
@@ -1092,6 +1185,63 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             waterTone.push(
                 shore <= SHALLOW_WATER_COAST_M ? TerrainTone.ShallowWater : TerrainTone.Water,
             );
+        }
+    }
+
+    // Landuse fill: each tagged polygon clipped to the land facets it lies on
+    // and lifted a hair off them, so it follows the drawn surface exactly and
+    // its edge sits where OSM has it. See landuseFill.ts.
+    if (hasRegions) {
+        // Below the strokes' own lift (RIVER_LIFT_CELLS), so an outline or a
+        // river crossing a field still draws over the fill. The fill is
+        // appended after the facets it covers, so it also wins any depth tie.
+        const FILL_LIFT_CELLS = 0.02;
+        const liftM = metresPerCell * FILL_LIFT_CELLS;
+        const tagged = input.regions!
+            .map((region, index) => ({ region, index }))
+            .filter(({ region }) => region.isLand && region.landuseClass !== undefined);
+        const landTris = tris.filter(isLandTriangle);
+        const toFillGrid = (p: { lon: number; lat: number }): GridPoint => ({
+            x: ((p.lon - bounds.west) / lonSpan) * cells,
+            y: ((bounds.north - p.lat) / latSpan) * cells,
+        });
+        const pieces = landuseFill(
+            landTris.map(t => t.pts),
+            tagged.map(({ region }) => ({
+                exterior: region.exterior.map(toFillGrid),
+                holes: region.holes.map(h => h.map(toFillGrid)),
+            })),
+            cells,
+        );
+        for (const piece of pieces) {
+            const facet = landTris[piece.facet];
+            const [f0, f1, f2] = facet.pts;
+            const det = (f1.y - f2.y) * (f0.x - f2.x) + (f2.x - f1.x) * (f0.y - f2.y);
+            if (Math.abs(det) < 1e-12) {
+                continue;
+            }
+            const e0 = project(f0.x, f0.y, true, f0.shore);
+            const e1 = project(f1.x, f1.y, true, f1.shore);
+            const e2 = project(f2.x, f2.y, true, f2.shore);
+            // On the facet's own plane, then up along the tile's vertical. The
+            // tile writes n reversed (z = centre.n - n), hence the minus.
+            const onFacet = (p: GridPoint): Enu => {
+                const l0 = ((f1.y - f2.y) * (p.x - f2.x) + (f2.x - f1.x) * (p.y - f2.y)) / det;
+                const l1 = ((f2.y - f0.y) * (p.x - f2.x) + (f0.x - f2.x) * (p.y - f2.y)) / det;
+                const l2 = 1 - l0 - l1;
+                return {
+                    e: e0.e * l0 + e1.e * l1 + e2.e * l2 + localUpX * liftM,
+                    u: e0.u * l0 + e1.u * l1 + e2.u * l2 + localUpY * liftM,
+                    n: e0.n * l0 + e1.n * l1 + e2.n * l2 - localUpZ * liftM,
+                };
+            };
+            const { region, index } = tagged[piece.region];
+            const cover = coverOf(facet);
+            pushLandTriangle(onFacet(piece.pts[0]), onFacet(piece.pts[1]), onFacet(piece.pts[2]), cover, facet);
+            // pushLandTriangle painted it as untagged ground; this is the polygon.
+            landClass[landClass.length - 1] = region.landuseClass!;
+            const rgb = regionColors?.[index] ?? [cover[1], cover[2], cover[3]];
+            landColor.splice(landColor.length - 3, 3, rgb[0], rgb[1], rgb[2]);
         }
     }
 
@@ -1214,6 +1364,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     const riverDir: number[] = [];
     const riverHalf: number[] = [];
     const riverIdx: number[] = [];
+    /** PTM_STROKE_KIND_* per vertex: watercourse or landuse outline. */
+    const riverKind: number[] = [];
 
     /**
      * The finished triangles, bucketed by grid cell.
@@ -1228,7 +1380,10 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
      * minority of them.
      */
     const surfaceBuckets = new Map<number, number[]>();
-    if ((input.watercourses?.length ?? 0) > 0) {
+    // Only a tagged land region has an edge worth drawing: untagged land is
+    // just "not mapped", and water already has a shoreline of its own.
+    const outlineRegions = (input.regions ?? []).filter(r => r.isLand && r.landuseClass !== undefined);
+    if ((input.watercourses?.length ?? 0) > 0 || outlineRegions.length > 0) {
         for (let t = 0; t < tris.length; t++) {
             const [a, b, c] = tris[t].pts;
             const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x, c.x)));
@@ -1332,36 +1487,42 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // visible at the scale the tile is drawn at and far above that noise.
     const riverLiftM = metresPerCell * RIVER_LIFT_CELLS;
 
-    for (const course of input.watercourses ?? []) {
-        const halfWidthM = Math.max(0.5, course.widthM / 2);
-        // Grid coordinates, resampled so the stroke follows the terrain. An
-        // OSM way can run straight for kilometres between vertices, and a
-        // stroke hung off those two points alone would fly over every valley
-        // in between.
-        const grid: Array<{ x: number; y: number }> = [];
-        const clamp = (v: number) => (v < 0 ? 0 : v > cells ? cells : v);
-        for (const pt of course.points) {
-            // Clamped: the centreline was clipped to the tile in degrees, and
-            // the conversion back can leave an endpoint a rounding error
-            // outside the grid it has to be looked up in.
-            const gx = clamp(((pt.lon - bounds.west) / lonSpan) * cells);
-            const gy = clamp(((bounds.north - pt.lat) / latSpan) * cells);
+    type GridPoint = { x: number; y: number };
+    // Clamped: a line was clipped to the tile in degrees, and the conversion
+    // back can leave an endpoint a rounding error outside the grid it has to
+    // be looked up in.
+    const clampGrid = (v: number) => (v < 0 ? 0 : v > cells ? cells : v);
+    const toGrid = (pt: { lon: number; lat: number }): GridPoint => ({
+        x: clampGrid(((pt.lon - bounds.west) / lonSpan) * cells),
+        y: clampGrid(((bounds.north - pt.lat) / latSpan) * cells),
+    });
+    // Resampled so the stroke follows the terrain. An OSM way can run straight
+    // for kilometres between vertices, and a stroke hung off those two points
+    // alone would fly over every valley in between.
+    const resample = (pts: readonly GridPoint[]): GridPoint[] => {
+        const grid: GridPoint[] = [];
+        for (const p of pts) {
             const prev = grid[grid.length - 1];
             if (prev === undefined) {
-                grid.push({ x: gx, y: gy });
+                grid.push(p);
                 continue;
             }
             const steps = Math.min(
                 RIVER_MAX_SUBDIVISIONS,
-                Math.ceil(Math.hypot(gx - prev.x, gy - prev.y) / RIVER_SAMPLE_CELLS),
+                Math.ceil(Math.hypot(p.x - prev.x, p.y - prev.y) / RIVER_SAMPLE_CELLS),
             );
             for (let s = 1; s <= steps; s++) {
                 const t = s / steps;
-                grid.push({ x: prev.x + (gx - prev.x) * t, y: prev.y + (gy - prev.y) * t });
+                grid.push({ x: prev.x + (p.x - prev.x) * t, y: prev.y + (p.y - prev.y) * t });
             }
         }
+        return grid;
+    };
+
+    /** Appends one stroke; false when it is degenerate or the stream is full. */
+    const pushStroke = (grid: readonly GridPoint[], halfWidthM: number, kind: number): boolean => {
         if (grid.length < 2 || riverHalf.length + grid.length * 2 > PTM_MAX_RIVER_VERTS) {
-            continue;
+            return false;
         }
         const base = riverHalf.length;
         for (let i = 0; i < grid.length; i++) {
@@ -1394,6 +1555,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             riverPos.push(ex, ey, ez, ex, ey, ez);
             riverDir.push(px, py, pz, -px, -py, -pz);
             riverHalf.push(halfWidthM, halfWidthM);
+            riverKind.push(kind, kind);
         }
         for (let i = 0; i + 1 < grid.length; i++) {
             const l0 = base + i * 2;
@@ -1401,6 +1563,50 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             const l1 = l0 + 2;
             const r1 = l0 + 3;
             riverIdx.push(l0, r0, r1, l0, r1, l1);
+        }
+        return true;
+    };
+
+    let waterStrokeTriangles = 0;
+    for (const course of input.watercourses ?? []) {
+        const grid = resample(course.points.map(toGrid));
+        if (pushStroke(grid, Math.max(0.5, course.widthM / 2), PTM_STROKE_KIND_WATER)) {
+            waterStrokeTriangles += (grid.length - 1) * 2;
+        }
+    }
+
+    // Landuse outlines, after every watercourse so a full stream drops field
+    // edges rather than rivers. A ring is clipped to the tile, so part of it
+    // runs along the tile border; stroking that would draw a grid of lines
+    // over the world at every tile edge, so a run breaks wherever both ends of
+    // a segment sit on the same border.
+    const BORDER_EPS = 1e-6;
+    const onSameBorder = (a: GridPoint, b: GridPoint): boolean =>
+        (a.x <= BORDER_EPS && b.x <= BORDER_EPS)
+        || (a.x >= cells - BORDER_EPS && b.x >= cells - BORDER_EPS)
+        || (a.y <= BORDER_EPS && b.y <= BORDER_EPS)
+        || (a.y >= cells - BORDER_EPS && b.y >= cells - BORDER_EPS);
+    for (const region of outlineRegions) {
+        for (const ring of [region.exterior, ...region.holes]) {
+            if (ring.length < 2) {
+                continue;
+            }
+            const pts = ring.map(toGrid);
+            const first = pts[0];
+            const last = pts[pts.length - 1];
+            if (first.x !== last.x || first.y !== last.y) {
+                pts.push(first);
+            }
+            let run: GridPoint[] = [pts[0]];
+            for (let i = 1; i < pts.length; i++) {
+                if (onSameBorder(pts[i - 1], pts[i])) {
+                    pushStroke(resample(run), OUTLINE_HALF_WIDTH_M, PTM_STROKE_KIND_OUTLINE);
+                    run = [pts[i]];
+                } else {
+                    run.push(pts[i]);
+                }
+            }
+            pushStroke(resample(run), OUTLINE_HALF_WIDTH_M, PTM_STROKE_KIND_OUTLINE);
         }
     }
 
@@ -1432,6 +1638,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             directions: new Float32Array(riverDir),
             halfWidthsM: new Float32Array(riverHalf),
             indices: new Uint32Array(riverIdx),
+            kinds: new Uint8Array(riverKind),
         },
     });
 
@@ -1440,7 +1647,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         triangleCount: landClass.length + waterTone.length + riverIdx.length / 3,
         landTriangles: landClass.length,
         waterTriangles: waterTone.length,
-        riverTriangles: riverIdx.length / 3,
+        riverTriangles: waterStrokeTriangles,
         maxErrorM,
         minLeafSize,
         attempts,

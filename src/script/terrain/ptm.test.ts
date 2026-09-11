@@ -5,6 +5,8 @@ import {
     PTM_FLAG_HAS_RIVERS,
     PTM_FLAG_HAS_WATER,
     PTM_HEADER_BYTES,
+    PTM_STROKE_KIND_OUTLINE,
+    PTM_STROKE_KIND_WATER,
     PTM_VERSION,
     PtmEncodeInput,
     decodePtm,
@@ -320,6 +322,24 @@ describe('PTM1 codec', () => {
             // ...and carry opposite offsets, /127.
             assert.equal(tile.riverDirections[2], 127);
             assert.equal(tile.riverDirections[6], -127);
+        });
+
+        it('carries the stroke kind in the direction padding, water by default', () => {
+            const plain = decodePtm(encodePtm(withRivers()));
+            for (let v = 0; v < 4; v++) {
+                assert.equal(plain.riverDirections[v * 4 + 3], PTM_STROKE_KIND_WATER);
+            }
+            const input = withRivers();
+            input.rivers!.kinds = new Uint8Array([
+                PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_OUTLINE,
+                PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_OUTLINE,
+            ]);
+            const outlined = decodePtm(encodePtm(input));
+            for (let v = 0; v < 4; v++) {
+                assert.equal(outlined.riverDirections[v * 4 + 3], PTM_STROKE_KIND_OUTLINE);
+            }
+            // The offsets themselves are untouched by the kind byte.
+            assert.equal(outlined.riverDirections[2], 127);
         });
 
         it('leaves a tile with no watercourse byte-identical to before', () => {

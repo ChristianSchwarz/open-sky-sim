@@ -26,7 +26,7 @@
 import * as THREE from 'three';
 import { TerrainShading } from '../state/gameDefs';
 import { EnuBasis, ecefToEnu, geodeticToEcef, sceneFromEnu } from './geodesy';
-import { PtmTile } from './ptm';
+import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmTile } from './ptm';
 import { TileKey, tileBounds } from './tiling';
 import { LAND_TONE_BASE, TerrainTone } from './tones';
 
@@ -35,6 +35,8 @@ export interface TileMeshes {
     land?: THREE.Mesh;
     water?: THREE.Mesh;
     rivers?: THREE.Mesh;
+    /** Landuse region edges; shares the rivers' vertex arrays. */
+    outlines?: THREE.Mesh;
     /**
      * A tile's two possible land geometries, so a shading switch is a
      * geometry swap on `land` rather than a re-stream or re-mesh. FACETED
@@ -240,9 +242,37 @@ function waterGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
  * `riverDir`, so nothing here says how wide the ribbon is on screen — that is
  * settled per frame, in pixels, by RiverVertProgram.
  */
-function riverGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
+function strokeGeometry(tile: PtmTile, kind: number): THREE.BufferGeometry | undefined {
     if (tile.riverIndices.length === 0) {
         return undefined;
+    }
+    // Watercourses and landuse outlines share the one stroke stream and differ
+    // only in the kind byte riding in riverDir's padding (see
+    // PtmRiverInput.kinds), so each gets its own index list over the same
+    // vertices. Both vertices of a pair, and every vertex of one stroke, carry
+    // the same kind, so a triangle's first vertex speaks for all three.
+    const all = tile.riverIndices;
+    const dirs = tile.riverDirections;
+    let count = 0;
+    for (let i = 0; i < all.length; i += 3) {
+        if (dirs[all[i] * 4 + 3] === kind) {
+            count += 3;
+        }
+    }
+    if (count === 0) {
+        return undefined;
+    }
+    let indices = all;
+    if (count !== all.length) {
+        indices = new Uint16Array(count);
+        let o = 0;
+        for (let i = 0; i < all.length; i += 3) {
+            if (dirs[all[i] * 4 + 3] === kind) {
+                indices[o++] = all[i];
+                indices[o++] = all[i + 1];
+                indices[o++] = all[i + 2];
+            }
+        }
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(tile.riverPositions, 3));
@@ -281,6 +311,8 @@ export function buildTileMeshes(
     frameFix?: THREE.Quaternion,
     /** Which land geometry `land` starts on. A later switch swaps geometry, not tiles. */
     shading: TerrainShading = TerrainShading.FACETED,
+    /** Landuse region edges. Omit and they are not drawn. */
+    outlineMaterial?: THREE.Material,
 ): TileMeshes {
     const group = new THREE.Group();
     group.name = `tile:${tile.id.z}/${tile.id.x}/${tile.id.y}`;
@@ -355,7 +387,23 @@ export function buildTileMeshes(
         bytes += tile.waterPositions.byteLength + tile.waterIndices.byteLength;
     }
 
-    const rg = riverMaterial ? riverGeometry(tile) : undefined;
+    const og = outlineMaterial ? strokeGeometry(tile, PTM_STROKE_KIND_OUTLINE) : undefined;
+    if (og) {
+        const mesh = new THREE.Mesh(og, outlineMaterial);
+        mesh.frustumCulled = false;
+        mesh.matrixAutoUpdate = false;
+        // Same ordering argument as the rivers below, and before them, so a
+        // river crossing a field edge draws over the edge rather than under it.
+        mesh.renderOrder = 1;
+        if (onBeforeRender) {
+            mesh.onBeforeRender = onBeforeRender;
+        }
+        group.add(mesh);
+        meshes.outlines = mesh;
+        bytes += og.getIndex()?.array.byteLength ?? 0;
+    }
+
+    const rg = riverMaterial ? strokeGeometry(tile, PTM_STROKE_KIND_WATER) : undefined;
     if (rg) {
         const mesh = new THREE.Mesh(rg, riverMaterial);
         mesh.frustumCulled = false;
@@ -384,5 +432,6 @@ export function disposeTileMeshes(m: TileMeshes): void {
     m.landGeometrySmooth?.dispose();
     m.water?.geometry.dispose();
     m.rivers?.geometry.dispose();
+    m.outlines?.geometry.dispose();
     m.group.clear();
 }

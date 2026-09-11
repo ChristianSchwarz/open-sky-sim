@@ -348,7 +348,10 @@ function plan(job: Job, withCover: boolean): Step[] {
         },
         {
             label: 'baking coastline', cmd: PYTHON,
-            args: ['tools/bake_osm_coast.py', `--bbox=${bbox}`],
+            // --osm-landuse here is what writes the LVR4 landuse regions the
+            // mesh bake cuts facets along; the cover stage's flag of the same
+            // name only paints .plc classes and cannot produce them.
+            args: ['tools/bake_osm_coast.py', `--bbox=${bbox}`, '--osm-landuse'],
         },
         // After the coast, because an airfield's platform is checked against
         // the land mask the coast bake just wrote — a runway the mask calls

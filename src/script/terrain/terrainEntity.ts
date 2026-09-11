@@ -152,6 +152,7 @@ export class TerrainEntity implements Entity {
      * over the surface rather than as part of it.
      */
     private readonly riverMaterial: THREE.ShaderMaterial;
+    private readonly outlineMaterial: THREE.ShaderMaterial;
 
     /**
      * Switch colour model. One uniform: every mode reads the same baked bytes,
@@ -281,6 +282,19 @@ export class TerrainEntity implements Entity {
         }) as THREE.ShaderMaterial;
         trackTerrainMaterial(this.riverMaterial);
 
+        // OSM landuse region edges, stroked like the rivers so a mapped field
+        // or wood reads as a shape even where the facet colour either side of
+        // it matches. Road grey rather than any land tone: it has to show
+        // against every class it can border.
+        this.outlineMaterial = opts.materials.build({
+            type: SceneMaterialPrimitiveType.MESH,
+            category: PaletteCategory.SCENERY_ROAD_SECONDARY,
+            depthWrite: false,
+            shaded: false as const,
+            river: true,
+        }) as THREE.ShaderMaterial;
+        trackTerrainMaterial(this.outlineMaterial);
+
         for (let tone = 0; tone < TONE_COUNT; tone++) {
             // Water is a flat palette fill: no sun shade, no normal smoothing.
             const water = tone === TerrainTone.Water || tone === TerrainTone.ShallowWater;
@@ -380,7 +394,7 @@ export class TerrainEntity implements Entity {
             store: this.meshStore,
             upload: (id, tile) => buildTileMeshes(
                 tile, this.basis, this.materials, this.riverMaterial,
-                updateUniforms, this.frameFix, this.landShading,
+                updateUniforms, this.frameFix, this.landShading, this.outlineMaterial,
             ),
             release: (_id, m) => disposeTileMeshes(m),
         });

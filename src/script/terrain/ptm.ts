@@ -130,7 +130,19 @@ export interface PtmRiverInput {
     halfWidthsM: Float32Array;
     /** 3 indices per triangle. */
     indices: Uint32Array;
+    /**
+     * 1 byte per vertex, a PTM_STROKE_KIND_*. Stored in riverDir's padding
+     * byte, which every tile before this field wrote as 0 - so an older tile
+     * reads back as all water, and the format needs no version bump. Omit for
+     * all water.
+     */
+    kinds?: Uint8Array;
 }
+
+/** A watercourse: drawn in the water colour. */
+export const PTM_STROKE_KIND_WATER = 0;
+/** The edge of an OSM landuse region: drawn in the outline colour. */
+export const PTM_STROKE_KIND_OUTLINE = 1;
 
 export interface PtmEncodeInput {
     id: PtmTileId;
@@ -425,7 +437,7 @@ export function encodePtm(input: PtmEncodeInput): Uint8Array {
             riverDir[i * 4] = quantiseNormal(rivers.directions[i * 3]);
             riverDir[i * 4 + 1] = quantiseNormal(rivers.directions[i * 3 + 1]);
             riverDir[i * 4 + 2] = quantiseNormal(rivers.directions[i * 3 + 2]);
-            riverDir[i * 4 + 3] = 0;
+            riverDir[i * 4 + 3] = rivers.kinds ? rivers.kinds[i] : PTM_STROKE_KIND_WATER;
             // Decimetres: a half-width is metres to a couple of significant
             // figures and the stroke is a couple of pixels wide most of the
             // time, so anything finer would be storing noise.

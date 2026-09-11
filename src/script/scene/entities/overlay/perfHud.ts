@@ -43,7 +43,7 @@ export class PerfHudEntity implements Entity {
 
     readonly tags: string[] = [];
 
-    enabled: boolean = false;
+    enabled: boolean = true;
 
     init(scene: Scene): void {
         //
@@ -68,49 +68,49 @@ export class PerfHudEntity implements Entity {
 
         const lines: string[] = [];
         const fps = this.frameEmaMs > 0 ? 1000 / this.frameEmaMs : 0;
-        lines.push(`${fps.toFixed(0)} FPS (${this.frameEmaMs.toFixed(1)}ms)`);
+        lines.push(`${fps.toFixed(0)} FPS ${this.frameEmaMs.toFixed(1)}ms`);
 
         const kernelStats = (globalThis as Record<string, unknown>).__kernelStats as { updateMs: number; renderMs: number } | undefined;
         if (kernelStats) {
-            lines.push(`  logic ${kernelStats.updateMs.toFixed(1)}ms / render ${kernelStats.renderMs.toFixed(1)}ms`);
+            lines.push(`LOG ${kernelStats.updateMs.toFixed(1)} RND ${kernelStats.renderMs.toFixed(1)}ms`);
         }
 
-        const gpuStats = (globalThis as Record<string, unknown>).__gpuStats as Record<string, number> | undefined;
-        const cpuStats = (globalThis as Record<string, unknown>).__cpuStats as Record<string, number> | undefined;
+        // Totals across every render pass; the per-pass breakdown is still
+        // on globalThis.__drawStats / __gpuStats for devtools.
         const drawStats = (globalThis as Record<string, unknown>).__drawStats as Record<string, DrawStatsEntry> | undefined;
         if (drawStats) {
-            for (const [key, entry] of Object.entries(drawStats)) {
-                const gpuMs = gpuStats?.[key];
-                const cpuMs = cpuStats?.[key];
-                const gpuSuffix = gpuMs !== undefined ? `, ${gpuMs.toFixed(2)}ms GPU` : '';
-                const cpuSuffix = cpuMs !== undefined ? `, ${cpuMs.toFixed(2)}ms CPU` : '';
-                lines.push(`${key}: ${entry.calls} draws, ${(entry.triangles / 1000).toFixed(1)}k tri${gpuSuffix}${cpuSuffix}`);
+            let calls = 0;
+            let triangles = 0;
+            for (const entry of Object.values(drawStats)) {
+                calls += entry.calls;
+                triangles += entry.triangles;
             }
-        }
-        if (gpuStats?.compose !== undefined || cpuStats?.compose !== undefined) {
-            const gpuSuffix = gpuStats?.compose !== undefined ? `, ${gpuStats.compose.toFixed(2)}ms GPU` : '';
-            const cpuSuffix = cpuStats?.compose !== undefined ? `, ${cpuStats.compose.toFixed(2)}ms CPU` : '';
-            lines.push(`compose${gpuSuffix}${cpuSuffix}`);
+            lines.push(`${calls} DRW ${(triangles / 1000).toFixed(1)}K TRI`);
         }
 
         const terrainStats = (globalThis as Record<string, unknown>).__terrainStats as TerrainStatsShape | undefined;
         if (terrainStats) {
             const budgetSuffix = terrainStats.triangleBudgetHit ? ' BUDGET' : '';
-            lines.push(`Terrain: ${terrainStats.drawn} tiles, ${(terrainStats.triangles / 1000).toFixed(1)}k tri, `
-                + `detail ${terrainStats.detailScale.toFixed(2)}, ema ${terrainStats.frameEmaMs.toFixed(1)}ms${budgetSuffix}`);
-            // Streaming health. `queued` should drain toward zero in level
-            // flight and `cache` should plateau; a climbing cache means
-            // eviction is not reclaiming. `tier` must not change as you climb.
+            lines.push(`TER ${terrainStats.drawn}T ${(terrainStats.triangles / 1000).toFixed(1)}K`
+                + ` D${terrainStats.detailScale.toFixed(2)}${budgetSuffix}`);
+            // Streaming health: queue should drain, cache should plateau, tier must not change.
             const mb = (terrainStats.cacheBytes ?? 0) / 1048576;
-            lines.push(`  stream: q${terrainStats.queued ?? 0} f${terrainStats.inflight ?? 0}`
-                + ` up${terrainStats.pendingUploads ?? 0}/${(terrainStats.uploadMs ?? 0).toFixed(1)}ms`
-                + ` cache ${mb.toFixed(0)}MB abort ${terrainStats.aborted ?? 0}`
-                + ` fail ${terrainStats.failed ?? 0} tier ${terrainStats.heightTier ?? '?'}`);
+            const failSuffix = (terrainStats.failed ?? 0) > 0 ? ` F${terrainStats.failed}` : '';
+            lines.push(`Q${terrainStats.queued ?? 0} ${mb.toFixed(0)}MB ${terrainStats.heightTier ?? '?'}${failSuffix}`);
         }
 
-        let y = font.charHeight;
+        // Top-right, on a black box so it stays legible over bright sky/terrain.
+        const pad = 2;
+        const textWidth = (line: string) => line.length * font.charWidth + Math.max(0, line.length - 1) * font.charSpacing;
+        const boxWidth = Math.max(...lines.map(textWidth)) + pad * 2;
+        const boxHeight = lines.length * lineHeight + pad * 2;
+        const right = targetWidth - pad;
+        painter.setBackground('#000000');
+        painter.rectangle(targetWidth - boxWidth, 0, boxWidth, boxHeight, true);
+
+        let y = pad + 1;
         for (const line of lines) {
-            painter.text(font, 2, y, line, hudColor, TextAlignment.LEFT);
+            painter.text(font, right, y, line, hudColor, TextAlignment.RIGHT);
             y += lineHeight;
         }
     }

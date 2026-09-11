@@ -456,10 +456,20 @@ def _polygons_from_osm(
         # picked the 99.5%-of-the-box land piece as "ocean", leaving ~0% land.
         # Voting over every coastline segment on a piece's boundary is robust
         # to a piece bordering several coastline ways with occasional noise.
+        #
+        # Each segment asks which side of it the piece actually lies on, by
+        # probing a point just off its left and right. It used to compare the
+        # segment against the piece's centroid, which is wrong for any piece
+        # with a hole: the sea around an island that closes inside the bbox is
+        # the bbox with the island punched out, its centroid lands on the
+        # island, every coastline segment voted "land", and the whole import
+        # box baked as land with a straight-edged coast along the box.
+        # Measured on Gran Canaria: land fraction 1.0 of the box.
         def is_sea(piece: Polygon) -> bool:
             land_votes = 0
             sea_votes = 0
             boundary = piece.boundary
+            prepared = prep(piece)
             for line in coastline_lines:
                 coords = list(line.coords)
                 for i in range(len(coords) - 1):
@@ -467,10 +477,15 @@ def _polygons_from_osm(
                     mid = Point((x1 + x2) / 2, (y1 + y2) / 2)
                     if boundary.distance(mid) > 1e-9:
                         continue
-                    cross = (x2 - x1) * (piece.centroid.y - mid.y) - (y2 - y1) * (piece.centroid.x - mid.x)
-                    if cross > 0:
+                    length = math.hypot(x2 - x1, y2 - y1)
+                    if length == 0:
+                        continue
+                    off = min(length * 0.25, 1e-6) / length
+                    left = Point(mid.x - (y2 - y1) * off, mid.y + (x2 - x1) * off)
+                    right = Point(mid.x + (y2 - y1) * off, mid.y - (x2 - x1) * off)
+                    if prepared.contains(left):
                         land_votes += 1
-                    else:
+                    elif prepared.contains(right):
                         sea_votes += 1
             return sea_votes > land_votes
 
