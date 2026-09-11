@@ -1,6 +1,12 @@
+const { AngularWebpackPlugin } = require('@ngtools/webpack');
 const CopyPlugin = require('copy-webpack-plugin');
+const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const fs = require('fs');
 const path = require('path');
+
+// Angular's npm packages ship partially compiled; the linker finishes them at
+// build time so the bundle needs no runtime JIT compiler.
+const angularLinker = require('@angular/compiler-cli/linker/babel');
 
 const modPrefixes = fs.readdirSync('assets')
     .filter(f => f.endsWith('.aircraft.json'))
@@ -21,7 +27,9 @@ function isModAsset(resourcePath) {
  * serving dist/ with a plain static server would otherwise 404 the manifest.
  */
 module.exports = (_env, argv) => ({
-    entry: './src/script/index.ts',
+    // ui.css is the settings dialog's Material theme and Tailwind utilities,
+    // extracted next to the bundle as bundle.css.
+    entry: ['./src/script/index.ts', './src/ui.css'],
     devtool: 'inline-source-map',
     output: {
         path: __dirname + '/dist',
@@ -30,9 +38,37 @@ module.exports = (_env, argv) => ({
     module: {
         rules: [
             {
+                // Every .ts file goes through the Angular compiler, not only the
+                // settings dialog: it owns the whole TypeScript program, and for
+                // plain modules its output is ordinary tsc output.
                 test: /\.ts$/,
-                use: 'ts-loader',
+                loader: '@ngtools/webpack',
                 exclude: /node_modules/,
+            },
+            {
+                test: /\.[cm]?js$/,
+                include: /node_modules[\\/]@angular[\\/]/,
+                use: {
+                    loader: 'babel-loader',
+                    options: {
+                        babelrc: false,
+                        configFile: false,
+                        compact: false,
+                        cacheDirectory: true,
+                        plugins: [angularLinker.default ?? angularLinker],
+                    },
+                },
+            },
+            {
+                test: /\.css$/,
+                use: [
+                    MiniCssExtractPlugin.loader,
+                    'css-loader',
+                    {
+                        loader: 'postcss-loader',
+                        options: { postcssOptions: { plugins: ['@tailwindcss/postcss'] } },
+                    },
+                ],
             },
             {
                 // @0x62/jsbsim-wasm ships its Emscripten glue module and the wasm
@@ -49,17 +85,25 @@ module.exports = (_env, argv) => ({
     resolve: {
         extensions: ['.ts', '.js'],
     },
+    // tsconfig includes all of src/, so the Angular compiler notices every
+    // module nothing imports yet (the mission editor, debug helpers).
+    ignoreWarnings: [/is part of the TypeScript compilation but it's unused/],
     plugins: [
+        new AngularWebpackPlugin({
+            tsconfig: path.resolve(__dirname, 'tsconfig.json'),
+            jitMode: false,
+        }),
+        new MiniCssExtractPlugin({ filename: 'bundle.css' }),
         new CopyPlugin({
             patterns: [
                 {
                     from: 'src/index.html',
                     to: 'index.html',
                     transform(content) {
-                        return content.toString().replace(
-                            'src="./bundle.js"',
-                            `src="./bundle.js?v=${Date.now()}"`,
-                        );
+                        const v = Date.now();
+                        return content.toString()
+                            .replace('src="./bundle.js"', `src="./bundle.js?v=${v}"`)
+                            .replace('href="./bundle.css"', `href="./bundle.css?v=${v}"`);
                     },
                 },
                 {

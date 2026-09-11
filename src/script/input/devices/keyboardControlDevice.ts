@@ -1,4 +1,5 @@
 import { KernelTask } from "../../core/kernel";
+import { isOverlayKeyEvent } from "../overlayKeys";
 import { CombatSimClient } from "../../physics/sim/combatSimClient";
 import { SimProxyFlightModel } from "../../physics/model/simProxyFlightModel";
 import { PLAYER_SIM_ID } from "../../physics/sim/simIds";
@@ -87,6 +88,9 @@ export class KeyboardControlDevice implements KernelTask {
 
     private setupInput() {
         document.addEventListener('keydown', (event: KeyboardEvent) => {
+            if (isOverlayKeyEvent(event)) {
+                return;
+            }
             const key = normalizeControlKey(event);
             if (this.isLayoutKey(key) && (key.startsWith('arrow') || key.startsWith('numpad'))) {
                 event.preventDefault();

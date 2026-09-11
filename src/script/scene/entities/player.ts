@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { AudioClip } from '../../audio/audioSystem';
+import { isOverlayKeyEvent } from '../../input/overlayKeys';
 import { Palette } from "../../config/palettes/palette";
 import { AIRBASE_RUNWAY, PITCH_STICK_AFT_UNITS, PITCH_STICK_FWD_UNITS, PLANE_DISTANCE_TO_GROUND, RUNWAY_HALF_LENGTH_M } from '../../defs';
 import { FlightModel } from '../../physics/model/flightModel';
@@ -1486,7 +1487,7 @@ export class PlayerEntity implements Entity {
 
     private setupInput() {
         document.addEventListener('keypress', (event: KeyboardEvent) => {
-            if (!this.isCrashed && this.controlsEnabled) {
+            if (!isOverlayKeyEvent(event) && !this.isCrashed && this.controlsEnabled) {
                 switch (event.key) {
                     case 't': {
                         this.pickTarget();

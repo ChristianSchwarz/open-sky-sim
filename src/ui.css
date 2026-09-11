@@ -1,0 +1,31 @@
+/*
+ * Styles for the Angular Material settings dialog.
+ *
+ * Tailwind's preflight is left out on purpose: it resets every element on the
+ * page, and the game's own overlays (help panel, spawn menu, F9 picker) are
+ * hand-styled in style.css against browser defaults.
+ */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "@angular/material/prebuilt-themes/cyan-orange.css";
+
+@source "./script/ui";
+
+/* The page body is bold with a text shadow for legibility over the 3D view;
+   the dialog sits on its own opaque surface and does not want either. */
+.rfs-settings-panel {
+    font-weight: normal;
+    text-shadow: none;
+}
+
+/* One scroller, not two: the dialog content stays put at a fixed height so the
+   tab headers never scroll away and switching tabs does not resize the dialog,
+   and only the active tab's body scrolls. */
+.rfs-settings-panel .mat-mdc-dialog-content {
+    overflow: hidden;
+}
+
+.rfs-settings-panel .mat-mdc-tab-group {
+    height: min(60vh, 520px);
+}

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { AudioSystem } from '../audio/audioSystem';
 import { ConfigService } from '../config/configService';
+import { isOverlayKeyEvent } from '../input/overlayKeys';
 import { daytimePalette } from '../config/palettes/daytimePalette';
 import { Palette, PaletteCategory, PaletteColor } from '../config/palettes/palette';
 import { SVGAMidnightPalette } from '../config/palettes/svga-midnight';
@@ -2311,6 +2312,9 @@ export class Game {
 
     private setupControls() {
         document.addEventListener('keydown', (event: KeyboardEvent) => {
+            if (isOverlayKeyEvent(event)) {
+                return;
+            }
             if (isTelemetryGraphKey(event)) {
                 event.preventDefault();
                 this.openTelemetryGraphWindow();
@@ -2447,7 +2451,7 @@ export class Game {
         });
 
         document.addEventListener('keypress', (event: KeyboardEvent) => {
-            if (this.state === GameState.PLAYER) {
+            if (!isOverlayKeyEvent(event) && this.state === GameState.PLAYER) {
                 switch (event.key) {
                     case '4': {
                         if (this.player.weaponsTarget) {
