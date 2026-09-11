@@ -37,7 +37,7 @@ import {
     AIRFIELD_SURFACE_EPS_M, buildAirfieldModel, buildingHeightM,
 } from '../scene/airfield/airfieldModel';
 import { ecefToEnu, geodeticToEcef, sceneFromEnu } from '../terrain/geodesy';
-import { AreaPicker } from '../osd/areaPicker';
+import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
 import { ShipWakeEntity } from '../scene/entities/shipWake';
@@ -563,16 +563,6 @@ export class Game {
     private selectedAircraftId = 'f22';
     private modUploadInput?: HTMLInputElement;
     private modImportInFlight = false;
-    private areaPickerInstance: AreaPicker | undefined;
-
-    /** Built on first use: the dialog is rarely opened and touches the DOM. */
-    private areaPicker(): AreaPicker {
-        if (!this.areaPickerInstance) {
-            this.areaPickerInstance = new AreaPicker();
-        }
-        return this.areaPickerInstance;
-    }
-
     private modStatusToken?: symbol;
     private showcaseRaycaster = new THREE.Raycaster();
     private showcasePointerNdc = new THREE.Vector2();
@@ -2322,7 +2312,7 @@ export class Game {
             }
             if (event.code === 'F9') {
                 event.preventDefault();
-                void this.areaPicker().show();
+                void openSettingsDialog('World');
                 return;
             }
             if (event.code === 'F10') {

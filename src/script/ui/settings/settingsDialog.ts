@@ -1,4 +1,5 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
+import { NgTemplateOutlet } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -9,7 +10,10 @@ import { MatTabsModule } from '@angular/material/tabs';
 import { AudioSystem } from '../../audio/audioSystem';
 import { ConfigService } from '../../config/configService';
 import { loadSettings, updateSettings } from '../../config/settingsStorage';
-import { KeyboardControlDevice, KeyboardControlLayoutId } from '../../input/devices/keyboardControlDevice';
+import { JoystickControlDevice } from '../../input/devices/joystickControlDevice';
+import {
+    KeyboardControlAction, KeyboardControlDevice, KeyboardControlLayoutId, KeyboardControlLayouts,
+} from '../../input/devices/keyboardControlDevice';
 import { formatSunTime } from '../../scene/materials/shaders/sun';
 import { AiPilotModels, FlightModels, ShadowQualities, TechProfiles, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
 import { PLAY_ORIGIN } from '../../state/worldLayout';
@@ -18,13 +22,82 @@ import {
 } from '../../terrain/lod';
 import { DEFAULT_TERRAIN_URL, loadTerrainManifest } from '../../terrain/manifest';
 import { homeArea, terrainAreas } from '../../terrain/playArea';
+import { TerrainImportTab } from './terrainImportTab';
+
+export type SettingsTab = 'Graphics' | 'World' | 'Simulation' | 'General' | 'Help';
 
 export interface SettingsDialogData {
     config: ConfigService;
     keyboardInput: KeyboardControlDevice;
+    joystickInput: JoystickControlDevice;
     audio: AudioSystem;
-    /** Relabels the key hints in the help panel for the new layout. */
-    onKeyboardLayoutChange: (layout: KeyboardControlLayoutId) => void;
+    /** The tab to open on; otherwise the one last looked at. */
+    initialTab?: SettingsTab;
+    /** Whether the World tab offers terrain import: only the dev server can bake terrain. */
+    terrainImport: boolean;
+}
+
+/** A row of the Help tab: the keys, then what they do. */
+interface HelpEntry {
+    keys: string[];
+    action: string;
+}
+
+const SYSTEMS_HELP: HelpEntry[] = [
+    { keys: ['G'], action: 'Landing gear' },
+    { keys: ['F'], action: 'Flaps' },
+    { keys: ['L'], action: 'FCS limiters (AoA/g) on/off' },
+    { keys: ['1', '2', '3'], action: 'FCS limiter strategy (soft / predictive / smooth)' },
+    { keys: ['T'], action: 'Select target' },
+    { keys: ['I'], action: 'Target night view' },
+    { keys: ['H'], action: 'Cycle HUD focus' },
+    { keys: ['R'], action: 'Flight recorder (toggle, downloads JSON)' },
+    { keys: ['Num Lock'], action: 'Telemetry graph' },
+    { keys: ['F9'], action: 'Import or delete terrain areas (opens the World tab)' },
+    { keys: ['F10'], action: 'Import aircraft mod (.zip)' },
+];
+
+const SPAWN_HELP: HelpEntry[] = [
+    { keys: ['Esc'], action: 'Open spawn menu' },
+    { keys: ['1'], action: 'Approach spawn' },
+    { keys: ['2'], action: 'Runway spawn' },
+    { keys: ['3'], action: 'Head-on spawn' },
+    { keys: ['4'], action: 'Carrier landing spawn' },
+    { keys: ['5'], action: 'Carrier takeoff spawn' },
+    { keys: ['6'], action: 'High-altitude spawn (10 km)' },
+    { keys: ['7'], action: 'Space spawn (400 km)' },
+    { keys: ['8'], action: 'Carrier barricade spawn (50 m astern of the ramp, net rigged, flying solo)' },
+];
+
+const VIEWS_HELP: HelpEntry[] = [
+    { keys: ['N'], action: 'Day/night' },
+    { keys: ['F1'], action: 'Cockpit (press again with a target to toggle padlock)' },
+    { keys: ['F2'], action: 'Exterior back/front' },
+    { keys: ['F3'], action: 'Exterior left/right' },
+    { keys: ['F6'], action: 'Exterior back/front of AI plane (looks at player)' },
+    { keys: ['F12'], action: 'Aircraft showcase (black background, orbit with numpad)' },
+    { keys: ['4'], action: 'To/from target' },
+    { keys: ['Num 4', 'Num 6', 'Num 8', 'Num 2'], action: 'Move camera around aircraft' },
+    { keys: ['Num 5'], action: 'Recenter camera' },
+    { keys: ['Num *', 'Num /'], action: 'Zoom in / out (F1: padlock target, F2: lock/unlock on enemy)' },
+];
+
+function formatControlKey(key: string): string {
+    switch (key) {
+        case 'arrowup': return '↑';
+        case 'arrowdown': return '↓';
+        case 'arrowleft': return '←';
+        case 'arrowright': return '→';
+        case 'numpadadd': return 'Num+';
+        case 'numpadsubtract': return 'Num-';
+        default: return key.toUpperCase();
+    }
+}
+
+/** "Logitech Extreme 3D (Vendor: 046d Product: c215)" reads as "Logitech Extreme 3D". */
+function joystickName(id: string): string {
+    const bracket = id.lastIndexOf('(');
+    return bracket !== -1 ? id.substring(0, bracket - 1) : id;
 }
 
 interface Option<T> {
@@ -93,8 +166,11 @@ const KEYBOARD_LAYOUT_OPTIONS: Option<KeyboardControlLayoutId>[] = [
  */
 const DETAIL_OFF_KM = TERRAIN_DETAIL_DISTANCE_MAX_M / 1000;
 
-/** The tab the player last looked at, so reopening lands back on it. */
-let lastTab = 0;
+/**
+ * The tab the player last looked at, so reopening lands back on it. Kept by
+ * name, not index, so reordering the tabs cannot land it on the wrong one.
+ */
+let lastTab: SettingsTab = 'Graphics';
 
 function sliderValue(event: Event): number {
     return parseFloat((event.target as HTMLInputElement).value);
@@ -104,14 +180,14 @@ function sliderValue(event: Event): number {
     selector: 'rfs-settings-dialog',
     changeDetection: ChangeDetectionStrategy.OnPush,
     imports: [
-        MatButtonModule, MatDialogModule, MatFormFieldModule, MatRadioModule,
-        MatSelectModule, MatSliderModule, MatTabsModule,
+        NgTemplateOutlet, MatButtonModule, MatDialogModule, MatFormFieldModule, MatRadioModule,
+        MatSelectModule, MatSliderModule, MatTabsModule, TerrainImportTab,
     ],
     template: `
 <h2 mat-dialog-title>Settings</h2>
 <mat-dialog-content>
-    <mat-tab-group mat-stretch-tabs="false" animationDuration="0ms"
-        [selectedIndex]="tab()" (selectedIndexChange)="selectTab($event)">
+    <mat-tab-group mat-stretch-tabs="false" animationDuration="0ms" [disablePagination]="true"
+        [selectedIndex]="tabIndex()" (selectedIndexChange)="selectTab($event)">
 
         <mat-tab label="Graphics">
             <div class="flex flex-col gap-6 pt-4">
@@ -185,20 +261,6 @@ function sliderValue(event: Event): number {
 
         <mat-tab label="World">
             <div class="flex flex-col gap-6 pt-4">
-                <section>
-                    <h3 class="m-0 mb-1 text-base font-medium">Time of day</h3>
-                    <p class="m-0 mb-2 text-sm opacity-70">
-                        Local solar time. Moves the sun, so sky, terrain and cast shadows follow
-                        it. Sunrise 06:00, sunset 18:00. N flips between afternoon and midnight.
-                    </p>
-                    <div class="flex items-center gap-4">
-                        <mat-slider class="flex-1" [min]="0" [max]="23.75" [step]="0.25">
-                            <input matSliderThumb [value]="daytime()" (input)="setDaytime($event)">
-                        </mat-slider>
-                        <output class="w-16 text-right tabular-nums">{{ daytimeLabel() }}</output>
-                    </div>
-                </section>
-
                 @if (areas().length > 1) {
                     <section>
                         <h3 class="m-0 mb-1 text-base font-medium">Area</h3>
@@ -221,11 +283,42 @@ function sliderValue(event: Event): number {
                         </div>
                     </section>
                 }
+
+                @if (terrainImport) {
+                    <section>
+                        <h3 class="m-0 mb-1 text-base font-medium">Import terrain</h3>
+                        <p class="m-0 mb-2 text-sm opacity-70">
+                            Bake a new area into the terrain, or delete one. Runs on the dev server
+                            and carries on if this dialog is closed.
+                        </p>
+                        <rfs-terrain-import-tab />
+                    </section>
+                }
+
+                @if (areasLoaded() && areas().length < 2 && !terrainImport) {
+                    <p class="m-0 text-sm opacity-70">
+                        Only one terrain area is baked, so there is nothing to choose between.
+                    </p>
+                }
             </div>
         </mat-tab>
 
         <mat-tab label="Simulation">
             <div class="flex flex-col gap-6 pt-4">
+                <section>
+                    <h3 class="m-0 mb-1 text-base font-medium">Time of day</h3>
+                    <p class="m-0 mb-2 text-sm opacity-70">
+                        Local solar time. Moves the sun, so sky, terrain and cast shadows follow
+                        it. Sunrise 06:00, sunset 18:00. N flips between afternoon and midnight.
+                    </p>
+                    <div class="flex items-center gap-4">
+                        <mat-slider class="flex-1" [min]="0" [max]="23.75" [step]="0.25">
+                            <input matSliderThumb [value]="daytime()" (input)="setDaytime($event)">
+                        </mat-slider>
+                        <output class="w-16 text-right tabular-nums">{{ daytimeLabel() }}</output>
+                    </div>
+                </section>
+
                 <section>
                     <h3 class="m-0 mb-2 text-base font-medium">Flight model</h3>
                     <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
@@ -282,8 +375,56 @@ function sliderValue(event: Event): number {
                 </section>
             </div>
         </mat-tab>
+
+        <mat-tab label="Help">
+            <div class="flex flex-col gap-6 pt-4">
+                <section>
+                    <h3 class="m-0 mb-2 text-base font-medium">Keyboard</h3>
+                    <ng-container *ngTemplateOutlet="helpList; context: { $implicit: flightHelp() }" />
+                </section>
+
+                <section>
+                    <h3 class="m-0 mb-1 text-base font-medium">Joystick</h3>
+                    @if (joystick(); as joystick) {
+                        <p class="m-0 mb-2 text-sm opacity-70">{{ joystick.name }}</p>
+                        <ng-container *ngTemplateOutlet="helpList; context: { $implicit: joystick.axes }" />
+                    } @else {
+                        <p class="m-0 text-sm opacity-70">No device detected</p>
+                    }
+                </section>
+
+                <section>
+                    <h3 class="m-0 mb-2 text-base font-medium">Systems</h3>
+                    <ng-container *ngTemplateOutlet="helpList; context: { $implicit: systemsHelp }" />
+                </section>
+
+                <section>
+                    <h3 class="m-0 mb-2 text-base font-medium">Spawn menu</h3>
+                    <ng-container *ngTemplateOutlet="helpList; context: { $implicit: spawnHelp }" />
+                    <p class="m-0 mt-2 text-sm opacity-70">Aircraft list: pick from the combobox in the spawn menu.</p>
+                </section>
+
+                <section>
+                    <h3 class="m-0 mb-2 text-base font-medium">Views</h3>
+                    <ng-container *ngTemplateOutlet="helpList; context: { $implicit: viewsHelp }" />
+                </section>
+            </div>
+        </mat-tab>
     </mat-tab-group>
 </mat-dialog-content>
+
+<ng-template #helpList let-entries>
+    <dl class="m-0 grid grid-cols-[minmax(7rem,auto)_1fr] items-baseline gap-x-4 gap-y-1.5 text-sm">
+        @for (entry of entries; track entry.action) {
+            <dt class="flex flex-wrap gap-1">
+                @for (key of entry.keys; track $index) {
+                    <kbd class="rounded border border-white/25 bg-white/10 px-1.5 font-mono text-xs leading-5">{{ key }}</kbd>
+                }
+            </dt>
+            <dd class="m-0">{{ entry.action }}</dd>
+        }
+    </dl>
+</ng-template>
 <mat-dialog-actions align="end">
     <button mat-button type="button" mat-dialog-close>Close</button>
 </mat-dialog-actions>
@@ -305,7 +446,13 @@ export class SettingsDialog {
     readonly detailMinKm = TERRAIN_DETAIL_DISTANCE_MIN_M / 1000;
     readonly detailMaxKm = DETAIL_OFF_KM + 2;
 
-    readonly tab = signal(lastTab);
+    readonly terrainImport = this.data.terrainImport;
+    /** In template order; must match the mat-tab labels. */
+    private readonly tabs: SettingsTab[] = [
+        'Graphics', 'World', 'Simulation', 'General', 'Help',
+    ];
+    readonly tab = signal<SettingsTab>(this.data.initialTab ?? lastTab);
+    readonly tabIndex = computed(() => Math.max(0, this.tabs.indexOf(this.tab())));
     readonly techProfile = signal(this.config.techProfiles.getActiveKey());
     readonly shadowQuality = signal(this.config.shadowQuality.getActive());
     readonly terrainColour = signal(this.config.terrainColour.getActive());
@@ -333,14 +480,43 @@ export class SettingsDialog {
     readonly areas = signal<Option<string>[]>([]);
     readonly area = signal('');
     readonly initialArea = signal('');
+    /** Set once the manifest has answered, so "nothing to choose" never flashes up while loading. */
+    readonly areasLoaded = signal(false);
+
+    readonly systemsHelp = SYSTEMS_HELP;
+    readonly spawnHelp = SPAWN_HELP;
+    readonly viewsHelp = VIEWS_HELP;
+
+    /** Flight control keys, relabelled whenever the keyboard layout changes. */
+    readonly flightHelp = computed<HelpEntry[]>(() => {
+        const layout = KeyboardControlLayouts.get(this.keyboardLayout());
+        if (!layout) {
+            return [];
+        }
+        const keys = (...actions: KeyboardControlAction[]) => actions.map(a => formatControlKey(layout[a]));
+        return [
+            { keys: keys(KeyboardControlAction.PITCH_NEG, KeyboardControlAction.PITCH_POS), action: 'Pitch' },
+            { keys: keys(KeyboardControlAction.ROLL_NEG, KeyboardControlAction.ROLL_POS), action: 'Roll' },
+            { keys: keys(KeyboardControlAction.YAW_NEG, KeyboardControlAction.YAW_POS), action: 'Yaw' },
+            { keys: keys(KeyboardControlAction.THROTTLE_POS, KeyboardControlAction.THROTTLE_NEG), action: 'Throttle' },
+        ];
+    });
+
+    readonly joystick = signal(this.readJoystick());
 
     constructor() {
         this.loadAreas();
+
+        // The device keeps a single status listener, and nothing else uses it,
+        // so the dialog takes it while open and hands back a no-op on close.
+        this.data.joystickInput.setListener(() => this.joystick.set(this.readJoystick()));
+        inject(DestroyRef).onDestroy(() => this.data.joystickInput.setListener(() => { }));
     }
 
     selectTab(index: number) {
-        lastTab = index;
-        this.tab.set(index);
+        const tab = this.tabs[index] ?? 'Graphics';
+        lastTab = tab;
+        this.tab.set(tab);
     }
 
     setTechProfile(id: string) {
@@ -404,7 +580,6 @@ export class SettingsDialog {
 
     setKeyboardLayout(layout: KeyboardControlLayoutId) {
         this.data.keyboardInput.setKeyboardLayout(layout);
-        this.data.onKeyboardLayoutChange(layout);
         updateSettings({ keyboardLayout: layout });
         this.keyboardLayout.set(layout);
     }
@@ -419,6 +594,26 @@ export class SettingsDialog {
     flyToArea() {
         updateSettings({ terrainArea: this.area() });
         window.location.reload();
+    }
+
+    /** Only the axes the device actually has are listed. */
+    private readJoystick(): { name: string; axes: HelpEntry[] } | undefined {
+        const device = this.data.joystickInput;
+        if (!device.isConnected()) {
+            return undefined;
+        }
+        const axes = [
+            { axis: 1, action: 'Pitch' },
+            { axis: 0, action: 'Roll' },
+            { axis: 3, action: 'Yaw' },
+            { axis: 2, action: 'Throttle' },
+        ];
+        return {
+            name: joystickName(device.getDeviceId()),
+            axes: axes
+                .filter(({ axis }) => axis < device.getAxisCount())
+                .map(({ axis, action }) => ({ keys: [`Axis ${axis}`], action })),
+        };
     }
 
     /**
@@ -443,6 +638,6 @@ export class SettingsDialog {
             })));
         }).catch(() => {
             // No manifest, no picker: the section is simply not shown.
-        });
+        }).finally(() => this.areasLoaded.set(true));
     }
 }

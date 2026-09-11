@@ -29,3 +29,25 @@
 .rfs-settings-panel .mat-mdc-tab-group {
     height: min(60vh, 520px);
 }
+
+/* Tabs scroll vertically only. Content is made to wrap or shrink to fit (see
+   the #area-* rules in style.css), so hiding the other axis cuts nothing off. */
+.rfs-settings-panel .mat-mdc-tab-body-content {
+    overflow-x: hidden;
+}
+
+.rfs-settings-panel .mat-mdc-dialog-content {
+    overflow-wrap: anywhere;
+}
+
+/* No sideways-scrolling tab header either: pagination is off in the template,
+   and labels that do not fit on one row wrap onto a second one instead. */
+.rfs-settings-panel .mat-mdc-tab-labels {
+    flex-wrap: wrap;
+}
+
+.rfs-settings-panel .mat-mdc-tab {
+    flex-grow: 0;
+    min-width: 0;
+    padding-inline: 12px;
+}

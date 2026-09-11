@@ -27,9 +27,11 @@ a:hover {
     bottom: 0;
 }
 
-#panel > nav > div {
+#settings-button {
+    z-index: 1;
     position: absolute;
-    right: 1rem;
+    top: 1rem;
+    left: 1rem;
     user-select: none;
     cursor: pointer;
     color: black;
@@ -42,99 +44,15 @@ a:hover {
     height: 3rem;
 }
 
-#panel > nav > div:hover {
+#settings-button:hover,
+#settings-button.active {
     color: white;
     background-color: black;
 }
 
-#panel > nav > div.active {
-    color: white;
-    background-color: black;
-}
-
-#panel > nav > div.active:hover {
+#settings-button.active:hover {
     color: black;
     background-color: white;
-}
-
-#help-button {
-    top: 1rem;
-}
-
-#settings-button {
-    top: 5rem;
-}
-
-#panel {
-    cursor: default;
-    overflow-y: none;
-    z-index: 1;
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: calc(-200px - 1rem);
-    padding: 1rem;
-    padding-right: 5rem;
-    width: 200px;
-    color: rgb(184, 184, 184);
-    background-color: transparent;
-}
-
-#panel.open {
-    overflow-y: auto;
-    left: 0;
-    background-color: rgba(0, 0, 0, 0.8);
-}
-
-#panel > section {
-    display: none;
-}
-
-#panel > section.active {
-    display: initial;
-}
-
-#panel h1 {
-    margin-top: 0;
-    font-size: 1.5rem;
-    line-height: 3rem;
-    color: white;
-}
-
-#panel h2 {
-    font-size: 1.2rem;
-    color: white;
-}
-
-#panel h3 {
-    font-size: 1rem;
-    color: white;
-}
-
-#panel ul {
-    padding: 0;
-}
-
-#panel li {
-    display: block;
-}
-
-#panel span {
-    display: inline-block;
-    padding: 0 0.25rem;
-    margin: 0.25rem;
-    border: 1px rgb(138, 138, 138) solid;
-    background-color: rgb(75, 75, 75);
-    color: white;
-}
-
-#panel input[type="radio"], #panel label {
-    cursor: pointer;
-}
-
-#joystick-id {
-    font-weight: initial;
-    font-size: smaller;
 }
 
 #boot-progress {
@@ -299,43 +217,29 @@ a:hover {
     display: none;
 }
 
-/* --- F9 terrain area picker ------------------------------------------- */
-
-#area-picker {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0, 0, 0, 0.65);
-    z-index: 30;
-}
-
-#area-picker.hidden {
-    display: none;
-}
+/* --- Terrain import (settings dialog, World tab / F9) ------------------- */
 
 #area-dialog {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    width: min(900px, 92vw);
-    max-height: 92vh;
-    padding: 1rem;
-    background: rgb(24, 24, 24);
-    border: 1px solid rgb(90, 90, 90);
+    min-width: 0;
     color: rgb(220, 220, 220);
-    font-family: sans-serif;
 }
 
-#area-dialog h2 {
-    margin: 0;
-    font-size: 1.1rem;
+/* Coordinates, area lists and bake log lines are long unbroken strings; they
+   wrap rather than widen the tab. */
+#area-dialog > * {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow-wrap: anywhere;
 }
 
 #area-map {
+    box-sizing: border-box;
     width: 100%;
-    height: min(420px, 48vh);
+    height: 280px;
     background: rgb(13, 26, 38);
     border: 1px solid rgb(90, 90, 90);
     cursor: grab;
@@ -380,12 +284,25 @@ a:hover {
 
 #area-cover-label {
     font-size: 0.85rem;
-    white-space: nowrap;
 }
 
-#area-import,
-#area-close {
+#area-name {
+    padding: 0.3rem 0.5rem;
+    font: inherit;
+    color: white;
+    background: rgb(40, 40, 40);
+    border: 1px solid rgb(110, 110, 110);
+    border-radius: 4px;
+}
+
+#area-import {
     cursor: pointer;
+    padding: 0.35rem 1.1rem;
+    font: inherit;
+    color: black;
+    background: var(--mat-sys-primary, rgb(0, 221, 221));
+    border: 0;
+    border-radius: 999px;
 }
 
 #area-import:disabled {

@@ -1,5 +1,6 @@
 /**
- * F9: pick an area on an OpenStreetMap map and bake it into the terrain.
+ * Terrain import in the settings dialog's World tab (F9): pick an area on an OpenStreetMap map
+ * and bake it into the terrain.
  *
  * The bake itself is the command line in tools/README.md — six stages sharing
  * one bbox — driven by the dev server (tools/areaImport.ts) and reported back
@@ -30,6 +31,54 @@ export interface Area {
 }
 
 interface Box { west: number; south: number; east: number; north: number }
+
+const MARKUP = `
+<div id="area-dialog">
+    <canvas id="area-map"></canvas>
+    <div id="area-readout">Shift-drag on the map to choose an area. Drag to pan, wheel to zoom.</div>
+    <div id="area-existing"></div>
+    <div id="area-controls">
+        <label for="area-name">Name</label>
+        <input type="text" id="area-name" placeholder="alps" autocomplete="off">
+        <label id="area-cover-label" for="area-cover">
+            <input type="checkbox" id="area-cover"> Satellite colour (adds ~30 min)
+        </label>
+        <button type="button" id="area-import" disabled>Import</button>
+    </div>
+    <div id="area-progress" class="hidden">
+        <div id="area-progress-label"></div>
+        <div id="area-progress-track"><div id="area-progress-fill"></div></div>
+    </div>
+    <pre id="area-log"></pre>
+</div>`;
+
+/**
+ * Whether the page is served by the dev server, the only thing that can bake.
+ * The published game is a static build with no /api at all.
+ */
+export async function isAreaImporterAvailable(): Promise<boolean> {
+    try {
+        const res = await fetch('/api/areas');
+        if (!res.ok) {
+            return false;
+        }
+        const body = await res.json();
+        return Array.isArray(body?.areas);
+    } catch {
+        return false;
+    }
+}
+
+let instance: AreaPicker | undefined;
+
+/**
+ * The one picker. It outlives the dialog so that a bake started from it keeps
+ * its progress stream and log when the dialog is closed and reopened.
+ */
+export function areaPicker(): AreaPicker {
+    instance ??= new AreaPicker();
+    return instance;
+}
 
 // --- Web Mercator ----------------------------------------------------------
 
@@ -72,7 +121,7 @@ function bakeTiles(b: Box): number {
 // --- the picker ------------------------------------------------------------
 
 export class AreaPicker {
-    private readonly panel: HTMLElement;
+    private readonly root: HTMLElement;
     private readonly canvas: HTMLCanvasElement;
     private readonly ctx: CanvasRenderingContext2D;
     private readonly nameInput: HTMLInputElement;
@@ -100,17 +149,21 @@ export class AreaPicker {
     private stream: EventSource | undefined;
 
     constructor() {
-        this.panel = mustGet('area-picker');
-        this.canvas = mustGet('area-map') as HTMLCanvasElement;
-        this.nameInput = mustGet('area-name') as HTMLInputElement;
-        this.coverInput = mustGet('area-cover') as HTMLInputElement;
-        this.importButton = mustGet('area-import') as HTMLButtonElement;
-        this.readout = mustGet('area-readout');
-        this.logEl = mustGet('area-log');
-        this.areaList = mustGet('area-existing');
-        this.progress = mustGet('area-progress');
-        this.progressLabel = mustGet('area-progress-label');
-        this.progressFill = mustGet('area-progress-fill');
+        const template = document.createElement('template');
+        template.innerHTML = MARKUP.trim();
+        this.root = template.content.firstElementChild as HTMLElement;
+        const get = (id: string) => mustGet(this.root, id);
+
+        this.canvas = get('area-map') as HTMLCanvasElement;
+        this.nameInput = get('area-name') as HTMLInputElement;
+        this.coverInput = get('area-cover') as HTMLInputElement;
+        this.importButton = get('area-import') as HTMLButtonElement;
+        this.readout = get('area-readout');
+        this.logEl = get('area-log');
+        this.areaList = get('area-existing');
+        this.progress = get('area-progress');
+        this.progressLabel = get('area-progress-label');
+        this.progressFill = get('area-progress-fill');
         const ctx = this.canvas.getContext('2d');
         if (!ctx) {
             throw new Error('area picker needs a 2d canvas');
@@ -126,30 +179,34 @@ export class AreaPicker {
         this.canvas.addEventListener('contextmenu', e => e.preventDefault());
 
         this.importButton.addEventListener('click', () => void this.startImport());
-        mustGet('area-close').addEventListener('click', () => this.hide());
         this.nameInput.addEventListener('input', () => this.syncButton());
+
+        // The tab lays the canvas out after it is attached, and the dialog can
+        // be resized with the window, so size follows the element, not mount().
+        new ResizeObserver(() => {
+            if (this.root.isConnected) {
+                this.resize();
+                this.draw();
+            }
+        }).observe(this.canvas);
     }
 
-    get isOpen(): boolean {
-        return !this.panel.classList.contains('hidden');
-    }
-
-    async show(): Promise<void> {
-        this.panel.classList.remove('hidden');
+    /** Shows the picker inside `host` — the settings dialog's World tab. */
+    async mount(host: HTMLElement): Promise<void> {
+        host.appendChild(this.root);
         this.resize();
         await this.loadAreas();
         this.syncButton();
         this.draw();
     }
 
-    hide(): void {
-        if (this.running) {
-            // Leaving the dialog is fine; the bake is a server-side job and
-            // carries on. Closing the stream just stops us listening.
-            this.stream?.close();
-            this.stream = undefined;
-        }
-        this.panel.classList.add('hidden');
+    /**
+     * Takes the picker off the page. A running bake is a server-side job and
+     * is not affected, and the progress stream stays open, so the log is
+     * still up to date when the tab is opened again.
+     */
+    unmount(): void {
+        this.root.remove();
     }
 
     private resize(): void {
@@ -474,7 +531,7 @@ export class AreaPicker {
             return;
         }
 
-        this.follow(id, 'Reload the page and pick it under Settings -> Area.');
+        this.follow(id, 'Reload the page and pick it under Settings -> World -> Area.');
     }
 
     private async deleteArea(name: string): Promise<void> {
@@ -600,8 +657,8 @@ export class AreaPicker {
     }
 }
 
-function mustGet(id: string): HTMLElement {
-    const el = document.getElementById(id);
+function mustGet(root: HTMLElement, id: string): HTMLElement {
+    const el = root.id === id ? root : root.querySelector<HTMLElement>(`#${id}`);
     if (!el) {
         throw new Error(`missing element #${id}`);
     }

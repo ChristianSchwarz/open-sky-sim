@@ -1,7 +1,8 @@
 import { ApplicationRef } from '@angular/core';
 import { MatDialog, MatDialogRef } from '@angular/material/dialog';
 import { createApplication } from '@angular/platform-browser';
-import { SettingsDialog, SettingsDialogData } from './settingsDialog';
+import { isAreaImporterAvailable } from '../../osd/areaPicker';
+import { SettingsDialog, SettingsDialogData, SettingsTab } from './settingsDialog';
 
 /**
  * The settings dialog is the only Angular in the sim. Rather than bootstrap a
@@ -13,24 +14,47 @@ let app: Promise<ApplicationRef> | undefined;
 let openDialog: MatDialogRef<SettingsDialog> | undefined;
 let opening = false;
 
+type HostData = Omit<SettingsDialogData, 'initialTab' | 'terrainImport'>;
+let host: { data: HostData; onOpenChange: (open: boolean) => void } | undefined;
+
+/** Whether the server can bake terrain does not change during a session. */
+let importerProbe: Promise<boolean> | undefined;
+
+/**
+ * Hands over what the dialog edits. Called once the game is built, so the
+ * settings button and the F9 key can open the dialog without holding the
+ * config and input devices themselves.
+ */
+export function registerSettingsDialog(data: HostData, onOpenChange: (open: boolean) => void): void {
+    host = { data, onOpenChange };
+}
+
 /** Opens the settings dialog, or closes it if it is already open. */
-export async function toggleSettingsDialog(data: SettingsDialogData, onClosed: () => void): Promise<void> {
+export async function toggleSettingsDialog(): Promise<void> {
     if (openDialog) {
         openDialog.close();
         return;
     }
-    if (opening) {
+    await openSettingsDialog();
+}
+
+/** Opens the settings dialog, on `initialTab` if given; does nothing if it is already open. */
+export async function openSettingsDialog(initialTab?: SettingsTab): Promise<void> {
+    if (!host || openDialog || opening) {
         return;
     }
+    const { data, onOpenChange } = host;
     opening = true;
+    onOpenChange(true);
     try {
         app ??= createApplication();
-        const dialog = (await app).injector.get(MatDialog);
-        const ref = dialog.open(SettingsDialog, {
-            data,
+        importerProbe ??= isAreaImporterAvailable();
+        const [appRef, terrainImport] = await Promise.all([app, importerProbe]);
+        const ref = appRef.injector.get(MatDialog).open(SettingsDialog, {
+            data: { ...data, initialTab, terrainImport },
             panelClass: 'rfs-settings-panel',
-            width: '640px',
-            maxWidth: '92vw',
+            width: '760px',
+            maxWidth: '94vw',
             // Focus the dialog itself so the keyboard belongs to it, not the
             // game, from the moment it opens (see isOverlayKeyEvent).
             autoFocus: 'dialog',
@@ -38,11 +62,11 @@ export async function toggleSettingsDialog(data: SettingsDialogData, onClosed: (
         openDialog = ref;
         ref.afterClosed().subscribe(() => {
             openDialog = undefined;
-            onClosed();
+            onOpenChange(false);
         });
     } catch (err) {
         console.error('Settings dialog failed to open', err);
-        onClosed();
+        onOpenChange(false);
     } finally {
         opening = false;
     }

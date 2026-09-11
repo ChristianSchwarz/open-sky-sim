@@ -23,28 +23,6 @@
         </div>
     </div>
     <div id="mod-status" class="hidden"></div>
-    <div id="area-picker" class="hidden">
-        <div id="area-dialog">
-            <h2>Import terrain area</h2>
-            <canvas id="area-map"></canvas>
-            <div id="area-readout">Shift-drag on the map to choose an area. Drag to pan, wheel to zoom.</div>
-            <div id="area-existing"></div>
-            <div id="area-controls">
-                <label for="area-name">Name</label>
-                <input type="text" id="area-name" placeholder="alps" autocomplete="off">
-                <label id="area-cover-label" for="area-cover">
-                    <input type="checkbox" id="area-cover"> Satellite colour (adds ~30 min)
-                </label>
-                <button type="button" id="area-import" disabled>Import</button>
-                <button type="button" id="area-close">Close</button>
-            </div>
-            <div id="area-progress" class="hidden">
-                <div id="area-progress-label"></div>
-                <div id="area-progress-track"><div id="area-progress-fill"></div></div>
-            </div>
-            <pre id="area-log"></pre>
-        </div>
-    </div>
     <div id="showcase-pick" class="hidden"></div>
     <div id="spawn-panel" class="hidden">
         <div id="spawn-dialog">
@@ -67,81 +45,7 @@
             </div>
         </div>
     </div>
-    <div id="panel">
-        <nav>
-            <div id="help-button">?</div>
-            <div id="settings-button">⋮</div>
-        </nav>
-        <section id="help">
-            <h1>Help</h1>
-
-            <h2>Controls</h2>
-
-            <div>
-                <h3>Keyboard</h3>
-                <ul>
-                    <li><span id="key-pitch-neg">W</span>/<span id="key-pitch-pos">S</span>: Pitch</li>
-                    <li><span id="key-roll-neg">A</span>/<span id="key-roll-pos">D</span>: Roll</li>
-                    <li><span id="key-yaw-neg">Q</span>/<span id="key-yaw-pos">E</span>: Yaw</li>
-                    <li><span id="key-throttle-pos">Z</span>/<span id="key-throttle-neg">X</span>: Throttle</li>
-                <li><span>Num Lock</span>: Telemetry graph</li>
-                </ul>
-            </div>
-
-            <div>
-                <h3>Joystick</h3>
-                <div id="joystick-id">No device detected</div>
-                <ul id="joystick" class="hidden">
-                    <li id="axis-pitch"><span>Axis 1</span>: Pitch</li>
-                    <li id="axis-roll"><span>Axis 0</span>: Roll</li>
-                    <li id="axis-yaw"><span>Axis 3</span>: Yaw</li>
-                    <li id="axis-throttle"><span>Axis 2</span>: Throttle</li>
-                </ul>
-            </div>
-
-            <h2>Systems</h2>
-            <ul>
-                <li><span>G</span>: Landing gear</li>
-                <li><span>F</span>: Flaps</li>
-                <li><span>L</span>: FCS limiters (AoA/g) on/off</li>
-                <li><span>1/2/3</span>: FCS limiter strategy (soft / predictive / smooth)</li>
-                <li><span>T</span>: Select target</li>
-                <li><span>I</span>: Target night view</li>
-                <li><span>H</span>: Cycle HUD focus</li>
-                <li><span>R</span>: Flight recorder (toggle, downloads JSON)</li>
-                <li><span>F9</span>: Import or delete terrain areas (picked on a map)</li>
-                <li><span>F10</span>: Import aircraft mod (.zip)</li>
-            </ul>
-
-            <h2>Spawn menu</h2>
-            <ul>
-                <li><span>Esc</span>: Open spawn menu</li>
-                <li><span>1</span>: Approach spawn</li>
-                <li><span>2</span>: Runway spawn</li>
-                <li><span>3</span>: Head-on spawn</li>
-                <li><span>4</span>: Carrier landing spawn</li>
-                <li><span>5</span>: Carrier takeoff spawn</li>
-                <li><span>6</span>: High-altitude spawn (10 km)</li>
-                <li><span>7</span>: Space spawn (400 km)</li>
-                <li><span>8</span>: Carrier barricade spawn (50 m astern of the ramp, net rigged, flying solo)</li>
-                <li>Aircraft list: pick from the combobox in the spawn menu</li>
-            </ul>
-
-            <h2>Views</h2>
-            <ul>
-                <li><span>N</span>: Day/night</li>
-                <li><span>F1</span>: Cockpit (press again with a target to toggle padlock)</li>
-                <li><span>F2</span>: Exterior back/front</li>
-                <li><span>F3</span>: Exterior left/right</li>
-                <li><span>F6</span>: Exterior back/front of AI plane (looks at player)</li>
-                <li><span>F12</span>: Aircraft showcase (black background, orbit with numpad)</li>
-                <li><span>4</span>: To/from target</li>
-                <li><span>Numpad 4/6/8/2</span>: Move camera around aircraft</li>
-                <li><span>Numpad 5</span>: Recenter camera</li>
-                <li><span>Numpad * / /</span>: Zoom in / out (F1: padlock target, F2: lock/unlock on enemy)</li>
-            </ul>
-        </section>
-    </div>
+    <div id="settings-button" title="Settings and help">⋮</div>
 </body>
 
 </html>
