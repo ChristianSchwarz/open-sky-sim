@@ -28,6 +28,13 @@ import { CLASS_TO_TONE, LAND_TONE_BASE, TerrainTone } from '../terrain/tones';
 import type { TerrainColourMode } from '../terrain/tones';
 
 /**
+ * TerrainClass.Ground, spelled out: TerrainClass is a `const enum`, and the
+ * tsx test runner leaves an imported const-enum binding undefined, so a
+ * comparison against it would silently never match under test.
+ */
+const GROUND_CLASS = 13;
+
+/**
  * The mode numbers, read from the runtime map rather than the enum.
  *
  * `TerrainColourMode` is a `const enum`: the webpack build inlines it, but the
@@ -105,6 +112,12 @@ export function facetColour(cover: Rgb, cls: number, palette: FacetPalette): Rgb
         // With no table baked there is nothing to snap to, and the raw colour
         // is a better answer than black.
         return palette.swatches.length === 0 ? cover : nearestSwatch(cover, palette.swatches);
+    }
+
+    // Unmapped ground on a landuse tile carries its own blended regional
+    // colour; the shader paints it as it is, so the chart does too.
+    if (cls === GROUND_CLASS) {
+        return cover;
     }
 
     const tone = toneColour(CLASS_TO_TONE[cls] ?? TerrainTone.Grass, palette.toneColours);

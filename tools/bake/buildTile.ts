@@ -21,7 +21,9 @@
  * the whole planet as its own mirror image. See `sceneFromEnu` in geodesy.ts.
  */
 
-import { EnuBasis, Ecef, Enu, ecefToEnu, geodeticToEcef } from '../../src/script/terrain/geodesy';
+import {
+    EnuBasis, Ecef, Enu, ecefToEnu, ecefToGeodetic, enuToEcef, geodeticToEcef,
+} from '../../src/script/terrain/geodesy';
 import {
     FlattenPad, applyFlattenPad, padBlendWeight, padReachM,
 } from '../../src/script/terrain/flattenPad';
@@ -179,6 +181,13 @@ export interface BuildTileInput {
      * does.
      */
     regions?: RegionPolygon[];
+    /**
+     * Regional ground colour at a point (see groundColor.ts), for land no
+     * landuse polygon claims on a tile that has `regions`. Given, that land is
+     * baked as TerrainClass.Ground with this colour per vertex, so it blends
+     * smoothly into neighbouring tiles. Omit to keep the facet's own sample.
+     */
+    groundColorAt?: (lon: number, lat: number) => readonly [number, number, number] | undefined;
 }
 
 export interface BuildTileResult {
@@ -1102,6 +1111,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     const landNrm: number[] = [];
     const landClass: number[] = [];
     const landColor: number[] = [];
+    /** 9 per triangle; only encoded when regional ground colour is in use. */
+    const landVertColor: number[] = [];
 
     const waterPos: number[] = [];
     const waterIdx: number[] = [];
@@ -1153,11 +1164,22 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         landNrm.push(nx, ny, nz);
         // With regions, the mesh is untagged ground: the polygons are laid over
         // it below, so the raster's own class must not show between them.
-        landClass.push(hasRegions ? TerrainClass.Unknown : facet[0]);
-        if (hasRegions && baseColor) {
-            landColor.push(baseColor[0], baseColor[1], baseColor[2]);
-        } else {
-            landColor.push(facet[1], facet[2], facet[3]);
+        // With a regional sampler too, that ground is Ground, coloured per
+        // vertex from the blended ~25 km² lattice so it has no tile seams.
+        const ground = hasRegions && input.groundColorAt !== undefined;
+        landClass.push(ground ? TerrainClass.Ground : hasRegions ? TerrainClass.Unknown : facet[0]);
+        const flat: readonly [number, number, number] = hasRegions && baseColor
+            ? baseColor
+            : [facet[1], facet[2], facet[3]];
+        landColor.push(flat[0], flat[1], flat[2]);
+        for (const p of [a, b, c]) {
+            let rgb = flat;
+            if (ground) {
+                const ecef = enuToEcef(basis, p);
+                const geo = ecefToGeodetic(ecef.x, ecef.y, ecef.z);
+                rgb = input.groundColorAt!(geo.lon, geo.lat) ?? flat;
+            }
+            landVertColor.push(rgb[0], rgb[1], rgb[2]);
         }
     };
 
@@ -1242,6 +1264,10 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             landClass[landClass.length - 1] = region.landuseClass!;
             const rgb = regionColors?.[index] ?? [cover[1], cover[2], cover[3]];
             landColor.splice(landColor.length - 3, 3, rgb[0], rgb[1], rgb[2]);
+            // A polygon fills evenly: its own colour at every vertex, not the
+            // regional ground blend pushLandTriangle sampled for it.
+            landVertColor.splice(landVertColor.length - 9, 9,
+                rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2]);
         }
     }
 
@@ -1627,6 +1653,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             faceNormals: new Float32Array(landNrm),
             classes: new Uint8Array(landClass),
             colors: new Uint8Array(landColor),
+            vertexColors: hasRegions && input.groundColorAt ? new Uint8Array(landVertColor) : undefined,
         },
         water: {
             positions: new Float32Array(waterPos),

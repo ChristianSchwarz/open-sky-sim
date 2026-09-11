@@ -89,10 +89,23 @@ describe('facetColour — LANDCOVER', () => {
     it('routes every class through the same map the shader uploads', () => {
         const p = palette({ mode: TERRAIN_COLOUR_MODE_INDEX[TerrainColours.LANDCOVER] });
         for (let cls = 0; cls < CLASS_TO_TONE.length; cls++) {
+            if (cls === 13) {
+                // TerrainClass.Ground paints its own baked colour, not a tone;
+                // covered by the test below.
+                continue;
+            }
             assert.ok(
                 near(facetColour({ r: 0.5, g: 0.5, b: 0.5 }, cls, p),
                     toneColour(CLASS_TO_TONE[cls], p.toneColours)),
                 `class ${cls} did not resolve through CLASS_TO_TONE`);
+        }
+    });
+
+    it('paints unmapped ground with its own blended colour in every mode, like the shader', () => {
+        const cover = { r: 0.35, g: 0.3, b: 0.2 };
+        for (const mode of [TerrainColours.LANDCOVER, TerrainColours.HYBRID, TerrainColours.IMAGERY]) {
+            const c = facetColour(cover, 13, palette({ mode: TERRAIN_COLOUR_MODE_INDEX[mode] }));
+            assert.ok(near(c, cover), `${mode}: ${JSON.stringify(c)}`);
         }
     });
 

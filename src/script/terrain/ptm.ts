@@ -102,6 +102,13 @@ export interface PtmLandInput {
     classes: Uint8Array;
     /** 3 bytes per triangle: mean sRGB over the triangle's ground footprint. */
     colors: Uint8Array;
+    /**
+     * 9 bytes per triangle (sRGB per vertex), overriding `colors` where given.
+     * The wire format already stores colour per vertex, so this changes
+     * nothing about the tile layout - it only lets a colour vary across a
+     * facet, for the smoothly blended regional ground colour.
+     */
+    vertexColors?: Uint8Array;
 }
 
 /** Water input: shared vertices, indexed triangles, one tone each. */
@@ -256,6 +263,9 @@ export function encodePtm(input: PtmEncodeInput): Uint8Array {
     if (land.colors.length !== landTriCount * 3) {
         throw new Error(`PTM1: land colors ${land.colors.length} != ${landTriCount * 3}`);
     }
+    if (land.vertexColors && land.vertexColors.length !== landTriCount * 9) {
+        throw new Error(`PTM1: land vertex colors ${land.vertexColors.length} != ${landTriCount * 9}`);
+    }
     if (water.indices.length !== waterTriCount * 3) {
         throw new Error(`PTM1: water indices ${water.indices.length} != ${waterTriCount * 3}`);
     }
@@ -403,9 +413,10 @@ export function encodePtm(input: PtmEncodeInput): Uint8Array {
             landNrm[v * 4 + 1] = quantiseNormal(ny);
             landNrm[v * 4 + 2] = quantiseNormal(nz);
             landNrm[v * 4 + 3] = 0;
-            landAttr[v * 4] = cr;
-            landAttr[v * 4 + 1] = cg;
-            landAttr[v * 4 + 2] = cb;
+            const vc = land.vertexColors;
+            landAttr[v * 4] = vc ? vc[t * 9 + k * 3] : cr;
+            landAttr[v * 4 + 1] = vc ? vc[t * 9 + k * 3 + 1] : cg;
+            landAttr[v * 4 + 2] = vc ? vc[t * 9 + k * 3 + 2] : cb;
             landAttr[v * 4 + 3] = cls;
             v++;
         }

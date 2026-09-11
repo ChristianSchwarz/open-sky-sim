@@ -1,4 +1,4 @@
-import { CLASS_COUNT, LAND_TONE_COUNT, TerrainColourMode } from '../../../terrain/tones';
+import { CLASS_COUNT, LAND_TONE_COUNT, TerrainClass, TerrainColourMode } from '../../../terrain/tones';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 
 /**
@@ -166,6 +166,13 @@ ${LOG_DEPTH_PARS_VERTEX}
         return srgbToLinear(coverColor) * uRawLight;
       }
       return srgbToLinear(nearestSwatch(coverColor)) * uRawLight;
+    }
+
+    // Unmapped ground on a landuse tile: its colour is already a smoothly
+    // blended regional mean, so paint it as it is. A palette tone would put
+    // one flat green over everything between the polygons.
+    if (abs(coverClass - ${TerrainClass.Ground}.0) < 0.5) {
+      return srgbToLinear(coverColor) * uRawLight;
     }
 
     vec3 tone = toneColor(toneOfClass(coverClass));

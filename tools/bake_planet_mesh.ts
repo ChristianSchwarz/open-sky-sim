@@ -49,6 +49,7 @@ import { LonLatBounds } from './bake/shoreline';
 import {
     MeshTileConfig, TileProcessResult, TileTask, tileBounds,
 } from './bake/meshTile';
+import { regionalGroundMeans } from './bake/groundColor';
 
 // Triangles per tile. Measured on real Canary z12 tiles: the coast alone costs
 // ~18k at full resolution and roughly halves per coarsening step, so this buys
@@ -517,6 +518,7 @@ async function main(): Promise<void> {
         budget: args.budget,
         basis,
         pads,
+        groundMeans: regionalGroundMeans(args.src),
     };
     const results = await runTilesInParallel(meshCfg, tiles, (done, total) => {
         const pct = ((done / total) * 100).toFixed(1);

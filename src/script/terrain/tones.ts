@@ -65,6 +65,14 @@ export const enum TerrainClass {
     Moss = 11,
     /** Bare ground close enough to the shore to read as beach. Bake-assigned. */
     Sand = 12,
+    /**
+     * Land no OSM landuse polygon claims, on a tile that has landuse. Its
+     * baked colour is a ~25 km² regional mean blended between neighbouring
+     * cells (tools/bake/groundColor.ts), and the shader paints that colour
+     * directly rather than a palette tone. Distinct from Unknown, whose colour
+     * is a placeholder grey wherever there is no cover data.
+     */
+    Ground = 13,
 }
 
 export const CLASS_COUNT = 16;

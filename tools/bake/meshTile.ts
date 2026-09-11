@@ -18,6 +18,7 @@ import { decodePdm } from '../../src/script/terrain/demTile';
 import { LanduseRegion, Watercourse, decodeLvr } from './lvr';
 import { PLC_FLAG_REAL_IMAGERY, decodePlc } from './plc';
 import { buildTile } from './buildTile';
+import { GroundMeans, groundColorAt } from './groundColor';
 import { CoastPolygon, InlandPolygon, LonLatBounds } from './shoreline';
 import { EnuBasis } from '../../src/script/terrain/geodesy';
 import { FlattenPad } from '../../src/script/terrain/flattenPad';
@@ -37,6 +38,8 @@ export interface MeshTileConfig {
     budget: number;
     basis: EnuBasis;
     pads: Array<FlattenPad & { basis: EnuBasis; lat: number; lon: number }>;
+    /** Regional ground colour cells; see groundColor.ts. Omit for none. */
+    groundMeans?: GroundMeans;
 }
 
 export interface TileProcessResult {
@@ -172,6 +175,9 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         cover,
         watercourses,
         regions,
+        groundColorAt: cfg.groundMeans
+            ? (lon, lat) => groundColorAt(cfg.groundMeans!, lon, lat)
+            : undefined,
     });
 
     const outPath = path.join(cfg.out, String(z), String(x), `${y}.ptm`);
