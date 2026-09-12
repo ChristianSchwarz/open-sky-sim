@@ -18,8 +18,11 @@ const RISE_MPS = 20;
 const DRIFT_MPS = 0.9;
 /** How long a leak keeps emitting after the last hit while still alive (s). */
 const LEAK_EMIT_DURATION_SEC = 14;
-/** Base emit rate at low speed (puffs/s). */
-const LEAK_EMIT_RATE = 18;
+/**
+ * Base emit rate at low speed (puffs/s). Sized with the pool so a cruising
+ * aircraft's ~30 s of puffs fit without recycling the tail early.
+ */
+const LEAK_EMIT_RATE = 8;
 /** At this airspeed (m/s), emit rate is ~2× base; scales linearly with speed. */
 const SPEED_REF_MPS = 80;
 /** Ground wreck plume — denser than in-flight. */
@@ -29,8 +32,8 @@ const MAX_HITS_PER_FRAME = 6;
 
 const FLAME_DITHER = 0.75;
 const SMOKE_DITHER_START = 0.72;
-/** End of puff — sparse stipple so the column fades to light haze. */
-const SMOKE_DITHER_END = 0.08;
+/** End of puff — near-zero (not 0: that disables dithering) so the tail vanishes. */
+const SMOKE_DITHER_END = 0.02;
 /**
  * Life fraction still on fire (yellow→red). Kept short so longer puff life
  * mostly adds gray smoke, not more flame.
@@ -474,8 +477,9 @@ export class DamageSmokeField implements Entity {
             const u = (mesh.material as THREE.ShaderMaterial).uniforms as SceneMaterialUniforms;
             u.color.value.copy(this.tmpColor);
             u.colorSecondary.value.copy(this.tmpColorB);
-            // Steady dissolve over the whole puff life — 0.72 → 0.08 (light haze).
-            u.alphaDither.value = lerp(progress, SMOKE_DITHER_START, SMOKE_DITHER_END);
+            // Ease-out dissolve: dense early, then a long thin tail to near-zero.
+            const fadeT = 1 - (1 - progress) * (1 - progress);
+            u.alphaDither.value = lerp(fadeT, SMOKE_DITHER_START, SMOKE_DITHER_END);
 
             mesh.lookAt(camera.position);
             mesh.rotateZ(p.rotationStart + (p.rotationEnd - p.rotationStart) * progress);
