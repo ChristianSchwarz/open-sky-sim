@@ -1,7 +1,7 @@
 import { ApplicationRef } from '@angular/core';
 import { MatDialog, MatDialogRef } from '@angular/material/dialog';
 import { createApplication } from '@angular/platform-browser';
-import { isAreaImporterAvailable } from '../../osd/areaPicker';
+import { isAreaImporterAvailable } from './terrain/areaImportService';
 import { SettingsDialog, SettingsDialogData, SettingsTab } from './settingsDialog';
 
 /**
@@ -17,7 +17,11 @@ let opening = false;
 type HostData = Omit<SettingsDialogData, 'initialTab' | 'terrainImport'>;
 let host: { data: HostData; onOpenChange: (open: boolean) => void } | undefined;
 
-/** Whether the server can bake terrain does not change during a session. */
+/**
+ * Whether the server can bake terrain. A yes is kept for the session; a no
+ * is asked again next time, because the dev server may simply not have been
+ * up yet when the dialog was first opened.
+ */
 let importerProbe: Promise<boolean> | undefined;
 
 /**
@@ -50,9 +54,11 @@ export async function openSettingsDialog(initialTab?: SettingsTab): Promise<void
         app ??= createApplication();
         importerProbe ??= isAreaImporterAvailable();
         const [appRef, terrainImport] = await Promise.all([app, importerProbe]);
+        if (!terrainImport) {
+            importerProbe = undefined;
+        }
         const ref = appRef.injector.get(MatDialog).open(SettingsDialog, {
             data: { ...data, initialTab, terrainImport },
-            panelClass: 'rfs-settings-panel',
             width: '760px',
             maxWidth: '94vw',
             // Focus the dialog itself so the keyboard belongs to it, not the

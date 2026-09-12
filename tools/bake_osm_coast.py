@@ -39,16 +39,18 @@ import tempfile
 import time
 import zlib
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
 try:
     import requests
+    import shapely
     from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box, mapping, shape
     from shapely.affinity import scale as affine_scale
     from shapely.ops import polygonize, unary_union
     from shapely.prepared import prep
+    from shapely.strtree import STRtree
 except ImportError:
     print('error: shapely and requests are required (pip install shapely requests)', file=sys.stderr)
     raise
@@ -200,7 +202,105 @@ def scan_pdm_tiles(out_dir: str, min_zoom: int, max_zoom: int) -> Dict[int, Set[
     return tiles
 
 
-def overpass_query(b: Bounds, refresh: bool = False) -> dict:
+PhaseProgress = Callable[[float, str], None]
+"""(fraction of the current phase done, 0..1; a short detail such as `12/40`)."""
+
+# The bytes a fetch has received, turned into a guess at how far along it is:
+# Overpass sends no Content-Length, so this is an asymptote that keeps the bar
+# moving and never reaches the end before the answer does. 8 MB is about half
+# of a typical regional coastline answer.
+FETCH_HALFWAY_BYTES = 8 * 1024 * 1024
+
+
+def fetch_fraction(received: int) -> float:
+    return received / (received + FETCH_HALFWAY_BYTES)
+
+
+def format_mb(n: int) -> str:
+    return f'{n / (1024 * 1024):.1f} MB'
+
+
+class StageProgress:
+    """Whole-stage progress for the in-app importer, across weighted phases.
+
+    tools/areaImport.ts reads `(NN.N% of stage)` off the end of a line as this
+    stage's own percentage and shows it in the import dialog. Every phase is
+    a weighted slice of the whole, so the percentage moves through the
+    Overpass fetches and the polygon assembly too - the minutes that used to
+    sit at 0% with nothing in the log.
+
+    A phase that turns out not to apply (no `--osm-landuse`, no inland water)
+    is skipped and its weight dropped, so the percentage still reaches 100
+    and only ever moves forward. The phase numbering stays over the full
+    list, so `phase 6/8 ... skipped` reads as what it is.
+    """
+
+    def __init__(self, phases: Sequence[Tuple[str, str, float]], min_interval_s: float = 0.5):
+        self._phases = [(key, label, float(weight)) for key, label, weight in phases]
+        self._index = {key: i for i, (key, _l, _w) in enumerate(self._phases)}
+        self._done: Set[str] = set()
+        self._skipped: Set[str] = set()
+        self._current: Optional[str] = None
+        self._label = ''
+        self._fraction = 0.0
+        self._phase_started = 0.0
+        self._last_print = 0.0
+        self._min_interval = min_interval_s
+
+    def _weight(self, key: str) -> float:
+        return self._phases[self._index[key]][2]
+
+    def percent(self) -> float:
+        active = sum(w for k, _l, w in self._phases if k not in self._skipped)
+        if active <= 0:
+            return 100.0
+        done = sum(self._weight(k) for k in self._done)
+        if self._current is not None and self._current not in self._done:
+            done += self._fraction * self._weight(self._current)
+        return max(0.0, min(100.0, 100.0 * done / active))
+
+    def _heading(self, key: str, label: str) -> str:
+        return f'phase {self._index[key] + 1}/{len(self._phases)}  {label}'
+
+    def begin(self, key: str, label: Optional[str] = None) -> None:
+        if self._current is not None and self._current not in self._done:
+            self.end()
+        self._current = key
+        self._label = label or self._phases[self._index[key]][1]
+        self._fraction = 0.0
+        self._phase_started = time.monotonic()
+        self._last_print = 0.0
+        print(self._heading(key, self._label), flush=True)
+
+    def update(self, fraction: float, detail: str = '', force: bool = False) -> None:
+        """Report where the current phase is. Throttled to keep the log sane."""
+        self._fraction = max(self._fraction, max(0.0, min(1.0, fraction)))
+        now = time.monotonic()
+        if not force and fraction < 1.0 and now - self._last_print < self._min_interval:
+            return
+        self._last_print = now
+        tail = f' {detail}' if detail else ''
+        print(f'  {self._label}{tail}  ({self.percent():.1f}% of stage)', flush=True)
+
+    def skip(self, key: str, reason: str) -> None:
+        self._skipped.add(key)
+        print(f'{self._heading(key, self._phases[self._index[key]][1])} - skipped, {reason}',
+              flush=True)
+
+    def end(self, summary: str = '') -> None:
+        if self._current is None:
+            return
+        self.update(1.0, force=True)
+        self._done.add(self._current)
+        elapsed = time.monotonic() - self._phase_started
+        tail = f', {summary}' if summary else ''
+        print(f'  {self._label} done in {elapsed:.1f}s{tail}', flush=True)
+        self._current = None
+
+
+def overpass_query(
+    b: Bounds, refresh: bool = False, progress: Optional[StageProgress] = None,
+) -> dict:
     """Fetch the coastline and the water features as two separate requests.
 
     Two requests, not one union of many clauses, because Overpass quietly
@@ -239,8 +339,19 @@ out body;
 out skel qt;
 '''
     elements: List[dict] = []
-    for label, query in (('coastline', coastline), ('water features', features)):
-        elements.extend(_overpass_fetch(query, label, refresh).get('elements', []))
+    for key, label, query in (('coast', 'coastline', coastline),
+                              ('water', 'water features', features)):
+        extra: Dict[str, object] = {}
+        if progress is not None:
+            progress.begin(key)
+
+            def on_bytes(received: int) -> None:
+                progress.update(fetch_fraction(received), f'{format_mb(received)} received')
+            extra['on_progress'] = on_bytes
+        got = _overpass_fetch(query, label, refresh, **extra).get('elements', [])
+        elements.extend(got)
+        if progress is not None:
+            progress.end(f'{len(got)} elements')
     return {'elements': elements}
 
 
@@ -337,9 +448,14 @@ def _water_kind(tags: dict) -> Optional[str]:
 
 
 def _polygons_from_osm(
-    data: dict, bbox: Bounds,
+    data: dict, bbox: Bounds, progress: Optional[PhaseProgress] = None,
 ) -> Tuple[MultiPolygon, List[WaterBody], List[Watercourse]]:
     """Return (land_multipolygon, inland_bodies, watercourses) clipped to bbox.
+
+    `progress(fraction, detail)`, when given, hears each step of the
+    assembly: the way and relation walks by count, then the polygonize,
+    classify and subtract steps, which are single geometry operations that
+    can each take a while on a regional bbox.
 
     Land is assembled exactly as it always was - every water polygon, inland
     ones included, is still subtracted from it - so the ocean shoreline this
@@ -364,7 +480,15 @@ def _polygons_from_osm(
     courses: List[Watercourse] = []
     widened_lines = 0
 
-    for way in ways.values():
+    def tell(fraction: float, detail: str) -> None:
+        if progress is not None:
+            progress(fraction, detail)
+
+    way_total = max(1, len(ways))
+    way_step = max(1, way_total // 50)
+    for i, way in enumerate(ways.values()):
+        if i % way_step == 0 or i + 1 == way_total:
+            tell(0.3 * (i + 1) / way_total, f'ways {i + 1}/{way_total}')
         tags = way.get('tags', {})
         line = _way_line(way, nodes)
         if line is None:
@@ -407,7 +531,9 @@ def _polygons_from_osm(
             inland_parts.append((widened, False))
             widened_lines += 1
 
-    for rel in relations:
+    rel_total = max(1, len(relations))
+    for i, rel in enumerate(relations):
+        tell(0.3 + 0.1 * (i + 1) / rel_total, f'relations {i + 1}/{len(relations)}')
         tags = rel.get('tags', {})
         natural = tags.get('natural', '')
         place = tags.get('place', '')
@@ -444,7 +570,9 @@ def _polygons_from_osm(
         # mainland coast runs off the edge, and its crossing with the bbox ring is
         # not a shared endpoint until something nodes it. Unnoded, the crossings
         # never close and the whole bbox comes out as ocean.
+        tell(0.4, f'noding {len(coastline_lines)} coastline ways')
         linework = unary_union(coastline_lines + [bbox_ring])
+        tell(0.45, 'polygonizing')
         pieces = list(polygonize(linework))
 
         # Classify each piece as land or sea from the coastline's own winding
@@ -465,32 +593,59 @@ def _polygons_from_osm(
         # island, every coastline segment voted "land", and the whole import
         # box baked as land with a straight-edged coast along the box.
         # Measured on Gran Canaria: land fraction 1.0 of the box.
-        def is_sea(piece: Polygon) -> bool:
-            land_votes = 0
-            sea_votes = 0
-            boundary = piece.boundary
-            prepared = prep(piece)
+        #
+        # The vote is cast once per segment, not once per piece per segment:
+        # the pieces sit in an STRtree, and each segment's two probe points
+        # are looked up in it in one bulk query. Walking every segment for
+        # every piece was quadratic - 270 pieces by 51k segments on Madeira
+        # was fourteen million GEOS calls and 317 s, with every download
+        # already cached.
+        tell(0.5, f'classifying {len(pieces)} pieces')
+        land_votes = np.zeros(len(pieces), dtype=np.int64)
+        sea_votes = np.zeros(len(pieces), dtype=np.int64)
+        if pieces:
+            starts: List[np.ndarray] = []
+            ends: List[np.ndarray] = []
             for line in coastline_lines:
-                coords = list(line.coords)
-                for i in range(len(coords) - 1):
-                    (x1, y1), (x2, y2) = coords[i], coords[i + 1]
-                    mid = Point((x1 + x2) / 2, (y1 + y2) / 2)
-                    if boundary.distance(mid) > 1e-9:
-                        continue
-                    length = math.hypot(x2 - x1, y2 - y1)
-                    if length == 0:
-                        continue
-                    off = min(length * 0.25, 1e-6) / length
-                    left = Point(mid.x - (y2 - y1) * off, mid.y + (x2 - x1) * off)
-                    right = Point(mid.x + (y2 - y1) * off, mid.y - (x2 - x1) * off)
-                    if prepared.contains(left):
-                        land_votes += 1
-                    elif prepared.contains(right):
-                        sea_votes += 1
-            return sea_votes > land_votes
+                coords = np.asarray(line.coords, dtype=np.float64)
+                if len(coords) >= 2:
+                    starts.append(coords[:-1])
+                    ends.append(coords[1:])
+            p1 = np.concatenate(starts) if starts else np.zeros((0, 2))
+            p2 = np.concatenate(ends) if ends else np.zeros((0, 2))
+            d = p2 - p1
+            length = np.hypot(d[:, 0], d[:, 1])
+            keep = length > 0
+            p1, d, length = p1[keep], d[keep], length[keep]
+            mid = p1 + d * 0.5
+            off = np.minimum(length * 0.25, 1e-6) / length
+            normal = np.column_stack([-d[:, 1], d[:, 0]]) * off[:, None]
+            left = shapely.points(mid + normal)
+            right = shapely.points(mid - normal)
+            mids = shapely.points(mid)
 
-        for piece in pieces:
-            if piece.area > 0 and not is_sea(piece):
+            tree = STRtree(pieces)
+            # (segment, piece) pairs whose probe point falls inside the piece.
+            lseg, lpiece = tree.query(left, predicate='within')
+            rseg, rpiece = tree.query(right, predicate='within')
+            # The segment must lie on the piece's boundary, as before: a way
+            # that dangles inside a face without bounding it says nothing
+            # about which side of it is sea.
+            boundaries = np.array([p.boundary for p in pieces], dtype=object)
+            on_edge_l = shapely.distance(boundaries[lpiece], mids[lseg]) <= 1e-9
+            lseg, lpiece = lseg[on_edge_l], lpiece[on_edge_l]
+            on_edge_r = shapely.distance(boundaries[rpiece], mids[rseg]) <= 1e-9
+            rseg, rpiece = rseg[on_edge_r], rpiece[on_edge_r]
+            # A right-side vote only where the left probe was not already
+            # inside the same piece, matching the old elif.
+            n = len(pieces)
+            left_pairs = set((lseg * n + lpiece).tolist())
+            right_ok = np.array([(s * n + p) not in left_pairs for s, p in zip(rseg, rpiece)], dtype=bool)
+            np.add.at(land_votes, lpiece, 1)
+            np.add.at(sea_votes, rpiece[right_ok], 1)
+
+        for i, piece in enumerate(pieces):
+            if piece.area > 0 and not sea_votes[i] > land_votes[i]:
                 land_from_coast.append(piece)
         # `place=island` relations only mean something next to a coastline:
         # polygonizing swallows a real island's shoreline into the same "sea"
@@ -509,8 +664,11 @@ def _polygons_from_osm(
     # box down the clip-minus-water fallback below instead of being
     # classified as ocean by a corner probe that no longer exists.
 
+    tell(0.8, f'merging {len(water_polys)} water polygons')
     water_union = unary_union(water_polys) if water_polys else Polygon()
+    tell(0.85, f'merging {len(land_from_coast)} land pieces')
     land_union = unary_union(land_from_coast) if land_from_coast else Polygon()
+    tell(0.9, 'subtracting water from land')
     if land_union.is_empty:
         land_union = clip.difference(water_union)
     else:
@@ -545,6 +703,7 @@ def _polygons_from_osm(
     if widened_lines:
         print(f'  {widened_lines} centreline watercourses kept as strokes '
               f'and buffered into water')
+    tell(0.95, f'merging {len(inland_parts)} inland water parts into bodies')
     inland = (bodies_of([p for p, flat in inland_parts if flat], True)
               + bodies_of([p for p, flat in inland_parts if not flat], False))
     return land_mp, inland, courses
@@ -667,6 +826,7 @@ def flat_body_height(
 
 def resolve_body_heights(
     bodies: Sequence[WaterBody], dem: DemSampler, cell_deg: float, sea_level: float = 0.0,
+    progress: Optional[PhaseProgress] = None,
 ) -> int:
     """Fill in `height` for every flat body. Returns how many resolved.
 
@@ -675,9 +835,14 @@ def resolve_body_heights(
     broken either, which is the right way round for a fallback.
     """
     resolved = 0
+    flat_total = sum(1 for b in bodies if b.flat)
+    seen = 0
     for body in bodies:
         if not body.flat:
             continue
+        seen += 1
+        if progress is not None:
+            progress(seen / max(1, flat_total), f'{seen}/{flat_total} flat bodies')
         body.height = flat_body_height(body, dem, cell_deg, sea_level)
         if body.height is not None:
             resolved += 1
@@ -685,7 +850,7 @@ def resolve_body_heights(
 
 
 def assemble_land(
-    bbox: Bounds, args: argparse.Namespace,
+    bbox: Bounds, args: argparse.Namespace, progress: Optional[StageProgress] = None,
 ) -> Tuple[MultiPolygon, List[WaterBody], List[Watercourse]]:
     # osmcoastline emits the ocean shoreline and nothing else, so those two
     # paths carry no inland water and no watercourses. They still bake
@@ -696,21 +861,39 @@ def assemble_land(
             return MultiPolygon([geom]) if not geom.is_empty else MultiPolygon()
         return geom
 
+    def from_shapefile(shp: str) -> Tuple[MultiPolygon, List[WaterBody], List[Watercourse]]:
+        # One shapefile stands in for all three Overpass-path phases.
+        if progress is not None:
+            progress.begin('coast', f'loading land polygons from {shp}')
+        land = as_mp(load_land_shp(shp, bbox))
+        if progress is not None:
+            progress.end(f'{len(land.geoms)} polygons')
+            progress.skip('water', 'shapefile input carries no inland water')
+            progress.skip('land', 'shapefile input is already assembled')
+        return land, [], []
+
     if args.land_shp:
         print(f'loading land polygons from {args.land_shp}')
-        return as_mp(load_land_shp(args.land_shp, bbox)), [], []
+        return from_shapefile(args.land_shp)
 
     if args.pbf:
         with tempfile.TemporaryDirectory() as tmp:
             shp = os.path.join(tmp, 'land_polygons.shp')
             if run_osmcoastline(args.pbf, shp):
                 print(f'osmcoastline produced {shp}')
-                return as_mp(load_land_shp(shp, bbox)), [], []
+                return from_shapefile(shp)
             print('osmcoastline not available — falling back to Overpass', file=sys.stderr)
 
-    data = overpass_query(bbox, getattr(args, 'refresh_osm', False))
+    data = overpass_query(bbox, getattr(args, 'refresh_osm', False), progress)
     print(f'  {len(data.get("elements", []))} OSM elements')
-    return _polygons_from_osm(data, bbox)
+    if progress is not None:
+        progress.begin('land')
+    result = _polygons_from_osm(data, bbox, progress.update if progress is not None else None)
+    if progress is not None:
+        land, inland, courses = result
+        progress.end(f'{len(land.geoms)} land polygons, {len(inland)} inland bodies, '
+                     f'{len(courses)} watercourses')
+    return result
 
 
 def rasterize_tile(land_prep, land_geom, b: Bounds, n: int) -> bytearray:
@@ -1000,40 +1183,117 @@ def write_lwm(out_dir: str, z: int, x: int, y: int, blob: bytes) -> int:
     return len(blob)
 
 
-def _progress_reporter(total: int, label: str, gate: int = 1):
-    """Closure that prints `label i/total` on a ~5% cadence. Cosmetic only."""
-    step = max(1, total // 20)
+def _progress_reporter(
+    total: int, label: str, gate: int = 1, progress: Optional[PhaseProgress] = None,
+):
+    """Closure that reports `label i/total` on a ~2% cadence. Cosmetic only.
+
+    With `progress` it hands the count to the stage model instead of printing
+    it, and ignores `gate`: the stage percentage should move even through a
+    level of five tiles.
+    """
+    step = max(1, total // 50)
     state = {'done': 0}
 
     def report() -> None:
         state['done'] += 1
         done = state['done']
-        if total > gate and (done % step == 0 or done == total):
+        if done % step != 0 and done != total:
+            return
+        if progress is not None:
+            progress(done / total, f'{done}/{total}')
+        elif total > gate:
             print(f'  {label} {done}/{total}', flush=True)
 
     return report
 
 
-# Per-worker state for rasterize_level_parallel, set once by _init_rasterize_worker.
-_raster_land = None
-_raster_land_prep = None
-_raster_tile_size = 0
-_raster_z = 0
+# Per-worker state shared by the rasterize and clip workers, set once per
+# worker process by _init_worker.
+_wk_out_dir = ''
+_wk_tile_size = 0
+_wk_land: Optional[MultiPolygon] = None
+_wk_land_prep = None
+_wk_inland: Sequence['WaterBody'] = ()
+_wk_courses: Sequence['Watercourse'] = ()
+_wk_landuse_tree: Optional['STRtree'] = None
+_wk_landuse_polys: Sequence[Polygon] = ()
+_wk_landuse_classes: Sequence[int] = ()
 
 
-def _init_rasterize_worker(land_geom, tile_size: int, z: int) -> None:
-    global _raster_land, _raster_land_prep, _raster_tile_size, _raster_z
-    _raster_land = land_geom
-    _raster_land_prep = None if HAS_RASTERIO else prep(land_geom)
-    _raster_tile_size = tile_size
-    _raster_z = z
+def _init_worker(
+    out_dir: str, tile_size: int, land, inland, courses,
+    landuse_tree=None, landuse_polys: Sequence[Polygon] = (), landuse_classes: Sequence[int] = (),
+) -> None:
+    global _wk_out_dir, _wk_tile_size, _wk_land, _wk_land_prep, _wk_inland, _wk_courses
+    global _wk_landuse_tree, _wk_landuse_polys, _wk_landuse_classes
+    _wk_out_dir = out_dir
+    _wk_tile_size = tile_size
+    _wk_land = land
+    _wk_land_prep = None if HAS_RASTERIO else prep(land)
+    _wk_inland = inland
+    _wk_courses = courses
+    _wk_landuse_tree = landuse_tree
+    _wk_landuse_polys = landuse_polys
+    _wk_landuse_classes = landuse_classes
 
 
-def _rasterize_worker(xy: Tuple[int, int]) -> Tuple[int, int, bytearray]:
-    x, y = xy
-    b = tile_bounds(_raster_z, x, y)
-    grid = rasterize_tile(_raster_land_prep, _raster_land, b, _raster_tile_size)
+def _rasterize_worker(task: Tuple[int, int, int]) -> Tuple[int, int, bytearray]:
+    z, x, y = task
+    b = tile_bounds(z, x, y)
+    grid = rasterize_tile(_wk_land_prep, _wk_land, b, _wk_tile_size)
     return x, y, grid
+
+
+def _clip_worker(task: Tuple[int, int, int, bytearray, float, float]) -> Tuple[int, bool, int, int]:
+    z, x, y, grid, tol, line_tol = task
+    return _clip_worker_inline(
+        _wk_out_dir, _wk_tile_size, _wk_land, _wk_inland, _wk_courses, z, x, y, grid, tol, line_tol,
+        _wk_landuse_tree, _wk_landuse_polys, _wk_landuse_classes,
+    )
+
+
+class TilePool:
+    """One pool of worker processes for the whole bake, or none at all.
+
+    The rasterize pass and every one of the thirteen clip levels used to
+    spawn a pool of their own. On Windows a spawned worker re-imports
+    shapely, rasterio and numpy from scratch, and each pool's initargs
+    shipped the entire landuse polygon set and its STRtree by pickle to
+    every worker again - overhead that did no work and, measured on
+    Madeira, took longer than rasterizing the 75 tiles it was spawned for.
+    The pool is created once, with everything the workers will ever need,
+    and reused level by level.
+
+    `jobs == 1` (or nothing to do) runs everything inline in this process
+    instead, which keeps a single-worker bake free of multiprocessing.
+    """
+
+    def __init__(
+        self, jobs: int, out_dir: str, tile_size: int, land, inland, courses,
+        landuse_tree=None, landuse_polys: Sequence[Polygon] = (), landuse_classes: Sequence[int] = (),
+    ) -> None:
+        self.jobs = max(1, jobs)
+        self.args = (out_dir, tile_size, land, inland, courses, landuse_tree, landuse_polys, landuse_classes)
+        self.pool = None
+
+    def __enter__(self) -> 'TilePool':
+        if self.jobs > 1:
+            ctx = mp.get_context('spawn')
+            self.pool = ctx.Pool(self.jobs, initializer=_init_worker, initargs=self.args)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self.pool is not None:
+            self.pool.close()
+            self.pool.join()
+            self.pool = None
+
+    def map(self, fn, inline, tasks, chunksize: int = 8):
+        """`fn` across the workers, unordered; `inline(task)` here when there are none."""
+        if self.pool is None or len(tasks) <= 1:
+            return (inline(t) for t in tasks)
+        return self.pool.imap_unordered(fn, tasks, chunksize=chunksize)
 
 
 def rasterize_level_parallel(
@@ -1041,9 +1301,10 @@ def rasterize_level_parallel(
     tile_size: int,
     z: int,
     tiles: Sequence[Tuple[int, int]],
-    jobs: int,
+    pool: TilePool,
+    progress: Optional[PhaseProgress] = None,
 ) -> Dict[Tuple[int, int], bytearray]:
-    """Rasterizes every tile at the finest level, across `jobs` worker processes.
+    """Rasterizes every tile at the finest level, across the pool's workers.
 
     Each tile only reads the same fixed `land` polygon and writes its own grid
     keyed by (x, y) - independent of every other tile, with no order
@@ -1056,58 +1317,19 @@ def rasterize_level_parallel(
     total = len(tiles)
     if total == 0:
         return level_grids
-    report = _progress_reporter(total, 'rasterize', gate=0)
+    report = _progress_reporter(total, 'rasterize', gate=0, progress=progress)
 
-    jobs = max(1, min(jobs, total))
-    if jobs == 1:
-        land_prep = None if HAS_RASTERIO else prep(land)
-        for x, y in tiles:
-            b = tile_bounds(z, x, y)
-            level_grids[(x, y)] = rasterize_tile(land_prep, land, b, tile_size)
-            report()
-        return level_grids
+    land_prep = None if HAS_RASTERIO else prep(land)
 
-    ctx = mp.get_context('spawn')
-    with ctx.Pool(jobs, initializer=_init_rasterize_worker, initargs=(land, tile_size, z)) as pool:
-        for x, y, grid in pool.imap_unordered(_rasterize_worker, tiles, chunksize=8):
-            level_grids[(x, y)] = grid
-            report()
+    def inline(task: Tuple[int, int, int]) -> Tuple[int, int, bytearray]:
+        _, x, y = task
+        return x, y, rasterize_tile(land_prep, land, tile_bounds(z, x, y), tile_size)
+
+    tasks = [(z, x, y) for x, y in tiles]
+    for x, y, grid in pool.map(_rasterize_worker, inline, tasks):
+        level_grids[(x, y)] = grid
+        report()
     return level_grids
-
-
-# Per-worker state for clip_level_parallel, set once by _init_clip_worker.
-_clip_out_dir = ''
-_clip_tile_size = 0
-_clip_land: Optional[MultiPolygon] = None
-_clip_inland: Sequence['WaterBody'] = ()
-_clip_courses: Sequence['Watercourse'] = ()
-_clip_landuse_tree: Optional['STRtree'] = None
-_clip_landuse_polys: Sequence[Polygon] = ()
-_clip_landuse_classes: Sequence[int] = ()
-
-
-def _init_clip_worker(
-    out_dir: str, tile_size: int, land, inland, courses,
-    landuse_tree=None, landuse_polys: Sequence[Polygon] = (), landuse_classes: Sequence[int] = (),
-) -> None:
-    global _clip_out_dir, _clip_tile_size, _clip_land, _clip_inland, _clip_courses
-    global _clip_landuse_tree, _clip_landuse_polys, _clip_landuse_classes
-    _clip_out_dir = out_dir
-    _clip_tile_size = tile_size
-    _clip_land = land
-    _clip_inland = inland
-    _clip_courses = courses
-    _clip_landuse_tree = landuse_tree
-    _clip_landuse_polys = landuse_polys
-    _clip_landuse_classes = landuse_classes
-
-
-def _clip_worker(task: Tuple[int, int, int, bytearray, float, float]) -> Tuple[int, bool, int, int]:
-    z, x, y, grid, tol, line_tol = task
-    return _clip_worker_inline(
-        _clip_out_dir, _clip_tile_size, _clip_land, _clip_inland, _clip_courses, z, x, y, grid, tol, line_tol,
-        _clip_landuse_tree, _clip_landuse_polys, _clip_landuse_classes,
-    )
 
 
 def clip_level_parallel(
@@ -1120,12 +1342,13 @@ def clip_level_parallel(
     tol: float,
     line_tol: float,
     items: Sequence[Tuple[Tuple[int, int], bytearray]],
-    jobs: int,
+    pool: TilePool,
     landuse_tree: Optional['STRtree'] = None,
     landuse_polys: Sequence[Polygon] = (),
     landuse_classes: Sequence[int] = (),
+    progress: Optional[PhaseProgress] = None,
 ) -> Tuple[int, int, int, int, int]:
-    """Writes .lwm and clips+writes .lvr for one level, across worker processes.
+    """Writes .lwm and clips+writes .lvr for one level, across the pool's workers.
 
     Each tile's mask is already decided (`items` carries the grid), so all
     that is left per tile is independent: clip the same fixed `land`/`inland`/
@@ -1145,10 +1368,17 @@ def clip_level_parallel(
     total_lines = 0
     if total == 0:
         return total_bytes, written, lvr_written, total_lvr_bytes, total_lines
-    report = _progress_reporter(total, f'clip {z}', gate=40)
+    report = _progress_reporter(total, f'clip {z}', gate=40, progress=progress)
 
-    def accept(lwm_bytes: int, has_lvr: bool, lvr_bytes: int, num_lines: int) -> None:
-        nonlocal total_bytes, written, lvr_written, total_lvr_bytes, total_lines
+    def inline(task: Tuple[int, int, int, bytearray, float, float]) -> Tuple[int, bool, int, int]:
+        tz, x, y, grid, ttol, tline_tol = task
+        return _clip_worker_inline(
+            out_dir, tile_size, land, inland, courses, tz, x, y, grid, ttol, tline_tol,
+            landuse_tree, landuse_polys, landuse_classes,
+        )
+
+    tasks = [(z, x, y, grid, tol, line_tol) for (x, y), grid in items]
+    for lwm_bytes, has_lvr, lvr_bytes, num_lines in pool.map(_clip_worker, inline, tasks):
         total_bytes += lwm_bytes
         written += 1
         if has_lvr:
@@ -1156,24 +1386,6 @@ def clip_level_parallel(
             total_lvr_bytes += lvr_bytes
             total_lines += num_lines
         report()
-
-    jobs = max(1, min(jobs, total))
-    if jobs == 1:
-        for (x, y), grid in items:
-            accept(*_clip_worker_inline(
-                out_dir, tile_size, land, inland, courses, z, x, y, grid, tol, line_tol,
-                landuse_tree, landuse_polys, landuse_classes,
-            ))
-        return total_bytes, written, lvr_written, total_lvr_bytes, total_lines
-
-    tasks = [(z, x, y, grid, tol, line_tol) for (x, y), grid in items]
-    ctx = mp.get_context('spawn')
-    with ctx.Pool(
-        jobs, initializer=_init_clip_worker,
-        initargs=(out_dir, tile_size, land, inland, courses, landuse_tree, landuse_polys, landuse_classes),
-    ) as pool:
-        for lwm_bytes, has_lvr, lvr_bytes, num_lines in pool.imap_unordered(_clip_worker, tasks, chunksize=8):
-            accept(lwm_bytes, has_lvr, lvr_bytes, num_lines)
     return total_bytes, written, lvr_written, total_lvr_bytes, total_lines
 
 
@@ -1274,7 +1486,21 @@ def bake(args: argparse.Namespace) -> int:
               f'lat [{asked.south:.5f}, {asked.north:.5f}]')
     print(f'zoom        {min_zoom}..{max_zoom}  tileSize={tile_size}')
 
-    land, inland, courses = assemble_land(bbox, args)
+    # Weights are a rough share of wall-clock on a regional bbox with cached
+    # DEM tiles: the two Overpass answers and the landuse one dominate when
+    # they are not cached, the tile work when they are.
+    progress = StageProgress([
+        ('coast', 'fetching OSM coastline', 12),
+        ('water', 'fetching OSM water features', 8),
+        ('land', 'assembling land and water polygons', 10),
+        ('landuse-fetch', 'fetching OSM landuse', 12),
+        ('landuse', 'assembling landuse polygons', 4),
+        ('heights', 'sampling inland water heights', 4),
+        ('rasterize', f'rasterizing zoom {max_zoom} tiles', 20),
+        ('clip', 'writing coast and vector tiles', 30),
+    ])
+
+    land, inland, courses = assemble_land(bbox, args, progress)
     if land.is_empty:
         print('error: no land polygons assembled — check bbox / OSM data', file=sys.stderr)
         return 2
@@ -1287,11 +1513,25 @@ def bake(args: argparse.Namespace) -> int:
             print('error: --osm-landuse requires shapely and its own dependencies '
                   '(the osm_landuse/osm_regions modules failed to import)', file=sys.stderr)
             return 2
-        landuse_data = overpass_landuse_query((bbox.west, bbox.south, bbox.east, bbox.north), args.refresh_osm)
-        landuse_polys, landuse_classes = assemble_landuse_polygons(landuse_data)
+        progress.begin('landuse-fetch')
+
+        def on_landuse_bytes(index: int, count: int, label: str, received: int) -> None:
+            progress.update((index + fetch_fraction(received)) / count,
+                            f'({label}) {format_mb(received)} received')
+        landuse_data = overpass_landuse_query(
+            (bbox.west, bbox.south, bbox.east, bbox.north), args.refresh_osm,
+            on_progress=on_landuse_bytes)
+        progress.end(f'{len(landuse_data.get("elements", []))} elements')
+        progress.begin('landuse')
+        landuse_polys, landuse_classes = assemble_landuse_polygons(landuse_data, progress.update)
         print(f'landuse     {len(landuse_polys)} OSM polygons')
         if landuse_polys:
+            progress.update(1.0, 'building spatial index', force=True)
             landuse_tree = build_landuse_index(landuse_polys)
+        progress.end(f'{len(landuse_polys)} polygons')
+    else:
+        progress.skip('landuse-fetch', '--osm-landuse not given')
+        progress.skip('landuse', '--osm-landuse not given')
 
     # A mainland coast that fails to close comes out as a handful of islets
     # rather than as nothing, so `is_empty` above does not catch it and the
@@ -1321,16 +1561,22 @@ def bake(args: argparse.Namespace) -> int:
 
     # Inland surface heights come off the DEM that was merged in before this
     # stage ran, so the pyramid is already on disk to read.
-    if inland:
+    flat_count = sum(1 for b in inland if b.flat)
+    if flat_count:
+        progress.begin('heights')
         cell_deg = (180.0 / (1 << max_zoom)) / max(1, tile_size - 1)
         dem = DemSampler(out_dir, max_zoom, tile_size)
-        flat_count = sum(1 for b in inland if b.flat)
-        resolved = resolve_body_heights(inland, dem, cell_deg, manifest.get('seaLevel', 0.0))
+        resolved = resolve_body_heights(
+            inland, dem, cell_deg, manifest.get('seaLevel', 0.0), progress.update)
         print(f'inland      {len(inland)} bodies ({flat_count} flat, '
               f'{len(inland) - flat_count} flowing), {resolved} heights resolved')
         if resolved < flat_count:
             print(f'            {flat_count - resolved} flat bodies had no DEM '
                   f'underneath — baked as flowing water')
+        progress.end(f'{resolved}/{flat_count} resolved')
+    else:
+        progress.skip('heights', 'no flat inland water' if not inland
+                      else f'{len(inland)} inland bodies all flowing')
 
     index_path = os.path.join(out_dir, manifest.get('indexPath', 'index.bin'))
     pdm_tiles = scan_pdm_tiles(out_dir, min_zoom, max_zoom)
@@ -1370,47 +1616,73 @@ def bake(args: argparse.Namespace) -> int:
     total_lvr_tiles = 0
     total_lines = 0
 
-    level_grids = rasterize_level_parallel(land, tile_size, max_zoom, sorted(max_tiles), args.jobs)
+    progress.begin('rasterize')
+    pool = TilePool(args.jobs, out_dir, tile_size, land, inland, courses,
+                    landuse_tree, landuse_polys, landuse_classes)
+    with pool:
+        level_grids = rasterize_level_parallel(
+            land, tile_size, max_zoom, sorted(max_tiles), pool, progress.update)
+        progress.end(f'{len(level_grids)} tiles, {args.jobs} workers')
 
-    print(f'level {max_zoom:2d}    {len(level_grids)} tiles')
+        print(f'level {max_zoom:2d}    {len(level_grids)} tiles')
 
-    for z in range(max_zoom, min_zoom - 1, -1):
-        tol = vector_simplify_tol(z, max_zoom, tile_size)
-        line_tol = ((180.0 / (1 << z)) / max(1, tile_size - 1)) * LINE_SIMPLIFY_CELLS
-        items = sorted(level_grids.items())
-        level_bytes, written, lvr_written, level_lvr_bytes, level_lines = clip_level_parallel(
-            out_dir, tile_size, land, inland, courses, z, tol, line_tol, items, args.jobs,
-            landuse_tree, landuse_polys, landuse_classes)
-        total_bytes += level_bytes
-        total_lvr_bytes += level_lvr_bytes
-        total_lines += level_lines
-        total_tiles += written
-        total_lvr_tiles += lvr_written
-        print(f'level {z:2d}    wrote {written} .lwm + {lvr_written} .lvr tiles',
-              flush=True)
-        if z == min_zoom:
-            break
-        parents: Dict[Tuple[int, int], bytearray] = {}
-        parent_children: Dict[Tuple[int, int], Dict[Tuple[int, int], bytearray]] = {}
-        for (x, y), grid in level_grids.items():
-            key = (x >> 1, y >> 1)
-            parent_children.setdefault(key, {})[(x & 1, y & 1)] = grid
-        reloaded = 0
-        for key, children in parent_children.items():
-            # Top the quadrants up from disk before decimating, or the coast of
-            # every area baked before this one is replaced with open water in
-            # the ancestors they share.
-            for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
-                if (qx, qy) in children:
-                    continue
-                sibling = read_lwm(out_dir, z, key[0] * 2 + qx, key[1] * 2 + qy)
-                if sibling is not None:
-                    children[(qx, qy)] = sibling
-                    reloaded += 1
-            parents[key] = build_parent_mask(children, tile_size)
-        if reloaded:
-            print(f'            {reloaded} siblings reloaded for {len(parents)} ancestors')
-        level_grids = parents
+        # How many tiles the level walk below will write in all, so its share of
+        # the stage moves at one steady rate instead of restarting every level.
+        # Ancestor tiles come from the child keys alone (siblings reloaded off
+        # disk fill quadrants of a parent that is being written anyway).
+        clip_total = 0
+        keys = set(level_grids)
+        for z in range(max_zoom, min_zoom - 1, -1):
+            clip_total += len(keys)
+            keys = {(x >> 1, y >> 1) for x, y in keys}
+        clip_done = 0
+        progress.begin('clip')
+        progress.update(0.0, f'{clip_total} tiles over zoom {max_zoom}..{min_zoom}', force=True)
+
+        for z in range(max_zoom, min_zoom - 1, -1):
+            tol = vector_simplify_tol(z, max_zoom, tile_size)
+            line_tol = ((180.0 / (1 << z)) / max(1, tile_size - 1)) * LINE_SIMPLIFY_CELLS
+            items = sorted(level_grids.items())
+            level_started = time.monotonic()
+
+            def level_progress(fraction: float, detail: str, z=z, n=len(items)) -> None:
+                progress.update((clip_done + fraction * n) / max(1, clip_total), f'zoom {z} {detail}')
+            level_bytes, written, lvr_written, level_lvr_bytes, level_lines = clip_level_parallel(
+                out_dir, tile_size, land, inland, courses, z, tol, line_tol, items, pool,
+                landuse_tree, landuse_polys, landuse_classes, progress=level_progress)
+            clip_done += len(items)
+            total_bytes += level_bytes
+            total_lvr_bytes += level_lvr_bytes
+            total_lines += level_lines
+            total_tiles += written
+            total_lvr_tiles += lvr_written
+            print(f'level {z:2d}    wrote {written} .lwm + {lvr_written} .lvr tiles '
+                  f'in {time.monotonic() - level_started:.1f}s', flush=True)
+            if z == min_zoom:
+                break
+            progress.update(clip_done / max(1, clip_total), f'zoom {z - 1} building ancestors',
+                            force=True)
+            parents: Dict[Tuple[int, int], bytearray] = {}
+            parent_children: Dict[Tuple[int, int], Dict[Tuple[int, int], bytearray]] = {}
+            for (x, y), grid in level_grids.items():
+                key = (x >> 1, y >> 1)
+                parent_children.setdefault(key, {})[(x & 1, y & 1)] = grid
+            reloaded = 0
+            for key, children in parent_children.items():
+                # Top the quadrants up from disk before decimating, or the coast of
+                # every area baked before this one is replaced with open water in
+                # the ancestors they share.
+                for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+                    if (qx, qy) in children:
+                        continue
+                    sibling = read_lwm(out_dir, z, key[0] * 2 + qx, key[1] * 2 + qy)
+                    if sibling is not None:
+                        children[(qx, qy)] = sibling
+                        reloaded += 1
+                parents[key] = build_parent_mask(children, tile_size)
+            if reloaded:
+                print(f'            {reloaded} siblings reloaded for {len(parents)} ancestors')
+            level_grids = parents
 
     # Union with whatever was already masked, not a replacement: this run only
     # looked at its own bbox, and the tiles baked outside it are still there.
@@ -1427,6 +1699,7 @@ def bake(args: argparse.Namespace) -> int:
             'west': bbox.west, 'south': bbox.south,
             'east': bbox.east, 'north': bbox.north,
         }
+    progress.end(f'{total_tiles} .lwm + {total_lvr_tiles} .lvr tiles')
     manifest['version'] = 3
     manifest['coastMask'] = {
         'enabled': True,

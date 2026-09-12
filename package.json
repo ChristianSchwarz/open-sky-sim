@@ -18,7 +18,7 @@
         "verify:planet": "node --import tsx tools/verify_planet.ts",
         "preserve": "npm run build",
         "serve": "tsx tools/modserver.ts",
-        "test": "node --import tsx --test src/script/config/**/*.test.ts src/script/physics/**/*.test.ts src/script/ai/**/*.test.ts src/script/weapons/**/*.test.ts src/script/state/**/*.test.ts src/script/render/**/*.test.ts src/script/scene/**/*.test.ts src/script/planet/**/*.test.ts src/script/terrain/**/*.test.ts tools/bake/**/*.test.ts tools/*.test.ts",
+        "test": "node --import tsx --test src/script/config/**/*.test.ts src/script/physics/**/*.test.ts src/script/ai/**/*.test.ts src/script/weapons/**/*.test.ts src/script/state/**/*.test.ts src/script/render/**/*.test.ts src/script/scene/**/*.test.ts src/script/planet/**/*.test.ts src/script/terrain/**/*.test.ts src/script/ui/**/*.test.ts tools/bake/**/*.test.ts tools/*.test.ts",
         "postinstall": "patch-package"
     },
     "author": "Ruben Moreno Montoliu <ruben3d@gmail.com>",

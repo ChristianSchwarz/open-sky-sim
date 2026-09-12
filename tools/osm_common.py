@@ -24,6 +24,7 @@ import math
 import os
 import struct
 import sys
+import threading
 import time
 import zlib
 from dataclasses import dataclass
@@ -213,11 +214,72 @@ def overpass_cache_path(query: str) -> str:
     return os.path.join(OSM_CACHE_DIR, f'{key}.json.gz')
 
 
+class _WaitTicker:
+    """Prints `still waiting for <mirror> (45s)` every few seconds until stopped.
+
+    An Overpass mirror spends most of a regional query's wall-clock time
+    computing before it sends a single byte, and `requests.post` blocks for
+    all of it. Without this the importer's log goes quiet for minutes with no
+    way to tell a slow mirror from a hung one.
+    """
+
+    def __init__(self, url: str, every_s: float = 10.0):
+        self._url = url
+        self._every = every_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._started = time.monotonic()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._every):
+            elapsed = time.monotonic() - self._started
+            print(f'  still waiting for {self._url} ({elapsed:.0f}s)', flush=True)
+
+    def __enter__(self) -> '_WaitTicker':
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._stop.set()
+        self._thread.join()
+
+
+def _read_json_streamed(resp, on_progress: Callable[[int], None]) -> dict:
+    """Pull the body down in chunks, reporting the byte count as it grows.
+
+    Overpass answers are chunked with no Content-Length, so this cannot know
+    the total - the caller turns a byte count into whatever estimate it wants
+    to show. Reports at most twice a second and always once at the end.
+    """
+    chunks: List[bytes] = []
+    received = 0
+    last = 0.0
+    for chunk in resp.iter_content(chunk_size=1 << 18):
+        if not chunk:
+            continue
+        chunks.append(chunk)
+        received += len(chunk)
+        now = time.monotonic()
+        if now - last >= 0.5:
+            on_progress(received)
+            last = now
+    on_progress(received)
+    return json.loads(b''.join(chunks))
+
+
 def overpass_fetch(
     query: str, label: str, refresh: bool,
     validate: Optional[Callable[[dict], None]] = None,
+    on_progress: Optional[Callable[[int], None]] = None,
 ) -> dict:
     """One Overpass request, cached by query hash.
+
+    `on_progress`, when given, is called with the number of body bytes
+    received so far while the answer streams in, and a "still waiting" line
+    is printed every few seconds while the mirror is computing - the two
+    together are what the in-app importer shows during the minutes an
+    Overpass fetch can take. Without it the request is read in one go as
+    before.
 
     Every mirror (in :func:`mirror_order`) is tried once per round before any
     round sleeps; `OVERPASS_ROUNDS` rounds are attempted before giving up. A
@@ -259,9 +321,16 @@ def overpass_fetch(
     for round_idx in range(OVERPASS_ROUNDS):
         for url in mirror_order():
             suffix = '' if round_idx == 0 else f' (round {round_idx + 1}/{OVERPASS_ROUNDS})'
-            print(f'fetching OSM {label} via Overpass ({url}){suffix}…')
+            print(f'fetching OSM {label} via Overpass ({url}){suffix}…', flush=True)
+            streamed = on_progress is not None
             try:
-                resp = requests.post(url, data=body, headers=headers, timeout=OVERPASS_TIMEOUT_S)
+                if streamed:
+                    with _WaitTicker(url):
+                        resp = requests.post(
+                            url, data=body, headers=headers, timeout=OVERPASS_TIMEOUT_S,
+                            stream=True)
+                else:
+                    resp = requests.post(url, data=body, headers=headers, timeout=OVERPASS_TIMEOUT_S)
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as err:
                 last_err = str(err)
                 print(f'  overpass failed: {last_err}', file=sys.stderr)
@@ -279,7 +348,16 @@ def overpass_fetch(
                 continue
 
             try:
-                data = resp.json()
+                if streamed:
+                    data = _read_json_streamed(resp, on_progress)
+                else:
+                    data = resp.json()
+            except requests.exceptions.RequestException as err:
+                # The connection dropped partway through the body.
+                last_err = str(err)
+                print(f'  overpass failed: {last_err}', file=sys.stderr)
+                _mirror_failed(url)
+                continue
             except ValueError:
                 last_err = 'response was not JSON'
                 print(f'  overpass failed: {last_err}', file=sys.stderr)

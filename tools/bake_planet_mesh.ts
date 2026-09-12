@@ -34,8 +34,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as zlib from 'node:zlib';
 import { Worker } from 'node:worker_threads';
 import { decodePdm } from '../src/script/terrain/demTile';
+import { decodePtm } from '../src/script/terrain/ptm';
 import {
     HISTOGRAM_BINS, accumulateColors, luminanceWindow, medianCut, newColorHistogram,
 } from './bake/swatches';
@@ -437,7 +439,6 @@ async function main(): Promise<void> {
         process.exit(1);
     }
     const src = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    const levelErrors: number[] = src.levelGeometricErrorM ?? [];
     const maxZoom = Math.min(args.maxZoom ?? src.maxZoom, src.maxZoom);
     const basis = makeEnuBasis(PLAY_ORIGIN.lat, PLAY_ORIGIN.lon, PLAY_ORIGIN.height);
     // One airbase pad per baked area, so every area has somewhere flat to put
@@ -486,7 +487,17 @@ async function main(): Promise<void> {
 
     fs.mkdirSync(args.out, { recursive: true });
     const written: Array<{ z: number; x: number; y: number }> = [];
+    // Per-level maxima over every tile in the final index, written or
+    // carried. These used to be copied from the height pyramid's manifest,
+    // whose table is a monotone max across every merge and delete ever run -
+    // a mountain baked long ago pinned z4-z10 at 1.6 km, and the runtime
+    // refined flat sea to z11 out to 130 km on the strength of it.
+    const levelError: number[] = [];
     const levelSkirt: number[] = [];
+    const foldLevel = (z: number, errM: number, skirtM: number) => {
+        levelError[z] = Math.max(levelError[z] ?? 0, errM);
+        levelSkirt[z] = Math.max(levelSkirt[z] ?? 0, skirtM);
+    };
     let totalBytes = 0;
     let totalTris = 0;
     let maxTris = 0;
@@ -514,7 +525,7 @@ async function main(): Promise<void> {
         src: args.src,
         out: args.out,
         seaLevel: src.seaLevel ?? 0,
-        levelErrors,
+        maxZoom,
         budget: args.budget,
         basis,
         pads,
@@ -535,7 +546,7 @@ async function main(): Promise<void> {
         if (r.imagery && r.landColors) {
             accumulateColors(colorHistogram, r.landColors);
         }
-        levelSkirt[z] = r.skirtDepthM;
+        foldLevel(z, r.geometricErrorM, r.skirtDepthM);
         if (r.covered) {
             coveredTiles++;
         }
@@ -614,17 +625,26 @@ async function main(): Promise<void> {
     const maxWritten = all.length > 0 ? Math.max(...all.map(t => t.z)) : 0;
     fs.writeFileSync(indexPath, encodeTileIndex(all, minZoom, maxWritten));
 
-    // Same for the per-level skirt depths: a scoped bake only touched the
-    // levels it had tiles on, and the rest still need their previous value.
-    const previousManifest = args.bbox !== undefined
-        && fs.existsSync(path.join(args.out, 'manifest.json'))
-        ? JSON.parse(fs.readFileSync(path.join(args.out, 'manifest.json'), 'utf8'))
-        : undefined;
-    const previousSkirt: number[] = previousManifest?.mesh?.levelSkirtDepthM ?? [];
-    for (let z = 0; z <= maxWritten; z++) {
-        if (levelSkirt[z] === undefined && previousSkirt[z] !== undefined) {
-            levelSkirt[z] = previousSkirt[z];
+    // A scoped bake only touched the levels it had tiles on; the carried
+    // tiles still have to count toward the per-level maxima, so read their
+    // headers back. A carried tile of an older version cannot be mixed with
+    // this run's output anyway - the runtime refuses the whole tree.
+    const writtenKeys = new Set(written.map(k => `${k.z}/${k.x}/${k.y}`));
+    for (const k of all) {
+        if (writtenKeys.has(`${k.z}/${k.x}/${k.y}`)) {
+            continue;
         }
+        const ptmPath = path.join(args.out, String(k.z), String(k.x), `${k.y}.ptm`);
+        let tile: ReturnType<typeof decodePtm>;
+        try {
+            tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
+        } catch (err) {
+            console.error(`error: carried tile ${k.z}/${k.x}/${k.y} cannot be read: `
+                + `${(err as Error).message}`);
+            console.error('Run a full `npm run bake:mesh` to rebuild the tree.');
+            process.exit(1);
+        }
+        foldLevel(k.z, tile.geometricErrorM, tile.skirtDepthM);
     }
 
     const outManifest = {
@@ -646,7 +666,10 @@ async function main(): Promise<void> {
             encoding: 'PTM1',
             transport: 'gzip',
             triangleBudget: args.budget,
-            levelGeometricErrorM: levelErrors.slice(0, maxWritten + 1),
+            levelGeometricErrorM: Array.from(
+                { length: maxWritten + 1 },
+                (_, z) => levelError[z] ?? 0,
+            ),
             levelSkirtDepthM: Array.from(
                 { length: maxWritten + 1 },
                 (_, z) => levelSkirt[z] ?? 0,

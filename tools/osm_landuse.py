@@ -25,7 +25,7 @@ gets away without one.
 from __future__ import annotations
 
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 try:
     from shapely.geometry import Polygon, box
@@ -138,10 +138,18 @@ def _reject_if_empty(label: str, data: dict) -> None:
         raise RuntimeError(f'{label} came back with zero elements - likely a truncated answer')
 
 
+LanduseFetchProgress = Callable[[int, int, str, int], None]
+"""(group index, group count, group label, bytes received so far)."""
+
+
 def overpass_landuse_query(
     bbox: Tuple[float, float, float, float], refresh: bool = False,
+    on_progress: Optional[LanduseFetchProgress] = None,
 ) -> dict:
     """Fetch OSM natural/landuse polygons as two grouped Overpass requests.
+
+    `on_progress`, when given, hears every download's byte count as it grows,
+    tagged with which of the groups it belongs to.
 
     `bbox` crosses the module boundary as a plain (west, south, east, north)
     tuple rather than an osm_common.Bounds - bake_planet_cover.py's own
@@ -157,13 +165,20 @@ def overpass_landuse_query(
     """
     b = Bounds(*bbox)
     elements: List[dict] = []
-    for label, tags in (('vegetation/agriculture', _VEGETATION_TAGS),
-                         ('built/bare/snow/wetland', _BUILT_TAGS)):
+    groups = (('vegetation/agriculture', _VEGETATION_TAGS),
+              ('built/bare/snow/wetland', _BUILT_TAGS))
+    for index, (label, tags) in enumerate(groups):
         query = _query_for(tags, b)
+        extra: Dict[str, object] = {}
+        if on_progress is not None:
+            def bytes_seen(received: int, index=index, label=label) -> None:
+                on_progress(index, len(groups), label, received)
+            extra['on_progress'] = bytes_seen
         try:
             data = overpass_fetch(
                 query, f'landuse ({label})', refresh,
                 validate=lambda d, label=label: _reject_if_empty(label, d),
+                **extra,
             )
         except Exception as err:
             print(f'  landuse ({label}) unavailable ({err}) - baking without it', file=sys.stderr)
@@ -192,8 +207,13 @@ def _polygon_from_way(way: dict, nodes: Dict[int, Tuple[float, float]]) -> Optio
     return poly if isinstance(poly, Polygon) and not poly.is_empty else None
 
 
-def assemble_landuse_polygons(data: dict) -> Tuple[List[Polygon], List[int]]:
+def assemble_landuse_polygons(
+    data: dict, progress: Optional[Callable[[float, str], None]] = None,
+) -> Tuple[List[Polygon], List[int]]:
     """Parallel (polygons, TerrainClass ids), one entry per OSM shape.
+
+    `progress(fraction, detail)`, when given, is called as the ways and then
+    the relations are walked.
 
     Every polygon keeps its own class rather than folding into one union,
     unlike bake_osm_coast.py's land/water assembly - that is the whole reason
@@ -213,7 +233,12 @@ def assemble_landuse_polygons(data: dict) -> Tuple[List[Polygon], List[int]]:
     polys: List[Polygon] = []
     classes: List[int] = []
 
-    for way in ways.values():
+    # Ways are the bulk of it; relations are few but each carries many rings.
+    way_total = max(1, len(ways))
+    way_step = max(1, way_total // 50)
+    for i, way in enumerate(ways.values()):
+        if progress is not None and (i % way_step == 0 or i + 1 == way_total):
+            progress(0.8 * (i + 1) / way_total, f'ways {i + 1}/{way_total}')
         cls = _class_for_tags(way.get('tags') or {})
         if cls is None:
             continue
@@ -222,7 +247,10 @@ def assemble_landuse_polygons(data: dict) -> Tuple[List[Polygon], List[int]]:
             polys.append(poly)
             classes.append(cls)
 
-    for rel in relations:
+    rel_total = max(1, len(relations))
+    for i, rel in enumerate(relations):
+        if progress is not None:
+            progress(0.8 + 0.2 * (i + 1) / rel_total, f'relations {i + 1}/{len(relations)}')
         cls = _class_for_tags(rel.get('tags') or {})
         if cls is None:
             continue

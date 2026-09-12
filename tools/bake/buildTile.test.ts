@@ -156,6 +156,7 @@ function base(overrides: Partial<BuildTileInput> = {}): BuildTileInput {
         seaLevel: 0,
         maxErrorM: 2,
         skirtDepthM: 25,
+        geometricErrorM: 0,
         basis: BASIS,
         ...overrides,
     };
@@ -1057,6 +1058,57 @@ describe('buildTile regions', () => {
             assert.deepEqual(kindsOf(r.bytes), new Set([PTM_STROKE_KIND_WATER, PTM_STROKE_KIND_OUTLINE]));
             assert.ok(r.riverTriangles > 0);
         });
+    });
+});
+
+describe('coarse zoom', () => {
+    // A z10 tile of the finest-is-z12 pyramid: drawn from ~25 km at the
+    // nearest, where nothing below a cell can show.
+    const COARSE = { id: { z: 10, x: 936, y: 352 }, maxZoom: 12 };
+
+    it('writes the DEM error plus what the decimator dropped into the header', () => {
+        const r = buildTile(base({ polygons: [coastAt(CELLS + 2)], geometricErrorM: 30 }));
+        const tile = decodePtm(r.bytes);
+        assert.ok(tile.geometricErrorM >= 30, `header ${tile.geometricErrorM}`);
+        // The interior tolerance is 2 m, so at most that on top.
+        assert.ok(tile.geometricErrorM <= 32, `header ${tile.geometricErrorM}`);
+        assert.equal(r.geometricErrorM, tile.geometricErrorM);
+    });
+
+    it('neither fills nor outlines landuse, but still colours the facets by it', () => {
+        const west = regionAt(-1, -1, SIZE / 2, CELLS + 1, true, TerrainClass.Tree);
+        const east = regionAt(SIZE / 2, -1, CELLS + 1, CELLS + 1, true, undefined);
+        const input = {
+            polygons: [coastAt(CELLS + 2)],
+            heights: heightsFrom(() => 50),
+            regions: [west, east],
+        };
+        const fine = decodePtm(buildTile(base(input)).bytes);
+        const r = buildTile(base({ ...input, ...COARSE }));
+        const coarse = decodePtm(r.bytes);
+        assert.equal(coarse.riverIndices.length, 0, 'no outline strokes');
+        assert.ok(coarse.landPositions.length < fine.landPositions.length, 'no fill triangles');
+        assert.ok(classesIn(r.bytes).has(TerrainClass.Tree), 'the polygon still paints its facets');
+        assert.ok(classesIn(r.bytes).has(TerrainClass.Unknown), 'untagged ground stays unknown');
+    });
+
+    it('drops a watercourse narrower than a twentieth of a cell', () => {
+        const course = (widthM: number): Watercourse => ({
+            widthM,
+            points: [
+                { lon: BOUNDS.west, lat: (BOUNDS.north + BOUNDS.south) / 2 },
+                { lon: BOUNDS.east, lat: (BOUNDS.north + BOUNDS.south) / 2 },
+            ],
+        });
+        // A cell here is ~35 m, so the cut falls at 1.7 m.
+        const ditch = decodePtm(buildTile(base({
+            polygons: [coastAt(CELLS + 2)], watercourses: [course(1)], ...COARSE,
+        })).bytes);
+        const canal = decodePtm(buildTile(base({
+            polygons: [coastAt(CELLS + 2)], watercourses: [course(12)], ...COARSE,
+        })).bytes);
+        assert.equal(ditch.riverIndices.length, 0);
+        assert.ok(canal.riverIndices.length > 0);
     });
 });
 

@@ -19,6 +19,7 @@ import {
     TERRAIN_CLASS_COUNT, TERRAIN_SWATCH_COUNT, TERRAIN_TONE_COUNT, TerrainVertProgram,
 } from './shaders/terrainVP';
 import { SUN_UNIFORMS } from './shaders/sun';
+import { LANDUSE_BLEND_DEFAULT } from '../../terrain/tones';
 
 export enum SceneMaterialPrimitiveType {
     MESH,
@@ -489,6 +490,9 @@ export class SceneMaterialManager implements KernelTask {
             uShadeRange: { value: spec.shadeRange },
             uShadeWindow: { value: new THREE.Vector2(spec.shadeMid, spec.shadeSpread) },
             uRawLight: { value: new THREE.Vector3(1, 1, 1) },
+            // Share of a land-use facet's Hybrid colour taken from its palette
+            // tone; the rest is its sampled colour. See LanduseBlendSetting.
+            uLanduseBlend: { value: LANDUSE_BLEND_DEFAULT },
         };
     }
 

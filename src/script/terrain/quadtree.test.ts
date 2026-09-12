@@ -4,7 +4,8 @@ import * as THREE from 'three';
 import { Quadtree } from './quadtree';
 import { TerrainManifest } from './manifest';
 import {
-    DETAIL_DISTANCE_OFF, DETAIL_SCALE_MAX, FRUSTUM_CULL_MARGIN_RAD, RECONCILE_INTERVAL_MS,
+    DETAIL_DISTANCE_OFF, DETAIL_SCALE_MAX, FRUSTUM_CULL_MARGIN_RAD, LEAF_REFINE_DISTANCE_SCALE,
+    RECONCILE_INTERVAL_MS,
 } from './lod';
 import { TileKey, childrenOf, parentOf, tileKeyString } from './tiling';
 
@@ -36,6 +37,7 @@ function makeTree(opts: {
     maxZoom?: number;
     resident?: Set<string>;
     ocean?: Set<string>;
+    tileErrorM?: (id: TileKey) => number | undefined;
 } = {}) {
     const resident = opts.resident ?? new Set<string>();
     const ocean = opts.ocean ?? new Set<string>();
@@ -50,6 +52,7 @@ function makeTree(opts: {
         tileRadius: (id) => (180 / (1 << id.z)) * 1000,
         isResident: (id) => resident.has(tileKeyString(id)),
         isOcean: (id) => ocean.has(tileKeyString(id)),
+        tileErrorM: opts.tileErrorM,
         earthCenter: new THREE.Vector3(0, -6378137, 0),
         maxZoom: opts.maxZoom ?? 4,
     });
@@ -360,6 +363,51 @@ describe('Quadtree', () => {
     });
 });
 
+describe('per-tile error', () => {
+    /** Every tile to z2 resident, so only the LOD rules limit refinement. */
+    function allResident() {
+        const resident = new Set<string>();
+        for (let z = 0; z <= 2; z++) {
+            for (let x = 0; x < (1 << (z + 1)); x++) {
+                for (let y = 0; y < (1 << z); y++) {
+                    resident.add(`${z}/${x}/${y}`);
+                }
+            }
+        }
+        return resident;
+    }
+
+    it('refines on the resident tile\'s own error rather than the level table', () => {
+        // The table says 4 km at z0, which refines from anywhere; the tiles
+        // themselves say they are exact, so nothing has anything to gain.
+        const h = makeTree({ maxZoom: 2, resident: allResident(), tileErrorM: () => 0 });
+        const r = h.tree.update(camera(), 200, 50, 1);
+        assert.ok(r.draw.length > 0);
+        for (const node of r.draw) {
+            assert.equal(node.id.z, 0, `${node.key} drawn: a tile with no error never refines`);
+            assert.equal(node.errorFromTile, true);
+        }
+    });
+
+    it('falls back to the level table while the tile has no figure of its own', () => {
+        const h = makeTree({ maxZoom: 2, resident: allResident(), tileErrorM: () => undefined });
+        const r = h.tree.update(camera(), 200, 50, 1);
+        assert.ok(r.draw.some(n => n.id.z > 0), 'the 4 km table entry refines');
+        for (const node of r.draw) {
+            assert.equal(node.errorFromTile, false);
+        }
+    });
+
+    it('does not take a figure from a tile that is not resident', () => {
+        const h = makeTree({ maxZoom: 2, tileErrorM: () => 0 });
+        const r = h.tree.update(camera(), 200, 50, 1);
+        for (const node of r.draw) {
+            assert.equal(node.errorFromTile, false);
+            assert.equal(node.geometricErrorM, 4000);
+        }
+    });
+});
+
 describe('far-field detail falloff', () => {
     /** Everything resident, so refinement is limited only by the LOD rules. */
     function everythingResident(maxZoom = 7) {
@@ -462,5 +510,64 @@ describe('far-field detail falloff', () => {
         const off = h.tree.update(cam, 200, 50, 1, DETAIL_DISTANCE_OFF).draw.length;
         const tight = h.tree.update(cam, 200, 50, 1, 2_000).draw.length;
         assert.equal(tight, off, 'the falloff reached the ocean sagitta bound');
+    });
+});
+
+describe('leaf refine bias', () => {
+    /** Everything resident down to maxZoom; z1 says `z1ErrM`, z2 says exact. */
+    function tree(maxZoom: number, z1ErrM: number) {
+        const resident = new Set<string>();
+        const add = (z: number, x: number, y: number) => {
+            resident.add(tileKeyString({ z, x, y }));
+            if (z >= maxZoom) return;
+            for (const c of childrenOf({ z, x, y })) add(c.z, c.x, c.y);
+        };
+        for (let x = 0; x < 2; x++) add(0, x, 0);
+        return makeTree({
+            maxZoom, resident,
+            tileErrorM: id => (id.z === 1 ? z1ErrM : id.z >= 2 ? 0 : undefined),
+        });
+    }
+
+    /**
+     * Smallest z1 error at which a z2 tile is drawn, from a camera 200 km
+     * short of the world looking across it. The altitude stays low so the
+     * altitude zoom cap never bites; distance is fixed and the error swept,
+     * which comes to the same thing since the two only ever appear as a ratio.
+     */
+    function z2Threshold(maxZoom: number, leafScale?: number): number {
+        for (let err = 50; err <= 3000; err += 5) {
+            const cam = new THREE.PerspectiveCamera(50, 1.6, 1, 5_000_000);
+            cam.position.set(0, 500, -200_000);
+            cam.lookAt(0, 500, 0);
+            cam.updateMatrixWorld(true);
+            cam.updateProjectionMatrix();
+            const r = tree(maxZoom, err).tree.update(
+                cam, 200, 50, 1, DETAIL_DISTANCE_OFF, undefined, leafScale,
+            );
+            if (r.draw.some(n => n.id.z === 2)) return err;
+        }
+        return Infinity;
+    }
+
+    it('brings the leaf in LEAF_REFINE_DISTANCE_SCALE times further out', () => {
+        // With maxZoom 3 the z1 node is an ordinary interior node; with
+        // maxZoom 2 it is the leaf's parent and carries the bias. The z2
+        // tiles report zero error so neither tree ever goes past them.
+        const plain = z2Threshold(3);
+        const biased = z2Threshold(2);
+        assert.ok(Number.isFinite(plain) && biased < plain, `${biased} < ${plain}`);
+        const ratio = plain / biased;
+        assert.ok(
+            Math.abs(ratio - LEAF_REFINE_DISTANCE_SCALE) < 0.05,
+            `threshold ratio ${ratio.toFixed(3)} != ${LEAF_REFINE_DISTANCE_SCALE}`,
+        );
+    });
+
+    it('takes the reach from the setting: 1 is no bias, 2 is twice the distance', () => {
+        const plain = z2Threshold(3);
+        assert.equal(z2Threshold(2, 1), plain);
+        const ratio = plain / z2Threshold(2, 2);
+        assert.ok(Math.abs(ratio - 2) < 0.05, `threshold ratio ${ratio.toFixed(3)} != 2`);
     });
 });

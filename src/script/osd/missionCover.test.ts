@@ -86,7 +86,7 @@ function tileOf(id: TileKey, cls: number, withWater = false): PtmTile {
 
     return {
         id, version: 5, flags: 0, centerHeightM: 0, quantScale: q,
-        boundingRadiusM: halfM, skirtDepthM: 0,
+        boundingRadiusM: halfM, skirtDepthM: 0, geometricErrorM: 0,
         landPositions, landNormals: new Int8Array(corners.length * 4), landAttrs,
         waterPositions, waterTones: new Uint8Array(0), waterIndices, waterGroups,
         riverPositions: new Int16Array(0), riverDirections: new Int8Array(0),

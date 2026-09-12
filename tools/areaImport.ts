@@ -185,8 +185,11 @@ export function areasHandler(_req: Request, res: Response): void {
  * plainly says. Unrecognised lines simply carry no percentage.
  */
 export function parseProgress(line: string): number | undefined {
-    // `  123/456 (27.0%)  1.2 MB` — the mesh and cover bakes.
-    const pct = /\((\d+(?:\.\d+)?)%\)/.exec(line);
+    // `  123/456 (27.0%)  1.2 MB` — the mesh and cover bakes — and
+    // `  fetching OSM coastline 4.2 MB received  (13.1% of stage)` — the
+    // coast bake, whose StageProgress folds its Overpass fetches, polygon
+    // assembly and every tile level into one percentage of the whole stage.
+    const pct = /\((\d+(?:\.\d+)?)%(?: of stage)?\)/.exec(line);
     if (pct) {
         return clampPercent(Number(pct[1]));
     }
@@ -212,7 +215,11 @@ function clampPercent(v: number): number | undefined {
 /** True for a line that is only a progress update, so the log can replace it. */
 export function isProgressLine(line: string): boolean {
     return /^\s*\d+\s*\/\s*\d+\s*\(/.test(line)
-        || /^\s*(?:sampling|rasterize|writing|clip)\s+\d+\s*\/\s*\d+/.test(line);
+        || /^\s*(?:sampling|rasterize|writing|clip)\s+\d+\s*\/\s*\d+/.test(line)
+        // The coast bake's stage lines all end the same way; its `phase 3/8`
+        // headings and `... done in 4.2s` summaries do not, and stay in the
+        // log for good.
+        || /\(\d+(?:\.\d+)?% of stage\)\s*$/.test(line);
 }
 
 function frameFor(job: Job, event: Record<string, unknown>): string {

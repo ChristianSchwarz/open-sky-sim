@@ -30,6 +30,7 @@ function sampleTile(): PtmEncodeInput {
         centerHeightM: 123.5,
         tileHalfWidthM: 2200,
         skirtDepthM: 7.25,
+        geometricErrorM: 12.5,
         land: {
             positions: new Float32Array([...tri(0, 0), ...tri(200, 0), ...tri(400, 0)]),
             faceNormals: new Float32Array([0, 1, 0, 0.6, 0.8, 0, -0.6, 0.8, 0]),
@@ -90,6 +91,7 @@ describe('PTM1 codec', () => {
         assert.equal(tile.version, PTM_VERSION);
         assert.ok(Math.abs(tile.centerHeightM - 123.5) < 1e-4);
         assert.ok(Math.abs(tile.skirtDepthM - 7.25) < 1e-4);
+        assert.ok(Math.abs(tile.geometricErrorM - 12.5) < 1e-4);
         assert.equal(tile.flags & PTM_FLAG_HAS_LAND, PTM_FLAG_HAS_LAND);
         assert.equal(tile.flags & PTM_FLAG_HAS_WATER, PTM_FLAG_HAS_WATER);
         assert.ok(tile.boundingRadiusM > 100, `radius ${tile.boundingRadiusM}`);

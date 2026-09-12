@@ -28,6 +28,29 @@ export const TERRAIN_ZOOM_OFFSET = 1;
 export const SSE_TARGET_PX = 1;
 
 /**
+ * How much earlier the leaf level comes in than screen-space error alone
+ * would bring it.
+ *
+ * The leaf is the only level that carries the exact OSM landuse fills and
+ * their outlines (tools/bake/buildTile.ts, LANDUSE_DETAIL_MIN_ZOOM); one
+ * level up the same polygons are only a vote on the facet colour, so the
+ * z11-to-z12 switch is where fields and towns pop into view. At 1 px of
+ * error that switch sat close enough to the aircraft to read as a wave of
+ * detail arriving just ahead of it. Multiplying the parent's error by this
+ * moves the switch out by the same factor in distance, and touches nothing
+ * else: no other level's cut moves, and the governor still scales on top.
+ */
+export const LEAF_REFINE_DISTANCE_SCALE = 1.5;
+/** Range of the *Land-use detail reach* slider: 1 is no bias at all. */
+export const LEAF_REFINE_DISTANCE_SCALE_MIN = 1;
+export const LEAF_REFINE_DISTANCE_SCALE_MAX = 10;
+
+export function clampLeafRefineScale(value: number): number {
+    if (!Number.isFinite(value)) return LEAF_REFINE_DISTANCE_SCALE;
+    return Math.min(LEAF_REFINE_DISTANCE_SCALE_MAX, Math.max(LEAF_REFINE_DISTANCE_SCALE_MIN, value));
+}
+
+/**
  * Distance (m) past which terrain is allowed to coarsen faster than screen
  * space alone would coarsen it.
  *
@@ -122,6 +145,14 @@ export const DETAIL_SCALE_MAX = 4;
  * so it is not expected to engage outside that kind of pathological case.
  */
 export const TERRAIN_TRIANGLE_BUDGET = 600_000;
+/** Range of the *Terrain triangle cap* slider. */
+export const TERRAIN_TRIANGLE_BUDGET_MIN = 200_000;
+export const TERRAIN_TRIANGLE_BUDGET_MAX = 4_000_000;
+
+export function clampTriangleBudget(value: number): number {
+    if (!Number.isFinite(value)) return TERRAIN_TRIANGLE_BUDGET;
+    return Math.min(TERRAIN_TRIANGLE_BUDGET_MAX, Math.max(TERRAIN_TRIANGLE_BUDGET_MIN, Math.round(value)));
+}
 
 /**
  * Per-frame GPU upload budget. Tile sizes vary far too much for a fixed count
@@ -196,8 +227,13 @@ export function cameraFarForAltitudeM(altitudeM: number): number {
  * screen footprint is tiny only after projection — the cap is the safety net.
  */
 const ZOOM_ALTITUDE_ANCHORS_M: ReadonlyArray<readonly [number, number]> = [
+    // Leaf tiles stay allowed to ~10 km (the curve rounds, so 11.5 is the
+    // edge). They used to drop out above 2.5 km, which silently overrode the
+    // land-use reach setting: the leaf is the only level with the exact
+    // fills, and no distance bias can bring in a level the cap forbids. The
+    // triangle budget and the governor bound the cost of the extra tiles.
     [0, 12],
-    [5_000, 11],
+    [6_000, 12],
     [15_000, 11],
     [22_000, 10],
     [35_000, 8],

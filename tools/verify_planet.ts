@@ -169,6 +169,9 @@ function main(): void {
         if (!Number.isFinite(tile.centerHeightM)) {
             note(`${key}: bad centre height`);
         }
+        if (!(tile.geometricErrorM > 0) || !Number.isFinite(tile.geometricErrorM)) {
+            note(`${key}: bad geometric error ${tile.geometricErrorM}`);
+        }
         if (!(tile.quantScale > 0)) {
             note(`${key}: bad quantisation scale ${tile.quantScale}`);
         }

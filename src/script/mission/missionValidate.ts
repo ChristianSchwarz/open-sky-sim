@@ -5,7 +5,7 @@
  * direction here; the reverse is blocked by `rootDir: "./src"`), so a mission
  * that the browser calls valid and one the server accepts are the same set by
  * construction. The alternative — a second copy of the shape server-side, as
- * `Area` is duplicated today between areaImport.ts and areaPicker.ts — cannot
+ * `Area` is duplicated today between areaImport.ts and importMath.ts — cannot
  * hold for a format a person is expected to hand-edit.
  *
  * The validator REJECTS rather than repairs. A repaired mission is one the

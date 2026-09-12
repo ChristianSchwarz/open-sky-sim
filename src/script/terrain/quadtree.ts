@@ -16,7 +16,8 @@ import * as THREE from 'three';
 import { behindHorizon, sphereInFrustum } from './culling';
 import { WGS84_A } from './geodesy';
 import {
-    DETAIL_DISTANCE_OFF, FRUSTUM_CULL_MARGIN_TAN, detailFalloff, ellipsoidSagittaM,
+    DETAIL_DISTANCE_OFF, FRUSTUM_CULL_MARGIN_TAN, LEAF_REFINE_DISTANCE_SCALE,
+    detailFalloff, ellipsoidSagittaM,
     shouldRefine, terrainMaxZoomForAltitudeM, terrainViewRangeM,
 } from './lod';
 import { TerrainManifest } from './manifest';
@@ -32,7 +33,13 @@ export interface QuadNode {
     /** Tile-centre in scene space, and a radius that bounds its geometry. */
     center: THREE.Vector3;
     radius: number;
+    /**
+     * The error refinement is tested against. The manifest's per-level figure
+     * until the tile is resident, then the tile's own - see `errorFromTile`.
+     */
     geometricErrorM: number;
+    /** True once `geometricErrorM` has been taken from the resident tile. */
+    errorFromTile: boolean;
     /** Set once the streamer has this tile uploaded. */
     resident: boolean;
     /** True when the index says there is no baked tile here. */
@@ -50,6 +57,15 @@ export interface QuadtreeOptions {
     isResident: (id: TileKey) => boolean;
     /** True when no baked tile exists (so an ocean patch is used instead). */
     isOcean: (id: TileKey) => boolean;
+    /**
+     * The resident tile's own header error, undefined before residency.
+     *
+     * The level table is one figure per zoom for the whole planet - and a
+     * monotone max at that, which a mountain baked years ago pinned at 1.6 km
+     * for z4-z10, so flat sea refined to z11 out to 130 km. A tile's own
+     * figure lets the cut follow the terrain: sea stays coarse, relief refines.
+     */
+    tileErrorM?: (id: TileKey) => number | undefined;
     maxZoom?: number;
     /** Scene-space position of the ellipsoid centre, for horizon culling. */
     earthCenter: THREE.Vector3;
@@ -90,6 +106,7 @@ export class Quadtree {
             geometricErrorM: levelErr !== undefined && levelErr > 0
                 ? levelErr
                 : ellipsoidSagittaM(id),
+            errorFromTile: false,
             resident: false,
             ocean: false,
             lastSeen: 0,
@@ -101,8 +118,9 @@ export class Quadtree {
     /**
      * The error that should drive refinement for this node.
      *
-     * `geometricErrorM` comes from `levelGeometricErrorM`, which describes the
-     * accuracy of a *baked* mesh. A node the index says has no tile never gets
+     * `geometricErrorM` is the tile's own header figure once it is resident,
+     * and the level's `levelGeometricErrorM` before that; either describes
+     * the accuracy of a *baked* mesh. A node the index says has no tile never gets
      * that mesh: it is drawn as a 10-triangle ellipsoid patch, and what bounds
      * its deviation is the chord sagitta of that patch. The two differ wildly
      * at coarse zoom -- at z2 the manifest says 1.7 km while the patch actually
@@ -110,11 +128,17 @@ export class Quadtree {
      * patch spanning 45 degrees be drawn within sight of the camera, where its
      * interior sags thousands of kilometres below sea level and the sea reads
      * as falling away into nothing.
+     *
+     * The node one level above the leaf is inflated by `leafScale` (the
+     * *Land-use detail reach* setting, default
+     * {@link LEAF_REFINE_DISTANCE_SCALE}), so the leaf - and the exact landuse
+     * fills only it carries - takes over that much further out.
      */
-    private drawErrorM(node: QuadNode): number {
-        return node.ocean
+    private drawErrorM(node: QuadNode, leafScale: number): number {
+        const err = node.ocean
             ? Math.max(node.geometricErrorM, ellipsoidSagittaM(node.id))
             : node.geometricErrorM;
+        return node.id.z === this.maxZoom - 1 ? err * leafScale : err;
     }
 
     get nodeCount(): number {
@@ -136,6 +160,8 @@ export class Quadtree {
          */
         detailDistanceM: number = DETAIL_DISTANCE_OFF,
         pinned?: (id: TileKey) => boolean,
+        /** How much further out the leaf level comes in; see {@link drawErrorM}. */
+        leafScale: number = LEAF_REFINE_DISTANCE_SCALE,
     ): QuadtreeUpdate {
         this.generation++;
         const draw: QuadNode[] = [];
@@ -158,6 +184,13 @@ export class Quadtree {
             node.lastSeen = this.generation;
             node.resident = this.opts.isResident(node.id);
             node.ocean = this.opts.isOcean(node.id);
+            if (node.resident && !node.errorFromTile) {
+                const own = this.opts.tileErrorM?.(node.id);
+                if (own !== undefined && own >= 0) {
+                    node.geometricErrorM = own;
+                    node.errorFromTile = true;
+                }
+            }
 
             _sphereCenter.copy(node.center);
             const centreDist = camPos.distanceTo(_sphereCenter);
@@ -203,7 +236,7 @@ export class Quadtree {
             const farScale = detailScale * detailFalloff(d, detailDistanceM);
             const canRefine = node.id.z < zoomCap && (
                 shouldRefine(
-                    this.drawErrorM(node), d, screenHeightPx, fovYDeg, farScale,
+                    this.drawErrorM(node, leafScale), d, screenHeightPx, fovYDeg, farScale,
                 )
                 || node.ocean && shouldRefine(
                     ellipsoidSagittaM(node.id), d, screenHeightPx, fovYDeg, 1,

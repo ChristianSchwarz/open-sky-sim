@@ -23,3 +23,6 @@ dist
 
 # Overpass response cache written by the OSM bake tools
 /tools/data/osm-cache/
+
+# Per-area fetched cover sources (e.g. data/cover-mad) — regenerate with `tools/fetch_cover_sources.py`
+/data/cover-*/

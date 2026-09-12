@@ -40,8 +40,8 @@ import { MapView } from '../mission/mapProjection';
  * Tiles whose facet colours are kept. Each is a few bytes per triangle, so this
  * is single-digit megabytes — far less than the meshes it describes.
  */
-const MAX_CACHED = 192;
-
+const MAX_CACHED = 192;
+
 /**
  * How many zoom levels coarser than the best tile on screen a tile may be and
  * still be drawn.
@@ -53,8 +53,8 @@ const MAX_CACHED = 192;
  * cover a continent in a handful of triangles and paint the screen in enormous
  * flat blocks where nothing finer exists.
  */
-const MAX_ZOOM_GAP = 4;
-
+const MAX_ZOOM_GAP = 4;
+
 /**
  * Twice the screen area (px^2) below which a triangle is treated as a sliver
  * rather than a facet. `area` here is the edge cross product, so this is one
@@ -188,7 +188,7 @@ export class MissionCoverRaster {
     ): void {
         const key = JSON.stringify([
             palette.mode, palette.shadeSteps, palette.shadeRange,
-            palette.shadeMid, palette.shadeSpread,
+            palette.shadeMid, palette.shadeSpread, palette.landuseBlend,
             palette.toneColours, palette.swatches,
         ]);
         if (key !== this.paletteKey) {

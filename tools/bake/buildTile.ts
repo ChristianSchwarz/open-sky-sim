@@ -32,7 +32,9 @@ import {
     PTM_MAX_RIVER_VERTS, PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmTileId, encodePtm,
 } from '../../src/script/terrain/ptm';
 import { GridTriangle, decimate } from './decimate';
-import { CoastPolygon, InlandPolygon, LonLatBounds, buildShoreline } from './shoreline';
+import {
+    CoastPolygon, InlandPolygon, LonLat, LonLatBounds, buildShoreline, simplifyRing,
+} from './shoreline';
 import { Watercourse } from './lvr';
 import { RegionPolygon, buildRegionField, regionFieldFromShoreline } from './regions';
 import { GridPoint, landuseFill } from './landuseFill';
@@ -88,6 +90,46 @@ export const SKIRT_TOP_EPS_M = 0.05;
  * may push before coarsening.
  */
 export const COAST_BUDGET_CEILING = 3;
+/**
+ * The same ceiling on a tile coarser than {@link COAST_FULL_DETAIL_MIN_ZOOM}.
+ * The 3x overspend exists to keep inland river polygons from dashing, and on
+ * a coarse tile those are under a cell wide and stroked instead - there is
+ * nothing left to protect at that price.
+ */
+export const COAST_BUDGET_CEILING_COARSE = 1.5;
+/** Zoom from which the coast may claim the full {@link COAST_BUDGET_CEILING}. */
+export const COAST_FULL_DETAIL_MIN_ZOOM = 11;
+
+/**
+ * Zoom from which landuse polygons are laid over the mesh as exact fills and
+ * their edges stroked. Coarser tiles vote the polygon's class onto the facet
+ * instead, at no triangle cost.
+ *
+ * The leaf only. A z11 tile is drawn from ~25 km at the nearest, where one of
+ * its 76 m cells is a few pixels and an exact polygon edge is under one, and
+ * an exact fill there cost a mean 35k triangles per tile over Berlin - six
+ * times the mesh budget, for edges no distance could show. Measured on a z9
+ * tile before any gate: 73k fill and 16k outline triangles.
+ */
+export const LANDUSE_DETAIL_MIN_ZOOM = 12;
+
+/**
+ * Douglas-Peucker tolerance for landuse rings, in cells, below the leaf
+ * zoom. OSM rings carry many vertices per cell, and every one costs a clip
+ * against the facets under it; half a cell is under four pixels at the
+ * nearest a z11 tile is ever drawn from. The leaf level keeps every vertex.
+ */
+export const LANDUSE_SIMPLIFY_CELLS = 0.5;
+/** A landuse ring smaller than this, in cells^2, is not worth a fill. */
+export const LANDUSE_MIN_RING_AREA_CELLS = 1;
+
+/**
+ * A watercourse narrower than this fraction of a cell is not stroked. The
+ * stroke has a pixel floor, so from 50 km every ditch would read as a river;
+ * at z10 this drops courses under 7.6 m and keeps a 12 m canal, at z8 the
+ * cut is 30 m.
+ */
+export const WATERCOURSE_MIN_WIDTH_CELLS = 0.05;
 
 /**
  * Spacing, in grid cells, at which a watercourse centreline is resampled
@@ -142,6 +184,17 @@ export interface BuildTileInput {
     /** Vertical tolerance for interior decimation. */
     maxErrorM: number;
     skirtDepthM: number;
+    /**
+     * The DEM's own geometric error for this tile - what its children hold
+     * that it does not - straight from the .pdm header; 0 on a leaf.
+     */
+    geometricErrorM: number;
+    /**
+     * The pyramid's finest zoom. A leaf tile keeps every landuse vertex and
+     * may fill the stroke stream; anything coarser is drawn from far enough
+     * away to be simplified and capped. Omit to treat this tile as a leaf.
+     */
+    maxZoom?: number;
     basis: EnuBasis;
     polygons?: CoastPolygon[];
     /**
@@ -198,6 +251,8 @@ export interface BuildTileResult {
     riverTriangles: number;
     /** Tolerance actually used after any budget coarsening. */
     maxErrorM: number;
+    /** Error bound written to the header; see PtmEncodeInput.geometricErrorM. */
+    geometricErrorM: number;
     minLeafSize: number;
     /** How many budget retries were needed. */
     attempts: number;
@@ -427,6 +482,9 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // finished land facets as exact vector fill instead; see landuseFill.ts.
     const regionField = regionFieldFromShoreline(shoreline);
     const hasRegions = input.regions !== undefined && input.regions.length > 0;
+    const leafZoom = input.id.z >= (input.maxZoom ?? input.id.z);
+    /** Exact fills and outlines; below this the polygons only colour facets. */
+    const landuseDetail = hasRegions && input.id.z >= LANDUSE_DETAIL_MIN_ZOOM;
     /** Node-level landuse classification, used only to average each polygon's colour. */
     const landuseField = hasRegions
         ? buildRegionField({ regions: input.regions!, bounds, size })
@@ -601,7 +659,10 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         //    rather than dropping detail the water needs - up to
         //    COAST_BUDGET_CEILING, past which even the cut has to give way.
         let coastOnly = run(HUGE_ERROR_M, minLeafSize);
-        while (costWithSkirts(coastOnly.triangles, cells, isLandTriangle) > budget * COAST_BUDGET_CEILING
+        const coastCeiling = input.id.z >= COAST_FULL_DETAIL_MIN_ZOOM
+            ? COAST_BUDGET_CEILING
+            : COAST_BUDGET_CEILING_COARSE;
+        while (costWithSkirts(coastOnly.triangles, cells, isLandTriangle) > budget * coastCeiling
             && minLeafSize < cells) {
             minLeafSize *= 2;
             coastOnly = run(HUGE_ERROR_M, minLeafSize);
@@ -1183,16 +1244,78 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         }
     };
 
+    /**
+     * The tagged landuse region owning most of a facet's nodes, on a tile too
+     * coarse for exact fills. Undefined when the winner is untagged.
+     *
+     * Same node walk as `classify`: every node inside the facet, or its
+     * centroid when it encloses none. The polygons are still what colour the
+     * ground here - only their edges give way, to the facet grid.
+     */
+    const landuseVote = (t: GridTriangle): number | undefined => {
+        if (!landuseField || landuseDetail) {
+            return undefined;
+        }
+        const [p0, p1, p2] = t.pts;
+        const votes = new Map<number, number>();
+        const add = (x: number, y: number) => {
+            const id = landuseField.regionNodes[y * size + x];
+            votes.set(id, (votes.get(id) ?? 0) + 1);
+        };
+        const area = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
+        const sign = area >= 0 ? 1 : -1;
+        const x0 = Math.max(0, Math.ceil(Math.min(p0.x, p1.x, p2.x)));
+        const x1 = Math.min(size - 1, Math.floor(Math.max(p0.x, p1.x, p2.x)));
+        const y0 = Math.max(0, Math.ceil(Math.min(p0.y, p1.y, p2.y)));
+        const y1 = Math.min(size - 1, Math.floor(Math.max(p0.y, p1.y, p2.y)));
+        for (let y = y0; y <= y1; y++) {
+            for (let x = x0; x <= x1; x++) {
+                const e0 = ((p1.x - p0.x) * (y - p0.y) - (x - p0.x) * (p1.y - p0.y)) * sign;
+                const e1 = ((p2.x - p1.x) * (y - p1.y) - (x - p1.x) * (p2.y - p1.y)) * sign;
+                const e2 = ((p0.x - p2.x) * (y - p2.y) - (x - p2.x) * (p0.y - p2.y)) * sign;
+                if (e0 >= 0 && e1 >= 0 && e2 >= 0) {
+                    add(x, y);
+                }
+            }
+        }
+        if (votes.size === 0) {
+            add(
+                Math.min(size - 1, Math.max(0, Math.round((p0.x + p1.x + p2.x) / 3))),
+                Math.min(size - 1, Math.max(0, Math.round((p0.y + p1.y + p2.y) / 3))),
+            );
+        }
+        let best = -1;
+        let bestN = 0;
+        for (const [id, n] of votes) {
+            if (n > bestN) {
+                best = id;
+                bestN = n;
+            }
+        }
+        return best >= 0 && landuseField.regionTable[best].landuseClass !== undefined ? best : undefined;
+    };
+
     for (const t of tris) {
         const [p0, p1, p2] = t.pts;
         if (isLandTriangle(t)) {
+            const cover = coverOf(t);
             pushLandTriangle(
                 project(p0.x, p0.y, true, p0.shore),
                 project(p1.x, p1.y, true, p1.shore),
                 project(p2.x, p2.y, true, p2.shore),
-                coverOf(t),
+                cover,
                 t,
             );
+            const voted = landuseVote(t);
+            if (voted !== undefined) {
+                // Coarse tile: the polygon colours the whole facet, as the
+                // fill would have at a finer zoom.
+                landClass[landClass.length - 1] = landuseField!.regionTable[voted].landuseClass!;
+                const rgb = regionColors?.[voted] ?? [cover[1], cover[2], cover[3]];
+                landColor.splice(landColor.length - 3, 3, rgb[0], rgb[1], rgb[2]);
+                landVertColor.splice(landVertColor.length - 9, 9,
+                    rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2]);
+            }
         } else {
             const shore = Math.min(
                 sampleDist(p0.x, p0.y),
@@ -1210,10 +1333,36 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         }
     }
 
+    /**
+     * A landuse ring in grid space, simplified for this zoom. Undefined when
+     * it is too small to draw at all. The leaf level keeps every vertex.
+     */
+    const landuseRing = (ring: LonLat[]): GridPoint[] | undefined => {
+        const flat = new Float64Array(ring.length * 2);
+        for (let i = 0; i < ring.length; i++) {
+            flat[i * 2] = ((ring[i].lon - bounds.west) / lonSpan) * cells;
+            flat[i * 2 + 1] = ((bounds.north - ring[i].lat) / latSpan) * cells;
+        }
+        const pts = leafZoom ? flat : simplifyRing(flat, LANDUSE_SIMPLIFY_CELLS);
+        const n = pts.length / 2;
+        let area2 = 0;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+            area2 += pts[j * 2] * pts[i * 2 + 1] - pts[i * 2] * pts[j * 2 + 1];
+        }
+        if (Math.abs(area2) / 2 < LANDUSE_MIN_RING_AREA_CELLS) {
+            return undefined;
+        }
+        const out: GridPoint[] = [];
+        for (let i = 0; i < n; i++) {
+            out.push({ x: pts[i * 2], y: pts[i * 2 + 1] });
+        }
+        return out;
+    };
+
     // Landuse fill: each tagged polygon clipped to the land facets it lies on
     // and lifted a hair off them, so it follows the drawn surface exactly and
     // its edge sits where OSM has it. See landuseFill.ts.
-    if (hasRegions) {
+    if (landuseDetail) {
         // Below the strokes' own lift (RIVER_LIFT_CELLS), so an outline or a
         // river crossing a field still draws over the fill. The fill is
         // appended after the facets it covers, so it also wins any depth tie.
@@ -1223,15 +1372,11 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             .map((region, index) => ({ region, index }))
             .filter(({ region }) => region.isLand && region.landuseClass !== undefined);
         const landTris = tris.filter(isLandTriangle);
-        const toFillGrid = (p: { lon: number; lat: number }): GridPoint => ({
-            x: ((p.lon - bounds.west) / lonSpan) * cells,
-            y: ((bounds.north - p.lat) / latSpan) * cells,
-        });
         const pieces = landuseFill(
             landTris.map(t => t.pts),
             tagged.map(({ region }) => ({
-                exterior: region.exterior.map(toFillGrid),
-                holes: region.holes.map(h => h.map(toFillGrid)),
+                exterior: landuseRing(region.exterior) ?? [],
+                holes: region.holes.map(landuseRing).filter((h): h is GridPoint[] => h !== undefined),
             })),
             cells,
         );
@@ -1408,7 +1553,9 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     const surfaceBuckets = new Map<number, number[]>();
     // Only a tagged land region has an edge worth drawing: untagged land is
     // just "not mapped", and water already has a shoreline of its own.
-    const outlineRegions = (input.regions ?? []).filter(r => r.isLand && r.landuseClass !== undefined);
+    const outlineRegions = landuseDetail
+        ? (input.regions ?? []).filter(r => r.isLand && r.landuseClass !== undefined)
+        : [];
     if ((input.watercourses?.length ?? 0) > 0 || outlineRegions.length > 0) {
         for (let t = 0; t < tris.length; t++) {
             const [a, b, c] = tris[t].pts;
@@ -1545,9 +1692,17 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         return grid;
     };
 
+    // Strokes are laid over the finished mesh and never counted against its
+    // budget. The leaf level may fill the stream; a coarser tile is drawn from
+    // far enough away that its strokes get the budget's worth of vertices and
+    // no more, so a river-laced z9 tile cannot cost a z12's worth of ribbon.
+    // Watercourses are pushed before outlines, so outlines are what give way.
+    const strokeVertexCap = leafZoom
+        ? PTM_MAX_RIVER_VERTS
+        : Math.min(PTM_MAX_RIVER_VERTS, input.triangleBudget ?? PTM_MAX_RIVER_VERTS);
     /** Appends one stroke; false when it is degenerate or the stream is full. */
     const pushStroke = (grid: readonly GridPoint[], halfWidthM: number, kind: number): boolean => {
-        if (grid.length < 2 || riverHalf.length + grid.length * 2 > PTM_MAX_RIVER_VERTS) {
+        if (grid.length < 2 || riverHalf.length + grid.length * 2 > strokeVertexCap) {
             return false;
         }
         const base = riverHalf.length;
@@ -1595,6 +1750,9 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
 
     let waterStrokeTriangles = 0;
     for (const course of input.watercourses ?? []) {
+        if (course.widthM < WATERCOURSE_MIN_WIDTH_CELLS * metresPerCell) {
+            continue;
+        }
         const grid = resample(course.points.map(toGrid));
         if (pushStroke(grid, Math.max(0.5, course.widthM / 2), PTM_STROKE_KIND_WATER)) {
             waterStrokeTriangles += (grid.length - 1) * 2;
@@ -1614,10 +1772,10 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         || (a.y >= cells - BORDER_EPS && b.y >= cells - BORDER_EPS);
     for (const region of outlineRegions) {
         for (const ring of [region.exterior, ...region.holes]) {
-            if (ring.length < 2) {
+            const pts = landuseRing(ring);
+            if (pts === undefined || pts.length < 2) {
                 continue;
             }
-            const pts = ring.map(toGrid);
             const first = pts[0];
             const last = pts[pts.length - 1];
             if (first.x !== last.x || first.y !== last.y) {
@@ -1643,11 +1801,22 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         (latSpan * 110540) / 2,
     );
 
+    // What refining this tile would gain: the DEM's own child-detail loss
+    // plus whatever the decimator gave up. The tolerance can be HUGE_ERROR_M
+    // when only the coast fitted the budget, so it is clamped to the relief
+    // actually present - nothing can be further off than that.
+    const interiorErrM = Math.min(
+        Number.isFinite(maxErrorM) ? maxErrorM : Infinity,
+        maxH - minH,
+    );
+    const geometricErrorM = input.geometricErrorM + Math.max(0, interiorErrM);
+
     const bytes = encodePtm({
         id: input.id,
         centerHeightM,
         tileHalfWidthM,
         skirtDepthM: skirt,
+        geometricErrorM,
         land: {
             positions: new Float32Array(landPos),
             faceNormals: new Float32Array(landNrm),
@@ -1676,6 +1845,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         waterTriangles: waterTone.length,
         riverTriangles: waterStrokeTriangles,
         maxErrorM,
+        geometricErrorM,
         minLeafSize,
         attempts,
         centerHeightM,

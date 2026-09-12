@@ -32,6 +32,11 @@ import { LAND_TONE_BASE, TerrainTone } from './tones';
 
 export interface TileMeshes {
     group: THREE.Group;
+    /**
+     * The tile's own LOD error, from its header. Kept on the GPU record so
+     * the quadtree can read it after the decoded bytes are evicted.
+     */
+    geometricErrorM: number;
     land?: THREE.Mesh;
     water?: THREE.Mesh;
     rivers?: THREE.Mesh;
@@ -342,7 +347,7 @@ export function buildTileMeshes(
     group.matrixAutoUpdate = false;
 
     let bytes = 0;
-    const meshes: TileMeshes = { group, bytes: 0 };
+    const meshes: TileMeshes = { group, bytes: 0, geometricErrorM: tile.geometricErrorM };
 
     const lg = landGeometry(tile);
     if (lg) {

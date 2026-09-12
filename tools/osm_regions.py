@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
+import numpy as np
 from shapely import make_valid, unary_union
 from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.geometry.base import BaseGeometry
@@ -168,24 +169,52 @@ def assemble_tile_regions(
     candidates: List[tuple] = []
     if landuse_tree is not None and len(landuse_polys) > 0:
         idxs = landuse_tree.query(halo_box)
+        # The exact reverse of the largest-first order this used to walk,
+        # ties included: a shape mapped twice with two tags has two
+        # equal-area candidates, and which of them wins must not depend on
+        # sort direction.
         candidates = sorted(
             ((landuse_polys[i], landuse_classes[i]) for i in idxs),
             key=lambda pc: pc[0].area, reverse=True,
-        )
+        )[::-1]
 
-    # Priority-ordered vector overlay: each candidate, largest first, claims
-    # its intersection with the land left over after every higher-priority
-    # candidate already took its share - the exact vector equivalent of
-    # stamp_landuse_classes's largest-first raster paint order.
+    # Priority-ordered vector overlay, smallest first: the smaller polygon
+    # wins wherever two overlap (a park inside a residential area is the
+    # park), the exact vector equivalent of stamp_landuse_classes's
+    # largest-first raster paint order, where the smallest is painted last.
+    #
+    # Walking smallest-first means each candidate only has to give up the
+    # area already claimed, rather than every earlier claim having to be
+    # re-cut around each new one. That earlier shape was quadratic in the
+    # candidate count - every candidate re-differenced every claimed piece,
+    # and each result went back through make_valid - and it is what made a
+    # z11 level take four times longer than the z12 level above it: a
+    # coarser tile sees four times the candidates, so sixteen times the
+    # work. Measured on Madeira: 26 z11 tiles in 480 s.
+    #
+    # Most landuse polygons never touch each other at all, so the subtract
+    # is also limited to the claims whose bounding boxes overlap the piece,
+    # found with a vectorised bounds test instead of a GEOS call each.
     claimed: List[tuple] = []
+    claimed_bounds = np.zeros((0, 4), dtype=np.float64)
     for poly, cls in candidates:
         piece = _valid(poly)
         piece = _valid(piece.intersection(local_land, grid_size=OVERLAY_GRID_SIZE))
         piece = _valid(piece.intersection(tile_box, grid_size=OVERLAY_GRID_SIZE))
         if piece.is_empty:
             continue
-        claimed = [(_valid(g.difference(piece, grid_size=OVERLAY_GRID_SIZE)), c) for g, c in claimed]
+        if claimed:
+            x0, y0, x1, y1 = piece.bounds
+            hit = np.flatnonzero(
+                (claimed_bounds[:, 0] <= x1) & (claimed_bounds[:, 2] >= x0)
+                & (claimed_bounds[:, 1] <= y1) & (claimed_bounds[:, 3] >= y0))
+            if len(hit):
+                taken = unary_union([claimed[i][0] for i in hit], grid_size=OVERLAY_GRID_SIZE)
+                piece = _valid(piece.difference(_valid(taken), grid_size=OVERLAY_GRID_SIZE))
+                if piece.is_empty:
+                    continue
         claimed.append((piece, cls))
+        claimed_bounds = np.vstack([claimed_bounds, np.array(piece.bounds, dtype=np.float64)])
 
     # Every step below is validated separately, not just the end of the
     # chain: the real Leipzig failure this guards was exactly a raw,
@@ -202,7 +231,10 @@ def assemble_tile_regions(
     water = _valid(tile_box.difference(local_land, grid_size=OVERLAY_GRID_SIZE))
 
     regions: List[Region] = []
-    for geom, cls in claimed:
+    # Emitted largest-first, as before: tools/bake/regions.ts breaks a
+    # shared-edge tie in favour of the later region, and that should stay
+    # the smaller one.
+    for geom, cls in reversed(claimed):
         for part in _polys_of(geom.intersection(tile_box, grid_size=OVERLAY_GRID_SIZE)):
             regions.append(Region(part, True, cls))
     for part in _polys_of(bare_land):

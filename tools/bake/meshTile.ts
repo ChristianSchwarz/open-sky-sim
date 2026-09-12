@@ -6,9 +6,9 @@
  * touches that tile's own input files and writes its own `.ptm` — so tiles
  * within a level can be processed in any order or in parallel. What is *not*
  * safe to parallelise is aggregating the results: bake_planet_mesh.ts folds
- * them back in the original z/x/y-sorted order specifically so per-level
- * derived values (levelSkirtDepthM, "last tile wins") come out byte-identical
- * to the old fully-serial bake regardless of which worker finished first.
+ * them back in the original z/x/y-sorted order so the swatch table and the
+ * per-level maxima come out byte-identical to a serial bake regardless of
+ * which worker finished first.
  */
 
 import * as fs from 'node:fs';
@@ -34,7 +34,8 @@ export interface MeshTileConfig {
     src: string;
     out: string;
     seaLevel: number;
-    levelErrors: number[];
+    /** Finest zoom in the pyramid; see BuildTileInput.maxZoom. */
+    maxZoom: number;
     budget: number;
     basis: EnuBasis;
     pads: Array<FlattenPad & { basis: EnuBasis; lat: number; lon: number }>;
@@ -60,6 +61,8 @@ export interface TileProcessResult {
     /** Only set for a tile with real imagery — the rest must not feed the swatch table. */
     landColors?: Uint8Array;
     skirtDepthM: number;
+    /** The error bound written to the tile header. */
+    geometricErrorM: number;
 }
 
 /** Geographic quadtree: level z has 2^(z+1) columns by 2^z rows. */
@@ -80,20 +83,50 @@ export function tileEdgeMetres(z: number, x: number, y: number): number {
 }
 
 /**
- * Skirt depth per level. The worst vertical mismatch across an LOD seam is
- * bounded by the *coarser* neighbour's geometric error, so the parent level's
+ * Skirt depth for one tile. The worst vertical mismatch across an LOD seam is
+ * bounded by the *coarser* neighbour's geometric error, so the parent tile's
  * error is the right term; 2x is margin, and the edge-length term covers
  * ellipsoid sagitta at coarse levels where geometric error is small.
  */
-export function skirtDepthForLevel(z: number, levelErrors: number[], edgeM: number): number {
-    const parentErr = z > 0 ? (levelErrors[z - 1] ?? 0) : (levelErrors[0] ?? 0);
-    return Math.max(2 * parentErr, 0.01 * edgeM);
+export function skirtDepthForTile(parentErrM: number, edgeM: number): number {
+    return Math.max(2 * Math.max(0, parentErrM), 0.01 * edgeM);
 }
 
-/** Interior tolerance: half the level's geometric error, floored so flats collapse. */
-export function maxErrorForLevel(z: number, levelErrors: number[]): number {
-    const err = levelErrors[z] ?? 0;
-    return err <= 0 ? 1 : Math.max(1, err * 0.5);
+/** Interior tolerance: half the tile's own geometric error, floored so flats collapse. */
+export function maxErrorForTile(tileErrM: number): number {
+    return tileErrM <= 0 ? 1 : Math.max(1, tileErrM * 0.5);
+}
+
+/**
+ * Floor on the coastline's Douglas-Peucker tolerance, in cells, by zoom.
+ *
+ * The tolerance is otherwise the interior one over the cell size, and on a
+ * coarse tile that is a fraction of a cell: z10 cells are 152 m and its
+ * error a few tens of metres. Cut at that resolution a z10 coast costs as
+ * much as a z12 one while being drawn from 25 km out, where a cell is under
+ * seven pixels. The floor is what makes the shoreline cheaper with distance.
+ */
+export function coastSimplifyFloorCells(z: number): number {
+    return z <= 10 ? 1 : z === 11 ? 0.5 : 0;
+}
+
+/** Ceiling on the coast simplify tolerance, in cells, whatever the zoom. */
+const COAST_SIMPLIFY_MAX_CELLS = 2;
+
+/**
+ * The parent tile's geometric error, read from its .pdm header, for the
+ * skirt depth. Falls back to the tile's own error when there is no parent
+ * on disk (z0, or a pyramid trimmed from above).
+ */
+function parentErrorM(src: string, z: number, x: number, y: number, ownErrM: number): number {
+    if (z === 0) {
+        return ownErrM;
+    }
+    const p = path.join(src, String(z - 1), String(x >> 1), `${y >> 1}.pdm`);
+    if (!fs.existsSync(p)) {
+        return ownErrM;
+    }
+    return decodePdm(fs.readFileSync(p)).geometricErrorM;
 }
 
 /** Reads one tile's inputs, builds it and writes its `.ptm`. Returns undefined if there is no DEM tile. */
@@ -153,10 +186,14 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
 
     const bounds = tileBounds(z, x, y);
     const edgeM = tileEdgeMetres(z, x, y);
-    const skirtDepthM = skirtDepthForLevel(z, cfg.levelErrors, edgeM);
-    // Simplify the coast to roughly the interior tolerance, in cells.
+    const skirtDepthM = skirtDepthForTile(parentErrorM(cfg.src, z, x, y, dem.geometricErrorM), edgeM);
+    const maxErrorM = maxErrorForTile(dem.geometricErrorM);
+    // Simplify the coast to roughly the interior tolerance, in cells, floored
+    // by zoom so a coarse tile's shoreline is not cut at fine-tile cost.
     const cellM = edgeM / (dem.size - 1);
-    const simplifyCells = cellM > 0 ? Math.min(2, (maxErrorForLevel(z, cfg.levelErrors) / cellM)) : 0;
+    const simplifyCells = cellM > 0
+        ? Math.min(COAST_SIMPLIFY_MAX_CELLS, Math.max(coastSimplifyFloorCells(z), maxErrorM / cellM))
+        : 0;
 
     const r = buildTile({
         id: { z, x, y },
@@ -164,8 +201,10 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         heights: dem.heights,
         size: dem.size,
         seaLevel: cfg.seaLevel,
-        maxErrorM: maxErrorForLevel(z, cfg.levelErrors),
+        maxErrorM,
         skirtDepthM,
+        geometricErrorM: dem.geometricErrorM,
+        maxZoom: cfg.maxZoom,
         basis: cfg.basis,
         polygons,
         inland,
@@ -191,6 +230,7 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         triangleCount: r.triangleCount,
         riverTriangles: r.riverTriangles,
         minLeafSize: r.minLeafSize,
+        geometricErrorM: r.geometricErrorM,
         covered,
         imagery,
         inlandTile,

@@ -34,7 +34,8 @@ import { FlattenPad, padFromRecord, padReachM } from './flattenPad';
 import { HeightField, HeightTier } from './heightField';
 import {
     MESH_CACHE_BYTES, PREFETCH_LOOKAHEAD_S, PREFETCH_MIN_DISTANCE_M, RECONCILE_INTERVAL_MS,
-    TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET, adjustDetailScale,
+    LEAF_REFINE_DISTANCE_SCALE, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
+    adjustDetailScale,
 } from './lod';
 import {
     TerrainManifest, baseUrlOf, heightIndexUrl, heightTileUrl, meshIndexUrl, meshTileUrl,
@@ -53,7 +54,10 @@ import {
     CLASS_TO_TONE, LAND_TONE_BASE, LAND_TONE_COUNT, TONE_COUNT, TerrainTone,
 } from './tones';
 import { TERRAIN_COLOUR_MODE_INDEX, TerrainColours, TerrainShading } from '../state/gameDefs';
-import { TerrainColourSetting, TerrainDetailSetting, TerrainShadingSetting } from '../config/configService';
+import {
+    LanduseBlendSetting, LanduseReachSetting, TerrainColourSetting, TerrainDetailSetting,
+    TerrainShadingSetting, TriangleBudgetSetting,
+} from '../config/configService';
 import { publishTerrainStats, trackTerrainMaterial } from './debug';
 
 const TONE_CATEGORIES: Record<number, PaletteCategory> = {
@@ -106,6 +110,12 @@ export interface TerrainEntityOptions {
     /** Live faceted/smooth land shading. Omit and the entity stays FACETED. */
     terrainShading?: TerrainShadingSetting;
     terrainDetail?: TerrainDetailSetting;
+    /** Live land-use tone/sampled colour blend. Omit and the shader default stays. */
+    landuseBlend?: LanduseBlendSetting;
+    /** Live leaf-refine reach. Omit and the LOD default stays. */
+    landuseReach?: LanduseReachSetting;
+    /** Live per-frame triangle ceiling. Omit and TERRAIN_TRIANGLE_BUDGET stays. */
+    triangleBudget?: TriangleBudgetSetting;
 }
 
 export interface TerrainStats {
@@ -152,7 +162,6 @@ export class TerrainEntity implements Entity {
      * over the surface rather than as part of it.
      */
     private readonly riverMaterial: THREE.ShaderMaterial;
-    private readonly outlineMaterial: THREE.ShaderMaterial;
 
     /**
      * Switch colour model. One uniform: every mode reads the same baked bytes,
@@ -204,6 +213,8 @@ export class TerrainEntity implements Entity {
      * moving the slider takes effect on the next pass with nothing to rebuild.
      */
     private detailDistanceM = TERRAIN_DETAIL_DISTANCE_DEFAULT_M;
+    private leafScale = LEAF_REFINE_DISTANCE_SCALE;
+    private triangleBudget = TERRAIN_TRIANGLE_BUDGET;
     private drawList: QuadNode[] = [];
     private drawnTriangles = 0;
     /** Set for a frame where TERRAIN_TRIANGLE_BUDGET cut the draw list short. */
@@ -282,18 +293,9 @@ export class TerrainEntity implements Entity {
         }) as THREE.ShaderMaterial;
         trackTerrainMaterial(this.riverMaterial);
 
-        // OSM landuse region edges, stroked like the rivers so a mapped field
-        // or wood reads as a shape even where the facet colour either side of
-        // it matches. Road grey rather than any land tone: it has to show
-        // against every class it can border.
-        this.outlineMaterial = opts.materials.build({
-            type: SceneMaterialPrimitiveType.MESH,
-            category: PaletteCategory.SCENERY_ROAD_SECONDARY,
-            depthWrite: false,
-            shaded: false as const,
-            river: true,
-        }) as THREE.ShaderMaterial;
-        trackTerrainMaterial(this.outlineMaterial);
+        // OSM landuse region edges are baked as a stroke stream beside the
+        // rivers but are not drawn: the exact fills carry the shape on their
+        // own, and a grey outline round every field read as a road net.
 
         for (let tone = 0; tone < TONE_COUNT; tone++) {
             // Water is a flat palette fill: no sun shade, no normal smoothing.
@@ -332,6 +334,24 @@ export class TerrainEntity implements Entity {
         if (opts.terrainDetail) {
             this.detailDistanceM = opts.terrainDetail.getActive();
             opts.terrainDetail.addChangeListener(m => { this.detailDistanceM = m; });
+        }
+
+        if (opts.landuseReach) {
+            this.leafScale = opts.landuseReach.getActive();
+            opts.landuseReach.addChangeListener(s => { this.leafScale = s; });
+        }
+
+        if (opts.triangleBudget) {
+            this.triangleBudget = opts.triangleBudget.getActive();
+            opts.triangleBudget.addChangeListener(n => { this.triangleBudget = n; });
+        }
+
+        // One uniform, like the colour mode: both colours are already baked.
+        if (opts.landuseBlend) {
+            this.landMaterial.uniforms.uLanduseBlend.value = opts.landuseBlend.getActive();
+            opts.landuseBlend.addChangeListener(blend => {
+                this.landMaterial.uniforms.uLanduseBlend.value = blend;
+            });
         }
 
         this.meshStore = new TileStore<PtmTile>({
@@ -394,7 +414,7 @@ export class TerrainEntity implements Entity {
             store: this.meshStore,
             upload: (id, tile) => buildTileMeshes(
                 tile, this.basis, this.materials, this.riverMaterial,
-                updateUniforms, this.frameFix, this.landShading, this.outlineMaterial,
+                updateUniforms, this.frameFix, this.landShading,
             ),
             release: (_id, m) => disposeTileMeshes(m),
         });
@@ -415,6 +435,7 @@ export class TerrainEntity implements Entity {
             // the index says are ocean are covered by isOcean everywhere
             // readiness is tested, so nothing needs this clause.
             isResident: (id) => this.streamer.has(id),
+            tileErrorM: (id) => this.streamer.get(id)?.geometricErrorM,
             isOcean: (id) => this.meshStore.isAbsent(id),
             earthCenter: this.earthCenter,
             maxZoom: opts.maxZoom ?? opts.manifest.mesh.maxZoom,
@@ -702,6 +723,7 @@ export class TerrainEntity implements Entity {
             this.detailScale,
             this.detailDistanceM,
             (id) => this.pinned.has(tileKeyString(id)),
+            this.leafScale,
         );
 
         this.streamer.setWants(r.wants, this.speculativeWants(camera, r.wants));
@@ -789,7 +811,7 @@ export class TerrainEntity implements Entity {
         for (const node of ordered) {
             const meshes = this.streamer.get(node.id);
             if (meshes) {
-                if (this.drawnTriangles >= TERRAIN_TRIANGLE_BUDGET) {
+                if (this.drawnTriangles >= this.triangleBudget) {
                     // See TERRAIN_TRIANGLE_BUDGET: the SSE governor bounds
                     // error, not triangle count, and can still leave a
                     // pathologically large draw list over complex terrain.

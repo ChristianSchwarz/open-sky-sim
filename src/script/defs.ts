@@ -40,7 +40,7 @@ export const TERRAIN_VIEW_RANGE_M = 450000;
 
 export const DEBRIS_PARTICLE_COUNT = 48;
 /** Hit fire/smoke puff pool (shared across aircraft leaks). */
-export const DAMAGE_SMOKE_PARTICLE_COUNT = 160;
+export const DAMAGE_SMOKE_PARTICLE_COUNT = 480;
 
 /** KeyboardEvent.code that opens the telemetry graph popup. */
 export const TELEMETRY_GRAPH_KEY_CODE = 'NumLock';

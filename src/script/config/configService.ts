@@ -3,8 +3,10 @@ import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
 import { AiPilotModels, ShadowQualities, TerrainColours, TerrainShading, UnitSystems } from "../state/gameDefs";
 import { assertExpr, assertIsDefined } from "../utils/asserts";
 import {
-    TERRAIN_DETAIL_DISTANCE_DEFAULT_M, clampDetailDistanceM,
+    LEAF_REFINE_DISTANCE_SCALE, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
+    clampDetailDistanceM, clampLeafRefineScale, clampTriangleBudget,
 } from "../terrain/lod";
+import { LANDUSE_BLEND_DEFAULT, clampLanduseBlend } from "../terrain/tones";
 import { TechProfile } from "./profiles/profile";
 
 export type ProfileChangeListener = (profile: TechProfile, newId: string, oldId: string) => void;
@@ -14,8 +16,11 @@ export type AiPilotModelChangeListener = (model: AiPilotModels) => void;
 export type ShadowQualityChangeListener = (quality: ShadowQualities) => void;
 export type TerrainColourChangeListener = (mode: TerrainColours) => void;
 export type TerrainShadingChangeListener = (mode: TerrainShading) => void;
+export type LanduseBlendChangeListener = (blend: number) => void;
 export type DaytimeChangeListener = (hours: number) => void;
 export type TerrainDetailChangeListener = (distanceM: number) => void;
+export type LanduseReachChangeListener = (scale: number) => void;
+export type TriangleBudgetChangeListener = (triangles: number) => void;
 
 export class ConfigService {
 
@@ -26,7 +31,10 @@ export class ConfigService {
     readonly shadowQuality: ShadowQualitySetting;
     readonly terrainColour: TerrainColourSetting;
     readonly terrainShading: TerrainShadingSetting;
+    readonly landuseBlend: LanduseBlendSetting;
     readonly terrainDetail: TerrainDetailSetting;
+    readonly landuseReach: LanduseReachSetting;
+    readonly triangleBudget: TriangleBudgetSetting;
     readonly daytime: DaytimeSetting;
 
     constructor(
@@ -40,6 +48,9 @@ export class ConfigService {
         initialTerrainColour?: TerrainColours,
         initialTerrainDetailM?: number,
         initialTerrainShading?: TerrainShading,
+        initialLanduseBlend?: number,
+        initialLanduseReach?: number,
+        initialTriangleBudget?: number,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -48,7 +59,10 @@ export class ConfigService {
         this.shadowQuality = new ShadowQualitySetting(initialShadowQuality);
         this.terrainColour = new TerrainColourSetting(initialTerrainColour);
         this.terrainShading = new TerrainShadingSetting(initialTerrainShading);
+        this.landuseBlend = new LanduseBlendSetting(initialLanduseBlend);
         this.terrainDetail = new TerrainDetailSetting(initialTerrainDetailM);
+        this.landuseReach = new LanduseReachSetting(initialLanduseReach);
+        this.triangleBudget = new TriangleBudgetSetting(initialTriangleBudget);
         this.daytime = new DaytimeSetting(initialDaytime);
     }
 }
@@ -134,6 +148,85 @@ export class TerrainDetailSetting {
     }
 
     removeChangeListener(listener: TerrainDetailChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * How much further out the leaf tiles - the only level carrying the exact
+ * land-use fills - come in than screen-space error alone would bring them.
+ * 1 is no bias; see {@link LEAF_REFINE_DISTANCE_SCALE}.
+ */
+export class LanduseReachSetting {
+    private active: number;
+    private listeners: Set<LanduseReachChangeListener> = new Set();
+
+    constructor(initialActive: number = LEAF_REFINE_DISTANCE_SCALE) {
+        this.active = clampLeafRefineScale(initialActive);
+    }
+
+    getActive(): number {
+        return this.active;
+    }
+
+    setActive(scale: number) {
+        const clamped = clampLeafRefineScale(scale);
+        if (clamped === this.active) return;
+        this.active = clamped;
+        this.notifyActive();
+    }
+
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: LanduseReachChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: LanduseReachChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * Hard ceiling on terrain triangles drawn per frame; see
+ * {@link TERRAIN_TRIANGLE_BUDGET}. The draw list is cut at the far edge once
+ * it is reached, so a low cap shows as missing far terrain, not as coarse
+ * near terrain.
+ */
+export class TriangleBudgetSetting {
+    private active: number;
+    private listeners: Set<TriangleBudgetChangeListener> = new Set();
+
+    constructor(initialActive: number = TERRAIN_TRIANGLE_BUDGET) {
+        this.active = clampTriangleBudget(initialActive);
+    }
+
+    getActive(): number {
+        return this.active;
+    }
+
+    setActive(triangles: number) {
+        const clamped = clampTriangleBudget(triangles);
+        if (clamped === this.active) return;
+        this.active = clamped;
+        this.notifyActive();
+    }
+
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: TriangleBudgetChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: TriangleBudgetChangeListener) {
         this.listeners.delete(listener);
     }
 }
@@ -290,6 +383,49 @@ export class TerrainColourSetting {
     }
 
     removeChangeListener(listener: TerrainColourChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * How land-use facets mix their two colours, 0..1: the share taken from the
+ * land type's palette tone, the rest from the terrain colour sampled from
+ * imagery. 0 paints the sampled colour alone, 1 the palette tone alone.
+ *
+ * Like the colour mode it is one uniform write - the baked bytes already hold
+ * both colours - so moving the slider re-streams and re-bakes nothing.
+ */
+export class LanduseBlendSetting {
+    private active: number;
+    private listeners: Set<LanduseBlendChangeListener> = new Set();
+
+    constructor(initialActive: number = LANDUSE_BLEND_DEFAULT) {
+        this.active = clampLanduseBlend(initialActive);
+    }
+
+    getActive(): number {
+        return this.active;
+    }
+
+    setActive(blend: number) {
+        const clamped = clampLanduseBlend(blend);
+        if (clamped === this.active) return;
+        this.active = clamped;
+        this.notifyActive();
+    }
+
+    /** Push the current value to listeners (used once after they register). */
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: LanduseBlendChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: LanduseBlendChangeListener) {
         this.listeners.delete(listener);
     }
 }

@@ -77,6 +77,22 @@ export const enum TerrainClass {
 
 export const CLASS_COUNT = 16;
 
+/**
+ * Default share of a land-use facet's colour that comes from its land type's
+ * palette tone, against the terrain colour sampled from imagery (0..1). Half
+ * and half keeps a field recognisably a field while still sitting in the
+ * colours of the ground around it. The player picks it in the settings.
+ */
+export const LANDUSE_BLEND_DEFAULT = 0.5;
+
+/** A stored or typed blend, forced into 0..1; anything unusable is the default. */
+export function clampLanduseBlend(value: number): number {
+    if (!Number.isFinite(value)) {
+        return LANDUSE_BLEND_DEFAULT;
+    }
+    return Math.min(1, Math.max(0, value));
+}
+
 /** ESA WorldCover v200 map codes -> TerrainClass. */
 export const WORLDCOVER_TO_CLASS: Readonly<Record<number, TerrainClass>> = {
     10: TerrainClass.Tree,

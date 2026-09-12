@@ -35,6 +35,9 @@ function palette(over: Partial<FacetPalette> = {}): FacetPalette {
         toneColours: tones,
         swatches: [],
         ...DEFAULT_FACET_SHADE,
+        // All palette tone, so the Hybrid cases below restate the banded tone
+        // on its own; the blend has its own test.
+        landuseBlend: 1,
         ...over,
     };
 }
@@ -42,6 +45,35 @@ function palette(over: Partial<FacetPalette> = {}): FacetPalette {
 function near(a: Rgb, b: Rgb, eps = 1e-9): boolean {
     return Math.abs(a.r - b.r) < eps && Math.abs(a.g - b.g) < eps && Math.abs(a.b - b.b) < eps;
 }
+
+describe('facetColour — HYBRID land-use blend', () => {
+    // A cover colour at the window centre sits in the middle band, so the
+    // banded tone is the plain tone and the blend is easy to state exactly.
+    const cover: Rgb = { r: 0.5, g: 0.5, b: 0.5 };
+    const hybrid = (landuseBlend: number) => palette({
+        mode: TERRAIN_COLOUR_MODE_INDEX[TerrainColours.HYBRID], landuseBlend,
+    });
+
+    it('is the sampled colour alone at 0 and the tone alone at 1', () => {
+        assert.ok(near(facetColour(cover, TerrainClass.Tree, hybrid(0)), cover));
+        assert.ok(near(facetColour(cover, TerrainClass.Tree, hybrid(1)), FOREST));
+    });
+
+    it('mixes half and half at 0.5', () => {
+        const c = facetColour(cover, TerrainClass.Tree, hybrid(0.5));
+        const want = {
+            r: (cover.r + FOREST.r) / 2, g: (cover.g + FOREST.g) / 2, b: (cover.b + FOREST.b) / 2,
+        };
+        assert.ok(near(c, want), JSON.stringify(c));
+    });
+
+    it('leaves unmapped ground and the palette-only mode alone', () => {
+        assert.ok(near(facetColour(cover, 13, hybrid(1)), cover), 'ground took the tone');
+        const landcover = palette({ landuseBlend: 0 });
+        assert.ok(near(facetColour(cover, TerrainClass.Tree, landcover), FOREST),
+            'landcover mode took the sampled colour');
+    });
+});
 
 describe('facetColour — IMAGERY', () => {
     it('returns the satellite colour untouched', () => {

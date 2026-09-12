@@ -70,6 +70,11 @@ export const TerrainVertProgram: string = `
    * counterpart of its own.
    */
   uniform vec3 uRawLight;
+  /**
+   * Hybrid mode: share of a land-use facet's colour taken from its palette
+   * tone, the rest from its sampled imagery colour. 0..1, a player setting.
+   */
+  uniform float uLanduseBlend;
 
   attribute vec3 coverColor;
   attribute float coverClass;
@@ -189,7 +194,11 @@ ${LOG_DEPTH_PARS_VERTEX}
       // Not named "step": that shadows the built-in, which some ES 1.00
       // compilers take badly and srgbToLinear above actually calls.
       float band = floor(d * uShadeSteps + 0.5) / max(uShadeSteps, 1.0);
-      return tone * (1.0 + band * uShadeRange);
+      vec3 toned = tone * (1.0 + band * uShadeRange);
+      // Then mixed with the colour sampled from imagery, by the player's
+      // setting: all tone keeps a field recognisably a field, all sampled
+      // keeps it in the colours of the ground around it.
+      return mix(srgbToLinear(coverColor) * uRawLight, toned, uLanduseBlend);
     }
     return tone;
   }

@@ -1,9 +1,12 @@
 /*
- * Styles for the Angular Material settings dialog.
+ * Styles for the Angular Material settings dialog: the Material theme and
+ * Tailwind's utilities, and nothing hand-written. Components style themselves
+ * with Tailwind classes in their templates; Material is adjusted only through
+ * its documented --mat-* tokens.
  *
  * Tailwind's preflight is left out on purpose: it resets every element on the
- * page, and the game's own overlays (help panel, spawn menu, F9 picker) are
- * hand-styled in style.css against browser defaults.
+ * page, and the game's own overlays (spawn menu, boot screen) are hand-styled
+ * in style.css against browser defaults.
  */
 @layer theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
@@ -11,43 +14,3 @@
 @import "@angular/material/prebuilt-themes/cyan-orange.css";
 
 @source "./script/ui";
-
-/* The page body is bold with a text shadow for legibility over the 3D view;
-   the dialog sits on its own opaque surface and does not want either. */
-.rfs-settings-panel {
-    font-weight: normal;
-    text-shadow: none;
-}
-
-/* One scroller, not two: the dialog content stays put at a fixed height so the
-   tab headers never scroll away and switching tabs does not resize the dialog,
-   and only the active tab's body scrolls. */
-.rfs-settings-panel .mat-mdc-dialog-content {
-    overflow: hidden;
-}
-
-.rfs-settings-panel .mat-mdc-tab-group {
-    height: min(60vh, 520px);
-}
-
-/* Tabs scroll vertically only. Content is made to wrap or shrink to fit (see
-   the #area-* rules in style.css), so hiding the other axis cuts nothing off. */
-.rfs-settings-panel .mat-mdc-tab-body-content {
-    overflow-x: hidden;
-}
-
-.rfs-settings-panel .mat-mdc-dialog-content {
-    overflow-wrap: anywhere;
-}
-
-/* No sideways-scrolling tab header either: pagination is off in the template,
-   and labels that do not fit on one row wrap onto a second one instead. */
-.rfs-settings-panel .mat-mdc-tab-labels {
-    flex-wrap: wrap;
-}
-
-.rfs-settings-panel .mat-mdc-tab {
-    flex-grow: 0;
-    min-width: 0;
-    padding-inline: 12px;
-}

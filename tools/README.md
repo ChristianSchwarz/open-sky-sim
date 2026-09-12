@@ -884,6 +884,37 @@ The default 6144 lands on a ~34 m coast at roughly 5,300 triangles and 47 KB
 gzip per tile. For comparison the old runtime CDT produced a median of 3,311
 triangles per tile but had no ceiling at all — its worst z12 tile was 86,463.
 
+### Detail falls with zoom
+
+A tile is drawn from a distance that scales with its size, so what a coarse
+tile carries has to be cheaper than what a fine one does or the far field
+costs more than the near field (it did: a z9 tile ran 100k triangles, most
+of it landuse fill and 2 m outlines no distance could show). The bake keys
+these on `z` (`tools/bake/buildTile.ts`, `meshTile.ts`):
+
+| What | z12 (leaf) | z11 | z10 and coarser |
+| --- | --- | --- | --- |
+| Landuse polygons | exact fill + outline stroke, every vertex | class voted onto the facet, no extra triangles | voted onto the facet |
+| Watercourse strokes | all | width ≥ 0.05 cell | width ≥ 0.05 cell |
+| Stroke stream | up to `PTM_MAX_RIVER_VERTS` | ≤ budget vertices | ≤ budget vertices |
+| Coast overspend | 3× budget | 3× | 1.5× |
+| Coast simplify floor | 0 | 0.5 cell | 1 cell |
+
+Fills were tried at z11 too: over Berlin that cost a mean 35k triangles per
+z11 tile, six times the mesh budget, for edges under a pixel at the nearest
+a z11 tile is ever drawn from. (`LANDUSE_SIMPLIFY_CELLS` still simplifies
+rings on any non-leaf tile that fills, should `LANDUSE_DETAIL_MIN_ZOOM` ever
+be lowered again.)
+
+The interior tolerance is half the tile's *own* DEM geometric error (from
+its `.pdm` header), floored at 1 m, and that error plus what the decimator
+gave up is written to the `.ptm` header as `geometricErrorM`. The runtime
+refines on the tile's own figure once it is resident; the manifest's
+`levelGeometricErrorM` (the per-level max over every tile in the index) only
+serves until then. It used to be copied from the height pyramid's manifest,
+which is a monotone max across every merge ever run — one long-gone mountain
+pinned z4–z10 at 1.6 km and had flat sea refining to z11 out to 130 km.
+
 ### Serving
 
 `assets/terrain` is **self-contained**: the mesh bake copies the height tiles

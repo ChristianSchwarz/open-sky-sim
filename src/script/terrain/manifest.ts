@@ -12,6 +12,11 @@ export interface MeshStreamManifest {
     /** `gzip` when tiles are stored pre-compressed and served with the header. */
     transport?: string;
     triangleBudget: number;
+    /**
+     * Per level, the largest header error of any tile on it. A node refines
+     * on this until its tile is resident and can answer for itself - see
+     * QuadtreeOptions.tileErrorM.
+     */
     levelGeometricErrorM: number[];
     levelSkirtDepthM: number[];
     /**

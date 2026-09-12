@@ -24,7 +24,7 @@
  */
 
 import { TERRAIN_COLOUR_MODE_INDEX, TerrainColours } from '../state/gameDefs';
-import { CLASS_TO_TONE, LAND_TONE_BASE, TerrainTone } from '../terrain/tones';
+import { CLASS_TO_TONE, LANDUSE_BLEND_DEFAULT, LAND_TONE_BASE, TerrainTone } from '../terrain/tones';
 import type { TerrainColourMode } from '../terrain/tones';
 
 /**
@@ -62,6 +62,11 @@ export interface FacetPalette {
     shadeMid: number;
     /** `uShadeWindow.y` — half-width of the window, in luminance. */
     shadeSpread: number;
+    /**
+     * `uLanduseBlend` — Hybrid mode's share of palette tone against sampled
+     * colour, 0..1. Omit for the shader's default.
+     */
+    landuseBlend?: number;
 }
 
 /** The shader's own defaults, for a caller that has no material to read. */
@@ -135,10 +140,13 @@ export function facetColour(cover: Rgb, cls: number, palette: FacetPalette): Rgb
         (lum - palette.shadeMid) / Math.max(palette.shadeSpread, 0.001)));
     const band = Math.floor(d * palette.shadeSteps + 0.5) / Math.max(palette.shadeSteps, 1);
     const scale = 1 + band * palette.shadeRange;
+    // Then mixed with the sampled colour by the player's land-use blend, as
+    // the shader does. 1 is the banded tone alone, 0 the imagery alone.
+    const t = palette.landuseBlend ?? LANDUSE_BLEND_DEFAULT;
     return {
-        r: clamp01(tone.r * scale),
-        g: clamp01(tone.g * scale),
-        b: clamp01(tone.b * scale),
+        r: clamp01(cover.r + (tone.r * scale - cover.r) * t),
+        g: clamp01(cover.g + (tone.g * scale - cover.g) * t),
+        b: clamp01(cover.b + (tone.b * scale - cover.b) * t),
     };
 }
 

@@ -15,7 +15,7 @@
  *
  *   header, 72 bytes
  *     0  u32  magic 'PTM1'          32  u32  landVertCount   (multiple of 3)
- *     4  u8   version = 5           36  u32  waterVertCount
+ *     4  u8   version = 6           36  u32  waterVertCount
  *     5  u8   z                     40  u32  waterIndexCount
  *     6  u16  flags                 44  u32  riverVertCount
  *     8  u32  x                     48  u32  riverIndexCount
@@ -60,12 +60,19 @@
  * changed, but a v3 tile drawn as v4 is a mirror image of the place it
  * describes, which is precisely the kind of silently-wrong that the version
  * byte exists to stop. See `sceneFromEnu` in geodesy.ts.
+ *
+ * Version 6 fills the last reserved header word with the tile's own geometric
+ * error - the bound on what drawing its children instead would gain. The
+ * runtime used to refine on one figure per zoom level for the whole planet,
+ * a monotone max that a mountain baked years ago pinned at 1.6 km for z4-z10,
+ * so a flat sea tile at z10 refined as eagerly as the Alps. Per tile, the LOD
+ * cut follows the terrain: sea stays coarse, relief refines.
  */
 
 import { CLASS_COUNT, TerrainTone } from './tones';
 
 export const PTM_MAGIC = 0x314d5450; // 'PTM1' little-endian
-export const PTM_VERSION = 5;
+export const PTM_VERSION = 6;
 export const PTM_HEADER_BYTES = 72;
 
 export const PTM_FLAG_HAS_LAND = 1 << 0;
@@ -158,6 +165,12 @@ export interface PtmEncodeInput {
     /** Half the tile's ground width (m); the floor for the quantisation step. */
     tileHalfWidthM: number;
     skirtDepthM: number;
+    /**
+     * World-space error bound (m) the runtime refines on: what drawing this
+     * tile's children instead of it would gain. The DEM's own child-detail
+     * loss plus whatever the decimator dropped.
+     */
+    geometricErrorM: number;
     land: PtmLandInput;
     water: PtmWaterInput;
     /** Omit for a tile with no watercourse on it, which is most of them. */
@@ -183,6 +196,8 @@ export interface PtmTile {
     quantScale: number;
     boundingRadiusM: number;
     skirtDepthM: number;
+    /** See {@link PtmEncodeInput.geometricErrorM}. */
+    geometricErrorM: number;
     /** Quantised, ready to bind. Multiply by quantScale. */
     landPositions: Int16Array;
     /** Bind with normalized: true. Stride 4; the 4th byte is padding. */
@@ -490,7 +505,7 @@ export function encodePtm(input: PtmEncodeInput): Uint8Array {
     view.setUint32(56, waterOrder[TerrainTone.Water].length * 3, true);
     view.setUint32(60, waterOrder[TerrainTone.ShallowWater].length * 3, true);
     view.setFloat32(64, input.skirtDepthM, true);
-    view.setUint32(68, 0, true);
+    view.setFloat32(68, input.geometricErrorM, true);
 
     return out;
 }
@@ -535,6 +550,7 @@ export function decodePtm(bytes: ArrayBuffer | Uint8Array): PtmTile {
     const waterDeep = view.getUint32(56, true);
     const waterShallow = view.getUint32(60, true);
     const skirtDepthM = view.getFloat32(64, true);
+    const geometricErrorM = view.getFloat32(68, true);
 
     if (landVertCount % 3 !== 0) {
         throw new Error(`PTM1: landVertCount ${landVertCount} is not a multiple of 3`);
@@ -589,6 +605,7 @@ export function decodePtm(bytes: ArrayBuffer | Uint8Array): PtmTile {
         quantScale,
         boundingRadiusM,
         skirtDepthM,
+        geometricErrorM,
         landPositions,
         landNormals,
         landAttrs,

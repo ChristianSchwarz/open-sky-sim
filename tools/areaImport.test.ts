@@ -35,6 +35,14 @@ describe('parseProgress', () => {
         assert.equal(parseProgress('  sampling 9/18'), 50);
     });
 
+    it('reads the coast bake stage percentage, whatever phase it is in', () => {
+        // tools/bake_osm_coast.py StageProgress: `  <label> <detail>  (NN.N% of stage)`
+        assert.equal(parseProgress('  fetching OSM coastline 4.2 MB received  (13.1% of stage)'), 13.1);
+        assert.equal(parseProgress('  assembling land and water polygons classifying piece 3/9  (25.0% of stage)'), 25);
+        assert.equal(parseProgress('  writing coast and vector tiles zoom 11 40/120  (88.5% of stage)'), 88.5);
+        assert.equal(parseProgress('  writing coast and vector tiles  (100.0% of stage)'), 100);
+    });
+
     it('reads the coastline rasterise counter', () => {
         // tools/bake_osm_coast.py: `  rasterize {i+1}/{len(max_tiles)}`
         assert.equal(parseProgress('  rasterize 12/24'), 50);
@@ -63,6 +71,15 @@ describe('isProgressLine', () => {
         assert.equal(isProgressLine('  123/456 (27.0%)  1.2 MB'), true);
         assert.equal(isProgressLine('  sampling 9/18'), true);
         assert.equal(isProgressLine('  rasterize 12/24'), true);
+        assert.equal(isProgressLine('  fetching OSM coastline 4.2 MB received  (13.1% of stage)'), true);
+        assert.equal(isProgressLine('  writing coast and vector tiles zoom 11 40/120  (88.5% of stage)'), true);
+    });
+
+    it('keeps the coast bake phase headings and summaries in the log', () => {
+        assert.equal(isProgressLine('phase 3/8  assembling land and water polygons'), false);
+        assert.equal(isProgressLine('phase 6/8  sampling inland water heights - skipped, no flat inland water'), false);
+        assert.equal(isProgressLine('  fetching OSM coastline done in 4.2s, 1832 elements'), false);
+        assert.equal(isProgressLine('  still waiting for https://overpass-api.de/api/interpreter (30s)'), false);
     });
 
     it('does not match one-off lines that happen to contain a percentage', () => {

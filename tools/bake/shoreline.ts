@@ -154,7 +154,8 @@ function douglasPeucker(pts: Float64Array, epsilon: number): number[] {
     return out;
 }
 
-function simplifyRing(pts: Float64Array, epsilon: number): Float64Array {
+/** Douglas-Peucker on a closed ring of flat xy pairs; keeps at least a triangle. */
+export function simplifyRing(pts: Float64Array, epsilon: number): Float64Array {
     const n = pts.length / 2;
     if (n < 4 || epsilon <= 0) {
         return pts;
