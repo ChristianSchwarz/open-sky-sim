@@ -1267,12 +1267,71 @@ def _ensure_worker_state() -> None:
     _wk_loaded = True
 
 
-def _rasterize_worker(task: Tuple[int, int, int]) -> Tuple[int, int, bytearray]:
+RasterBlock = Tuple[int, List[Tuple[int, int]]]
+"""(zoom, the tiles of one block) - the unit of rasterize work."""
+
+# Tiles per block side. A block is clipped out of the land once and its
+# tiles are rasterized from that piece, so the land's full vertex count is
+# paid per block, not per tile.
+RASTER_BLOCK_TILES = 8
+
+
+def _polygonal(geom) -> MultiPolygon:
+    """Just the polygon parts of a clip result, as one MultiPolygon."""
+    if geom.is_empty:
+        return MultiPolygon()
+    if isinstance(geom, Polygon):
+        return MultiPolygon([geom])
+    if isinstance(geom, MultiPolygon):
+        return geom
+    parts = [g for g in getattr(geom, 'geoms', []) if isinstance(g, Polygon) and not g.is_empty]
+    return MultiPolygon(parts)
+
+
+def rasterize_block(land, z: int, tiles: Sequence[Tuple[int, int]], n: int) -> List[Tuple[int, int, bytearray]]:
+    """Rasterize a block of tiles from the land clipped to the block.
+
+    `rasterize_tile` hands rasterio the whole land geometry for every
+    tile, and a regional box's land runs to hundreds of thousands of
+    vertices - a Pamir box measured 425k, 3.7 s per tile, nine minutes for
+    the level on 19 workers. Clipping is a plain rectangle cut with no
+    topology (`clip_by_rect`), done once per block and once more per tile,
+    so each tile rasterizes only the geometry that reaches it. The clip
+    rectangle is padded by a cell, so no pixel centre ever sits on a clip
+    edge and the result is the same as rasterizing the full land.
+    """
+    xs = [x for x, _ in tiles]
+    ys = [y for _, y in tiles]
+    nw = tile_bounds(z, min(xs), min(ys))
+    se = tile_bounds(z, max(xs), max(ys))
+    cell = (nw.north - nw.south) / max(1, n - 1)
+    block = _polygonal(shapely.clip_by_rect(
+        land, nw.west - cell, se.south - cell, se.east + cell, nw.north + cell))
+    out: List[Tuple[int, int, bytearray]] = []
+    for x, y in tiles:
+        b = tile_bounds(z, x, y)
+        piece = _polygonal(shapely.clip_by_rect(
+            block, b.west - cell, b.south - cell, b.east + cell, b.north + cell))
+        out.append((x, y, rasterize_tile(None, piece, b, n)))
+    return out
+
+
+def raster_blocks(z: int, tiles: Sequence[Tuple[int, int]]) -> List[RasterBlock]:
+    """The tiles grouped into aligned blocks of RASTER_BLOCK_TILES a side."""
+    groups: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+    for x, y in tiles:
+        groups.setdefault((x // RASTER_BLOCK_TILES, y // RASTER_BLOCK_TILES), []).append((x, y))
+    return [(z, groups[key]) for key in sorted(groups)]
+
+
+def _rasterize_worker(task: RasterBlock) -> List[Tuple[int, int, bytearray]]:
     _ensure_worker_state()
-    z, x, y = task
-    b = tile_bounds(z, x, y)
-    grid = rasterize_tile(_wk_land_prep, _wk_land, b, _wk_tile_size)
-    return x, y, grid
+    z, tiles = task
+    if not HAS_RASTERIO:
+        # The point-in-polygon fallback tests against the prepared full land.
+        return [(x, y, rasterize_tile(_wk_land_prep, _wk_land, tile_bounds(z, x, y), _wk_tile_size))
+                for x, y in tiles]
+    return rasterize_block(_wk_land, z, tiles, _wk_tile_size)
 
 
 ClipTask = Tuple[int, int, int, bytearray, float, float, Optional[List[Tuple[int, bytes]]]]
@@ -1378,14 +1437,17 @@ def rasterize_level_parallel(
 
     land_prep = None if HAS_RASTERIO else prep(land)
 
-    def inline(task: Tuple[int, int, int]) -> Tuple[int, int, bytearray]:
-        _, x, y = task
-        return x, y, rasterize_tile(land_prep, land, tile_bounds(z, x, y), tile_size)
+    def inline(task: RasterBlock) -> List[Tuple[int, int, bytearray]]:
+        bz, block_tiles = task
+        if not HAS_RASTERIO:
+            return [(x, y, rasterize_tile(land_prep, land, tile_bounds(bz, x, y), tile_size))
+                    for x, y in block_tiles]
+        return rasterize_block(land, bz, block_tiles, tile_size)
 
-    tasks = [(z, x, y) for x, y in tiles]
-    for x, y, grid in pool.map(_rasterize_worker, inline, tasks):
-        level_grids[(x, y)] = grid
-        report()
+    for block in pool.map(_rasterize_worker, inline, raster_blocks(z, tiles), chunksize=1):
+        for x, y, grid in block:
+            level_grids[(x, y)] = grid
+            report()
     return level_grids
 
 

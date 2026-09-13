@@ -235,3 +235,13 @@ seconds of interpreter start-up per stage.
 
 The mesh bake takes `--jobs N` and `--no-bundle` for diagnosis, and a
 parent run with `--cpu-prof` now profiles the bundled workers too.
+
+### Rasterize phase, 2026-09-13 evening
+
+The finest-level mask rasterized the whole land geometry for every tile.
+A Pamir box (2665 tiles) had 425k land vertices: 3.7 s per tile, nine
+minutes on 19 workers. Tiles are now rasterized in aligned 8x8 blocks,
+each block clipped out of the land once with a plain rectangle cut and
+each tile clipped once more from the block, padded by a cell so no pixel
+centre sits on a clip edge. 5 ms per tile, output identical on every
+tile checked (Madeira in full, a Pamir sample).
