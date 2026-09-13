@@ -86,10 +86,19 @@ _MIRROR_FAILURES: Dict[str, int] = {}
 _MIRROR_LOCK = threading.Lock()
 
 
-def mirror_order() -> List[str]:
-    """Overpass mirrors, least-failing first; ties keep `OVERPASS_URLS` order."""
+def mirror_order(prefer: Optional[str] = None) -> List[str]:
+    """Overpass mirrors, least-failing first; ties keep `OVERPASS_URLS` order.
+
+    `prefer` puts one mirror first regardless of its tally, so concurrent
+    fetches can each keep to a mirror of their own (see overpass_fetch_many);
+    it still falls through to the others when that mirror fails.
+    """
     with _MIRROR_LOCK:
-        return sorted(OVERPASS_URLS, key=lambda u: _MIRROR_FAILURES.get(u, 0))
+        order = sorted(OVERPASS_URLS, key=lambda u: _MIRROR_FAILURES.get(u, 0))
+    if prefer in order:
+        order.remove(prefer)
+        order.insert(0, prefer)
+    return order
 
 
 def _mirror_failed(url: str) -> None:
@@ -102,11 +111,12 @@ def _mirror_succeeded(url: str) -> None:
         _MIRROR_FAILURES[url] = 0
 
 
-# How many Overpass requests are in flight at once. Two, across the
-# least-failing mirrors, is the most the public mirrors tolerate from one
-# address before answering 429; the eight queries an import makes used to
-# run strictly one after another.
-OVERPASS_CONCURRENCY = 2
+# How many Overpass requests are in flight at once: one per mirror. Each
+# concurrent fetch keeps to a mirror of its own, so no mirror sees more than
+# one request at a time from this address - two at once on the same mirror
+# is what earned 429s - while the whole fetch runs as wide as there are
+# mirrors. The eight queries an import makes used to run one after another.
+OVERPASS_CONCURRENCY = len(OVERPASS_URLS)
 
 # The grid an Overpass fetch is cut into: whole tiles at this zoom, on the
 # same lattice as everything else the bake writes. A cache entry is one
@@ -339,6 +349,7 @@ def overpass_fetch(
     query: str, label: str, refresh: bool,
     validate: Optional[Callable[[dict], None]] = None,
     on_progress: Optional[Callable[[int], None]] = None,
+    prefer: Optional[str] = None,
 ) -> dict:
     """One Overpass request, cached by query hash.
 
@@ -384,7 +395,7 @@ def overpass_fetch(
     body = ('data=' + requests.utils.quote(query)).encode('utf-8')
     last_err: Optional[str] = None
     for round_idx in range(OVERPASS_ROUNDS):
-        for url in mirror_order():
+        for url in mirror_order(prefer):
             suffix = '' if round_idx == 0 else f' (round {round_idx + 1}/{OVERPASS_ROUNDS})'
             print(f'fetching OSM {label} via Overpass ({url}){suffix}…', flush=True)
             streamed = on_progress is not None
@@ -477,20 +488,35 @@ def overpass_fetch_many(
     """
     results: List[Optional[dict]] = [None] * len(requests_)
 
+    # Each worker slot owns one mirror, best first, so requests spread over
+    # the mirrors instead of piling onto the least-failing one.
+    slots = mirror_order()
+    free: List[int] = list(range(min(concurrency, len(slots))))
+    free_lock = threading.Lock()
+
     def one(index: int) -> None:
         query, label = requests_[index]
         extra: Dict[str, object] = {}
         if on_progress is not None:
             extra['on_progress'] = lambda received, index=index: on_progress(index, received)
         validate = validates[index] if validates is not None else None
-        results[index] = overpass_fetch(query, label, refresh, validate=validate, **extra)
+        with free_lock:
+            slot = free.pop(0) if free else None
+        try:
+            results[index] = overpass_fetch(
+                query, label, refresh, validate=validate,
+                prefer=slots[slot] if slot is not None else None, **extra)
+        finally:
+            if slot is not None:
+                with free_lock:
+                    free.append(slot)
 
     if len(requests_) <= 1 or concurrency <= 1:
         for i in range(len(requests_)):
             one(i)
     else:
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        with ThreadPoolExecutor(max_workers=min(concurrency, len(slots))) as pool:
             for future in [pool.submit(one, i) for i in range(len(requests_))]:
                 future.result()
     return [r if r is not None else {'elements': []} for r in results]

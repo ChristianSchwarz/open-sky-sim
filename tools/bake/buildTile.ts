@@ -300,6 +300,38 @@ function padLonSpan(pad: FlattenPad & { lat: number }): number {
     return padReachM(pad) / (111320 * shrink) + 1e-4;
 }
 
+/** A pad with its reject box precomputed, for the per-node loops. */
+type NearPad = {
+    pad: NonNullable<BuildTileInput['pads']>[number];
+    latSpan: number;
+    lonSpan: number;
+};
+
+/**
+ * The pads whose reach touches the tile, with their reject spans worked out
+ * once. The manifest carries every pad of every baked area - 193 across 40
+ * airfields once a few areas are in - and the per-node loops used to test
+ * all of them for every land node, recomputing each pad's reach (a hypot
+ * and a cosine) on every test. Measured on Madeira, which has two
+ * airfields: 29% of the whole mesh bake. Almost every tile has no pad near
+ * it at all, and one that does has one or two.
+ */
+function padsNearTile(pads: BuildTileInput['pads'], bounds: LonLatBounds): NearPad[] {
+    if (pads === undefined || pads.length === 0) {
+        return [];
+    }
+    const near: NearPad[] = [];
+    for (const pad of pads) {
+        const latSpan = padLatSpan(pad);
+        const lonSpan = padLonSpan(pad);
+        if (pad.lat + latSpan >= bounds.south && pad.lat - latSpan <= bounds.north
+            && pad.lon + lonSpan >= bounds.west && pad.lon - lonSpan <= bounds.east) {
+            near.push({ pad, latSpan, lonSpan });
+        }
+    }
+    return near;
+}
+
 /**
  * Node heights with the flatten pads already applied — the surface that will
  * actually be drawn.
@@ -443,12 +475,11 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // below must not leave it as sea. Only the pad *core* counts: the feather
     // is where the platform blends into whatever is around it, and if that is
     // the sea then blending into the sea is right.
-    const pads = input.pads;
-    const paved = pads && pads.length > 0
+    const nearPads = padsNearTile(input.pads, bounds);
+    const paved = nearPads.length > 0
         ? (lon: number, lat: number): boolean => {
-            for (const pad of pads) {
-                if (Math.abs(lat - pad.lat) > padLatSpan(pad)
-                    || Math.abs(lon - pad.lon) > padLonSpan(pad)) {
+            for (const { pad, latSpan, lonSpan } of nearPads) {
+                if (Math.abs(lat - pad.lat) > latSpan || Math.abs(lon - pad.lon) > lonSpan) {
                     continue;
                 }
                 geodeticToEcef(lat, lon, 0, _ecef);
@@ -929,14 +960,13 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         if (land) {
             // The pad blend is in ENU, so we need a first ENU pass to know
             // where we are before we can decide how much to flatten.
-            if (input.pads) {
-                for (const pad of input.pads) {
+            if (nearPads.length > 0) {
+                for (const { pad, latSpan, lonSpan } of nearPads) {
                     // Cheap geodetic reject first: a pad is a kilometre or two
-                    // across and there is one per baked area, so almost every
-                    // node is outside almost every pad and must not pay for a
-                    // frame conversion to find that out.
-                    if (Math.abs(lat - pad.lat) > padLatSpan(pad)
-                        || Math.abs(lon - pad.lon) > padLonSpan(pad)) {
+                    // across, so almost every node is outside almost every
+                    // pad and must not pay for a frame conversion to find
+                    // that out.
+                    if (Math.abs(lat - pad.lat) > latSpan || Math.abs(lon - pad.lon) > lonSpan) {
                         continue;
                     }
                     geodeticToEcef(lat, lon, h, _ecef);

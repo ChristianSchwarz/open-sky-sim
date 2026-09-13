@@ -204,3 +204,34 @@ What changed in the output, deliberately:
 Land masks stayed byte-identical through every change except a handful of
 boundary pixels on three Madeira tiles, traced to one water way edited in
 OSM between the two fetches and to union order.
+
+## Second pass, 2026-09-13 afternoon
+
+Profiling the remaining stages found three things the first pass missed.
+
+- **Mesh bake: the airfield pad scan.** Every land node of every tile was
+  tested against every pad in the manifest, recomputing each pad's reach
+  on every test - 193 pads across 40 airfields once a few areas are in,
+  on a Madeira tile that has two. The pads near a tile are now picked once
+  per tile with their reject spans precomputed. Madeira meshing 70 s ->
+  15 s, every tile byte-identical. This cost grew with every area
+  imported, which is why last night's 32 s had become 70 s by the
+  morning.
+- **Cover bake: too many workers, and a serial ancestor pass.** A spawned
+  worker costs seconds to import rasterio and shapely and the per-tile
+  work is memory bound, so 19 workers were slower than one on a small
+  box and slower than six on a large one. The pool is now sized by tile
+  count (one per ~48 tiles, at most 8, none under 96 tiles), created
+  once, and the ancestor levels run across it too. Madeira 39 s -> 12 s,
+  Crimea (1511 tiles) 176 s -> 71 s.
+- **Cold Overpass fetch: one stream per mirror.** Concurrent requests
+  each keep to a mirror of their own, so the fetch runs as wide as there
+  are mirrors without any mirror seeing two requests at once from this
+  address, which is what earned 429s at concurrency two on one mirror.
+
+Warm-cache Madeira import now: heights 5 s, merge 6 s, coast 30 s,
+airfields 1 s, cover fetch 37 s, cover bake 12 s, mesh 15 s, plus a few
+seconds of interpreter start-up per stage.
+
+The mesh bake takes `--jobs N` and `--no-bundle` for diagnosis, and a
+parent run with `--cpu-prof` now profiles the bundled workers too.

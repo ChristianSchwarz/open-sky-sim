@@ -76,6 +76,10 @@ interface Args {
     limit?: number;
     swatches: number;
     bbox?: LonLatBounds;
+    /** Worker threads; default one fewer than the machine's CPUs. */
+    jobs?: number;
+    /** Run the worker from its .ts source under tsx instead of the esbuild bundle. */
+    noBundle: boolean;
 }
 
 /**
@@ -109,6 +113,7 @@ function parseArgs(argv: string[]): Args {
         budget: DEFAULT_BUDGET,
         only: [],
         swatches: DEFAULT_SWATCHES,
+        noBundle: false,
     };
     for (let i = 0; i < argv.length; i++) {
         const k = argv[i];
@@ -121,6 +126,8 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--limit') a.limit = Number(next());
         else if (k === '--swatches') a.swatches = Number(next());
         else if (k === '--bbox') a.bbox = parseBbox(next());
+        else if (k === '--jobs') a.jobs = Number(next());
+        else if (k === '--no-bundle') a.noBundle = true;
         else throw new Error(`unknown argument ${k}`);
     }
     return a;
@@ -327,7 +334,10 @@ async function prepareWorker(): Promise<{ file: string; execArgv: string[] }> {
             target: `node${process.versions.node.split('.')[0]}`,
             logLevel: 'silent',
         });
-        return { file: WORKER_BUNDLE, execArgv: [] };
+        // Only the profiler flags carry over: `--cpu-prof` on the parent
+        // should profile the workers too, and nothing else on execArgv
+        // (`--import tsx`) is wanted for the bundle.
+        return { file: WORKER_BUNDLE, execArgv: process.execArgv.filter(a => a.startsWith('--cpu-prof')) };
     } catch (err) {
         console.warn(`warning: could not bundle the mesh worker (${(err as Error).message}); `
             + 'running it under tsx instead, which is slower');
@@ -348,8 +358,10 @@ async function runTilesInParallel(
     cfg: MeshTileConfig,
     tasks: TileTask[],
     onProgress: (done: number, total: number) => void,
+    jobs?: number,
+    noBundle = false,
 ): Promise<Array<TileProcessResult | undefined>> {
-    const worker = tasks.length > 0
+    const worker = tasks.length > 0 && !noBundle
         ? await prepareWorker()
         : { file: WORKER_SOURCE, execArgv: process.execArgv };
     return new Promise((resolve, reject) => {
@@ -358,7 +370,7 @@ async function runTilesInParallel(
             resolve(results);
             return;
         }
-        const workerCount = Math.max(1, Math.min(os.cpus().length - 1, tasks.length));
+        const workerCount = Math.max(1, Math.min(jobs ?? (os.cpus().length - 1), tasks.length));
         let nextTask = 0;
         let completed = 0;
         let failed: unknown;
@@ -627,11 +639,14 @@ async function main(): Promise<void> {
         pads,
         groundMeans: regionalGroundMeans(args.src, path.join(args.out, GROUND_MEANS_FILE)),
     };
+    const tMesh = Date.now();
     const results = await runTilesInParallel(meshCfg, tiles, (done, total) => {
         const pct = ((done / total) * 100).toFixed(1);
         process.stdout.write(`\r  ${done}/${total} (${pct}%)`);
-    });
+    }, args.jobs, args.noBundle);
     process.stdout.write('\n');
+    console.log(`  meshed ${tiles.length} tiles in ${((Date.now() - tMesh) / 1000).toFixed(1)}s `
+        + `after ${((tMesh - t0) / 1000).toFixed(1)}s of setup`);
 
     for (let i = 0; i < tiles.length; i++) {
         const { z, x, y } = tiles[i];
@@ -673,9 +688,11 @@ async function main(): Promise<void> {
     }
 
     const heightMaxZoom = Math.min(11, src.maxZoom);
+    const tCopy = Date.now();
     const heights = copyHeightTiles(args.src, args.out, heightMaxZoom);
     console.log(`height tiles z0..${heightMaxZoom}: ${(heights.bytes / 1048576).toFixed(1)} MB, `
-        + `${heights.copied} copied, ${heights.skipped} already current`);
+        + `${heights.copied} copied, ${heights.skipped} already current, `
+        + `${((Date.now() - tCopy) / 1000).toFixed(1)}s`);
 
     // Counts from every bake so far, this one included, so the table describes
     // the pyramid rather than the last area added to it.

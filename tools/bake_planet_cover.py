@@ -620,6 +620,50 @@ def _cover_worker(zxy: Tuple[int, int, int]) -> Optional[Tuple[int, bool, int, i
     )
 
 
+def build_ancestor_tile(src_dir: str, out_root: str, pz: int, px: int, py: int) -> Optional[Tuple[int, int]]:
+    """Decimate one parent's .plc from its children on disk.
+
+    Returns (bytes written, flags), or None when no child was ever baked -
+    every quadrant ocean-only, nothing to derive the parent from.
+    """
+    children: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray, int]] = {}
+    for qx in (0, 1):
+        for qy in (0, 1):
+            child_path = os.path.join(out_root, str(pz + 1), str(px * 2 + qx), f'{py * 2 + qy}.plc')
+            if os.path.exists(child_path):
+                children[(qx, qy)] = decode_plc(child_path)
+    if not children:
+        return None
+    size = pdm_size(os.path.join(src_dir, str(pz), str(px), f'{py}.pdm'))
+    classes, colors, flags = build_parent_cover(children, size, ANCESTOR_VOTE_RADIUS)
+    out_dir = os.path.join(out_root, str(pz), str(px))
+    os.makedirs(out_dir, exist_ok=True)
+    blob = encode_plc(size, flags, classes, colors)
+    with open(os.path.join(out_dir, f'{py}.plc'), 'wb') as fh:
+        fh.write(blob)
+    return len(blob), flags
+
+
+def _ancestor_worker(zxy: Tuple[int, int, int]) -> Optional[Tuple[int, int]]:
+    z, x, y = zxy
+    return build_ancestor_tile(_cover_src_dir, _cover_out_root, z, x, y)
+
+
+def worker_count(jobs: int, tiles: int) -> int:
+    """How many processes to spawn for `tiles` tiles.
+
+    Measured on a 20-core Windows box: a spawned worker costs a couple of
+    seconds to import rasterio and shapely, and the per-tile work is memory
+    bound, so more workers than physical cores make it slower, not faster -
+    Crimea's 1511 tiles took 126 s on 6 workers and 176 s on 19; Madeira's
+    137 took 12 s in-process and 39 s on 19. So: one worker per ~48 tiles,
+    at most 8, and none at all for a small import.
+    """
+    if tiles <= 96:
+        return 1
+    return max(1, min(jobs, 8, -(-tiles // 48)))
+
+
 def bake_tiles(
     tiles: Sequence[Tuple[int, int, int]],
     src_dir: str,
@@ -632,13 +676,13 @@ def bake_tiles(
     color_lut: np.ndarray,
     patch_m: float,
     pads: Sequence[dict],
-    jobs: int,
+    pool=None,
     osm_tree: Optional['STRtree'] = None,
     osm_polys: Sequence['Polygon'] = (),
     osm_classes: Sequence[int] = (),
 ) -> Tuple[int, int, int, int, int]:
-    """Bakes every tile, across `jobs` worker processes. Returns
-    (written, with_imagery, paved_nodes, osm_nodes, total_bytes)."""
+    """Bakes every tile, across the worker `pool` (in this process when None).
+    Returns (written, with_imagery, paved_nodes, osm_nodes, total_bytes)."""
     written = 0
     with_imagery = 0
     paved_nodes = 0
@@ -664,8 +708,7 @@ def bake_tiles(
             sys.stdout.write(f'\r  {done}/{total} ({pct:.1f}%)  {total_bytes / 1048576:.1f} MB')
             sys.stdout.flush()
 
-    jobs = max(1, min(jobs, total)) if total else 1
-    if jobs == 1:
+    if pool is None:
         for i, (z, x, y) in enumerate(tiles):
             accept(bake_tile(
                 z, x, y, src_dir, out_root, landcover, imagery,
@@ -676,15 +719,9 @@ def bake_tiles(
         sys.stdout.write('\n')
         return written, with_imagery, paved_nodes, osm_nodes, total_bytes
 
-    ctx = mp.get_context('spawn')
-    with ctx.Pool(
-        jobs, initializer=_init_cover_worker,
-        initargs=(src_dir, out_root, landcover_paths, imagery_paths, patch_m, pads,
-                  osm_tree, osm_polys, osm_classes),
-    ) as pool:
-        for i, result in enumerate(pool.imap_unordered(_cover_worker, tiles, chunksize=8)):
-            accept(result)
-            report(i + 1)
+    for i, result in enumerate(pool.imap_unordered(_cover_worker, tiles, chunksize=8)):
+        accept(result)
+        report(i + 1)
     sys.stdout.write('\n')
     return written, with_imagery, paved_nodes, osm_nodes, total_bytes
 
@@ -835,7 +872,7 @@ def main() -> None:
 
     out_root = args.out or args.src
     patch = f'{args.patch_m:.0f} m patches' if args.patch_m > 0 else 'raw classes'
-    jobs = max(1, min(args.jobs, len(tiles))) if tiles else 1
+    jobs = worker_count(args.jobs, len(tiles))
     print(f'baking cover for {len(tiles)} tiles -> {out_root} ({patch}), {jobs} job(s)')
 
     pads = airfield_pads(manifest)
@@ -877,9 +914,17 @@ def main() -> None:
     finest = tiles if args.only else by_zoom.get(max_zoom, [])
 
     t0 = time.time()
+    # One pool for the leaf tiles and every ancestor level: a spawned worker
+    # pays its imports once, not once per phase.
+    pool = None
+    if jobs > 1:
+        pool = mp.get_context('spawn').Pool(
+            jobs, initializer=_init_cover_worker,
+            initargs=(args.src, out_root, landcover_paths, imagery_paths, args.patch_m, pads,
+                      osm_tree, osm_polys, osm_classes))
     written, with_imagery, paved_nodes, osm_nodes, total_bytes = bake_tiles(
         finest, args.src, out_root, landcover, imagery,
-        landcover_paths, imagery_paths, class_lut, color_lut, args.patch_m, pads, jobs,
+        landcover_paths, imagery_paths, class_lut, color_lut, args.patch_m, pads, pool,
         osm_tree, osm_polys, osm_classes,
     )
 
@@ -890,39 +935,36 @@ def main() -> None:
         # Every level above the finest is built by decimating its own four
         # children, never by independently resampling the raw sources again
         # - the cover-bake analogue of bake_planet_dem.py's build_parent()
-        # and bake_osm_coast.py's build_parent_mask(). Single-threaded, one
-        # level at a time: each parent needs all four (up to four - see
-        # build_parent_cover) children gathered first, and the per-tile cost
-        # here is small next to a raw-source resample.
+        # and bake_osm_coast.py's build_parent_mask(). One level at a time:
+        # each parent needs all four (up to four - see build_parent_cover)
+        # children gathered first.
         ancestor_levels = sorted((z for z in by_zoom if z < max_zoom), reverse=True)
         if ancestor_levels:
             print(f'building {sum(len(by_zoom[z]) for z in ancestor_levels)} '
                   f'ancestor tiles from their children...')
+        # Level by level, coarsest last: a parent reads the children the
+        # previous level just wrote. Within a level every parent is
+        # independent, so a level goes across the pool.
+        t_anc = time.time()
         for z in ancestor_levels:
-            for (pz, px, py) in by_zoom[z]:
-                children: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray, int]] = {}
-                for qx in (0, 1):
-                    for qy in (0, 1):
-                        child_path = os.path.join(
-                            out_root, str(pz + 1), str(px * 2 + qx), f'{py * 2 + qy}.plc')
-                        if os.path.exists(child_path):
-                            children[(qx, qy)] = decode_plc(child_path)
-                if not children:
-                    # Every quadrant is itself ocean-only or otherwise never
-                    # baked - nothing to derive this ancestor from.
+            level = by_zoom[z]
+            if pool is None:
+                results = (build_ancestor_tile(args.src, out_root, pz, px, py) for pz, px, py in level)
+            else:
+                results = pool.imap_unordered(_ancestor_worker, level, chunksize=8)
+            for result in results:
+                if result is None:
                     continue
-                pdm_path = os.path.join(args.src, str(pz), str(px), f'{py}.pdm')
-                size = pdm_size(pdm_path)
-                classes, colors, flags = build_parent_cover(children, size, ANCESTOR_VOTE_RADIUS)
-                out_dir = os.path.join(out_root, str(pz), str(px))
-                os.makedirs(out_dir, exist_ok=True)
-                blob = encode_plc(size, flags, classes, colors)
-                with open(os.path.join(out_dir, f'{py}.plc'), 'wb') as fh:
-                    fh.write(blob)
+                blob_len, flags = result
                 written += 1
-                total_bytes += len(blob)
+                total_bytes += blob_len
                 if flags & PLC_FLAG_REAL_IMAGERY:
                     with_imagery += 1
+        if ancestor_levels:
+            print(f'  ancestors built in {time.time() - t_anc:.1f}s')
+    if pool is not None:
+        pool.close()
+        pool.join()
 
     secs = time.time() - t0
     print(f'wrote {written} cover tiles, {total_bytes / 1048576:.1f} MB in {secs:.1f}s')
