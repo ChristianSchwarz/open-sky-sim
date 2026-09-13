@@ -66,8 +66,11 @@ import argparse
 import math
 import os
 import sys
+import threading
+import time
 import warnings
-from typing import List, Optional, Sequence, Set, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -78,6 +81,10 @@ try:
     from rasterio.enums import Resampling
     from rasterio.transform import from_origin
     from rasterio.warp import reproject
+    from rasterio.windows import Window
+    from rasterio.windows import bounds as window_bounds
+    from rasterio.windows import from_bounds as window_from_bounds
+    from rasterio.windows import transform as window_transform
 except ImportError:  # pragma: no cover - dependency hint
     print('error: rasterio is required (pip install rasterio numpy requests)', file=sys.stderr)
     raise
@@ -131,6 +138,48 @@ MARGIN_PX = 2
 # from the slightly larger area it covers. Without it the bake reads the margin
 # as real coverage and claims the tiles next door on the strength of two pixels.
 CLAIM_TAG = 'RETRO_CLAIM_BBOX'
+
+# Each square is one HTTP-backed read, so the fetch is latency-bound and GDAL
+# releases the GIL while it waits - a thread pool overlaps the squares' network
+# time. Same figure as fetch_cover_sources.py, for the same per-host reasons.
+DEFAULT_JOBS = 8
+
+# Both archives are immutable products (a square never changes once
+# published), so a downloaded square is kept byte-for-byte and read from disk
+# on every later run - a re-fetch of the same area, a neighbour sharing a
+# square, or a bake at a different --arcsec all skip the network.
+DEM_CACHE_DIR = 'data/imports/.dem-cache'
+
+# Source pixels read beyond the ones the target window strictly maps onto.
+# Bilinear needs the neighbour on each side, and the warper's own source
+# window estimate rounds outwards by a pixel or so; four is enough that a
+# windowed read samples exactly what a whole-square read would have.
+SRC_PAD_PX = 4
+
+# Target pixels around a square's footprint that its reprojection is allowed
+# to fill. A square's edge pixel centre sits half a source pixel inside its
+# bounds, and the target lattice is not aligned to it, so the last target
+# column a square touches can round either way.
+DST_PAD_PX = 1
+
+GDAL_ENV = dict(
+    # A COG is one file; do not list its directory on open (a wasted round
+    # trip against S3, and a slow one against the HF CDN).
+    GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',
+    GDAL_HTTP_MULTIPLEX='YES',
+    GDAL_HTTP_VERSION='2',
+    # Range reads land in this cache; a square's IFD and the blocks a window
+    # touches are well inside it.
+    CPL_VSIL_CURL_CACHE_SIZE=str(64 * 1024 * 1024),
+    # libcurl has no timeout by default: a stalled connection hangs the run
+    # with nothing printed. Bounded, it becomes an exception the per-square
+    # skip already handles.
+    GDAL_HTTP_CONNECTTIMEOUT=10,
+    GDAL_HTTP_TIMEOUT=60,
+    GDAL_HTTP_MAX_RETRY=2,
+    GDAL_HTTP_RETRY_DELAY=2,
+    GDAL_NUM_THREADS='ALL_CPUS',
+)
 
 
 def parse_bbox(text: str) -> Tuple[float, float, float, float]:
@@ -309,64 +358,219 @@ def auto_max_zoom(deg_per_pixel: float, tile_size: int) -> int:
     return 23
 
 
+def source_name(url: str) -> str:
+    return url.rsplit('/', 1)[-1]
+
+
+def http_url(source: str) -> str:
+    """The plain URL behind a ``/vsicurl/`` path (a local path is left alone)."""
+    return source[len('/vsicurl/'):] if source.startswith('/vsicurl/') else source
+
+
+def cache_path(source: str, cache_dir: str = DEM_CACHE_DIR) -> str:
+    return os.path.join(cache_dir, source_name(source))
+
+
+def ensure_cached(source: str, cache_dir: str = DEM_CACHE_DIR) -> str:
+    """The local copy of an archive square, downloading it on first use.
+
+    The whole file is kept, not the window this run happened to need: the
+    next area over wants a different window of the same square, and a
+    re-bake at another --arcsec wants another overview level of it. The
+    download lands in a per-thread temp file and is renamed into place only
+    once its length matches what the server announced, so a run killed
+    mid-download leaves no truncated square for the next one to trust.
+    """
+    path = cache_path(source, cache_dir)
+    if os.path.exists(path):
+        return path
+    os.makedirs(cache_dir, exist_ok=True)
+    part = f'{path}.part-{os.getpid()}-{threading.get_ident()}'
+    try:
+        with requests.get(http_url(source), stream=True, timeout=(10, 60)) as res:
+            res.raise_for_status()
+            expected = res.headers.get('Content-Length')
+            got = 0
+            with open(part, 'wb') as fh:
+                for chunk in res.iter_content(chunk_size=1 << 20):
+                    fh.write(chunk)
+                    got += len(chunk)
+        if expected is not None and int(expected) != got:
+            raise IOError(f'short download: {got} of {expected} bytes')
+        os.replace(part, path)
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def _round_out(window: Window, pad: int, width: int, height: int) -> Optional[Window]:
+    """Grow a float window outwards to whole pixels plus `pad`, clipped to a
+    `width` x `height` raster. None when nothing is left."""
+    col0 = max(0, int(math.floor(window.col_off)) - pad)
+    row0 = max(0, int(math.floor(window.row_off)) - pad)
+    col1 = min(width, int(math.ceil(window.col_off + window.width)) + pad)
+    row1 = min(height, int(math.ceil(window.row_off + window.height)) + pad)
+    if col1 <= col0 or row1 <= row0:
+        return None
+    return Window(col0, row0, col1 - col0, row1 - row0)
+
+
+def _align_to(window: Window, factor: int, width: int, height: int) -> Optional[Window]:
+    """Snap a window outwards to multiples of `factor` pixels, so a decimated
+    read of it samples the same cells a decimated read of the whole raster
+    would - a partial cell at the end is dropped the same way `width //
+    factor` drops it."""
+    if factor <= 1:
+        return window
+    col0 = (int(window.col_off) // factor) * factor
+    row0 = (int(window.row_off) // factor) * factor
+    col1 = min((width // factor) * factor,
+               int(math.ceil((window.col_off + window.width) / factor)) * factor)
+    row1 = min((height // factor) * factor,
+               int(math.ceil((window.row_off + window.height) / factor)) * factor)
+    if col1 <= col0 or row1 <= row0:
+        return None
+    return Window(col0, row0, col1 - col0, row1 - row0)
+
+
+def square_windows(
+    src_transform, src_width: int, src_height: int,
+    dst_transform, dst_width: int, dst_height: int,
+    factor: int = 1,
+) -> Optional[Tuple[Window, Window]]:
+    """(source window, target window) for one square against the target grid.
+
+    The target window is the square's own footprint on the target grid -
+    padded a pixel, clipped to the grid - so the reprojection fills O(square)
+    pixels rather than a whole-grid temporary. The source window is then
+    whatever maps onto that target window, padded enough that bilinear at its
+    edges sees the same neighbours a whole-square read would, so a bbox that
+    clips a sliver of a square transfers a sliver of it. None when the square
+    misses the grid entirely.
+    """
+    src_bounds = window_bounds(Window(0, 0, src_width, src_height), src_transform)
+    dst = _round_out(window_from_bounds(*src_bounds, transform=dst_transform),
+                     DST_PAD_PX, dst_width, dst_height)
+    if dst is None:
+        return None
+    src = _round_out(window_from_bounds(*window_bounds(dst, dst_transform), transform=src_transform),
+                     SRC_PAD_PX, src_width, src_height)
+    if src is None:
+        return None
+    src = _align_to(src, factor, src_width, src_height)
+    if src is None:
+        return None
+    return src, dst
+
+
+FetchResult = Tuple[str, Optional[Window], Optional[np.ndarray], Optional[str]]
+
+
+def fetch_square(
+    source: str,
+    dst_transform,
+    dst_shape: Tuple[int, int],
+    step_deg: float,
+    cache_dir: Optional[str] = DEM_CACHE_DIR,
+) -> FetchResult:
+    """Read the part of one square the target grid needs and reproject it.
+
+    Standalone (no shared output array) so a thread pool can run several at
+    once. Returns (name, target window, reprojected block, error) - the block
+    is the target window's size, NODATA where the square had nothing.
+    """
+    name = source_name(source)
+    try:
+        path = ensure_cached(source, cache_dir) if cache_dir else source
+        with rasterio.Env(**GDAL_ENV), rasterio.open(path) as src:
+            # Height is a continuous field, so decimating a read costs detail
+            # rather than saving nothing - but a caller who asked for a coarse
+            # grid should still hit the COG's own overviews instead of
+            # dragging full-resolution float32 over the wire per square.
+            factor = max(1, int(step_deg / max(abs(src.transform.a), 1e-12)))
+            windows = square_windows(
+                src.transform, src.width, src.height,
+                dst_transform, dst_shape[1], dst_shape[0], factor)
+            if windows is None:
+                return name, None, None, None
+            src_win, dst_win = windows
+            out_w = max(1, int(src_win.width) // factor)
+            out_h = max(1, int(src_win.height) // factor)
+            data = src.read(
+                1,
+                window=src_win,
+                out_shape=(out_h, out_w),
+                resampling=Resampling.bilinear,
+            ).astype(np.float32)
+            src_transform = src.window_transform(src_win) * rasterio.Affine.scale(
+                src_win.width / out_w, src_win.height / out_h)
+            block = np.full((int(dst_win.height), int(dst_win.width)), NODATA, dtype=np.float32)
+            reproject(
+                source=data,
+                destination=block,
+                src_transform=src_transform,
+                src_crs=src.crs,
+                dst_transform=window_transform(dst_win, dst_transform),
+                dst_crs='EPSG:4326',
+                src_nodata=src.nodata if src.nodata is not None else NODATA,
+                dst_nodata=NODATA,
+                resampling=Resampling.bilinear,
+                num_threads=4,
+            )
+    except Exception as exc:  # noqa: BLE001 - one missing square must not sink the run
+        return name, None, None, str(exc)
+    return name, dst_win, block, None
+
+
 def mosaic_into(
     out: np.ndarray,
     dst_transform,
     sources: Sequence[str],
     step_deg: float,
+    jobs: int = DEFAULT_JOBS,
+    cache_dir: Optional[str] = DEM_CACHE_DIR,
+    fetch: Callable[..., FetchResult] = fetch_square,
 ) -> int:
     """Reproject each square onto the target grid, first real height wins.
 
     The squares do not overlap, so precedence never actually arbitrates - the
     filled mask is here to report coverage and to notice a square that came
-    back entirely void.
+    back entirely void. Up to `jobs` squares are fetched at once; the merge
+    itself walks the results in the order the squares were given, so the
+    output does not depend on which fetch finished first.
     """
     used = 0
     total = len(sources)
     filled = np.zeros(out.shape, dtype=bool)
-    for i, url in enumerate(sources):
-        name = url.rsplit('/', 1)[-1]
-        try:
-            with rasterio.open(url) as src:
-                # Height is a continuous field, so decimating a read costs
-                # detail rather than saving nothing - but a caller who asked
-                # for a coarse grid should still hit the COG's own overviews
-                # instead of dragging 3600x3600 float32 over the wire per
-                # square.
-                factor = max(1, int(step_deg / max(abs(src.transform.a), 1e-12)))
-                out_w = max(1, src.width // factor)
-                out_h = max(1, src.height // factor)
-                data = src.read(
-                    1,
-                    out_shape=(out_h, out_w),
-                    resampling=Resampling.bilinear,
-                ).astype(np.float32)
-                src_transform = src.transform * rasterio.Affine.scale(
-                    src.width / out_w, src.height / out_h)
-                tmp = np.full_like(out, NODATA)
-                reproject(
-                    source=data,
-                    destination=tmp,
-                    src_transform=src_transform,
-                    src_crs=src.crs,
-                    dst_transform=dst_transform,
-                    dst_crs='EPSG:4326',
-                    src_nodata=src.nodata if src.nodata is not None else NODATA,
-                    dst_nodata=NODATA,
-                    resampling=Resampling.bilinear,
-                    num_threads=4,
-                )
-        except Exception as exc:  # noqa: BLE001 - one missing square must not sink the run
-            print(f'  [{i + 1}/{total}] skipped {name}: {exc}')
-            continue
-        fresh = (tmp != NODATA) & ~filled
-        if not fresh.any():
-            print(f'  [{i + 1}/{total}] nothing new from {name}')
-            continue
-        out[fresh] = tmp[fresh]
-        filled |= fresh
-        used += 1
-        print(f'  [{i + 1}/{total}] merged {name} -> {100.0 * filled.mean():.1f}% covered', flush=True)
+    jobs = max(1, min(jobs, total)) if total else 1
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        results = pool.map(
+            lambda url: fetch(url, dst_transform, out.shape, step_deg, cache_dir),
+            sources,
+        )
+        for i, (name, win, block, err) in enumerate(results):
+            if err is not None:
+                print(f'  [{i + 1}/{total}] skipped {name}: {err}', flush=True)
+                continue
+            if win is None:
+                print(f'  [{i + 1}/{total}] {name} lies outside the grid', flush=True)
+                continue
+            rows = slice(int(win.row_off), int(win.row_off + win.height))
+            cols = slice(int(win.col_off), int(win.col_off + win.width))
+            view = out[rows, cols]
+            fresh = (block != NODATA) & ~filled[rows, cols]
+            if not fresh.any():
+                print(f'  [{i + 1}/{total}] nothing new from {name}', flush=True)
+                continue
+            view[fresh] = block[fresh]
+            filled[rows, cols] |= fresh
+            used += 1
+            print(f'  [{i + 1}/{total}] merged {name} -> {100.0 * filled.mean():.1f}% covered',
+                  flush=True)
     return used
 
 
@@ -433,7 +637,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          'shared edge tile half-covered, which merges badly)')
     ap.add_argument('--refresh-tile-list', action='store_true',
                     help='re-fetch the cached archive tile list')
+    ap.add_argument('--jobs', type=int, default=DEFAULT_JOBS,
+                    help=f'squares fetched at once (default {DEFAULT_JOBS})')
+    ap.add_argument('--no-cache', action='store_true',
+                    help=f'read squares straight off the archive instead of keeping '
+                         f'a copy under {DEM_CACHE_DIR}')
     args = ap.parse_args(glue_negative_values(sys.argv[1:] if argv is None else argv))
+    t_start = time.perf_counter()
 
     try:
         bounds = parse_bbox(args.bbox)
@@ -508,8 +718,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     transform, width, height = target_grid(bounds, step_deg)
     print(f'grid      {width} x {height} px ({width * height * 4 / 1048576:.0f} MB in memory)')
     out = np.full((height, width), NODATA, dtype=np.float32)
+    cache_dir = None if args.no_cache else DEM_CACHE_DIR
+    print(f'cache     {cache_dir or "off"}, {max(1, args.jobs)} squares at a time')
 
-    used = mosaic_into(out, transform, urls, step_deg)
+    t_mosaic = time.perf_counter()
+    used = mosaic_into(out, transform, urls, step_deg, jobs=args.jobs, cache_dir=cache_dir)
+    print(f'mosaic    {time.perf_counter() - t_mosaic:.1f} s')
     if used == 0:
         print('error: no DEM squares could be read', file=sys.stderr)
         return 1
@@ -529,6 +743,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
           f'{100.0 * land.mean():.1f}% land')
 
     write_tif(args.out, out, transform, claim)
+    print(f'total     {time.perf_counter() - t_start:.1f} s')
     print(f'\nnext: python tools/bake_planet_dem.py --input {args.out} --out assets/planet')
     return 0
 

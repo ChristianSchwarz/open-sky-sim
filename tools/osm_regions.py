@@ -216,6 +216,68 @@ def assemble_tile_regions(
         claimed.append((piece, cls))
         claimed_bounds = np.vstack([claimed_bounds, np.array(piece.bounds, dtype=np.float64)])
 
+    return _finish_regions(tile_box, local_land, claimed)
+
+
+def derive_tile_regions(
+    tile_box: Polygon,
+    land: 'MultiPolygon | Polygon',
+    child_claims: Sequence[tuple],
+    tolerance: float,
+) -> List[Region]:
+    """A coarser tile's partition, built from its four children's claimed pieces.
+
+    `child_claims` is every (class, geometry) landuse piece the children one
+    level finer resolved, in the children's own coordinates. Running the
+    overlay again at this level would query four times the candidates the
+    children did and resolve the same boundaries a second time; the z12
+    partition is already exact, so a z11 tile is that partition unioned per
+    class across the child seams, simplified with this level's tolerance,
+    and clipped to this level's own simplified land - which is what makes
+    its outer edge agree exactly with the plain coastline layer, the same
+    way `assemble_tile_regions` clips to `local_land`.
+
+    Simplifying each class on its own can leave two classes overlapping by
+    a hair along a shared edge. The pieces are re-resolved smallest-first
+    over the handful of classes a tile carries, so the result stays a
+    partition, and anything under a grid cell of that level is dropped.
+    """
+    local_land = _valid(_valid(land).intersection(tile_box, grid_size=OVERLAY_GRID_SIZE))
+    if local_land.is_empty:
+        return [Region(tile_box, False, None)]
+
+    by_class: dict = {}
+    for cls, geom in child_claims:
+        if geom is not None and not geom.is_empty:
+            by_class.setdefault(cls, []).append(geom)
+    min_area = tolerance * tolerance
+    merged: List[tuple] = []
+    for cls, parts in by_class.items():
+        geom = _valid(unary_union(parts, grid_size=OVERLAY_GRID_SIZE))
+        geom = _valid(geom.simplify(tolerance, preserve_topology=True))
+        geom = _valid(geom.intersection(local_land, grid_size=OVERLAY_GRID_SIZE))
+        parts_kept = [p for p in _polys_of(geom) if p.area >= min_area]
+        if parts_kept:
+            merged.append((parts_kept[0] if len(parts_kept) == 1 else MultiPolygon(parts_kept), cls))
+    merged.sort(key=lambda gc: gc[0].area)
+
+    claimed: List[tuple] = []
+    covered: Optional[BaseGeometry] = None
+    for geom, cls in merged:
+        if covered is not None:
+            geom = _valid(geom.difference(covered, grid_size=OVERLAY_GRID_SIZE))
+            if geom.is_empty:
+                continue
+        claimed.append((geom, cls))
+        covered = geom if covered is None else _valid(unary_union([covered, geom], grid_size=OVERLAY_GRID_SIZE))
+    return _finish_regions(tile_box, local_land, claimed)
+
+
+def _finish_regions(tile_box: Polygon, local_land: BaseGeometry, claimed: List[tuple]) -> List[Region]:
+    """Bare land and water around the claimed pieces, then the per-tile cap.
+
+    `claimed` is smallest-first, as both builders above leave it.
+    """
     # Every step below is validated separately, not just the end of the
     # chain: the real Leipzig failure this guards was exactly a raw,
     # unrepaired *intermediate* result (a difference() whose output came back

@@ -6,8 +6,8 @@ import { Area, Box, blockedReason } from './importMath';
  *
  * The bake itself is the command line in tools/README.md — six stages sharing
  * one bbox — driven by the dev server (tools/areaImport.ts) and reported back
- * over server-sent events, because the whole thing takes minutes and the
- * imagery stage takes half an hour.
+ * over server-sent events, because the whole thing takes minutes, and longer
+ * on a cold cache while Overpass and the imagery download answer.
  *
  * A root service rather than component state: the Angular application lives
  * for the whole session, so a bake started from the dialog keeps its progress

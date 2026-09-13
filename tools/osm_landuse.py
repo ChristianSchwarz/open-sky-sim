@@ -42,7 +42,9 @@ except ImportError:
     print('error: rasterio and numpy are required (pip install rasterio numpy)', file=sys.stderr)
     raise
 
-from osm_common import Bounds, nodes_map, overpass_fetch, relation_rings, ways_map
+from osm_common import (
+    Bounds, merge_elements, nodes_map, overpass_fetch, overpass_fetch_cells, relation_rings, ways_map,
+)
 
 # Compact TerrainClass ids this module may emit. Must match
 # src/script/terrain/tones.ts and tools/bake_planet_cover.py's own copy -
@@ -164,27 +166,29 @@ def overpass_landuse_query(
     a desert with no natural= or landuse= tags at all) must still bake.
     """
     b = Bounds(*bbox)
-    elements: List[dict] = []
+    answers: List[dict] = []
     groups = (('vegetation/agriculture', _VEGETATION_TAGS),
               ('built/bare/snow/wetland', _BUILT_TAGS))
     for index, (label, tags) in enumerate(groups):
-        query = _query_for(tags, b)
         extra: Dict[str, object] = {}
         if on_progress is not None:
             def bytes_seen(received: int, index=index, label=label) -> None:
                 on_progress(index, len(groups), label, received)
             extra['on_progress'] = bytes_seen
         try:
-            data = overpass_fetch(
-                query, f'landuse ({label})', refresh,
-                validate=lambda d, label=label: _reject_if_empty(label, d),
+            # One request per grid cell, each cached on its own, with the
+            # empty-answer guard `_reject_if_empty` describes applied per
+            # cell in its one-retry form: a cell of open ocean really is
+            # empty, and must not burn the whole retry budget proving it.
+            data = overpass_fetch_cells(
+                lambda cell, tags=tags: _query_for(tags, cell), b, f'landuse ({label})', refresh,
                 **extra,
             )
         except Exception as err:
             print(f'  landuse ({label}) unavailable ({err}) - baking without it', file=sys.stderr)
             continue
-        elements.extend(data.get('elements', []))
-    return {'elements': elements}
+        answers.append(data)
+    return merge_elements(answers)
 
 
 def _class_for_tags(tags: dict) -> Optional[int]:

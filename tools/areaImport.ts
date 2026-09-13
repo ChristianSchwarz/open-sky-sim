@@ -7,9 +7,9 @@
 //   GET  /api/import-area/:id  server-sent progress for that job (either kind)
 //
 // The bake is the same command line documented in tools/README.md, run stage by
-// stage with one bbox. It takes minutes at best and half an hour when the
-// satellite imagery is included, which is why this streams rather than making
-// the browser hold a request open.
+// stage with one bbox. A cached re-import takes a couple of minutes and a cold
+// one waits on Overpass and the satellite imagery on top, which is why this
+// streams rather than making the browser hold a request open.
 
 import { Request, Response } from 'express';
 import * as fs from 'fs';

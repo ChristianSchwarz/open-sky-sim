@@ -26,3 +26,6 @@ dist
 
 # Per-area fetched cover sources (e.g. data/cover-mad) — regenerate with `tools/fetch_cover_sources.py`
 /data/cover-*/
+
+# esbuild bundle of the mesh bake worker, rebuilt on every bake
+/tools/bake/.build/

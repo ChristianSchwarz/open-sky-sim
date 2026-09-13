@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 import os
+import pickle
 import struct
 import sys
 import threading
@@ -80,19 +81,41 @@ OVERPASS_BACKOFF_S = (10.0, 30.0)
 # front paid its refusal on every single fetch of a multi-hour bake. A
 # success resets the count, so a mirror that recovers earns its place back.
 _MIRROR_FAILURES: Dict[str, int] = {}
+# Fetches run a few at a time (see overpass_fetch_many), so the tally is
+# shared between threads.
+_MIRROR_LOCK = threading.Lock()
 
 
 def mirror_order() -> List[str]:
     """Overpass mirrors, least-failing first; ties keep `OVERPASS_URLS` order."""
-    return sorted(OVERPASS_URLS, key=lambda u: _MIRROR_FAILURES.get(u, 0))
+    with _MIRROR_LOCK:
+        return sorted(OVERPASS_URLS, key=lambda u: _MIRROR_FAILURES.get(u, 0))
 
 
 def _mirror_failed(url: str) -> None:
-    _MIRROR_FAILURES[url] = _MIRROR_FAILURES.get(url, 0) + 1
+    with _MIRROR_LOCK:
+        _MIRROR_FAILURES[url] = _MIRROR_FAILURES.get(url, 0) + 1
 
 
 def _mirror_succeeded(url: str) -> None:
-    _MIRROR_FAILURES[url] = 0
+    with _MIRROR_LOCK:
+        _MIRROR_FAILURES[url] = 0
+
+
+# How many Overpass requests are in flight at once. Two, across the
+# least-failing mirrors, is the most the public mirrors tolerate from one
+# address before answering 429; the eight queries an import makes used to
+# run strictly one after another.
+OVERPASS_CONCURRENCY = 2
+
+# The grid an Overpass fetch is cut into: whole tiles at this zoom, on the
+# same lattice as everything else the bake writes. A cache entry is one
+# cell, so a widened, nudged or neighbouring bbox re-fetches only the cells
+# it did not already have, instead of everything under a bbox whose text
+# no longer hashes the same. z7 is 1.4 degrees a side: a 6 degree box is
+# 25 cells, an island a handful, and a cell's answer stays small enough
+# that the mirrors do not 504 on it.
+OVERPASS_CELL_ZOOM = 7
 
 
 def remark_is_failure(remark: str) -> bool:
@@ -211,7 +234,52 @@ def load_manifest(path: str) -> dict:
 
 def overpass_cache_path(query: str) -> str:
     key = hashlib.sha1(query.encode('utf-8')).hexdigest()[:16]
-    return os.path.join(OSM_CACHE_DIR, f'{key}.json.gz')
+    return os.path.join(OSM_CACHE_DIR, f'{key}.pkl.gz')
+
+
+def _legacy_cache_path(query: str) -> str:
+    """Where an answer fetched before the pickle cache landed would be."""
+    return overpass_cache_path(query)[:-len('.pkl.gz')] + '.json.gz'
+
+
+def _read_cache(query: str) -> Optional[Tuple[dict, str]]:
+    """The cached answer and the file it came from, or None.
+
+    Pickle rather than JSON, at the lightest gzip level: a hit on a
+    regional answer used to cost tens of seconds of `json.load` over a
+    45 MB gzip written at level 9, which is most of what a warm-cache bake
+    spent in its fetch phases. A pre-pickle `.json.gz` entry is still read,
+    and rewritten in the new form so the next hit is fast.
+    """
+    cache = overpass_cache_path(query)
+    if os.path.isfile(cache):
+        try:
+            with gzip.open(cache, 'rb') as fh:
+                return pickle.load(fh), cache
+        except Exception:
+            print(f'  cached answer unreadable ({cache}), re-fetching', file=sys.stderr)
+            return None
+    legacy = _legacy_cache_path(query)
+    if os.path.isfile(legacy):
+        try:
+            with gzip.open(legacy, 'rt', encoding='utf-8') as fh:
+                data = json.load(fh)
+        except Exception:
+            print(f'  cached answer unreadable ({legacy}), re-fetching', file=sys.stderr)
+            return None
+        _write_cache(query, data)
+        return data, legacy
+    return None
+
+
+def _write_cache(query: str, data: dict) -> str:
+    cache = overpass_cache_path(query)
+    os.makedirs(OSM_CACHE_DIR, exist_ok=True)
+    tmp = f'{cache}.{os.getpid()}.{threading.get_ident()}.tmp'
+    with gzip.open(tmp, 'wb', compresslevel=1) as fh:
+        pickle.dump(data, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, cache)
+    return cache
 
 
 class _WaitTicker:
@@ -302,15 +370,12 @@ def overpass_fetch(
     importantly, never cached: caching it would make the mirror's mistake
     permanent for every later run of the same bbox.
     """
-    cache = overpass_cache_path(query)
-    if not refresh and os.path.isfile(cache):
-        try:
-            with gzip.open(cache, 'rt', encoding='utf-8') as fh:
-                data = json.load(fh)
+    if not refresh:
+        hit = _read_cache(query)
+        if hit is not None:
+            data, cache = hit
             print(f'using cached OSM {label} ({cache})')
             return data
-        except Exception:
-            print(f'  cached {label} unreadable, re-fetching', file=sys.stderr)
 
     headers = {
         'User-Agent': 'retroflightsim-coast-bake/1.0',
@@ -384,10 +449,7 @@ def overpass_fetch(
 
             _mirror_succeeded(url)
             try:
-                os.makedirs(OSM_CACHE_DIR, exist_ok=True)
-                with gzip.open(cache, 'wt', encoding='utf-8') as fh:
-                    json.dump(data, fh)
-                print(f'  cached to {cache}')
+                print(f'  cached to {_write_cache(query, data)}')
             except Exception as err:
                 print(f'  could not cache the response: {err}', file=sys.stderr)
             return data
@@ -398,6 +460,110 @@ def overpass_fetch(
             time.sleep(delay)
     raise RuntimeError(
         f'all Overpass mirrors failed after {OVERPASS_ROUNDS} rounds: {last_err}')
+
+
+def overpass_fetch_many(
+    requests_: Sequence[Tuple[str, str]], refresh: bool,
+    validates: Optional[Sequence[Optional[Callable[[dict], None]]]] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+    concurrency: int = OVERPASS_CONCURRENCY,
+) -> List[dict]:
+    """`overpass_fetch` over several (query, label) pairs, a few at a time.
+
+    Results come back in the order asked. `validates`, when given, is one
+    `validate` per request. `on_progress(index, received)` hears each
+    request's byte count as it grows. Each request keeps its own cache
+    entry, so a mix of hits and misses only fetches the misses.
+    """
+    results: List[Optional[dict]] = [None] * len(requests_)
+
+    def one(index: int) -> None:
+        query, label = requests_[index]
+        extra: Dict[str, object] = {}
+        if on_progress is not None:
+            extra['on_progress'] = lambda received, index=index: on_progress(index, received)
+        validate = validates[index] if validates is not None else None
+        results[index] = overpass_fetch(query, label, refresh, validate=validate, **extra)
+
+    if len(requests_) <= 1 or concurrency <= 1:
+        for i in range(len(requests_)):
+            one(i)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            for future in [pool.submit(one, i) for i in range(len(requests_))]:
+                future.result()
+    return [r if r is not None else {'elements': []} for r in results]
+
+
+def bounds_cells(b: Bounds, zoom: int = OVERPASS_CELL_ZOOM) -> List[Bounds]:
+    """Whole tiles at `zoom` covering `b`, row by row - the units a fetch is cut into."""
+    x0, y0, x1, y1 = tile_range_for_bounds(zoom, b)
+    return [tile_bounds(zoom, x, y) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
+
+
+def accept_empty_once() -> Callable[[dict], None]:
+    """A `validate` that refuses an empty answer the first time only.
+
+    overpass.osm.ch has answered a heavy query with HTTP 200, no remark and
+    a silently truncated `elements: []`, which no status code tells apart
+    from a bbox that really has nothing in it. Refusing every empty answer
+    made a genuinely empty box - open ocean, which most cells of a coastal
+    import are - burn the whole mirror and retry budget confirming it. One
+    refusal sends the query to the next mirror; if that one says empty too,
+    empty it is.
+    """
+    seen = {'empty': 0}
+
+    def validate(data: dict) -> None:
+        if not data.get('elements'):
+            seen['empty'] += 1
+            if seen['empty'] == 1:
+                raise RuntimeError('came back with zero elements - checking another mirror')
+    return validate
+
+
+def merge_elements(answers: Sequence[dict]) -> dict:
+    """The union of several Overpass answers, each element once by (type, id)."""
+    seen: Set[Tuple[str, int]] = set()
+    elements: List[dict] = []
+    for data in answers:
+        for el in data.get('elements', []):
+            key = (el.get('type', ''), el.get('id', 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            elements.append(el)
+    return {'elements': elements}
+
+
+def overpass_fetch_cells(
+    query_for: Callable[[Bounds], str], b: Bounds, label: str, refresh: bool,
+    on_progress: Optional[Callable[[int], None]] = None,
+    guard_empty: bool = True,
+) -> dict:
+    """One logical fetch over `b`, made as one request per grid cell.
+
+    `query_for(cell)` builds the query text for a cell. Every cell answer is
+    cached on its own, so two imports that overlap share the cells they
+    have in common, and one that grows a box fetches only the new ring.
+    The result covers the cells' union, a superset of `b`; callers clip.
+    `on_progress` hears the total bytes received so far across all cells.
+    """
+    cells = bounds_cells(b)
+    received = [0] * len(cells)
+
+    def progress(index: int, n: int) -> None:
+        received[index] = n
+        if on_progress is not None:
+            on_progress(sum(received))
+
+    requests_ = [(query_for(cell), f'{label} [{i + 1}/{len(cells)}]') for i, cell in enumerate(cells)]
+    answers = overpass_fetch_many(
+        requests_, refresh,
+        validates=[accept_empty_once() if guard_empty else None for _ in cells],
+        on_progress=progress if on_progress is not None else None)
+    return merge_elements(answers)
 
 
 # --- OSM element helpers ----------------------------------------------

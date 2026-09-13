@@ -185,5 +185,46 @@ class InvalidGeometryTest(unittest.TestCase):
         self.assertAlmostEqual(_total_area(regions), TILE.area, places=6)
 
 
+
+
+class DeriveFromChildrenTest(unittest.TestCase):
+    """A coarser tile's partition, built from its children's claimed pieces."""
+
+    def test_pieces_of_one_class_merge_across_the_child_seam(self):
+        from osm_regions import derive_tile_regions
+        land = MultiPolygon([TILE])
+        # Two z+1 children's forest halves meeting at x=0.5.
+        west = box(0.2, 0.2, 0.5, 0.6)
+        east = box(0.5, 0.2, 0.8, 0.6)
+        regions = derive_tile_regions(TILE, land, [(CLS_TREE, west), (CLS_TREE, east)], 0.001)
+
+        forest = [r for r in regions if r.landuse_class == CLS_TREE]
+        self.assertEqual(len(forest), 1, 'the seam must not survive as two regions')
+        self.assertAlmostEqual(forest[0].geom.area, 0.6 * 0.4, places=9)
+        self.assertAlmostEqual(_total_area(regions), TILE.area, places=9)
+
+    def test_overlapping_classes_after_simplify_stay_a_partition(self):
+        from osm_regions import derive_tile_regions
+        land = MultiPolygon([TILE])
+        big = box(0.1, 0.1, 0.9, 0.9)
+        small = box(0.4, 0.4, 0.6, 0.6)
+        regions = derive_tile_regions(TILE, land, [(CLS_TREE, big), (CLS_BUILT, small)], 0.001)
+
+        built = [r for r in regions if r.landuse_class == CLS_BUILT]
+        forest = [r for r in regions if r.landuse_class == CLS_TREE]
+        self.assertEqual(len(built), 1)
+        self.assertAlmostEqual(built[0].geom.area, small.area, places=9)
+        self.assertAlmostEqual(sum(r.geom.area for r in forest), big.area - small.area, places=9)
+        self.assertAlmostEqual(_total_area(regions), TILE.area, places=9)
+
+    def test_claims_never_reach_into_water(self):
+        from osm_regions import derive_tile_regions
+        land = MultiPolygon([box(0.0, 0.0, 0.5, 1.0)])
+        regions = derive_tile_regions(TILE, land, [(CLS_TREE, box(0.3, 0.3, 0.7, 0.7))], 0.001)
+        classed = [r for r in regions if r.landuse_class == CLS_TREE]
+        self.assertAlmostEqual(classed[0].geom.area, 0.2 * 0.4, places=9)
+        self.assertAlmostEqual(_total_area([r for r in regions if not r.is_land]), 0.5, places=9)
+
+
 if __name__ == '__main__':
     unittest.main()

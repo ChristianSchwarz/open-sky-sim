@@ -40,14 +40,15 @@ import multiprocessing as mp
 import os
 import sys
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
 try:
-    from shapely.geometry import Point, Polygon
-    from shapely.prepared import prep
+    from shapely.geometry import Point, Polygon, box
+    from shapely.strtree import STRtree
 except ImportError:
     print('error: shapely is required (pip install shapely requests)', file=sys.stderr)
     raise
@@ -58,7 +59,9 @@ from osm_common import (
     LAND,
     glue_negative_bbox,
     load_manifest,
+    accept_empty_once,
     nodes_map,
+    OVERPASS_CONCURRENCY,
     overpass_fetch,
     parse_bbox,
     read_lwm,
@@ -668,6 +671,130 @@ def _oriented_footprint(
 
 # --- Overpass ---------------------------------------------------------------
 
+# --- progress ---------------------------------------------------------------
+
+PhaseProgress = Callable[[float, str], None]
+"""(fraction of the current phase done, 0..1; a short detail such as `12/40`)."""
+
+# The bytes a fetch has received, turned into a guess at how far along it is:
+# Overpass sends no Content-Length, so this is an asymptote that keeps the bar
+# moving and never reaches the end before the answer does. 2 MB is about half
+# of a regional taxiways-and-aprons answer; the aerodrome and runway answers
+# are far smaller and simply arrive.
+FETCH_HALFWAY_BYTES = 2 * 1024 * 1024
+
+
+def fetch_fraction(received: int) -> float:
+    return received / (received + FETCH_HALFWAY_BYTES)
+
+
+def format_mb(n: int) -> str:
+    return f'{n / (1024 * 1024):.1f} MB'
+
+
+class StageProgress:
+    """Whole-stage progress for the in-app importer, across weighted phases.
+
+    A copy of the coast bake's class of the same name: tools/areaImport.ts
+    reads `(NN.N% of stage)` off the end of a line as this stage's own
+    percentage and shows it in the import dialog. Every phase is a weighted
+    slice of the whole, so the percentage moves through the four Overpass
+    fetches and the assembly too - the minutes that used to sit at 0% with
+    nothing in the log.
+
+    A phase that turns out not to apply (an optional fetch that failed, the
+    write of a dry run) is skipped and its weight dropped, so the percentage
+    still reaches 100 and only ever moves forward. The phase numbering stays
+    over the full list, so `phase 6/8 ... skipped` reads as what it is.
+    """
+
+    def __init__(self, phases: Sequence[Tuple[str, str, float]], min_interval_s: float = 0.5):
+        self._phases = [(key, label, float(weight)) for key, label, weight in phases]
+        self._index = {key: i for i, (key, _l, _w) in enumerate(self._phases)}
+        self._done: Set[str] = set()
+        self._skipped: Set[str] = set()
+        self._current: Optional[str] = None
+        self._label = ''
+        self._fraction = 0.0
+        self._phase_started = 0.0
+        self._last_print = 0.0
+        self._min_interval = min_interval_s
+
+    def _weight(self, key: str) -> float:
+        return self._phases[self._index[key]][2]
+
+    def percent(self) -> float:
+        active = sum(w for k, _l, w in self._phases if k not in self._skipped)
+        if active <= 0:
+            return 100.0
+        done = sum(self._weight(k) for k in self._done)
+        if self._current is not None and self._current not in self._done:
+            done += self._fraction * self._weight(self._current)
+        return max(0.0, min(100.0, 100.0 * done / active))
+
+    def _heading(self, key: str, label: str) -> str:
+        return f'phase {self._index[key] + 1}/{len(self._phases)}  {label}'
+
+    def is_done(self, key: str) -> bool:
+        return key in self._done
+
+    def begin(self, key: str, label: Optional[str] = None) -> None:
+        if self._current is not None and self._current not in self._done:
+            self.end()
+        self._current = key
+        self._label = label or self._phases[self._index[key]][1]
+        self._fraction = 0.0
+        self._phase_started = time.monotonic()
+        self._last_print = 0.0
+        print(self._heading(key, self._label), flush=True)
+
+    def update(self, fraction: float, detail: str = '', force: bool = False) -> None:
+        """Report where the current phase is. Throttled to keep the log sane."""
+        self._fraction = max(self._fraction, max(0.0, min(1.0, fraction)))
+        now = time.monotonic()
+        if not force and fraction < 1.0 and now - self._last_print < self._min_interval:
+            return
+        self._last_print = now
+        tail = f' {detail}' if detail else ''
+        print(f'  {self._label}{tail}  ({self.percent():.1f}% of stage)', flush=True)
+
+    def skip(self, key: str, reason: str) -> None:
+        """Drop a phase from the total. Also the way out of a phase that was
+        begun and then failed (an optional fetch the mirror refused): it is
+        neither done nor still running afterwards."""
+        self._skipped.add(key)
+        if self._current == key:
+            self._current = None
+        print(f'{self._heading(key, self._phases[self._index[key]][1])} - skipped, {reason}',
+              flush=True)
+
+    def end(self, summary: str = '') -> None:
+        if self._current is None:
+            return
+        self.update(1.0, force=True)
+        self._done.add(self._current)
+        elapsed = time.monotonic() - self._phase_started
+        tail = f', {summary}' if summary else ''
+        print(f'  {self._label} done in {elapsed:.1f}s{tail}', flush=True)
+        self._current = None
+
+
+# The phases one area goes through, in order, with their share of the stage.
+# The fetches dominate on a cold cache and vanish on a warm one; the platform
+# sampling is the CPU-bound part that remains. Keys are prefixed per area in
+# `bake()` so a multi-area run numbers every phase of every area.
+AREA_PHASES: Tuple[Tuple[str, str, float], ...] = (
+    ('aerodromes', 'fetching OSM aerodromes', 3),
+    ('runways', 'fetching OSM runways', 3),
+    ('taxiways', 'fetching OSM taxiways', 6),
+    ('aprons', 'fetching OSM aprons and buildings', 6),
+    ('assemble', 'assembling airfields', 4),
+    ('sample', 'sampling platforms', 20),
+)
+
+
+# --- Overpass ---------------------------------------------------------------
+
 def _aeroway_query(clauses: Sequence[str]) -> str:
     body = '\n'.join(f'  {c};' for c in clauses)
     return f"""[out:json][timeout:180];
@@ -680,7 +807,10 @@ out skel qt;
 """
 
 
-def overpass_airports(b: Bounds, refresh: bool = False) -> dict:
+def overpass_airports(
+    b: Bounds, refresh: bool = False,
+    progress: Optional[StageProgress] = None, phase_prefix: str = '',
+) -> dict:
     """Aerodromes, runways and the rest of the surfaces, as separate requests.
 
     Separate, for the reason the coast bake documents at length: Overpass
@@ -706,16 +836,35 @@ def overpass_airports(b: Bounds, refresh: bool = False) -> dict:
     runways_query = _aeroway_query(
         [f'way["aeroway"="{kind}"]({box})' for kind in ('runway', 'helipad')])
     optional = (
-        ('taxiways', _aeroway_query([f'way["aeroway"="taxiway"]({box})'])),
-        ('aprons and buildings', _aeroway_query(
+        ('taxiways', 'taxiways', _aeroway_query([f'way["aeroway"="taxiway"]({box})'])),
+        ('aprons', 'aprons and buildings', _aeroway_query(
             [f'way["aeroway"="{kind}"]({box})'
              for kind in ('apron', 'terminal', 'hangar', 'control_tower', 'tower')]
             + [f'relation["aeroway"="{kind}"]({box})'
                for kind in ('apron', 'terminal')])),
     )
 
+    def fetch(key: str, label: str, query: str, **extra) -> List[dict]:
+        """One fetch as one progress phase, bytes streaming into the bar."""
+        if progress is not None:
+            progress.begin(phase_prefix + key)
+
+            def on_bytes(received: int) -> None:
+                progress.update(fetch_fraction(received), f'{format_mb(received)} received')
+            extra['on_progress'] = on_bytes
+        got = overpass_fetch(query, label, refresh, **extra).get('elements', [])
+        if progress is not None:
+            progress.end(f'{len(got)} elements')
+        return got
+
     elements: List[dict] = []
-    aerodrome_elements = overpass_fetch(aerodromes_query, 'aerodromes', refresh).get('elements', [])
+    # An empty aerodromes answer is checked on a second mirror before it is
+    # believed: a silently truncated HTTP 200 looks exactly like a box with
+    # no airfields, and one such answer was cached for Crimea and baked as
+    # "no airfields" - it also disarms the empty check on the three fetches
+    # below, which take the aerodrome count as their reference.
+    aerodrome_elements = fetch('aerodromes', 'aerodromes', aerodromes_query,
+                               validate=accept_empty_once())
     elements.extend(aerodrome_elements)
 
     def reject_if_suspiciously_empty(label: str, data: dict) -> None:
@@ -733,18 +882,55 @@ def overpass_airports(b: Bounds, refresh: bool = False) -> dict:
                 f'{label} came back empty for a bbox with aerodromes - '
                 'likely a truncated answer, not a bbox with none')
 
-    elements.extend(overpass_fetch(
-        runways_query, 'runways', refresh,
-        validate=lambda data: reject_if_suspiciously_empty('runways', data),
-    ).get('elements', []))
-    for label, query in optional:
+    # The runways and the two optional groups only need the aerodromes for
+    # their empty-answer check, so they go out together, a couple at a time
+    # (OVERPASS_CONCURRENCY), instead of one after another. The progress
+    # bar shows them as one phase: the runways one carries the streamed
+    # bytes of all three, and the other two complete the moment it ends.
+    remaining = (('runways', 'runways', runways_query, False),) + tuple(
+        (key, label, query, True) for key, label, query in optional)
+    received = [0] * len(remaining)
+    if progress is not None:
+        progress.begin(phase_prefix + 'runways', 'fetching OSM runways, taxiways and aprons')
+
+    def one(index: int) -> Tuple[Optional[List[dict]], Optional[Exception]]:
+        key, label, query, _optional = remaining[index]
+        extra: Dict[str, object] = {}
+        if progress is not None:
+            def on_bytes(n: int, index=index) -> None:
+                received[index] = n
+                total = sum(received)
+                progress.update(fetch_fraction(total), f'{format_mb(total)} received')
+            extra['on_progress'] = on_bytes
         try:
-            elements.extend(overpass_fetch(
+            data = overpass_fetch(
                 query, label, refresh,
                 validate=lambda data, label=label: reject_if_suspiciously_empty(label, data),
-            ).get('elements', []))
-        except Exception as err:
+                **extra)
+            return data.get('elements', []), None
+        except Exception as err:  # reported below, per group
+            return None, err
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=OVERPASS_CONCURRENCY) as pool:
+        outcomes = list(pool.map(one, range(len(remaining))))
+
+    counts = []
+    for (key, label, _query, is_optional), (got, err) in zip(remaining, outcomes):
+        if err is not None:
+            if not is_optional:
+                raise err
             print(f'  {label} unavailable ({err}) - baking without them', file=sys.stderr)
+            if progress is not None:
+                progress.skip(phase_prefix + key, 'unavailable, baking without them')
+            continue
+        elements.extend(got)
+        counts.append(f'{len(got)} {label}')
+        if progress is not None and key != 'runways':
+            progress.begin(phase_prefix + key)
+            progress.end(f'{len(got)} elements, fetched with the runways')
+    if progress is not None:
+        progress.end(', '.join(counts))
     return {'elements': elements}
 
 
@@ -778,8 +964,77 @@ def _polygon_of(element: dict, ways: Dict[int, dict], nodes: Dict[int, Tuple[flo
     return best
 
 
-def assemble_airfields(data: dict) -> List[Airfield]:
-    """Group every aeroway element under the aerodrome it belongs to."""
+class AerodromeIndex:
+    """Which aerodrome an aeroway element belongs to, answered from two STRtrees.
+
+    The plain scan this replaces tested every aerodrome polygon against every
+    taxiway, apron and building - O(aerodromes x elements), and a regional
+    box has hundreds of the one and tens of thousands of the other. The
+    answer is unchanged:
+
+    - a point inside an aerodrome polygon belongs to the first such aerodrome
+      in OSM element order (the tree can return several for overlapping or
+      nested polygons; the lowest index wins, as the scan's first hit did);
+    - otherwise it belongs to the nearest node-only aerodrome within
+      `ORPHAN_ASSIGN_RADIUS_M`, measured in that aerodrome's own local frame
+      exactly as before, with the earlier of two equidistant nodes winning.
+
+    The node tree holds each node's reach as a box in degrees - its radius
+    converted through its own `LocalFrame`, so every node whose metric
+    distance could be under the radius is a candidate, and the metric test
+    then decides among the candidates precisely as the scan did.
+    """
+
+    def __init__(self, entries: Sequence[Tuple[Optional[Polygon], Airfield]]):
+        self._entries = list(entries)
+        poly_slots: List[int] = []
+        poly_geoms: List[Polygon] = []
+        node_slots: List[int] = []
+        node_boxes: List[Polygon] = []
+        self._node_frames: List[LocalFrame] = []
+        for i, (poly, airfield) in enumerate(self._entries):
+            if poly is not None:
+                poly_slots.append(i)
+                poly_geoms.append(poly)
+                continue
+            frame = LocalFrame(airfield.lat, airfield.lon)
+            reach = ORPHAN_ASSIGN_RADIUS_M * 1.001
+            west, south = frame.to_lonlat(-reach, -reach)
+            east, north = frame.to_lonlat(reach, reach)
+            node_slots.append(i)
+            node_boxes.append(box(west, south, east, north))
+            self._node_frames.append(frame)
+        self._poly_slots = poly_slots
+        self._node_slots = node_slots
+        self._poly_tree = STRtree(poly_geoms) if poly_geoms else None
+        self._node_tree = STRtree(node_boxes) if node_boxes else None
+
+    def owner(self, lon: float, lat: float) -> Optional[Airfield]:
+        """The aerodrome whose polygon holds this point, else the nearest node."""
+        point = Point(lon, lat)
+        if self._poly_tree is not None:
+            hits = self._poly_tree.query(point, predicate='within')
+            if len(hits):
+                # Tree slots ascend with element order, so the lowest slot is
+                # the scan's first hit.
+                return self._entries[self._poly_slots[int(min(hits))]][1]
+        best: Optional[Airfield] = None
+        best_d = ORPHAN_ASSIGN_RADIUS_M
+        if self._node_tree is not None:
+            for slot in sorted(int(s) for s in self._node_tree.query(point)):
+                e, n = self._node_frames[slot].to_m(lon, lat)
+                d = math.hypot(e, n)
+                if d < best_d:
+                    best, best_d = self._entries[self._node_slots[slot]][1], d
+        return best
+
+
+def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) -> List[Airfield]:
+    """Group every aeroway element under the aerodrome it belongs to.
+
+    `on_progress`, when given, hears (fraction, detail) as the elements are
+    walked, for the importer's bar.
+    """
     elements = data.get('elements', [])
     nodes = nodes_map(elements)
     ways = ways_map(elements)
@@ -817,29 +1072,14 @@ def assemble_airfields(data: dict) -> List[Airfield]:
         airfields.append(airfield)
         polygons.append((poly, airfield))
 
-    prepared = [(prep(p) if p is not None else None, p, a) for p, a in polygons]
-
-    def owner(lon: float, lat: float) -> Optional[Airfield]:
-        """The aerodrome whose polygon holds this point, else the nearest node."""
-        point = Point(lon, lat)
-        for pre, poly, airfield in prepared:
-            if pre is not None and pre.contains(point):
-                return airfield
-        best: Optional[Airfield] = None
-        best_d = ORPHAN_ASSIGN_RADIUS_M
-        for pre, poly, airfield in prepared:
-            if poly is not None:
-                continue
-            frame = LocalFrame(airfield.lat, airfield.lon)
-            e, n = frame.to_m(lon, lat)
-            d = math.hypot(e, n)
-            if d < best_d:
-                best, best_d = airfield, d
-        return best
+    owner = AerodromeIndex(polygons).owner
 
     orphan_runways: List[Tuple[dict, Tuple[float, float]]] = []
+    total = len(elements)
 
-    for el in elements:
+    for index, el in enumerate(elements):
+        if on_progress is not None and index % 2000 == 0:
+            on_progress(index / total if total else 1.0, f'{index}/{total} elements')
         tags = el.get('tags') or {}
         aeroway = tags.get('aeroway')
         if aeroway is None or aeroway == 'aerodrome':
@@ -981,17 +1221,24 @@ class LandMask:
         self.zoom = zoom
         self.n = tile_size
         self.span = 180.0 / (1 << zoom)
-        self._cache: Dict[Tuple[int, int], Optional[bytearray]] = {}
+        # Least-recently-used, capped: an airfield's samples straddle a few
+        # tiles and keep coming back to them, and dropping the whole cache
+        # at the cap (as this used to) re-read every one of those from disk
+        # right when they were all in play.
+        self._cache: 'OrderedDict[Tuple[int, int], Optional[bytearray]]' = OrderedDict()
+        self._cache_cap = 256
 
     def is_land(self, lon: float, lat: float) -> Optional[bool]:
         """True/False, or None where no mask was ever baked for this point."""
         x = int(math.floor((lon + 180.0) / self.span))
         y = int(math.floor((90.0 - lat) / self.span))
         key = (x, y)
-        if key not in self._cache:
-            if len(self._cache) >= 256:
-                self._cache.clear()
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
             self._cache[key] = read_lwm(self.out_dir, self.zoom, x, y)
+            while len(self._cache) > self._cache_cap:
+                self._cache.popitem(last=False)
         grid = self._cache[key]
         if grid is None:
             return None
@@ -1429,6 +1676,7 @@ def evaluate_airfields_parallel(
     max_zoom: int,
     tile_size: int,
     jobs: int,
+    on_progress: Optional[PhaseProgress] = None,
 ) -> List[dict]:
     """Evaluates every candidate in `found`, across `jobs` worker processes.
 
@@ -1437,20 +1685,31 @@ def evaluate_airfields_parallel(
     `--per-area` keeps the serial early-break instead, since most of its
     candidates are never looked at).
     """
-    jobs = max(1, min(jobs, len(found))) if found else 1
-    if jobs == 1:
-        return [r for a in found if (r := evaluate_airfield(a, dem, mask)) is not None]
+    def report(done: int) -> None:
+        if on_progress is not None:
+            on_progress(done / len(found) if found else 1.0, f'{done}/{len(found)}')
 
+    jobs = max(1, min(jobs, len(found))) if found else 1
     kept: List[dict] = []
+    if jobs == 1:
+        for done, airfield in enumerate(found, 1):
+            result = evaluate_airfield(airfield, dem, mask)
+            if result is not None:
+                kept.append(result)
+            report(done)
+        return kept
+
     ctx = mp.get_context('spawn')
     with ctx.Pool(
         jobs, initializer=_init_airfield_worker,
         initargs=(out_dir, max_zoom, tile_size, mask is not None),
     ) as pool:
-        for result, report_text in pool.imap(_airfield_worker, found, chunksize=4):
+        for done, (result, report_text) in enumerate(
+                pool.imap(_airfield_worker, found, chunksize=4), 1):
             sys.stdout.write(report_text)
             if result is not None:
                 kept.append(result)
+            report(done)
     return kept
 
 
@@ -1484,14 +1743,28 @@ def bake(args: argparse.Namespace) -> int:
     items: List[dict] = list(block.get('items') or [])
     coverage = block.get('coverage')
 
+    # Every area's phases in order, then the one write at the end. With one
+    # target (the importer's case) the prefix is empty and the headings read
+    # `phase 1/7  fetching OSM aerodromes`; a multi-area run numbers through.
+    def prefix_for(i: int) -> str:
+        return '' if len(targets) == 1 else f'{i}:'
+    phases: List[Tuple[str, str, float]] = []
+    for i, (name, _b) in enumerate(targets):
+        suffix = '' if len(targets) == 1 else f' ({name})'
+        phases.extend((prefix_for(i) + key, label + suffix, weight)
+                      for key, label, weight in AREA_PHASES)
+    phases.append(('write', 'writing the manifest', 1))
+    progress = StageProgress(phases)
+
     total_kept = 0
     fresh_ids: Set[int] = set()
     failed: List[str] = []
-    for name, bounds in targets:
+    for i, (name, bounds) in enumerate(targets):
+        prefix = prefix_for(i)
         print(f'\narea {name}  lon [{bounds.west:.4f}, {bounds.east:.4f}] '
               f'lat [{bounds.south:.4f}, {bounds.north:.4f}]')
         try:
-            data = overpass_airports(bounds, args.refresh_osm)
+            data = overpass_airports(bounds, args.refresh_osm, progress, prefix)
         except Exception as err:
             # One area's fetch failing must not cost the areas after it. The
             # merge is per-bbox, so a skipped area simply keeps whatever it had
@@ -1499,9 +1772,13 @@ def bake(args: argparse.Namespace) -> int:
             print(f'  Overpass failed for {name}: {err} - skipping this area',
                   file=sys.stderr)
             failed.append(name)
+            for key, _label, _weight in AREA_PHASES:
+                if not progress.is_done(prefix + key):
+                    progress.skip(prefix + key, 'Overpass failed for this area')
             continue
         print(f'  {len(data.get("elements", []))} OSM elements')
-        found = assemble_airfields(data)
+        progress.begin(prefix + 'assemble')
+        found = assemble_airfields(data, progress.update)
         # Overpass returns anything *touching* the box; an airfield whose
         # polygon overlaps the edge but whose runways are outside belongs to
         # the neighbouring area, and claiming it here would place it twice.
@@ -1509,12 +1786,14 @@ def bake(args: argparse.Namespace) -> int:
                  if bounds.west <= a.lon <= bounds.east and bounds.south <= a.lat <= bounds.north]
         found.sort(key=score)
         cap = 'all' if args.per_area is None else f'up to {args.per_area}'
+        progress.end(f'{len(found)} aerodromes with runways')
         print(f'  {len(found)} aerodromes with runways; keeping {cap}')
 
         for airfield in found:
             airfield.area = name
             airfield.pads = platform_pads(airfield)
 
+        progress.begin(prefix + 'sample')
         if args.per_area is not None:
             # A finite cap is usually reached long before the end of a sorted
             # `found`, so the serial early-break - stop the moment enough are
@@ -1522,18 +1801,20 @@ def bake(args: argparse.Namespace) -> int:
             # worker for nothing. Pooling only pays when every candidate gets
             # evaluated anyway, which is the (now default) uncapped case.
             kept: List[dict] = []
-            for airfield in found:
+            for done, airfield in enumerate(found, 1):
                 if len(kept) >= args.per_area:
                     break
                 result = evaluate_airfield(airfield, dem, mask)
                 if result is not None:
                     kept.append(result)
+                progress.update(done / len(found), f'{done}/{len(found)}')
         else:
             t_af = time.time()
             kept = evaluate_airfields_parallel(
-                found, dem, mask, out_dir, max_zoom, tile_size, args.jobs)
+                found, dem, mask, out_dir, max_zoom, tile_size, args.jobs, progress.update)
             if len(found) > 1:
                 print(f'  fitted {len(found)} candidates in {time.time() - t_af:.1f}s')
+        progress.end(f'{len(kept)} kept')
 
         items = merge_items(items, kept, bounds)
         coverage = union_bounds(coverage, bounds)
@@ -1541,9 +1822,11 @@ def bake(args: argparse.Namespace) -> int:
         fresh_ids.update(i['osmId'] for i in kept)
 
     if args.dry_run:
+        progress.skip('write', 'dry run')
         print(f'\ndry run - {total_kept} airfields, manifest not written')
         return 1 if failed else 0
 
+    progress.begin('write')
     manifest['airfields'] = {
         'source': 'osm',
         'coverage': coverage,
@@ -1555,6 +1838,7 @@ def bake(args: argparse.Namespace) -> int:
     with open(manifest_path, 'w', encoding='utf-8') as fh:
         json.dump(manifest, fh, indent=2)
         fh.write('\n')
+    progress.end()
 
     runways = sum(len(i['runways']) for i in items)
     print(f'\nwrote {len(items)} airfields ({runways} runways) to {manifest_path}')

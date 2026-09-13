@@ -56,8 +56,9 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, module='rasterio'
 try:
     import rasterio
     from rasterio.enums import Resampling
-    from rasterio.transform import from_origin
-    from rasterio.warp import reproject
+    from rasterio.transform import array_bounds, from_origin
+    from rasterio.warp import reproject, transform_bounds
+    from rasterio.windows import Window, from_bounds as window_from_bounds
 except ImportError:  # pragma: no cover - dependency hint
     print('error: rasterio is required (pip install rasterio numpy requests)', file=sys.stderr)
     raise
@@ -151,6 +152,45 @@ def _source_name(url: str) -> str:
         else url.rsplit('/', 1)[-1]
 
 
+# Source pixels of slack around the target footprint, before decimation. Enough
+# that the resampling kernel at the crop edge sees the same neighbours it would
+# have seen in an uncropped read, so the crop is invisible in the mosaic.
+WINDOW_PAD_PX = 4
+
+
+def source_window(src, dst_transform, dst_shape, factor: int) -> Optional[Window]:
+    """The part of `src` that can land on the target grid, or None if none can.
+
+    The target is EPSG:4326 and the sources are UTM (Sentinel-2) or geographic
+    (WorldCover), so the target bounds are pushed through `transform_bounds`
+    (densified, so a UTM zone's curved edge is not cut by a straight chord),
+    padded, then snapped outward to a multiple of the decimation factor. The
+    snapping matters: a decimated read samples the COG overview relative to
+    the window origin, and keeping that origin on the same lattice a full-
+    raster read would use is what keeps the cropped result pixel-identical to
+    the uncropped one rather than half a pixel adrift.
+    """
+    dst_bounds = array_bounds(dst_shape[1], dst_shape[2], dst_transform)
+    try:
+        west, south, east, north = transform_bounds(
+            'EPSG:4326', src.crs, *dst_bounds, densify_pts=21)
+    except Exception:  # noqa: BLE001 - out-of-zone bounds; fall back to the whole raster
+        return Window(0, 0, src.width, src.height)
+    if not all(math.isfinite(v) for v in (west, south, east, north)):
+        return Window(0, 0, src.width, src.height)
+    win = window_from_bounds(west, south, east, north, transform=src.transform)
+    pad = WINDOW_PAD_PX * factor
+    col0 = int(math.floor((win.col_off - pad) / factor)) * factor
+    row0 = int(math.floor((win.row_off - pad) / factor)) * factor
+    col1 = int(math.ceil((win.col_off + win.width + pad) / factor)) * factor
+    row1 = int(math.ceil((win.row_off + win.height + pad) / factor)) * factor
+    col0, row0 = max(0, col0), max(0, row0)
+    col1, row1 = min(src.width, col1), min(src.height, row1)
+    if col1 <= col0 or row1 <= row0:
+        return None
+    return Window(col0, row0, col1 - col0, row1 - row0)
+
+
 def _fetch_reprojected(
     url: str,
     dst_transform,
@@ -181,16 +221,23 @@ def _fetch_reprojected(
             GDAL_HTTP_CONNECTTIMEOUT=10, GDAL_HTTP_TIMEOUT=60, GDAL_HTTP_MAX_RETRY=2,
         ), rasterio.open(url) as src:
             factor = decimation_for(src, target_m)
-            out_w = max(1, src.width // factor)
-            out_h = max(1, src.height // factor)
+            tmp = np.full(dst_shape, nodata, dtype=dst_dtype)
+            # Only the part of the source under the target grid is fetched. A
+            # scene that clips the bbox by 5% used to transfer 100% of its
+            # overview; now it transfers the 5%.
+            win = source_window(src, dst_transform, dst_shape, factor)
+            if win is None:
+                return name, tmp, None
+            out_w = max(1, int(win.width) // factor)
+            out_h = max(1, int(win.height) // factor)
             data = src.read(
                 list(bands),
+                window=win,
                 out_shape=(len(bands), out_h, out_w),
                 resampling=resampling,
             )
-            src_transform = src.transform * rasterio.Affine.scale(
-                src.width / out_w, src.height / out_h)
-            tmp = np.zeros(dst_shape, dtype=dst_dtype)
+            src_transform = src.window_transform(win) * rasterio.Affine.scale(
+                win.width / out_w, win.height / out_h)
             reproject(
                 source=data,
                 destination=tmp,

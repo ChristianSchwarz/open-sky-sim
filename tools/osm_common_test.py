@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import pickle
 import tempfile
 import unittest
 from unittest import mock
@@ -85,9 +86,8 @@ class OverpassFetchTest(unittest.TestCase):
         })
         self.post_returning(poisoned, FakeResponse(200, DATA))
         self.assertEqual(overpass_fetch('q4', 'test', False), DATA)
-        with gzip.open(osm_common.overpass_cache_path('q4'),
-                       'rt', encoding='utf-8') as fh:
-            self.assertEqual(json.load(fh), DATA)
+        with gzip.open(osm_common.overpass_cache_path('q4'), 'rb') as fh:
+            self.assertEqual(pickle.load(fh), DATA)
 
     def test_a_connection_error_moves_to_the_next_mirror(self):
         post = self.post_returning(

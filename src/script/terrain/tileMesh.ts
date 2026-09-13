@@ -287,7 +287,9 @@ function strokeGeometry(tile: PtmTile, kind: number): THREE.BufferGeometry | und
     g.setAttribute('riverDir', new THREE.InterleavedBufferAttribute(dirBuffer, 3, 0, true));
     // Raw, not normalised: the shader wants decimetres, not a 0..1 fraction.
     g.setAttribute('riverHalf', new THREE.BufferAttribute(tile.riverHalfWidths, 1, false));
-    g.setIndex(new THREE.BufferAttribute(tile.riverIndices, 1));
+    // The filtered list, not the whole stream: with every index the water
+    // material drew the landuse outlines too, as blue lines round each field.
+    g.setIndex(new THREE.BufferAttribute(indices, 1));
     return g;
 }
 

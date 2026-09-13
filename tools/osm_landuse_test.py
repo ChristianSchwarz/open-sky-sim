@@ -157,25 +157,29 @@ class OverpassLanduseQueryRetryTest(unittest.TestCase):
         # overpass_fetch gives up raises, and that must not take the whole
         # bake down with it - the other group's real elements still come
         # through.
-        def fake_fetch(query, label, refresh, validate=None):
+        def fake_fetch(query, label, refresh, validate=None, **_extra):
             if 'vegetation' in label:
                 if validate is not None:
                     validate({'elements': []})  # exercises the same rejection path
                 raise RuntimeError('all Overpass mirrors failed: vegetation stayed empty')
             return {'elements': [{'type': 'way', 'id': 42}]}
 
-        with patch('osm_landuse.overpass_fetch', side_effect=fake_fetch):
+        # The fetch is made per grid cell through osm_common's client, so
+        # that is what gets faked; every cell of the built group answers
+        # the same way 42, which the union keeps once.
+        with patch('osm_common.overpass_fetch', side_effect=fake_fetch):
             data = overpass_landuse_query((0.0, 0.0, 1.0, 1.0))
         self.assertEqual(data['elements'], [{'type': 'way', 'id': 42}])
 
     def test_a_genuinely_populated_response_is_never_rejected(self):
-        def fake_fetch(query, label, refresh, validate=None):
-            data = {'elements': [{'type': 'way', 'id': 1}]}
+        def fake_fetch(query, label, refresh, validate=None, **_extra):
+            # One way per group, the same one from every cell of that group.
+            data = {'elements': [{'type': 'way', 'id': 1 if 'vegetation' in label else 2}]}
             if validate is not None:
                 validate(data)  # must not raise
             return data
 
-        with patch('osm_landuse.overpass_fetch', side_effect=fake_fetch):
+        with patch('osm_common.overpass_fetch', side_effect=fake_fetch):
             data = overpass_landuse_query((0.0, 0.0, 1.0, 1.0))
         self.assertEqual(len(data['elements']), 2, 'one element from each of the two groups')
 

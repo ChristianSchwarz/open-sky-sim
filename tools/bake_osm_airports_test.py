@@ -443,5 +443,193 @@ class MergeItemsTest(unittest.TestCase):
                          ['AAAA', 'ZZZZ'])
 
 
+# --- ownership, the LRU mask cache and the progress lines --------------------
+
+import contextlib
+import io
+import re
+
+import bake_osm_airports
+from bake_osm_airports import (
+    AerodromeIndex,
+    LandMask,
+    ORPHAN_ASSIGN_RADIUS_M,
+    StageProgress,
+    assemble_airfields,
+)
+
+
+def aerodrome_way(way_id: int, lat: float, lon: float, half_m: float, tags: dict,
+                  first_node: int) -> tuple:
+    """A square aerodrome polygon `half_m` metres about (lat, lon)."""
+    frame = LocalFrame(lat, lon)
+    corners = [frame.to_lonlat(e, n) for e, n in
+               ((-half_m, -half_m), (half_m, -half_m), (half_m, half_m), (-half_m, half_m))]
+    ids = list(range(first_node, first_node + 4))
+    nodes = dict(zip(ids, corners))
+    tags = {'aeroway': 'aerodrome', **tags}
+    return {'type': 'way', 'id': way_id, 'nodes': ids + [ids[0]], 'tags': tags}, nodes
+
+
+def aerodrome_node(node_id: int, lat: float, lon: float, tags: dict) -> dict:
+    return {'type': 'node', 'id': node_id, 'lat': lat, 'lon': lon,
+            'tags': {'aeroway': 'aerodrome', **tags}}
+
+
+def runway_way(way_id: int, lat: float, lon: float, first_node: int, bearing: float = 90.0) -> tuple:
+    way, nodes = way_from_bearing(way_id, bearing, 1500.0, {'aeroway': 'runway'}, lat=lat, lon=lon)
+    a, b = nodes[1], nodes[2]
+    way['nodes'] = [first_node, first_node + 1]
+    return way, {first_node: a, first_node + 1: b}
+
+
+def offset(lat: float, lon: float, east_m: float, north_m: float) -> tuple:
+    lon2, lat2 = LocalFrame(lat, lon).to_lonlat(east_m, north_m)
+    return lat2, lon2
+
+
+def elements_and_nodes(*pairs) -> dict:
+    """Build an Overpass-shaped answer from (element, nodes) pairs and bare elements."""
+    elements = []
+    nodes = {}
+    for item in pairs:
+        if isinstance(item, tuple):
+            el, ns = item
+            elements.append(el)
+            nodes.update(ns)
+        else:
+            elements.append(item)
+    elements += [{'type': 'node', 'id': nid, 'lat': lat, 'lon': lon}
+                 for nid, (lon, lat) in nodes.items()]
+    return {'elements': elements}
+
+
+class OwnerTest(unittest.TestCase):
+
+    def test_first_listed_polygon_wins_when_two_contain_the_runway(self):
+        outer = aerodrome_way(10, LAT0, LON0, 6000.0, {'name': 'outer'}, first_node=100)
+        inner = aerodrome_way(11, LAT0, LON0, 2000.0, {'name': 'inner'}, first_node=200)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        for order in ((outer, inner), (inner, outer)):
+            found = assemble_airfields(elements_and_nodes(*order, runway))
+            self.assertEqual([a.name for a in found], [order[0][0]['tags']['name']])
+            self.assertEqual(len(found[0].runways), 1)
+
+    def test_a_polygon_beats_a_nearer_node(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'polygon'}, first_node=100)
+        lat_n, lon_n = offset(LAT0, LON0, 500.0, 0.0)
+        near = aerodrome_node(20, lat_n, lon_n, {'name': 'node'})
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        found = assemble_airfields(elements_and_nodes(near, field, runway))
+        self.assertEqual([a.name for a in found], ['polygon'])
+
+    def test_nearest_node_within_radius_wins_regardless_of_order(self):
+        lat_a, lon_a = offset(LAT0, LON0, 0.0, 4000.0)
+        lat_b, lon_b = offset(LAT0, LON0, -3000.0, 0.0)
+        far = aerodrome_node(20, lat_a, lon_a, {'name': 'four km north'})
+        near = aerodrome_node(21, lat_b, lon_b, {'name': 'three km west'})
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        for order in ((far, near), (near, far)):
+            found = assemble_airfields(elements_and_nodes(*order, runway))
+            self.assertEqual([a.name for a in found], ['three km west'])
+
+    def test_earlier_node_wins_a_tie(self):
+        # Two nodes mapped on the same spot (it happens: a duplicated import)
+        # are the only exact tie - anywhere else each node measures in its
+        # own frame and one of them is a hair closer.
+        lat_a, lon_a = offset(LAT0, LON0, 0.0, 2000.0)
+        north = aerodrome_node(20, lat_a, lon_a, {'name': 'north'})
+        south = aerodrome_node(21, lat_a, lon_a, {'name': 'south'})
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        for order in ((north, south), (south, north)):
+            found = assemble_airfields(elements_and_nodes(*order, runway))
+            self.assertEqual([a.name for a in found], [order[0]['tags']['name']])
+
+    def test_a_runway_beyond_the_radius_becomes_its_own_airstrip(self):
+        lat_a, lon_a = offset(LAT0, LON0, 0.0, ORPHAN_ASSIGN_RADIUS_M + 200.0)
+        node = aerodrome_node(20, lat_a, lon_a, {'name': 'too far'})
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        found = assemble_airfields(elements_and_nodes(node, runway))
+        self.assertEqual([a.name for a in found], ['airstrip 12'])
+        self.assertEqual(found[0].kind, 'ga')
+
+    def test_radius_is_measured_in_the_node_frame_just_inside_and_just_outside(self):
+        # The candidate box is a hair wider than the radius; the metric test
+        # is what decides, so 4990 m attaches and 5010 m does not, east or north.
+        for east, north, expect in ((4990.0, 0.0, 'node'), (0.0, 4990.0, 'node'),
+                                    (5010.0, 0.0, 'airstrip 12'), (0.0, 5010.0, 'airstrip 12')):
+            lat_a, lon_a = offset(LAT0, LON0, east, north)
+            node = aerodrome_node(20, lat_a, lon_a, {'name': 'node'})
+            runway = runway_way(12, LAT0, LON0, first_node=300)
+            found = assemble_airfields(elements_and_nodes(node, runway))
+            self.assertEqual([a.name for a in found], [expect], (east, north))
+
+    def test_index_answers_none_with_no_aerodromes_at_all(self):
+        self.assertIsNone(AerodromeIndex([]).owner(LON0, LAT0))
+
+
+class LandMaskLruTest(unittest.TestCase):
+
+    def test_is_land_refreshes_recency_and_evicts_the_oldest(self):
+        reads = []
+        original = bake_osm_airports.read_lwm
+        bake_osm_airports.read_lwm = lambda out_dir, zoom, x, y: reads.append((x, y)) or None
+        try:
+            mask = LandMask('nowhere', 12, 257)
+            mask._cache_cap = 2
+            span = mask.span
+            top = 90.0 - 0.5 * span
+            mask.is_land(-180.0 + 0.5 * span, top)   # (0, 0)
+            mask.is_land(-180.0 + 1.5 * span, top)   # (1, 0)
+            mask.is_land(-180.0 + 0.5 * span, top)   # (0, 0) again: now newest, no read
+            mask.is_land(-180.0 + 2.5 * span, top)   # (2, 0) evicts (1, 0), not (0, 0)
+            self.assertEqual(list(mask._cache), [(0, 0), (2, 0)])
+            self.assertEqual(reads, [(0, 0), (1, 0), (2, 0)])
+        finally:
+            bake_osm_airports.read_lwm = original
+
+
+class StageProgressTest(unittest.TestCase):
+    # The importer's regex, verbatim from tools/areaImport.ts parseProgress.
+    PCT = re.compile(r'\((\d+(?:\.\d+)?)%(?: of stage)?\)')
+
+    def run_phases(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            p = StageProgress([('a', 'first', 1), ('b', 'second', 1), ('c', 'third', 2)],
+                              min_interval_s=0.0)
+            p.begin('a')
+            p.update(0.5, '1/2')
+            p.end('done')
+            p.skip('b', 'not needed')
+            p.begin('c')
+            p.update(0.25)
+            p.end()
+        return buf.getvalue().splitlines()
+
+    def test_lines_carry_the_percentage_the_importer_reads(self):
+        lines = self.run_phases()
+        self.assertEqual(lines[0], 'phase 1/3  first')
+        self.assertEqual(lines[1], '  first 1/2  (12.5% of stage)')
+        self.assertIn('phase 2/3  second - skipped, not needed', lines)
+        pcts = [float(m.group(1)) for m in map(self.PCT.search, lines) if m]
+        self.assertEqual(pcts, sorted(pcts))
+        self.assertEqual(pcts[-1], 100.0)
+        # The skipped phase's weight is gone: `c` alone is two thirds of what
+        # is left, and a quarter of it lands at 1/3 + 2/3 * 1/4.
+        self.assertIn('  third  (50.0% of stage)', lines)
+
+    def test_skipping_the_running_phase_leaves_nothing_in_flight(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            p = StageProgress([('a', 'first', 1), ('b', 'second', 1)], min_interval_s=0.0)
+            p.begin('a')
+            p.update(0.5)
+            p.skip('a', 'failed')
+            self.assertEqual(p.percent(), 0.0)
+            p.begin('b')
+            p.end()
+            self.assertEqual(p.percent(), 100.0)
+
+
 if __name__ == '__main__':
     unittest.main()

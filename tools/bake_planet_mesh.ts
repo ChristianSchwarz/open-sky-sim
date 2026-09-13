@@ -51,7 +51,7 @@ import { LonLatBounds } from './bake/shoreline';
 import {
     MeshTileConfig, TileProcessResult, TileTask, tileBounds,
 } from './bake/meshTile';
-import { regionalGroundMeans } from './bake/groundColor';
+import { GROUND_MEANS_FILE, regionalGroundMeans } from './bake/groundColor';
 
 // Triangles per tile. Measured on real Canary z12 tiles: the coast alone costs
 // ~18k at full resolution and roughly halves per coarsening step, so this buys
@@ -229,8 +229,12 @@ function computePadHeight(
  * when something happened to be mounting both, which is exactly how a stale dev
  * server turns into a 404 on the manifest.
  */
-function copyHeightTiles(src: string, out: string, maxZoom: number): number {
+function copyHeightTiles(
+    src: string, out: string, maxZoom: number,
+): { bytes: number; copied: number; skipped: number } {
     let bytes = 0;
+    let copied = 0;
+    let skipped = 0;
     for (let z = 0; z <= maxZoom; z++) {
         const zDir = path.join(src, String(z));
         if (!fs.existsSync(zDir)) {
@@ -248,8 +252,19 @@ function copyHeightTiles(src: string, out: string, maxZoom: number): number {
                 const dstDir = path.join(out, String(z), xs);
                 fs.mkdirSync(dstDir, { recursive: true });
                 const dst = path.join(dstDir, f);
+                const srcStat = fs.statSync(path.join(xDir, f));
+                const dstStat = fs.existsSync(dst) ? fs.statSync(dst) : undefined;
+                // Already there and no older than the source: nothing to do.
+                // A DEM bake rewrites its tiles, so a changed tile is newer.
+                if (dstStat !== undefined && dstStat.size === srcStat.size
+                    && dstStat.mtimeMs >= srcStat.mtimeMs) {
+                    bytes += dstStat.size;
+                    skipped++;
+                    continue;
+                }
                 fs.copyFileSync(path.join(xDir, f), dst);
-                bytes += fs.statSync(dst).size;
+                bytes += srcStat.size;
+                copied++;
             }
         }
     }
@@ -258,7 +273,7 @@ function copyHeightTiles(src: string, out: string, maxZoom: number): number {
         fs.copyFileSync(index, path.join(out, 'index.bin'));
         bytes += fs.statSync(index).size;
     }
-    return bytes;
+    return { bytes, copied, skipped };
 }
 
 function walkTiles(src: string, maxZoom: number): Array<{ z: number; x: number; y: number }> {
@@ -283,9 +298,42 @@ function walkTiles(src: string, maxZoom: number): Array<{ z: number; x: number; 
     return out;
 }
 
-const WORKER_FILE = path.join(
-    path.dirname(fileURLToPath(import.meta.url)), 'bake', 'meshTileWorker.ts',
-);
+const TOOLS_DIR = path.dirname(fileURLToPath(import.meta.url));
+const WORKER_SOURCE = path.join(TOOLS_DIR, 'bake', 'meshTileWorker.ts');
+const WORKER_BUNDLE = path.join(TOOLS_DIR, 'bake', '.build', 'meshTileWorker.cjs');
+
+/**
+ * Where the worker threads load their code from.
+ *
+ * The bake itself runs under `--import tsx`, and a worker spawned with the
+ * parent's execArgv does too: every one of the ~20 workers transpiles the
+ * whole buildTile graph on start and then runs tsx's output, which this repo
+ * has measured at tens of times slower than an esbuild bundle. So the worker
+ * is bundled once per bake (a few hundred ms, always redone - cheaper than
+ * getting a staleness check wrong) and spawned as plain JavaScript with an
+ * empty execArgv. If esbuild is missing or the bundle fails, fall back to
+ * the source under tsx: slower, but the same code.
+ */
+async function prepareWorker(): Promise<{ file: string; execArgv: string[] }> {
+    try {
+        const esbuild = await import('esbuild');
+        fs.mkdirSync(path.dirname(WORKER_BUNDLE), { recursive: true });
+        await esbuild.build({
+            entryPoints: [WORKER_SOURCE],
+            outfile: WORKER_BUNDLE,
+            bundle: true,
+            platform: 'node',
+            format: 'cjs',
+            target: `node${process.versions.node.split('.')[0]}`,
+            logLevel: 'silent',
+        });
+        return { file: WORKER_BUNDLE, execArgv: [] };
+    } catch (err) {
+        console.warn(`warning: could not bundle the mesh worker (${(err as Error).message}); `
+            + 'running it under tsx instead, which is slower');
+        return { file: WORKER_SOURCE, execArgv: process.execArgv };
+    }
+}
 
 /**
  * Runs `processTile` for every tile across a pool of worker threads.
@@ -296,11 +344,14 @@ const WORKER_FILE = path.join(
  * (indexed, not completion order) so folding them in that fixed order
  * reproduces the old fully-serial bake byte-for-byte - see meshTile.ts.
  */
-function runTilesInParallel(
+async function runTilesInParallel(
     cfg: MeshTileConfig,
     tasks: TileTask[],
     onProgress: (done: number, total: number) => void,
 ): Promise<Array<TileProcessResult | undefined>> {
+    const worker = tasks.length > 0
+        ? await prepareWorker()
+        : { file: WORKER_SOURCE, execArgv: process.execArgv };
     return new Promise((resolve, reject) => {
         const results: Array<TileProcessResult | undefined> = new Array(tasks.length);
         if (tasks.length === 0) {
@@ -329,19 +380,19 @@ function runTilesInParallel(
         };
 
         for (let i = 0; i < workerCount; i++) {
-            const worker = new Worker(WORKER_FILE, { execArgv: process.execArgv, workerData: cfg });
-            workers.push(worker);
-            worker.on('message', (msg: { idx: number; result: TileProcessResult | undefined }) => {
+            const w = new Worker(worker.file, { execArgv: worker.execArgv, workerData: cfg });
+            workers.push(w);
+            w.on('message', (msg: { idx: number; result: TileProcessResult | undefined }) => {
                 results[msg.idx] = msg.result;
                 completed++;
                 onProgress(completed, tasks.length);
                 if (completed === tasks.length) {
                     settle();
                 } else {
-                    dispatch(worker);
+                    dispatch(w);
                 }
             });
-            worker.on('error', (err) => {
+            w.on('error', (err) => {
                 if (failed === undefined) {
                     failed = err;
                     for (const w of workers) {
@@ -350,7 +401,7 @@ function runTilesInParallel(
                     reject(failed);
                 }
             });
-            dispatch(worker);
+            dispatch(w);
         }
     });
 }
@@ -363,6 +414,51 @@ function runTilesInParallel(
  * across every scoped run.
  */
 const AIRFIELDS_FILE = 'airfields.json';
+
+/**
+ * The per-tile numbers the manifest's per-level maxima are folded from,
+ * keyed `z/x/y`, kept beside the index.
+ *
+ * A scoped bake has to fold every tile it did not write into those maxima,
+ * and the only other place the numbers live is each tile's own header -
+ * behind a gunzip and a decode, for hundreds of tiles per run. Reading them
+ * from here instead costs one JSON parse; a tile the sidecar does not know
+ * (an older tree, or one written by hand) is still decoded.
+ */
+const INDEX_META_FILE = 'index_meta.json';
+
+interface TileMeta {
+    geometricErrorM: number;
+    skirtDepthM: number;
+}
+
+interface IndexMeta {
+    version: 1;
+    tiles: Record<string, TileMeta>;
+}
+
+function loadIndexMeta(dir: string): Record<string, TileMeta> {
+    const p = path.join(dir, INDEX_META_FILE);
+    if (!fs.existsSync(p)) {
+        return {};
+    }
+    try {
+        const parsed = JSON.parse(fs.readFileSync(p, 'utf8')) as IndexMeta;
+        if (parsed.version !== 1 || typeof parsed.tiles !== 'object' || parsed.tiles === null) {
+            console.warn(`  ignoring ${INDEX_META_FILE}: unknown layout`);
+            return {};
+        }
+        return parsed.tiles;
+    } catch (err) {
+        console.warn(`  ignoring ${INDEX_META_FILE}: ${(err as Error).message}`);
+        return {};
+    }
+}
+
+function saveIndexMeta(dir: string, tiles: Record<string, TileMeta>): void {
+    const meta: IndexMeta = { version: 1, tiles };
+    fs.writeFileSync(path.join(dir, INDEX_META_FILE), `${JSON.stringify(meta)}\n`);
+}
 
 /** One airfield as `tools/bake_osm_airports.py` writes it into the DEM manifest. */
 interface AirfieldRecord {
@@ -529,7 +625,7 @@ async function main(): Promise<void> {
         budget: args.budget,
         basis,
         pads,
-        groundMeans: regionalGroundMeans(args.src),
+        groundMeans: regionalGroundMeans(args.src, path.join(args.out, GROUND_MEANS_FILE)),
     };
     const results = await runTilesInParallel(meshCfg, tiles, (done, total) => {
         const pct = ((done / total) * 100).toFixed(1);
@@ -577,9 +673,9 @@ async function main(): Promise<void> {
     }
 
     const heightMaxZoom = Math.min(11, src.maxZoom);
-    const heightBytes = copyHeightTiles(args.src, args.out, heightMaxZoom);
-    console.log(`copied height tiles z0..${heightMaxZoom}: `
-        + `${(heightBytes / 1048576).toFixed(1)} MB`);
+    const heights = copyHeightTiles(args.src, args.out, heightMaxZoom);
+    console.log(`height tiles z0..${heightMaxZoom}: ${(heights.bytes / 1048576).toFixed(1)} MB, `
+        + `${heights.copied} copied, ${heights.skipped} already current`);
 
     // Counts from every bake so far, this one included, so the table describes
     // the pyramid rather than the last area added to it.
@@ -629,23 +725,55 @@ async function main(): Promise<void> {
     // tiles still have to count toward the per-level maxima, so read their
     // headers back. A carried tile of an older version cannot be mixed with
     // this run's output anyway - the runtime refuses the whole tree.
-    const writtenKeys = new Set(written.map(k => `${k.z}/${k.x}/${k.y}`));
+    // Per-tile figures come from the sidecar where it has them; only the
+    // tiles it lacks are decoded. The sidecar is rewritten to cover exactly
+    // the tiles in the index, so a deleted area drops out of it too.
+    const previousMeta = carried > 0 ? loadIndexMeta(args.out) : {};
+    const tileMeta: Record<string, TileMeta> = {};
+    for (let i = 0; i < tiles.length; i++) {
+        const r = results[i];
+        if (r !== undefined) {
+            const { z, x, y } = tiles[i];
+            tileMeta[`${z}/${x}/${y}`] = {
+                geometricErrorM: r.geometricErrorM, skirtDepthM: r.skirtDepthM,
+            };
+        }
+    }
+    let carriedFromMeta = 0;
+    let carriedDecoded = 0;
     for (const k of all) {
-        if (writtenKeys.has(`${k.z}/${k.x}/${k.y}`)) {
+        const key = `${k.z}/${k.x}/${k.y}`;
+        if (tileMeta[key] !== undefined) {
             continue;
         }
-        const ptmPath = path.join(args.out, String(k.z), String(k.x), `${k.y}.ptm`);
-        let tile: ReturnType<typeof decodePtm>;
-        try {
-            tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
-        } catch (err) {
-            console.error(`error: carried tile ${k.z}/${k.x}/${k.y} cannot be read: `
-                + `${(err as Error).message}`);
-            console.error('Run a full `npm run bake:mesh` to rebuild the tree.');
-            process.exit(1);
+        const known = previousMeta[key];
+        if (known !== undefined
+            && Number.isFinite(known.geometricErrorM) && Number.isFinite(known.skirtDepthM)) {
+            tileMeta[key] = known;
+            carriedFromMeta++;
+        } else {
+            const ptmPath = path.join(args.out, String(k.z), String(k.x), `${k.y}.ptm`);
+            let tile: ReturnType<typeof decodePtm>;
+            try {
+                tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
+            } catch (err) {
+                console.error(`error: carried tile ${key} cannot be read: `
+                    + `${(err as Error).message}`);
+                console.error('Run a full `npm run bake:mesh` to rebuild the tree.');
+                process.exit(1);
+            }
+            tileMeta[key] = {
+                geometricErrorM: tile.geometricErrorM, skirtDepthM: tile.skirtDepthM,
+            };
+            carriedDecoded++;
         }
-        foldLevel(k.z, tile.geometricErrorM, tile.skirtDepthM);
+        foldLevel(k.z, tileMeta[key].geometricErrorM, tileMeta[key].skirtDepthM);
     }
+    if (carried > 0) {
+        console.log(`  carried tile headers: ${carriedFromMeta} from ${INDEX_META_FILE}, `
+            + `${carriedDecoded} decoded`);
+    }
+    saveIndexMeta(args.out, tileMeta);
 
     const outManifest = {
         version: 4,
