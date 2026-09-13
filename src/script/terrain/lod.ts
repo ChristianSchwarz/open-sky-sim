@@ -96,6 +96,97 @@ export function detailFalloff(distanceM: number, kneeM: number): number {
     return Math.max(1, distanceM / kneeM);
 }
 
+/**
+ * The distance (m) inside which a tile of error `geometricErrorM` refines:
+ * the inverse of {@link shouldRefine} with {@link detailFalloff} folded in.
+ *
+ * Inside the knee the projected error falls as 1/d, so the switch sits at
+ * err*K/target. Past the knee the target grows with d as well, and the two
+ * meet at sqrt(A*knee) instead. Used to place the land-use reveal band (see
+ * LOD_FADE_NEAR) where the leaf actually takes over, so the band follows
+ * the governor, the reach slider and the detail-distance slider rather than
+ * sitting at a fixed range that those three would leave behind.
+ */
+export function refineDistanceM(
+    geometricErrorM: number,
+    screenHeightPx: number,
+    fovYDeg: number,
+    detailScale: number = 1,
+    kneeM: number = DETAIL_DISTANCE_OFF,
+    targetPx: number = SSE_TARGET_PX,
+): number {
+    const a = geometricErrorM * screenHeightPx
+        / (2 * Math.tan(fovYDeg * Math.PI / 360) * targetPx * Math.max(detailScale, 1e-6));
+    if (!(kneeM > 0) || a <= kneeM) {
+        return Math.max(0, a);
+    }
+    return Math.sqrt(a * kneeM);
+}
+
+/**
+ * The leaf dissolve: how the leaf level comes in over its parent.
+ *
+ * The leaf is the only level with exact land-use fills; one level up the same
+ * polygons are a vote per 76 m facet, so the z11-to-z12 switch is where field
+ * edges sharpen and small fields appear, and with a hard switch a whole tile
+ * of them arrived at once. Instead the parent stays drawn underneath, pushed
+ * back in depth by its own error so the leaf wins every pixel it paints, and
+ * the leaf paints itself in with an ordered dither between the switch
+ * distance and LOD_FADE_NEAR of it - and a tile whose children only arrived
+ * once the aircraft was already inside the band ramps in over LOD_FADE_MS
+ * instead. The parent is dropped once its farthest vertex is inside the near
+ * end, where every leaf pixel is already opaque, so the drop moves nothing.
+ *
+ * Which *fields* show at a given distance is a separate rule, by size: see
+ * LANDUSE_REVEAL_MIN_PX.
+ */
+export const LOD_FADE_NEAR = 0.55;
+/** Half-width of one region's own dissolve, as a fraction of its threshold. */
+export const LOD_FADE_SOFTNESS = 0.08;
+/** The time ramp for a leaf arriving inside the band. */
+export const LOD_FADE_MS = 600;
+/**
+ * How far past its own geometric error the under-parent is pushed back in
+ * depth. The error bounds how far the leaf surface departs from it, so 1
+ * would already put the parent behind every leaf pixel; the margin covers
+ * the error being a header figure rounded from a coarser fit.
+ */
+export const LOD_DEPTH_PUSH_SCALE = 1.5;
+
+/**
+ * A land-use region is drawn once its width - the square root of its area on
+ * the tile - would cover this many pixels; before that it stays hidden and
+ * the ground it sits on shows instead. Small plots therefore appear only
+ * close in and large fields from far out, rather than every polygon of a
+ * tile arriving with the tile. On a 720-line display at 60 degrees a ten
+ * hectare field comes in at about 33 km, a one hectare field at 10 km and a
+ * thirty metre plot at 3 km. 10 px was tried and hid too much: the player
+ * asked for the fields to reach further.
+ *
+ * On the leaf a region is an exact fill lifted over the ground, so a hidden
+ * one is dithered away like the leaf dissolve; one level up the same region
+ * is a vote painted onto the surface, which cannot be dropped, so there it is
+ * painted as its own sampled colour, the way untagged ground is. The width is
+ * summed per tile at upload (tileMesh.ts, regionSizes), so a field split by a
+ * tile edge shows by the size of each piece.
+ */
+export const LANDUSE_REVEAL_MIN_PX = 6;
+/** Range of the *Land-use region size* slider, in pixels. */
+export const LANDUSE_REVEAL_MIN_PX_MIN = 1;
+export const LANDUSE_REVEAL_MIN_PX_MAX = 24;
+
+export function clampLanduseRevealPx(value: number): number {
+    if (!Number.isFinite(value)) return LANDUSE_REVEAL_MIN_PX;
+    return Math.min(LANDUSE_REVEAL_MIN_PX_MAX, Math.max(LANDUSE_REVEAL_MIN_PX_MIN, value));
+}
+
+/** Metres of distance per metre of region width at which a region shows. */
+export function landuseRevealScale(
+    screenHeightPx: number, fovYDeg: number, minPx: number = LANDUSE_REVEAL_MIN_PX,
+): number {
+    return screenHeightPx / (2 * Math.tan(fovYDeg * Math.PI / 360)) / Math.max(minPx, 1e-3);
+}
+
 /** Clamp a persisted or user-supplied detail distance onto the slider's range. */
 export function clampDetailDistanceM(value: number): number {
     if (!Number.isFinite(value)) {

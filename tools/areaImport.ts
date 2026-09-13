@@ -384,6 +384,10 @@ function plan(job: Job, withCover: boolean): Step[] {
         label: 'baking meshes', cmd: process.execPath,
         args: ['--import', 'tsx', 'tools/bake_planet_mesh.ts', '--bbox', bbox],
     });
+    steps.push({
+        label: 'baking far-tile textures', cmd: process.execPath,
+        args: ['--import', 'tsx', 'tools/bake_planet_tex.ts', '--bbox', bbox],
+    });
     return steps;
 }
 
@@ -508,7 +512,7 @@ export function startDelete(req: Request, res: Response): void {
     const job: Job = {
         id, name: `delete ${name}`, bbox,
         state: 'running', log: [], step: 'starting',
-        stepIndex: 0, stepCount: 2, percent: 0,
+        stepIndex: 0, stepCount: 3, percent: 0,
         subscribers: new Set(),
     };
     jobs.set(id, job);
@@ -522,6 +526,10 @@ export function startDelete(req: Request, res: Response): void {
         {
             label: 'rebaking surrounding meshes', cmd: process.execPath,
             args: ['--import', 'tsx', 'tools/bake_planet_mesh.ts', '--bbox', bbox.join(',')],
+        },
+        {
+            label: 'rebaking far-tile textures', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_tex.ts', '--bbox', bbox.join(',')],
         },
     ];
     finishJob(job, (async () => {

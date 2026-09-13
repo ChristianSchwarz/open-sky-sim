@@ -17,7 +17,8 @@ import { behindHorizon, sphereInFrustum } from './culling';
 import { WGS84_A } from './geodesy';
 import {
     DETAIL_DISTANCE_OFF, FRUSTUM_CULL_MARGIN_TAN, LEAF_REFINE_DISTANCE_SCALE,
-    detailFalloff, ellipsoidSagittaM,
+    LOD_FADE_MS, LOD_FADE_NEAR, LOD_FADE_SOFTNESS,
+    detailFalloff, ellipsoidSagittaM, refineDistanceM,
     shouldRefine, terrainMaxZoomForAltitudeM, terrainViewRangeM,
 } from './lod';
 import { TerrainManifest } from './manifest';
@@ -45,6 +46,26 @@ export interface QuadNode {
     /** True when the index says there is no baked tile here. */
     ocean: boolean;
     lastSeen: number;
+    /**
+     * Drawn beneath its own children while they dissolve in - see
+     * LOD_FADE_NEAR. Set per pass; a node is either this or a solo draw.
+     */
+    under: boolean;
+    /**
+     * A drawn leaf: the distance (m) its parent handed over at, which is the
+     * far end of its dissolve. 0 for any node not dissolving.
+     */
+    fadeM: number;
+    /** A drawn leaf: when its parent first handed over, ms. */
+    fadeFromMs: number;
+    /** A leaf parent: when its children first took over, ms; unset while solo. */
+    takeoverAt?: number;
+    /**
+     * A leaf parent: whether it had a mesh to draw under its children when
+     * they took over. Decided once per take-over: a leaf that arrived opaque
+     * must not start dissolving later, when a parent turns up.
+     */
+    dissolving?: boolean;
 }
 
 export interface QuadtreeOptions {
@@ -107,6 +128,9 @@ export class Quadtree {
                 ? levelErr
                 : ellipsoidSagittaM(id),
             errorFromTile: false,
+            under: false,
+            fadeM: 0,
+            fadeFromMs: 0,
             resident: false,
             ocean: false,
             lastSeen: 0,
@@ -162,6 +186,8 @@ export class Quadtree {
         pinned?: (id: TileKey) => boolean,
         /** How much further out the leaf level comes in; see {@link drawErrorM}. */
         leafScale: number = LEAF_REFINE_DISTANCE_SCALE,
+        /** The clock the leaf dissolve's time ramp runs on; see LOD_FADE_MS. */
+        nowMs: number = performance.now(),
     ): QuadtreeUpdate {
         this.generation++;
         const draw: QuadNode[] = [];
@@ -182,6 +208,9 @@ export class Quadtree {
 
         const visit = (node: QuadNode): void => {
             node.lastSeen = this.generation;
+            // `fadeM` is not reset here: a leaf's parent sets it just before
+            // visiting the leaf (see dissolveLeaves), and no other node reads it.
+            node.under = false;
             node.resident = this.opts.isResident(node.id);
             node.ocean = this.opts.isOcean(node.id);
             if (node.resident && !node.errorFromTile) {
@@ -246,6 +275,7 @@ export class Quadtree {
             if (!canRefine) {
                 wantThis();
                 draw.push(node);
+                node.takeoverAt = undefined;
                 return;
             }
 
@@ -261,6 +291,7 @@ export class Quadtree {
             if (!ready) {
                 wantThis();
                 draw.push(node);
+                node.takeoverAt = undefined;
                 // Still ask for the children, so the wait is bounded.
                 for (const c of node.children) {
                     c.lastSeen = this.generation;
@@ -277,6 +308,12 @@ export class Quadtree {
                 return;
             }
 
+            if (node.id.z === this.maxZoom - 1) {
+                this.dissolveLeaves(
+                    node, centreDist, farScale, screenHeightPx, fovYDeg, leafScale, nowMs, draw,
+                );
+            }
+
             for (const c of node.children) {
                 visit(c);
             }
@@ -286,6 +323,53 @@ export class Quadtree {
             visit(root);
         }
         return { draw, wants };
+    }
+
+    /**
+     * The leaf parent's part in the leaf dissolve (see LOD_FADE_NEAR): hand
+     * the children the distance it just refined at, and stay in the draw list
+     * underneath them while any of their vertices can still be dithered away.
+     *
+     * The switch distance is the one {@link shouldRefine} just crossed, so
+     * every leaf vertex starts at or beyond it - the parent's sphere bounds
+     * them - and the leaf arrives fully transparent. Its far vertex is at
+     * most `centreDist + radius` away, so once that is inside the near end
+     * the leaf is opaque everywhere and the parent can go.
+     */
+    private dissolveLeaves(
+        node: QuadNode, centreDist: number, farScale: number,
+        screenHeightPx: number, fovYDeg: number, leafScale: number, nowMs: number,
+        draw: QuadNode[],
+    ): void {
+        if (node.takeoverAt === undefined) {
+            node.takeoverAt = nowMs;
+            node.dissolving = node.resident;
+        }
+        // No mesh to show through the dither - the index says there is no
+        // tile here (a coast leaf under an all-sea parent), or it has been
+        // evicted since - so the leaves are drawn opaque, as they always were.
+        if (!node.dissolving || !node.resident) {
+            for (const c of node.children!) {
+                c.fadeM = 0;
+            }
+            return;
+        }
+        // `farScale` already carries the falloff at this node's distance, so
+        // the knee is not applied a second time here.
+        const switchM = refineDistanceM(
+            this.drawErrorM(node, leafScale), screenHeightPx, fovYDeg, farScale,
+        );
+        const farVertexM = centreDist + node.radius;
+        const stillDissolving = farVertexM > switchM * LOD_FADE_NEAR * (1 - LOD_FADE_SOFTNESS)
+            || nowMs - node.takeoverAt < LOD_FADE_MS;
+        for (const c of node.children!) {
+            c.fadeM = switchM;
+            c.fadeFromMs = node.takeoverAt;
+        }
+        if (stillDissolving) {
+            node.under = true;
+            draw.push(node);
+        }
     }
 
     /** Nodes not seen for `maxAge` passes, so their tiles can be released. */

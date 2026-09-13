@@ -3,8 +3,8 @@ import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
 import { AiPilotModels, ShadowQualities, TerrainColours, TerrainShading, UnitSystems } from "../state/gameDefs";
 import { assertExpr, assertIsDefined } from "../utils/asserts";
 import {
-    LEAF_REFINE_DISTANCE_SCALE, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
-    clampDetailDistanceM, clampLeafRefineScale, clampTriangleBudget,
+    LANDUSE_REVEAL_MIN_PX, LEAF_REFINE_DISTANCE_SCALE, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
+    clampDetailDistanceM, clampLanduseRevealPx, clampLeafRefineScale, clampTriangleBudget,
 } from "../terrain/lod";
 import { LANDUSE_BLEND_DEFAULT, clampLanduseBlend } from "../terrain/tones";
 import { TechProfile } from "./profiles/profile";
@@ -20,7 +20,9 @@ export type LanduseBlendChangeListener = (blend: number) => void;
 export type DaytimeChangeListener = (hours: number) => void;
 export type TerrainDetailChangeListener = (distanceM: number) => void;
 export type LanduseReachChangeListener = (scale: number) => void;
+export type LanduseRevealChangeListener = (px: number) => void;
 export type TriangleBudgetChangeListener = (triangles: number) => void;
+export type FarTileTexturesChangeListener = (enabled: boolean) => void;
 
 export class ConfigService {
 
@@ -34,7 +36,9 @@ export class ConfigService {
     readonly landuseBlend: LanduseBlendSetting;
     readonly terrainDetail: TerrainDetailSetting;
     readonly landuseReach: LanduseReachSetting;
+    readonly landuseReveal: LanduseRevealSetting;
     readonly triangleBudget: TriangleBudgetSetting;
+    readonly farTileTextures: FarTileTexturesSetting;
     readonly daytime: DaytimeSetting;
 
     constructor(
@@ -51,6 +55,8 @@ export class ConfigService {
         initialLanduseBlend?: number,
         initialLanduseReach?: number,
         initialTriangleBudget?: number,
+        initialLanduseRevealPx?: number,
+        initialFarTileTextures?: boolean,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -62,7 +68,9 @@ export class ConfigService {
         this.landuseBlend = new LanduseBlendSetting(initialLanduseBlend);
         this.terrainDetail = new TerrainDetailSetting(initialTerrainDetailM);
         this.landuseReach = new LanduseReachSetting(initialLanduseReach);
+        this.landuseReveal = new LanduseRevealSetting(initialLanduseRevealPx);
         this.triangleBudget = new TriangleBudgetSetting(initialTriangleBudget);
+        this.farTileTextures = new FarTileTexturesSetting(initialFarTileTextures);
         this.daytime = new DaytimeSetting(initialDaytime);
     }
 }
@@ -187,6 +195,83 @@ export class LanduseReachSetting {
     }
 
     removeChangeListener(listener: LanduseReachChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * The smallest a land-use region may be on screen, in pixels of width, before
+ * it is drawn; see {@link LANDUSE_REVEAL_MIN_PX}. Lower shows small fields
+ * from further away.
+ */
+export class LanduseRevealSetting {
+    private active: number;
+    private listeners: Set<LanduseRevealChangeListener> = new Set();
+
+    constructor(initialActive: number = LANDUSE_REVEAL_MIN_PX) {
+        this.active = clampLanduseRevealPx(initialActive);
+    }
+
+    getActive(): number {
+        return this.active;
+    }
+
+    setActive(px: number) {
+        const clamped = clampLanduseRevealPx(px);
+        if (clamped === this.active) return;
+        this.active = clamped;
+        this.notifyActive();
+    }
+
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: LanduseRevealChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: LanduseRevealChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * Whether far tiles paint the leaf-level cover texture the bake shipped for
+ * them (see CoverTextures) or one colour per facet. Off is how a pyramid
+ * baked without textures always looks; on costs nothing where there are none.
+ */
+export class FarTileTexturesSetting {
+    private active: boolean;
+    private listeners: Set<FarTileTexturesChangeListener> = new Set();
+
+    constructor(initialActive: boolean = true) {
+        this.active = initialActive;
+    }
+
+    getActive(): boolean {
+        return this.active;
+    }
+
+    setActive(enabled: boolean) {
+        if (enabled === this.active) return;
+        this.active = enabled;
+        this.notifyActive();
+    }
+
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: FarTileTexturesChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: FarTileTexturesChangeListener) {
         this.listeners.delete(listener);
     }
 }

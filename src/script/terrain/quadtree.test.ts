@@ -5,7 +5,7 @@ import { Quadtree } from './quadtree';
 import { TerrainManifest } from './manifest';
 import {
     DETAIL_DISTANCE_OFF, DETAIL_SCALE_MAX, FRUSTUM_CULL_MARGIN_RAD, LEAF_REFINE_DISTANCE_SCALE,
-    RECONCILE_INTERVAL_MS,
+    LOD_FADE_MS, LOD_FADE_NEAR, RECONCILE_INTERVAL_MS,
 } from './lod';
 import { TileKey, childrenOf, parentOf, tileKeyString } from './tiling';
 
@@ -98,7 +98,9 @@ describe('Quadtree', () => {
         }
         const t = makeTree({ resident: all });
         const r = t.tree.update(camera(), 200, 50, 1);
-        const drawn = new Set(keysOf(r.draw));
+        // A leaf parent drawn *under* its dissolving children is the one
+        // sanctioned exception, and says so; see the leaf dissolve suite.
+        const drawn = new Set(keysOf(r.draw.filter(n => !n.under)));
         for (const key of drawn) {
             const [z, x, y] = key.split('/').map(Number);
             let p = parentOf({ z, x, y });
@@ -128,7 +130,7 @@ describe('Quadtree', () => {
         const all = new Set<string>(['1/0/0', '1/1/0', '1/0/1', '1/1/1']);
         const h = makeTree({ resident: all, maxZoom: 1 });
         const r = h.tree.update(camera(), 200, 50, 1);
-        const drawn = new Set(keysOf(r.draw));
+        const drawn = new Set(keysOf(r.draw.filter(n => !n.under)));
         assert.ok(!drawn.has('0/0/0'), 'parent handed over');
         assert.ok([...drawn].some(k => k.startsWith('1/')), 'children drawn');
     });
@@ -140,7 +142,7 @@ describe('Quadtree', () => {
             maxZoom: 1,
         });
         const r = h.tree.update(camera(), 200, 50, 1);
-        const drawn = new Set(keysOf(r.draw));
+        const drawn = new Set(keysOf(r.draw.filter(n => !n.under)));
         assert.ok(!drawn.has('0/0/0'), 'ocean children do not block hand-over');
     });
 
@@ -569,5 +571,143 @@ describe('leaf refine bias', () => {
         assert.equal(z2Threshold(2, 1), plain);
         const ratio = plain / z2Threshold(2, 2);
         assert.ok(Math.abs(ratio - 2) < 0.05, `threshold ratio ${ratio.toFixed(3)} != 2`);
+    });
+});
+
+describe('leaf dissolve', () => {
+    /** Everything resident at every level, so only distance decides the cut. */
+    function fullTree(maxZoom = 4) {
+        const all = new Set<string>();
+        for (let z = 0; z <= maxZoom; z++) {
+            for (let x = 0; x < (1 << (z + 1)); x++) {
+                for (let y = 0; y < (1 << z); y++) {
+                    all.add(`${z}/${x}/${y}`);
+                }
+            }
+        }
+        return makeTree({ resident: all, maxZoom });
+    }
+
+    // 3/8/3 sits at lon 11.25, lat 11.25 in the toy world: x = z = 11 250 m,
+    // radius 22.5 km. Its level error is 500 m, so under the leaf bias it
+    // hands over at 750 m * 200 px / (2 tan 25 deg) = 160 km, and its near
+    // end (LOD_FADE_NEAR) is 88 km.
+    const PARENT = '3/8/3';
+    const LEAVES = new Set(['4/16/6', '4/17/6', '4/16/7', '4/17/7']);
+    const isLeaf = (n: { key: string }) => LEAVES.has(n.key);
+    const PX = 11_250;
+    const RADIUS_M = 22_500;
+
+    /**
+     * Camera `aheadM` short of the tile centre, looking at it. Not the
+     * shared helper: that one looks almost straight down, and a tile 100 km
+     * ahead would sit outside its frustum.
+     */
+    function cameraAt(aheadM: number): THREE.PerspectiveCamera {
+        const c = new THREE.PerspectiveCamera(50, 1.6, 1, 5_000_000);
+        c.position.set(PX, 500, PX - aheadM);
+        c.lookAt(PX, 0, PX);
+        c.updateMatrixWorld(true);
+        c.updateProjectionMatrix();
+        return c;
+    }
+
+    function update(cam: THREE.PerspectiveCamera, nowMs: number) {
+        return fullTree().tree.update(
+            cam, 200, 50, 1, DETAIL_DISTANCE_OFF, undefined, undefined, nowMs,
+        );
+    }
+
+    it('keeps the parent under its children at the moment they take over', () => {
+        const r = update(cameraAt(100_000), 0);
+        const parent = r.draw.find(n => n.key === PARENT);
+        assert.ok(parent, 'parent still drawn');
+        assert.ok(parent.under, 'and marked as underneath');
+        const leaves = r.draw.filter(isLeaf);
+        assert.ok(leaves.length > 0, 'its leaves drawn over it');
+    });
+
+    it('hands the leaves a far end no nearer than the distance they were refined at', () => {
+        const r = update(cameraAt(100_000), 0);
+        const parent = r.draw.find(n => n.key === PARENT)!;
+        const sphereDistance = 100_000 - RADIUS_M;
+        const leaves = r.draw.filter(isLeaf);
+        assert.equal(leaves.length, 4);
+        for (const leaf of leaves) {
+            assert.ok(leaf.fadeM > 0, `${leaf.key} is dissolving`);
+            assert.ok(
+                leaf.fadeM >= sphereDistance,
+                `${leaf.key} far end ${leaf.fadeM.toFixed(0)} m is inside the refine distance ${sphereDistance}`,
+            );
+            assert.equal(leaf.fadeFromMs, parent.takeoverAt);
+        }
+    });
+
+    it('stays under while any leaf vertex can still be beyond the near end', () => {
+        // 100 km ahead: the far vertex is 122.5 km off, past 88 km, however
+        // long ago the children took over.
+        const r = update(cameraAt(100_000), LOD_FADE_MS * 100);
+        const parent = r.draw.find(n => n.key === PARENT);
+        assert.ok(parent?.under, 'parent still under');
+        const switchM = r.draw.find(isLeaf)!.fadeM;
+        assert.ok(100_000 + RADIUS_M > switchM * LOD_FADE_NEAR, 'the test sits outside the near end');
+    });
+
+    it('drops the parent once its far vertex is inside the near end and the ramp is done', () => {
+        // Over the tile centre its far vertex is one radius off, well inside.
+        const h = fullTree();
+        const cam = cameraAt(0);
+        const first = h.tree.update(cam, 200, 50, 1, DETAIL_DISTANCE_OFF, undefined, undefined, 0);
+        assert.ok(first.draw.find(n => n.key === PARENT)?.under, 'under during the time ramp');
+        const later = h.tree.update(cam, 200, 50, 1, DETAIL_DISTANCE_OFF, undefined, undefined, LOD_FADE_MS + 1);
+        assert.ok(!later.draw.some(n => n.key === PARENT), 'gone once the ramp is done');
+        const leaf = later.draw.find(isLeaf)!;
+        assert.ok(leaf.fadeM > 0, 'the leaves still carry the band');
+        assert.equal(leaf.fadeFromMs, 0, 'and the original take-over time');
+    });
+
+    it('restarts the ramp when the parent goes back to drawing solo', () => {
+        const h = fullTree();
+        const cam = cameraAt(0);
+        h.tree.update(cam, 200, 50, 1, DETAIL_DISTANCE_OFF, undefined, undefined, 0);
+        // Evict one child: the parent draws solo again.
+        h.resident.delete('4/16/6');
+        const solo = h.tree.update(cam, 200, 50, 1, DETAIL_DISTANCE_OFF, undefined, undefined, 5_000);
+        const parent = solo.draw.find(n => n.key === PARENT);
+        assert.ok(parent && !parent.under, 'solo while a child is missing');
+        h.resident.add('4/16/6');
+        const back = h.tree.update(cam, 200, 50, 1, DETAIL_DISTANCE_OFF, undefined, undefined, 6_000);
+        const leaf = back.draw.find(n => n.key === '4/16/6')!;
+        assert.equal(leaf.fadeFromMs, 6_000, 'ramp restarts from the second take-over');
+    });
+
+    it('draws the leaves opaque when their parent has no mesh to show through', () => {
+        // The index says there is no z3 tile here: its leaves pop in as they
+        // always did, since a dither would open onto nothing.
+        const h = fullTree();
+        h.resident.delete(PARENT);
+        h.ocean.add(PARENT);
+        const r = h.tree.update(cameraAt(100_000), 200, 50, 1, DETAIL_DISTANCE_OFF, undefined, undefined, 0);
+        assert.ok(!r.draw.some(n => n.key === PARENT), 'nothing drawn for the parent');
+        const leaves = r.draw.filter(isLeaf);
+        assert.equal(leaves.length, 4);
+        for (const leaf of leaves) {
+            assert.equal(leaf.fadeM, 0, `${leaf.key} is opaque`);
+        }
+        // And a parent arriving later does not start a dissolve the leaves
+        // never had: they would go transparent over it with no warning.
+        h.ocean.delete(PARENT);
+        h.resident.add(PARENT);
+        const later = h.tree.update(cameraAt(100_000), 200, 50, 1, DETAIL_DISTANCE_OFF, undefined, undefined, 50);
+        assert.ok(!later.draw.some(n => n.key === PARENT), 'still nothing under');
+        assert.ok(later.draw.filter(isLeaf).every(n => n.fadeM === 0), 'still opaque');
+    });
+
+    it('never marks a node under below the leaf parent level', () => {
+        const r = update(cameraAt(100_000), 0);
+        for (const n of r.draw) {
+            if (n.under) assert.equal(n.id.z, 3, `${n.key} is under`);
+            if (n.fadeM > 0) assert.equal(n.id.z, 4, `${n.key} dissolves`);
+        }
     });
 });

@@ -1215,7 +1215,8 @@ app.post('/api/import-mod', importUpload, async (req: Request, res: Response) =>
 // dist/ on every build (see webpack.config.js). Mounted before the dist static
 // handler so it wins for /assets/planet/*.
 //
-// .ptm tiles are stored gzip-compressed on disk and served with
+// .ptm tiles and their .ptx texture sidecars are stored gzip-compressed on
+// disk and served with
 // Content-Encoding: gzip so the browser inflates them in native code off the
 // main thread. express.static would otherwise serve them as opaque bytes.
 const PLANET_DIR = path.join(PROJECT_ROOT, 'assets', 'planet');
@@ -1231,7 +1232,7 @@ for (const [mount, dir] of TERRAIN_MOUNTS) {
             res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
             res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
             res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-            if (filePath.endsWith('.ptm')) {
+            if (filePath.endsWith('.ptm') || filePath.endsWith('.ptx')) {
                 res.setHeader('Content-Encoding', 'gzip');
                 res.setHeader('Content-Type', 'application/octet-stream');
             }

@@ -280,3 +280,17 @@ describe('TileStore', () => {
 });
 
 void mock;
+
+describe('raw gzip payloads', () => {
+    it('recognises the gzip magic and inflates it with the native decoder', async () => {
+        const zlib = await import('node:zlib');
+        const { inflateGzip, isGzip } = await import('./tileStore');
+        const plain = new Uint8Array([80, 84, 88, 49, 1, 2, 3, 4, 5, 6, 7, 8]);
+        const gz = zlib.gzipSync(plain);
+        const gzBuf = gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.byteLength) as ArrayBuffer;
+        assert.equal(isGzip(gzBuf), true);
+        assert.equal(isGzip(plain.buffer as ArrayBuffer), false);
+        const back = new Uint8Array(await inflateGzip(gzBuf));
+        assert.deepEqual([...back], [...plain]);
+    });
+});

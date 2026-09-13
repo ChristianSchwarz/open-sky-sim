@@ -7,6 +7,7 @@ import { MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatRadioModule } from '@angular/material/radio';
 import { MatSelectModule } from '@angular/material/select';
+import { MatSlideToggleChange, MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatSliderModule } from '@angular/material/slider';
 import { MatTabsModule } from '@angular/material/tabs';
 import { map } from 'rxjs';
@@ -21,7 +22,8 @@ import { formatSunTime } from '../../scene/materials/shaders/sun';
 import { AiPilotModels, FlightModels, ShadowQualities, TechProfiles, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
 import { PLAY_ORIGIN } from '../../state/worldLayout';
 import {
-    DETAIL_DISTANCE_OFF, LEAF_REFINE_DISTANCE_SCALE_MAX, LEAF_REFINE_DISTANCE_SCALE_MIN,
+    DETAIL_DISTANCE_OFF, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
+    LEAF_REFINE_DISTANCE_SCALE_MAX, LEAF_REFINE_DISTANCE_SCALE_MIN,
     TERRAIN_DETAIL_DISTANCE_MAX_M, TERRAIN_DETAIL_DISTANCE_MIN_M, TERRAIN_TRIANGLE_BUDGET_MAX,
     TERRAIN_TRIANGLE_BUDGET_MIN,
 } from '../../terrain/lod';
@@ -198,7 +200,7 @@ function sliderValue(event: Event): number {
     changeDetection: ChangeDetectionStrategy.OnPush,
     imports: [
         NgTemplateOutlet, MatButtonModule, MatDialogModule, MatFormFieldModule, MatRadioModule,
-        MatSelectModule, MatSliderModule, MatTabsModule, TerrainImporter,
+        MatSelectModule, MatSlideToggleModule, MatSliderModule, MatTabsModule, TerrainImporter,
     ],
     // The page body is bold with a text shadow for legibility over the 3D
     // view; the dialog sits on its own opaque surface and wants neither.
@@ -291,6 +293,22 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Land-use region size</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">
+                                How large a field, wood or town has to be on screen before it is
+                                drawn, in pixels across. Big regions show from far away and small
+                                ones fill in as you close; lower brings the small ones in from
+                                further out, higher keeps the distance cleaner.
+                            </p>
+                            <div class="flex items-center gap-4">
+                                <mat-slider class="flex-1" [min]="revealMin" [max]="revealMax" [step]="1">
+                                    <input matSliderThumb [value]="landuseReveal()" (input)="setLanduseReveal($event)">
+                                </mat-slider>
+                                <output class="w-16 text-right tabular-nums">{{ landuseReveal() }} px</output>
+                            </div>
+                        </section>
+
+                        <section>
                             <h3 class="m-0 mb-1 text-base font-medium">Terrain triangle cap</h3>
                             <p class="m-0 mb-2 text-sm opacity-70">
                                 Hard ceiling on terrain triangles drawn per frame. When it is reached
@@ -304,6 +322,19 @@ function sliderValue(event: Event): number {
                                 </mat-slider>
                                 <output class="w-16 text-right tabular-nums">{{ triangleBudgetLabel() }}</output>
                             </div>
+                        </section>
+
+                        <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Far tile textures</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">
+                                Distant ground is drawn as large facets, one colour each. With this
+                                on, those facets are painted with an image of the fields, woods and
+                                towns the detailed tiles hold, so the far view keeps its detail
+                                instead of switching it on as you close. Off shows the plain facets.
+                            </p>
+                            <mat-slide-toggle [checked]="farTileTextures()" (change)="setFarTileTextures($event)">
+                                Paint far tiles from the detailed ground
+                            </mat-slide-toggle>
                         </section>
 
                         <section>
@@ -581,9 +612,15 @@ export class SettingsDialog {
     readonly reachMax = LEAF_REFINE_DISTANCE_SCALE_MAX;
     readonly landuseReach = signal(this.config.landuseReach.getActive());
 
+    readonly revealMin = LANDUSE_REVEAL_MIN_PX_MIN;
+    readonly revealMax = LANDUSE_REVEAL_MIN_PX_MAX;
+    readonly landuseReveal = signal(this.config.landuseReveal.getActive());
+
     readonly triangleMinK = TERRAIN_TRIANGLE_BUDGET_MIN / 1000;
     readonly triangleMaxK = TERRAIN_TRIANGLE_BUDGET_MAX / 1000;
     readonly triangleBudget = signal(this.config.triangleBudget.getActive());
+
+    readonly farTileTextures = signal(this.config.farTileTextures.getActive());
     readonly triangleBudgetK = computed(() => this.triangleBudget() / 1000);
     readonly triangleBudgetLabel = computed(() => {
         const n = this.triangleBudget();
@@ -666,6 +703,19 @@ export class SettingsDialog {
         const scale = this.config.landuseReach.getActive();
         updateSettings({ landuseReach: scale });
         this.landuseReach.set(scale);
+    }
+
+    setLanduseReveal(event: Event) {
+        this.config.landuseReveal.setActive(sliderValue(event));
+        const px = this.config.landuseReveal.getActive();
+        updateSettings({ landuseRevealPx: px });
+        this.landuseReveal.set(px);
+    }
+
+    setFarTileTextures(event: MatSlideToggleChange) {
+        this.config.farTileTextures.setActive(event.checked);
+        updateSettings({ farTileTextures: event.checked });
+        this.farTileTextures.set(event.checked);
     }
 
     setTriangleBudget(event: Event) {

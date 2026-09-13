@@ -2,6 +2,7 @@ import { KeyboardControlLayoutId } from "../input/devices/keyboardControlDevice"
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
 import { AiPilotModels, FlightModels, ShadowQualities, TechProfiles, TerrainColours, TerrainShading } from "../state/gameDefs";
 import {
+    LANDUSE_REVEAL_MIN_PX, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
     LEAF_REFINE_DISTANCE_SCALE, LEAF_REFINE_DISTANCE_SCALE_MAX, LEAF_REFINE_DISTANCE_SCALE_MIN,
     TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET, TERRAIN_TRIANGLE_BUDGET_MAX,
     TERRAIN_TRIANGLE_BUDGET_MIN,
@@ -59,8 +60,12 @@ export interface AppSettings {
      * land-use fills, replace their parent. 1 is no bias.
      */
     landuseReach: number;
+    /** Pixels of width a land-use region must reach on screen before it is drawn. */
+    landuseRevealPx: number;
     /** Hard ceiling on terrain triangles drawn per frame. */
     terrainTriangleBudget: number;
+    /** Paint far tiles with the leaf-level cover texture the bake shipped, where it did. */
+    farTileTextures: boolean;
     /** Master audio volume level (0.0 to 1.0). */
     volume: number;
 }
@@ -80,7 +85,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
     terrainArea: '',
     terrainDetailDistanceM: TERRAIN_DETAIL_DISTANCE_DEFAULT_M,
     landuseReach: LEAF_REFINE_DISTANCE_SCALE,
+    landuseRevealPx: LANDUSE_REVEAL_MIN_PX,
     terrainTriangleBudget: TERRAIN_TRIANGLE_BUDGET,
+    farTileTextures: true,
     volume: 0.7,
 };
 
@@ -124,8 +131,12 @@ export function loadSettings(): AppSettings {
                 ? parsed.terrainDetailDistanceM
                 : DEFAULT_SETTINGS.terrainDetailDistanceM,
             landuseReach: isValidLanduseReach(parsed.landuseReach) ? parsed.landuseReach : DEFAULT_SETTINGS.landuseReach,
+            landuseRevealPx: isValidLanduseRevealPx(parsed.landuseRevealPx)
+                ? parsed.landuseRevealPx : DEFAULT_SETTINGS.landuseRevealPx,
             terrainTriangleBudget: isValidTriangleBudget(parsed.terrainTriangleBudget)
                 ? parsed.terrainTriangleBudget : DEFAULT_SETTINGS.terrainTriangleBudget,
+            farTileTextures: typeof parsed.farTileTextures === 'boolean'
+                ? parsed.farTileTextures : DEFAULT_SETTINGS.farTileTextures,
             volume: isValidVolume(parsed.volume) ? parsed.volume : DEFAULT_SETTINGS.volume,
         };
     } catch {
@@ -182,6 +193,11 @@ function isValidLanduseBlend(value: unknown): value is number {
 function isValidLanduseReach(value: unknown): value is number {
     return typeof value === 'number' && Number.isFinite(value)
         && value >= LEAF_REFINE_DISTANCE_SCALE_MIN && value <= LEAF_REFINE_DISTANCE_SCALE_MAX;
+}
+
+function isValidLanduseRevealPx(value: unknown): value is number {
+    return typeof value === 'number' && Number.isFinite(value)
+        && value >= LANDUSE_REVEAL_MIN_PX_MIN && value <= LANDUSE_REVEAL_MIN_PX_MAX;
 }
 
 function isValidTriangleBudget(value: unknown): value is number {

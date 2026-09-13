@@ -1,33 +1,29 @@
-import { CLASS_COUNT, LAND_TONE_COUNT, TerrainClass, TerrainColourMode } from '../../../terrain/tones';
+import { LOD_FADE_NEAR, LOD_FADE_SOFTNESS } from '../../../terrain/lod';
+import { TerrainClass } from '../../../terrain/tones';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
+import { TERRAIN_COVER_PARS } from './terrainCover';
 
-/**
- * How many colours the swatch table holds. Compile-time, because a GLSL ES
- * 1.00 loop bound has to be constant and a dynamically-indexed uniform array
- * makes ANGLE emit helper functions the HLSL compiler dislikes.
- */
-export const TERRAIN_SWATCH_COUNT = 24;
-
-// The other two array sizes come from the terrain vocabulary rather than being
-// restated here: a tone added to the palette without the shader's array
-// growing to match would silently clamp every facet above it.
-export const TERRAIN_TONE_COUNT = LAND_TONE_COUNT;
-export const TERRAIN_CLASS_COUNT = CLASS_COUNT;
+export { TERRAIN_CLASS_COUNT, TERRAIN_SWATCH_COUNT, TERRAIN_TONE_COUNT } from './terrainCover';
 
 /**
  * Terrain land: the shaded vertex program plus a per-facet colour decision.
  *
  * Every land facet arrives carrying two observations - what the landcover
  * raster said it is (coverClass) and what the satellite said it looks like
- * (coverColor) - and this picks which of them to paint with. That choice is a
- * uniform, so switching between the four looks costs one uniform write and no
- * re-upload of anything.
+ * (coverColor) - and facetColor (see terrainCover.ts) picks which of them to
+ * paint with. That choice is a uniform, so switching between the four looks
+ * costs one uniform write and no re-upload of anything.
  *
- * It is resolved here rather than in the fragment program on purpose. The two
- * attributes are facet constants replicated across the facet's three vertices,
- * so a per-vertex decision is exactly equal to a per-fragment one — and it
- * keeps the swatch search off the fragment path, where it would run per pixel
- * instead of per triangle.
+ * It is resolved here rather than in the fragment program for a facet. The
+ * two attributes are facet constants replicated across the facet's three
+ * vertices, so a per-vertex decision is exactly equal to a per-fragment one
+ * — and it keeps the swatch search off the fragment path, where it would run
+ * per pixel instead of per triangle. A far tile with a cover texture is the
+ * exception: its colour is a texel, which only the fragment program can
+ * see, so this also emits where in that texture the vertex falls
+ * (vCoverUv) and the fragment program resolves the texel through the same
+ * facetColor. Where the texture has no data the facet colour resolved here
+ * still shows.
  *
  * The lighting below is ShadedVertProgram's, unchanged. Land is always the
  * STATIC path (normals are baked in world ENU and tiles are never rotated), so
@@ -44,40 +40,39 @@ export const TerrainVertProgram: string = `
   uniform vec3 uSunDirect;
   uniform vec3 uSunTint;
 
-  uniform int uTerrainMode;
-  /** Palette colour per land tone, already blended for the time of day. */
-  uniform vec3 uToneColor[${TERRAIN_TONE_COUNT}];
-  /** Land tone for each cover class, as a float so it can index by compare. */
-  uniform float uClassTone[${TERRAIN_CLASS_COUNT}];
+${TERRAIN_COVER_PARS}
   /**
-   * The swatch table, in sRGB rather than linear like every other colour
-   * uniform here. Deliberate: the bake chose these by median cut over sRGB
-   * bytes, so matching in the same space picks the same swatch it would.
-   * Nearest-in-linear is not the same answer - it spends the table's
-   * resolution on highlights - and the winner is converted below anyway.
+   * The far cover texture's frame, per tile (see coverFrame in
+   * coverTextures.ts): local east and north at the tile centre in these
+   * axes, scaled so a dot with the raw position is the fraction of the tile
+   * from its centre, and the lon span's shrink toward the pole per lat
+   * fraction. Zero vectors on a tile without a texture.
    */
-  uniform vec3 uSwatch[${TERRAIN_SWATCH_COUNT}];
-  uniform int uSwatchCount;
-  /** Hybrid mode: how many shade bands, and how far they reach either side. */
-  uniform float uShadeSteps;
-  uniform float uShadeRange;
-  /** The brightness this bake calls average, and one standard deviation of it. */
-  uniform vec2 uShadeWindow;
+  uniform vec3 uCoverEast;
+  uniform vec3 uCoverNorth;
+  uniform float uCoverK;
   /**
-   * What a colour the palette does not own must be multiplied by to stand in
-   * the same light as one it does — the same factor the rawColor path takes.
-   * Imagery is exactly that kind of colour: real, and with no authored night
-   * counterpart of its own.
+   * The leaf dissolve, see LOD_FADE_NEAR. uLodFadeM is the distance (m) this
+   * tile's parent handed over at, the far end of the dissolve; 0 for a tile
+   * not dissolving. uLodFadeCap is the time ramp, 0..1, for a leaf that
+   * arrived inside the band.
    */
-  uniform vec3 uRawLight;
+  uniform float uLodFadeM;
+  uniform float uLodFadeCap;
   /**
-   * Hybrid mode: share of a land-use facet's colour taken from its palette
-   * tone, the rest from its sampled imagery colour. 0..1, a player setting.
+   * Land-use regions by size, see LANDUSE_REVEAL_MIN_PX: a region shows once
+   * the camera is within regionSize * uSizeRevealScale metres (0 turns it
+   * off). uLodFills says whether this tile's regions are fills lifted over
+   * the ground (1), which a hidden one is dithered away from, or votes
+   * painted onto it (0), which are painted as their own sampled colour.
    */
-  uniform float uLanduseBlend;
+  uniform float uSizeRevealScale;
+  uniform float uLodFills;
 
   attribute vec3 coverColor;
   attribute float coverClass;
+  /** Width (m) of this vertex's land-use region on the tile; 0 for ground. */
+  attribute float regionSize;
 
   const float AMBIENT_SKY_FLOOR = 0.4;
   /**
@@ -90,117 +85,47 @@ export const TerrainVertProgram: string = `
   const float SHADOW_CONTRAST_POWER = 1.69;
   const float RIM_POWER = 3.0;
   const float RIM_STRENGTH = 0.35;
-  const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
   // Two varyings, not the shaded program's four: terrain has no duotone
   // branch to feed a scalar shade to, and no waterline to clip against.
   varying vec3 vLight;
   varying vec3 vBase;
+  /** How far in the leaf dissolve is here, 0..1; the fragment dithers on it. */
+  varying float vReveal;
+  /** Where in the tile's cover texture this vertex falls; see uCoverEast. */
+  varying vec2 vCoverUv;
 ${LOG_DEPTH_PARS_VERTEX}
 
   /**
-   * The baked colour arrives as sRGB bytes; every palette uniform reached its
-   * value through THREE.Color, which decodes sRGB to the linear working space.
-   * Without this the two sit in different spaces and imagery reads visibly
-   * paler than the palette modes it is meant to be comparable with.
-   *
-   * Same piecewise curve THREE.Color uses, not a 2.2 power: the toe matters at
-   * exactly the dark end where sea cliffs and lava live.
+   * How far in the leaf dissolve is at this vertex: 0 still the parent, 1
+   * this tile. The band runs from one softness under the switch distance -
+   * so a tile arrives fully transparent, its parent's sphere putting every
+   * vertex at or past the switch - to LOD_FADE_NEAR of it. Distance is to
+   * the camera, which the camera-relative rebase puts at the origin.
    */
-  vec3 srgbToLinear(vec3 c) {
-    vec3 lo = c * 0.0773993808;
-    vec3 hi = pow(c * 0.9478672986 + 0.0521327014, vec3(2.4));
-    return mix(hi, lo, step(c, vec3(0.04045)));
+  float lodReveal(float d) {
+    if (uLodFadeM <= 0.0) {
+      return 1.0;
+    }
+    float far = 1.0 - ${LOD_FADE_SOFTNESS.toFixed(3)};
+    float t = uLodFadeM * mix(${LOD_FADE_NEAR.toFixed(3)}, far, 0.5);
+    float soft = t * ${LOD_FADE_SOFTNESS.toFixed(3)};
+    float byDistance = 1.0 - smoothstep(t - soft, t + soft, d);
+    return min(byDistance, uLodFadeCap);
   }
 
-  /** uToneColor[i] without dynamic indexing. */
-  vec3 toneColor(float index) {
-    vec3 c = uToneColor[0];
-    for (int i = 1; i < ${TERRAIN_TONE_COUNT}; i++) {
-      if (abs(float(i) - index) < 0.5) {
-        c = uToneColor[i];
-        break; // indices are unique - nothing later could also match
-      }
+  /**
+   * Whether this vertex's land-use region is big enough to show from here:
+   * 1 fully, 0 not at all, with the same softness as the dissolve. Ground,
+   * and every vertex of a raster-only tile, carries no size and always shows.
+   */
+  float sizeReveal(float d) {
+    if (uSizeRevealScale <= 0.0 || regionSize <= 0.0) {
+      return 1.0;
     }
-    return c;
-  }
-
-  /** uClassTone[i] without dynamic indexing. */
-  float toneOfClass(float cls) {
-    float t = uClassTone[0];
-    for (int i = 1; i < ${TERRAIN_CLASS_COUNT}; i++) {
-      if (abs(float(i) - cls) < 0.5) {
-        t = uClassTone[i];
-        break; // indices are unique - nothing later could also match
-      }
-    }
-    return t;
-  }
-
-  /** Nearest table colour, in plain RGB distance. */
-  vec3 nearestSwatch(vec3 c) {
-    vec3 best = c;
-    float bestD = 1.0e9;
-    for (int i = 0; i < ${TERRAIN_SWATCH_COUNT}; i++) {
-      if (i >= uSwatchCount) {
-        break;
-      }
-      vec3 d = uSwatch[i] - c;
-      float dist = dot(d, d);
-      if (dist < bestD) {
-        bestD = dist;
-        best = uSwatch[i];
-      }
-    }
-    return best;
-  }
-
-  vec3 facetColor() {
-    // srgbToLinear(coverColor) only ever feeds the two branches below - it
-    // used to run unconditionally ahead of every branch instead, which is a
-    // pow(x, 2.4) every one of Hybrid/Swatch-table/Plain mode's vertices paid
-    // for and threw away, uTerrainMode being one uniform for the whole draw
-    // rather than something that could vary in and skip back out per vertex.
-    if (uTerrainMode == ${TerrainColourMode.Imagery}) {
-      return srgbToLinear(coverColor) * uRawLight;
-    }
-    if (uTerrainMode == ${TerrainColourMode.Swatch}) {
-      // With no table baked there is nothing to snap to, and returning the raw
-      // colour is a better answer than returning black.
-      if (uSwatchCount == 0) {
-        return srgbToLinear(coverColor) * uRawLight;
-      }
-      return srgbToLinear(nearestSwatch(coverColor)) * uRawLight;
-    }
-
-    // Unmapped ground on a landuse tile: its colour is already a smoothly
-    // blended regional mean, so paint it as it is. A palette tone would put
-    // one flat green over everything between the polygons.
-    if (abs(coverClass - ${TerrainClass.Ground}.0) < 0.5) {
-      return srgbToLinear(coverColor) * uRawLight;
-    }
-
-    vec3 tone = toneColor(toneOfClass(coverClass));
-    if (uTerrainMode == ${TerrainColourMode.Hybrid}) {
-      // The palette keeps the hue; the imagery only says how light this patch
-      // of that cover is relative to an average one. Banded, so neighbouring
-      // facets share a step and the result reads as terraced rather than as
-      // noise — which is the whole point of picking this over raw imagery.
-      // sRGB, and measured against what this bake calls average rather than
-      // against mid-grey: in linear light real ground bunches into the bottom
-      // fifth of the range, and every facet lands in the same band.
-      float lum = dot(coverColor, LUMA);
-      float d = clamp((lum - uShadeWindow.x) / max(uShadeWindow.y, 0.001), -1.0, 1.0);
-      // Not named "step": that shadows the built-in, which some ES 1.00
-      // compilers take badly and srgbToLinear above actually calls.
-      float band = floor(d * uShadeSteps + 0.5) / max(uShadeSteps, 1.0);
-      vec3 toned = tone * (1.0 + band * uShadeRange);
-      // Then mixed with the colour sampled from imagery, by the player's
-      // setting: all tone keeps a field recognisably a field, all sampled
-      // keeps it in the colours of the ground around it.
-      return mix(srgbToLinear(coverColor) * uRawLight, toned, uLanduseBlend);
-    }
-    return tone;
+    float t = regionSize * uSizeRevealScale;
+    float soft = t * ${LOD_FADE_SOFTNESS.toFixed(3)};
+    return 1.0 - smoothstep(t - soft, t + soft, d);
   }
 
   void main() {
@@ -212,9 +137,20 @@ ${LOG_DEPTH_PARS_VERTEX}
     float skyView = mix(AMBIENT_SKY_FLOOR, 1.0, 0.5 + 0.5 * worldNormal.y);
 
     vLight = uSunAmbient * skyView + uSunDirect * ndl;
-    vBase = facetColor();
 
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    float d = length(worldPos.xyz);
+    float bySize = sizeReveal(d);
+    bool fills = uLodFills > 0.5;
+    vBase = facetColor(coverColor, coverClass, fills ? 1.0 : bySize);
+    vReveal = min(lodReveal(d), fills ? bySize : 1.0);
+
+    // The cover texture's grid is the tile's lon/lat box: east and north
+    // fractions from the centre, the east one over a lon span that narrows
+    // toward the pole. Row 0 of the texture is the north edge.
+    float coverE = dot(position, uCoverEast);
+    float coverN = dot(position, uCoverNorth);
+    vCoverUv = vec2(0.5 + coverE / (1.0 - uCoverK * coverN), 0.5 - coverN);
 
     vec3 toCamera = normalize(-worldPos.xyz);
     float backlit = max(-dot(toCamera, uSunDir), 0.0);

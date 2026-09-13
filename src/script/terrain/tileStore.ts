@@ -70,8 +70,24 @@ export interface TileStoreStats {
     concurrency: number;
 }
 
+/** Whether a payload starts with the gzip magic, i.e. was not inflated on the way. */
+export function isGzip(buf: ArrayBuffer): boolean {
+    if (buf.byteLength < 2) {
+        return false;
+    }
+    const b = new Uint8Array(buf, 0, 2);
+    return b[0] === 0x1f && b[1] === 0x8b;
+}
+
+/** Inflate a gzip payload with the browser's native decoder. */
+export async function inflateGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
+    const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Response(stream).arrayBuffer();
+}
+
 export class TileStore<T> {
     private readonly map = new Map<string, Entry<T>>();
+    private warnedRawGzip = false;
     private head?: Entry<T>;   // most recently used
     private tail?: Entry<T>;   // least recently used
     private cacheBytes = 0;
@@ -336,7 +352,20 @@ export class TileStore<T> {
             if (!res.ok) {
                 throw new Error(`HTTP ${res.status}`);
             }
-            const buf = await res.arrayBuffer();
+            let buf = await res.arrayBuffer();
+            if (isGzip(buf)) {
+                // The tile is stored gzip on disk and meant to be served with
+                // Content-Encoding: gzip, which the browser inflates before we
+                // see it. A server without that rule - a stale dev server, a
+                // static host missing the header - hands over the raw gzip
+                // bytes instead, which would fail to decode and be drawn as
+                // sea from then on. Inflate here rather than fail.
+                if (!this.warnedRawGzip) {
+                    this.warnedRawGzip = true;
+                    console.warn(`[terrain] ${job.key}: served without Content-Encoding: gzip; inflating in the page`);
+                }
+                buf = await inflateGzip(buf);
+            }
             this.bytesInFlight += buf.byteLength;
             const value = this.opts.decode(buf);
             this.bytesInFlight -= buf.byteLength;

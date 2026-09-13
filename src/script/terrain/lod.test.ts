@@ -4,6 +4,7 @@ import {
     DETAIL_DISTANCE_OFF, DETAIL_SCALE_MAX, DETAIL_SCALE_MIN,
     TARGET_FRAME_MS, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_DETAIL_DISTANCE_MAX_M,
     TERRAIN_DETAIL_DISTANCE_MIN_M, adjustDetailScale, clampDetailDistanceM, detailFalloff,
+    LANDUSE_REVEAL_MIN_PX, landuseRevealScale, refineDistanceM, shouldRefine,
 } from './lod';
 
 /** Reconciles needed to get from `from` to `to` at a steady frame time. */
@@ -97,5 +98,50 @@ describe('far-field detail falloff', () => {
         assert.equal(clampDetailDistanceM(TERRAIN_DETAIL_DISTANCE_MAX_M), DETAIL_DISTANCE_OFF);
         assert.equal(clampDetailDistanceM(1e9), DETAIL_DISTANCE_OFF);
         assert.equal(clampDetailDistanceM(NaN), DETAIL_DISTANCE_OFF);
+    });
+});
+
+describe('refineDistanceM', () => {
+    const H = 720;
+    const FOV = 60;
+
+    it('is the boundary shouldRefine tests against, inside the knee', () => {
+        const d = refineDistanceM(15, H, FOV, 1, 12_000);
+        assert.ok(d < 12_000, 'this case must sit inside the knee');
+        assert.ok(shouldRefine(15, d * 0.99, H, FOV, 1));
+        assert.ok(!shouldRefine(15, d * 1.01, H, FOV, 1));
+    });
+
+    it('is the boundary shouldRefine tests against, past the knee', () => {
+        const knee = 2_000;
+        const d = refineDistanceM(15, H, FOV, 1, knee);
+        assert.ok(d > knee, 'this case must sit past the knee');
+        const at = (x: number) => shouldRefine(15, x, H, FOV, detailFalloff(x, knee));
+        assert.ok(at(d * 0.99));
+        assert.ok(!at(d * 1.01));
+    });
+
+    it('moves in as the governor backs off', () => {
+        assert.ok(refineDistanceM(15, H, FOV, 2) < refineDistanceM(15, H, FOV, 1));
+    });
+
+    it('ignores an off knee', () => {
+        assert.equal(refineDistanceM(15, H, FOV, 1, DETAIL_DISTANCE_OFF), refineDistanceM(15, H, FOV, 1));
+    });
+});
+
+describe('landuseRevealScale', () => {
+    it('shows a region exactly where its width projects to the pixel threshold', () => {
+        const scale = landuseRevealScale(720, 60);
+        const widthM = 100;
+        const d = widthM * scale;
+        // Projected height of `widthM` at distance d, in pixels.
+        const px = widthM * 720 / (2 * d * Math.tan(Math.PI / 6));
+        assert.ok(Math.abs(px - LANDUSE_REVEAL_MIN_PX) < 1e-9);
+    });
+
+    it('reaches further on a taller viewport and a narrower field of view', () => {
+        assert.ok(landuseRevealScale(1080, 60) > landuseRevealScale(720, 60));
+        assert.ok(landuseRevealScale(720, 40) > landuseRevealScale(720, 60));
     });
 });

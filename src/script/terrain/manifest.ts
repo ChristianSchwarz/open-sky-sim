@@ -34,6 +34,25 @@ export interface MeshStreamManifest {
     luminance?: { mid: number; spread: number };
 }
 
+/**
+ * Far-tile cover textures, written by tools/bake_planet_tex.ts. One PTX1
+ * raster per coarse tile, `size` texels across its lon/lat box, each texel
+ * the same `r, g, b, TerrainClass` word a land vertex carries (alpha 255 =
+ * no data). Absent on a pyramid baked without them, which the runtime treats
+ * as "paint facets", exactly as before textures existed.
+ */
+export interface TextureStreamManifest {
+    /** Path template, e.g. `{z}/{x}/{y}.ptx`. */
+    path: string;
+    indexPath: string;
+    encoding: string;
+    transport?: string;
+    size: number;
+    minZoom: number;
+    /** The leaf zoom less one: a leaf draws its own facets. */
+    maxZoom: number;
+}
+
 export interface HeightStreamManifest {
     path: string;
     indexPath: string;
@@ -104,6 +123,7 @@ export interface TerrainManifest {
     areas?: TerrainArea[];
     enuOrigin: { lat: number; lon: number; height: number };
     mesh: MeshStreamManifest;
+    texture?: TextureStreamManifest;
     height: HeightStreamManifest;
     flattenPads: FlattenPadManifest[];
     /**
@@ -152,6 +172,17 @@ export function heightTileUrl(
     manifest: TerrainManifest, z: number, x: number, y: number, base: string,
 ): string {
     return `${base}/${expand(manifest.height.path, z, x, y)}`;
+}
+
+/** Only meaningful when `manifest.texture` is present. */
+export function textureTileUrl(
+    manifest: TerrainManifest, z: number, x: number, y: number, base: string,
+): string {
+    return `${base}/${expand(manifest.texture!.path, z, x, y)}`;
+}
+
+export function textureIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
+    return manifest.texture ? `${base}/${manifest.texture.indexPath}` : undefined;
 }
 
 export function meshIndexUrl(manifest: TerrainManifest, base: string): string {

@@ -20,6 +20,7 @@ import {
 } from './shaders/terrainVP';
 import { SUN_UNIFORMS } from './shaders/sun';
 import { LANDUSE_BLEND_DEFAULT } from '../../terrain/tones';
+import { makeNoCoverTexture } from '../../terrain/coverTextures';
 
 export enum SceneMaterialPrimitiveType {
     MESH,
@@ -210,6 +211,8 @@ export class SceneMaterialManager implements KernelTask {
     private readonly lineProto: THREE.ShaderMaterial;
     private readonly shadedProto: THREE.ShaderMaterial;
     private readonly terrainProto: THREE.ShaderMaterial;
+    /** Bound to uCoverTex on every terrain draw that has no cover texture. */
+    private readonly noCoverTexture = makeNoCoverTexture();
     private readonly pointProto: THREE.ShaderMaterial;
     private readonly particleMeshProto: THREE.ShaderMaterial;
     private readonly impostorProto: THREE.ShaderMaterial;
@@ -493,6 +496,25 @@ export class SceneMaterialManager implements KernelTask {
             // Share of a land-use facet's Hybrid colour taken from its palette
             // tone; the rest is its sampled colour. See LanduseBlendSetting.
             uLanduseBlend: { value: LANDUSE_BLEND_DEFAULT },
+            // The leaf dissolve, per tile, set per draw by the terrain
+            // entity's tileBeforeRender. See lodReveal in terrainVP and
+            // uDepthPush in logDepth.
+            uLodFadeM: { value: 0 },
+            uLodFadeCap: { value: 1 },
+            uLodFills: { value: 0 },
+            uDepthPush: { value: 0 },
+            // Land-use regions by size; the entity sets the scale per
+            // reconcile from the viewport. See LANDUSE_REVEAL_MIN_PX.
+            uSizeRevealScale: { value: 0 },
+            // The far cover texture, per tile, set per draw by
+            // tileBeforeRender. The sampler always has *a* texture bound -
+            // a lone no-data texel - so a draw without one is well-formed.
+            uCoverTex: { value: this.noCoverTexture },
+            uHasCoverTex: { value: 0 },
+            uCoverEnabled: { value: 1 },
+            uCoverEast: { value: new THREE.Vector3() },
+            uCoverNorth: { value: new THREE.Vector3() },
+            uCoverK: { value: 0 },
         };
     }
 

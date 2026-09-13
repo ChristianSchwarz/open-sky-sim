@@ -26,6 +26,8 @@ interface TerrainStatsShape {
     uploadMs?: number;
     pendingUploads?: number;
     triangleBudgetHit?: boolean;
+    /** Resident tiles with a far cover texture attached. */
+    textured?: number;
 }
 
 /** Frame-time EMA smoothing factor — same order as the terrain LOD governor's own. */
@@ -96,7 +98,8 @@ export class PerfHudEntity implements Entity {
             // Streaming health: queue should drain, cache should plateau, tier must not change.
             const mb = (terrainStats.cacheBytes ?? 0) / 1048576;
             const failSuffix = (terrainStats.failed ?? 0) > 0 ? ` F${terrainStats.failed}` : '';
-            lines.push(`Q${terrainStats.queued ?? 0} ${mb.toFixed(0)}MB ${terrainStats.heightTier ?? '?'}${failSuffix}`);
+            const texSuffix = (terrainStats.textured ?? 0) > 0 ? ` TEX${terrainStats.textured}` : '';
+            lines.push(`Q${terrainStats.queued ?? 0} ${mb.toFixed(0)}MB ${terrainStats.heightTier ?? '?'}${failSuffix}${texSuffix}`);
         }
 
         // Top-right, on a black box so it stays legible over bright sky/terrain.

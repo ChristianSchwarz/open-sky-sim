@@ -55,8 +55,9 @@ QUADRANTS = ((0, 0), (1, 0), (0, 1), (1, 1))
 
 # Everything a planet tile can carry: heights, coast/water vectors, cover.
 PLANET_EXTS = ('.pdm', '.lvr', '.plc')
-# The draw-ready tree: the mesh, plus the height tile copied there for physics.
-TERRAIN_EXTS = ('.ptm', '.pdm')
+# The draw-ready tree: the mesh, the height tile copied there for physics, and
+# the far-tile cover texture beside the mesh.
+TERRAIN_EXTS = ('.ptm', '.pdm', '.ptx')
 
 TileSet = Set[Tuple[int, int]]
 
@@ -283,7 +284,8 @@ def delete(args: argparse.Namespace) -> int:
     if os.path.exists(tman_path):
         tman = load_json(tman_path)
         for index_rel in {tman.get('mesh', {}).get('indexPath', 'index_mesh.bin'),
-                          tman.get('height', {}).get('indexPath', 'index.bin')}:
+                          tman.get('height', {}).get('indexPath', 'index.bin'),
+                          tman.get('texture', {}).get('indexPath', 'index_tex.bin')}:
             t_index_path = os.path.join(args.terrain, index_rel)
             if not os.path.exists(t_index_path):
                 continue
@@ -337,8 +339,9 @@ def delete(args: argparse.Namespace) -> int:
     print(f'coverage    {manifest["coverage"]}')
     print(f'done in {time.time() - started:.1f}s')
     bbox = f'{box.west},{box.south},{box.east},{box.north}'
-    print(f'\nnext: rebake the surviving coarse meshes over the box:\n'
-          f'  npm run bake:mesh -- --bbox {bbox}')
+    print(f'\nnext: rebake the surviving coarse meshes and their textures over the box:\n'
+          f'  npm run bake:mesh -- --bbox {bbox}\n'
+          f'  npm run bake:tex -- --bbox {bbox}')
     return 0
 
 

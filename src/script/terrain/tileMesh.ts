@@ -55,12 +55,90 @@ export interface TileMeshes {
      */
     landGeometryFaceted?: THREE.BufferGeometry;
     landGeometrySmooth?: THREE.BufferGeometry;
+    /**
+     * The tile's far cover texture, once attached (see CoverTextures):
+     * undefined until asked for, 'pending' while its sidecar is fetched,
+     * 'none' for a tile that has no sidecar, and the texture itself after
+     * it is bound to the land mesh. Disposed with the tile.
+     */
+    cover?: THREE.DataTexture | 'pending' | 'none';
     /** Bytes of GPU buffer, for the cache budget. */
     bytes: number;
 }
 
 /** Materials indexed by {@link TerrainTone}. */
 export type ToneMaterials = readonly THREE.Material[];
+
+// TerrainClass.Ground spelled out: it is a `const enum`, and the tsx test
+// runner leaves an imported const-enum binding undefined (see facetColour.ts).
+const GROUND_CLASS = 13;
+
+/**
+ * Whether any land vertex is TerrainClass.Ground - land no land-use polygon
+ * claims, on a tile that has land-use. Only such a tile's other classes are
+ * land-use regions (exact fills on the leaf, votes above it); on a raster-only
+ * tile the classes *are* the ground.
+ */
+export function hasLanduseGround(landAttrs: Uint8Array): boolean {
+    for (let i = 3; i < landAttrs.length; i += 4) {
+        if (landAttrs[i] === GROUND_CLASS) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Per vertex, the width in metres of the land-use region it belongs to: the
+ * square root of the region's area on this tile. 0 for ground, and for every
+ * vertex of a raster-only tile. See LANDUSE_REVEAL_MIN_PX for what it gates.
+ *
+ * A region is told by the vertex's whole cover word - its colour and class -
+ * since a fill carries its region's own colour at every vertex and a vote
+ * paints the whole facet with it. Two regions of one class and the same
+ * sampled colour would merge, which only makes both show a little earlier.
+ * Non-indexed input: three vertices per triangle, all carrying the same word.
+ */
+export function regionSizes(
+    positions: Int16Array, attrs: Uint8Array, quantScale: number,
+): Uint16Array {
+    const vertexCount = positions.length / 3;
+    const out = new Uint16Array(vertexCount);
+    if (!hasLanduseGround(attrs)) {
+        return out;
+    }
+    const area = new Map<number, number>();
+    const wordOf = (v: number) =>
+        attrs[v * 4] | (attrs[v * 4 + 1] << 8) | (attrs[v * 4 + 2] << 16) | (attrs[v * 4 + 3] << 24);
+    for (let v = 0; v + 2 < vertexCount; v += 3) {
+        if (attrs[v * 4 + 3] === GROUND_CLASS) {
+            continue;
+        }
+        const ax = positions[v * 3], ay = positions[v * 3 + 1], az = positions[v * 3 + 2];
+        const bx = positions[v * 3 + 3] - ax, by = positions[v * 3 + 4] - ay, bz = positions[v * 3 + 5] - az;
+        const cx = positions[v * 3 + 6] - ax, cy = positions[v * 3 + 7] - ay, cz = positions[v * 3 + 8] - az;
+        const nx = by * cz - bz * cy;
+        const ny = bz * cx - bx * cz;
+        const nz = bx * cy - by * cx;
+        const tri = 0.5 * Math.hypot(nx, ny, nz) * quantScale * quantScale;
+        const key = wordOf(v);
+        area.set(key, (area.get(key) ?? 0) + tri);
+    }
+    for (let v = 0; v < vertexCount; v++) {
+        if (attrs[v * 4 + 3] === GROUND_CLASS) {
+            continue;
+        }
+        const a = area.get(wordOf(v));
+        if (a !== undefined) {
+            out[v] = Math.min(65535, Math.round(Math.sqrt(a)));
+        }
+    }
+    return out;
+}
+
+function vertexCountOf(g: THREE.BufferGeometry): number {
+    return g.getAttribute('position').count;
+}
 
 function landGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
     const vertexCount = tile.landPositions.length / 3;
@@ -84,6 +162,10 @@ function landGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
     const attrBuffer = new THREE.InterleavedBuffer(tile.landAttrs, 4);
     g.setAttribute('coverColor', new THREE.InterleavedBufferAttribute(attrBuffer, 3, 0, true));
     g.setAttribute('coverClass', new THREE.InterleavedBufferAttribute(attrBuffer, 1, 3, false));
+    // Metres, not normalised: the shader compares it with a distance.
+    g.setAttribute('regionSize', new THREE.BufferAttribute(
+        regionSizes(tile.landPositions, tile.landAttrs, tile.quantScale), 1, false,
+    ));
 
     // Land is one draw: the shader resolves colour per vertex from coverColor
     // and coverClass, so there is nothing left to bucket into tone groups.
@@ -113,6 +195,8 @@ function landGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
  */
 export function buildSmoothLandGeometry(
     positions: Int16Array, normals: Int8Array, attrs: Uint8Array,
+    /** Per-vertex region width (see regionSizes); the weld keeps the largest. */
+    sizes?: Uint16Array,
 ): THREE.BufferGeometry | undefined {
     const vertexCount = positions.length / 3;
     if (vertexCount === 0) {
@@ -124,6 +208,7 @@ export function buildSmoothLandGeometry(
     const normalSum: number[] = [];
     const colorSum: number[] = [];
     const classVotes: Map<number, number>[] = [];
+    const sizeMax: number[] = [];
     const remap = new Uint32Array(vertexCount);
 
     for (let i = 0; i < vertexCount; i++) {
@@ -139,8 +224,12 @@ export function buildSmoothLandGeometry(
             normalSum.push(0, 0, 0);
             colorSum.push(0, 0, 0, 0);
             classVotes.push(new Map());
+            sizeMax.push(0);
         }
         remap[i] = idx;
+        if (sizes && sizes[i] > sizeMax[idx]) {
+            sizeMax[idx] = sizes[i];
+        }
 
         const ni = i * 4;
         normalSum[idx * 3] += normals[ni];
@@ -162,6 +251,7 @@ export function buildSmoothLandGeometry(
     const outPositions = new Int16Array(uniquePositions);
     const outNormals = new Int8Array(uniqueCount * 4);
     const outAttrs = new Uint8Array(uniqueCount * 4);
+    const outSizes = new Uint16Array(sizeMax);
     for (let v = 0; v < uniqueCount; v++) {
         const nx = normalSum[v * 3];
         const ny = normalSum[v * 3 + 1];
@@ -199,6 +289,7 @@ export function buildSmoothLandGeometry(
     const attrBuffer = new THREE.InterleavedBuffer(outAttrs, 4);
     g.setAttribute('coverColor', new THREE.InterleavedBufferAttribute(attrBuffer, 3, 0, true));
     g.setAttribute('coverClass', new THREE.InterleavedBufferAttribute(attrBuffer, 1, 3, false));
+    g.setAttribute('regionSize', new THREE.BufferAttribute(outSizes, 1, false));
     g.setIndex(new THREE.BufferAttribute(indices, 1));
     g.addGroup(0, indices.length, LAND_TONE_BASE);
     return g;
@@ -216,10 +307,12 @@ export function buildSmoothLandGeometryFromFaceted(faceted: THREE.BufferGeometry
     const position = faceted.getAttribute('position') as THREE.BufferAttribute;
     const normal = faceted.getAttribute('normal') as THREE.InterleavedBufferAttribute;
     const coverColor = faceted.getAttribute('coverColor') as THREE.InterleavedBufferAttribute;
+    const regionSize = faceted.getAttribute('regionSize') as THREE.BufferAttribute | undefined;
     return buildSmoothLandGeometry(
         position.array as Int16Array,
         normal.data.array as Int8Array,
         coverColor.data.array as Uint8Array,
+        regionSize?.array as Uint16Array | undefined,
     );
 }
 
@@ -320,6 +413,12 @@ export function buildTileMeshes(
     shading: TerrainShading = TerrainShading.FACETED,
     /** Landuse region edges. Omit and they are not drawn. */
     outlineMaterial?: THREE.Material,
+    /**
+     * The pyramid's finest zoom: a tile there carries land-use regions as
+     * exact fills lifted over the ground; coarser tiles carry them as votes
+     * painted onto it. See LANDUSE_REVEAL_MIN_PX for why the shader cares.
+     */
+    leafZoom: number = Infinity,
 ): TileMeshes {
     const group = new THREE.Group();
     group.name = `tile:${tile.id.z}/${tile.id.x}/${tile.id.y}`;
@@ -359,7 +458,10 @@ export function buildTileMeshes(
         // TerrainEntity.setTerrainShading — rather than every tile upload
         // paying it up front regardless of the active setting.
         const smoothLg = shading === TerrainShading.SMOOTH
-            ? buildSmoothLandGeometry(tile.landPositions, tile.landNormals, tile.landAttrs)
+            ? buildSmoothLandGeometry(
+                tile.landPositions, tile.landNormals, tile.landAttrs,
+                (lg.getAttribute('regionSize') as THREE.BufferAttribute).array as Uint16Array,
+            )
             : undefined;
         const mesh = new THREE.Mesh(
             shading === TerrainShading.SMOOTH && smoothLg ? smoothLg : lg,
@@ -367,6 +469,8 @@ export function buildTileMeshes(
         );
         mesh.frustumCulled = false;   // the quadtree already culled this tile
         mesh.matrixAutoUpdate = false; // identity local transform, never moves
+        // Read per draw into uLodFills (see TerrainEntity).
+        mesh.userData.landuseFills = tile.id.z >= leafZoom;
         if (onBeforeRender) {
             mesh.onBeforeRender = onBeforeRender;
         }
@@ -375,7 +479,7 @@ export function buildTileMeshes(
         meshes.landGeometryFaceted = lg;
         meshes.landGeometrySmooth = smoothLg;
         bytes += tile.landPositions.byteLength + tile.landNormals.byteLength
-            + tile.landAttrs.byteLength;
+            + tile.landAttrs.byteLength + vertexCountOf(lg) * 2;   // regionSize
         if (smoothLg) {
             bytes += smoothLg.getIndex()?.array.byteLength ?? 0;
         }
@@ -440,5 +544,10 @@ export function disposeTileMeshes(m: TileMeshes): void {
     m.water?.geometry.dispose();
     m.rivers?.geometry.dispose();
     m.outlines?.geometry.dispose();
+    if (m.cover instanceof THREE.DataTexture) {
+        m.cover.dispose();
+    }
+    // A sidecar still in flight must not bind to a released tile.
+    m.cover = 'none';
     m.group.clear();
 }

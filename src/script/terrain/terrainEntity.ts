@@ -34,19 +34,22 @@ import { FlattenPad, padFromRecord, padReachM } from './flattenPad';
 import { HeightField, HeightTier } from './heightField';
 import {
     MESH_CACHE_BYTES, PREFETCH_LOOKAHEAD_S, PREFETCH_MIN_DISTANCE_M, RECONCILE_INTERVAL_MS,
-    LEAF_REFINE_DISTANCE_SCALE, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
-    adjustDetailScale,
+    LANDUSE_REVEAL_MIN_PX, LEAF_REFINE_DISTANCE_SCALE, LOD_DEPTH_PUSH_SCALE, LOD_FADE_MS,
+    TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
+    adjustDetailScale, landuseRevealScale,
 } from './lod';
 import {
     TerrainManifest, baseUrlOf, heightIndexUrl, heightTileUrl, meshIndexUrl, meshTileUrl,
+    textureIndexUrl,
 } from './manifest';
+import { CoverBinding, CoverTextures } from './coverTextures';
 import { OceanPatch, buildOceanPatch, disposeOceanPatch } from './oceanPatch';
 import { PtmTile, decodePtm } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
 import { TileIndex } from './tileIndex';
 import { TileMeshes, buildSmoothLandGeometryFromFaceted, buildTileMeshes, disposeTileMeshes, tileOriginWorld } from './tileMesh';
 import { TileStore } from './tileStore';
-import { TileStreamer, TileWant, predictViewTarget } from './tileStreamer';
+import { PRIORITY_IN_FRUSTUM, TileStreamer, TileWant, predictViewTarget } from './tileStreamer';
 import { TileHeightIndex } from './tileHeightIndex';
 import { TileKey, approxTileEdgeMetres, tileAtLonLat, tileKeyString } from './tiling';
 import { enuToGeodeticApprox } from './geodesy';
@@ -55,8 +58,8 @@ import {
 } from './tones';
 import { TERRAIN_COLOUR_MODE_INDEX, TerrainColours, TerrainShading } from '../state/gameDefs';
 import {
-    LanduseBlendSetting, LanduseReachSetting, TerrainColourSetting, TerrainDetailSetting,
-    TerrainShadingSetting, TriangleBudgetSetting,
+    FarTileTexturesSetting, LanduseBlendSetting, LanduseReachSetting, LanduseRevealSetting, TerrainColourSetting,
+    TerrainDetailSetting, TerrainShadingSetting, TriangleBudgetSetting,
 } from '../config/configService';
 import { publishTerrainStats, trackTerrainMaterial } from './debug';
 
@@ -98,6 +101,62 @@ const HYBRID_SHADE_FALLBACK = { mid: 0.5, spread: 0.2 };
  */
 const PAD_RELEVANCE_M = 400_000;
 
+/** A tile's part in the leaf dissolve this pass; on its group's userData. */
+interface TileLodState {
+    /** Depth push (m) for a parent drawn under its children; 0 otherwise. */
+    pushM: number;
+    /** A dissolving leaf: the far end of its dissolve (m); 0 otherwise. */
+    fadeM: number;
+    /** A dissolving leaf: when its parent handed over, ms. */
+    fadeFromMs: number;
+}
+
+/**
+ * Per-draw uniform refresh for a tile's land mesh: the shared one, then the
+ * tile's part in the leaf dissolve (see LOD_FADE_NEAR), which syncGroup
+ * leaves on the tile group. The land material is one object for every tile,
+ * so a per-tile value can only travel this way; updateUniforms already marks
+ * shaded uniforms for upload on every draw, so this adds no upload of its own.
+ * Water is unshaded and refreshed once per material per pass, so it takes no
+ * part: the under-parent's water is drawn unpushed and the leaf's over it.
+ */
+const tileBeforeRender: THREE.Mesh['onBeforeRender'] = function (
+    this: THREE.Mesh, renderer, scene, camera, geometry, material, group,
+) {
+    updateUniforms.call(this, renderer, scene, camera, geometry, material, group);
+    const u = (material as THREE.ShaderMaterial).uniforms;
+    if (!u || !u.uLodFadeM) {
+        return;
+    }
+    const lod = this.parent?.userData.lod as TileLodState | undefined;
+    u.uDepthPush.value = lod?.pushM ?? 0;
+    u.uLodFadeM.value = lod?.fadeM ?? 0;
+    u.uLodFadeCap.value = lod && lod.fadeM > 0
+        ? Math.min(1, (performance.now() - lod.fadeFromMs) / LOD_FADE_MS)
+        : 1;
+    u.uLodFills.value = this.userData.landuseFills ? 1 : 0;
+    // The far cover texture, where this tile has one; see CoverTextures.
+    const cover = this.userData.cover as CoverBinding | undefined;
+    if (cover) {
+        u.uCoverTex.value = cover.texture;
+        u.uHasCoverTex.value = 1;
+        (u.uCoverEast.value as THREE.Vector3).copy(cover.east);
+        (u.uCoverNorth.value as THREE.Vector3).copy(cover.north);
+        u.uCoverK.value = cover.k;
+    } else if (u.uHasCoverTex.value !== 0) {
+        u.uHasCoverTex.value = 0;
+        u.uCoverTex.value = noCoverTexture;
+    }
+};
+
+/**
+ * What uCoverTex is rebound to for a draw without a texture: the material's
+ * own placeholder, read back off the first tile drawn without one. Binding
+ * the previous tile's texture there instead would be harmless (the sampler
+ * is not read) but keeps a released texture referenced by the material.
+ */
+let noCoverTexture: THREE.Texture | null = null;
+
 export interface TerrainEntityOptions {
     manifest: TerrainManifest;
     manifestUrl: string;
@@ -114,8 +173,12 @@ export interface TerrainEntityOptions {
     landuseBlend?: LanduseBlendSetting;
     /** Live leaf-refine reach. Omit and the LOD default stays. */
     landuseReach?: LanduseReachSetting;
+    /** Live land-use region size threshold. Omit and LANDUSE_REVEAL_MIN_PX stays. */
+    landuseReveal?: LanduseRevealSetting;
     /** Live per-frame triangle ceiling. Omit and TERRAIN_TRIANGLE_BUDGET stays. */
     triangleBudget?: TriangleBudgetSetting;
+    /** Live far-tile texture switch. Omit and textures are drawn where the bake shipped them. */
+    farTileTextures?: FarTileTexturesSetting;
 }
 
 export interface TerrainStats {
@@ -134,6 +197,9 @@ export interface TerrainStats {
     pendingUploads: number;
     /** TERRAIN_TRIANGLE_BUDGET cut this frame's draw list short (see syncGroup). */
     triangleBudgetHit: boolean;
+    /** Resident tiles drawing their far cover texture; see CoverTextures. */
+    textured: number;
+    texturesInflight: number;
 }
 
 export class TerrainEntity implements Entity {
@@ -151,6 +217,7 @@ export class TerrainEntity implements Entity {
     private readonly meshStore: TileStore<PtmTile>;
     private readonly heightStore: TileStore<DemTile>;
     private readonly streamer: TileStreamer<PtmTile, TileMeshes>;
+    private readonly cover: CoverTextures;
     private readonly quadtree: Quadtree;
     private readonly oceans = new Map<string, OceanPatch>();
     private readonly pinned = new Set<string>();
@@ -169,6 +236,16 @@ export class TerrainEntity implements Entity {
      */
     setTerrainColour(mode: TerrainColours): void {
         this.landMaterial.uniforms.uTerrainMode.value = TERRAIN_COLOUR_MODE_INDEX[mode];
+    }
+
+    /**
+     * Switch the far cover textures. One uniform, like the colour mode: the
+     * textures already attached stay on their tiles, unread, and no new
+     * sidecar is fetched while it is off.
+     */
+    setFarTileTextures(on: boolean): void {
+        this.landMaterial.uniforms.uCoverEnabled.value = on ? 1 : 0;
+        this.cover.setEnabled(on);
     }
 
     /** Which of a resident tile's two land geometries new uploads start on. */
@@ -214,6 +291,8 @@ export class TerrainEntity implements Entity {
      */
     private detailDistanceM = TERRAIN_DETAIL_DISTANCE_DEFAULT_M;
     private leafScale = LEAF_REFINE_DISTANCE_SCALE;
+    /** Pixels of width a land-use region needs before it is drawn; see LANDUSE_REVEAL_MIN_PX. */
+    private revealPx = LANDUSE_REVEAL_MIN_PX;
     private triangleBudget = TERRAIN_TRIANGLE_BUDGET;
     private drawList: QuadNode[] = [];
     private drawnTriangles = 0;
@@ -340,6 +419,10 @@ export class TerrainEntity implements Entity {
             this.leafScale = opts.landuseReach.getActive();
             opts.landuseReach.addChangeListener(s => { this.leafScale = s; });
         }
+        if (opts.landuseReveal) {
+            this.revealPx = opts.landuseReveal.getActive();
+            opts.landuseReveal.addChangeListener(px => { this.revealPx = px; });
+        }
 
         if (opts.triangleBudget) {
             this.triangleBudget = opts.triangleBudget.getActive();
@@ -414,10 +497,28 @@ export class TerrainEntity implements Entity {
             store: this.meshStore,
             upload: (id, tile) => buildTileMeshes(
                 tile, this.basis, this.materials, this.riverMaterial,
-                updateUniforms, this.frameFix, this.landShading,
+                tileBeforeRender, this.frameFix, this.landShading,
+                undefined, opts.manifest.mesh.maxZoom,
             ),
-            release: (_id, m) => disposeTileMeshes(m),
+            release: (_id, m) => {
+                this.cover.release(m);
+                disposeTileMeshes(m);
+            },
         });
+
+        // Far cover textures ride beside the meshes, in the bake's own frame:
+        // a tile's positions are offsets in that frame's axes, and so is the
+        // east/north frame the shader projects them onto.
+        this.cover = new CoverTextures({
+            manifest: opts.manifest,
+            baseUrl: base,
+            bakeBasis: makeEnuBasis(baked.lat, baked.lon, baked.height ?? 0),
+        });
+        noCoverTexture = this.landMaterial.uniforms.uCoverTex?.value ?? null;
+        if (opts.farTileTextures) {
+            this.setFarTileTextures(opts.farTileTextures.getActive());
+            opts.farTileTextures.addChangeListener(on => this.setFarTileTextures(on));
+        }
 
         // The ellipsoid centre in scene space. The ENU origin sits on the
         // surface with +Y up, so the centre is one Earth radius straight down.
@@ -453,12 +554,15 @@ export class TerrainEntity implements Entity {
     async load(manifestUrl: string): Promise<void> {
         this.manifestUrl = manifestUrl;
         const base = baseUrlOf(manifestUrl);
-        const [meshIdx, heightIdx] = await Promise.all([
+        const texIndexUrl = textureIndexUrl(this.manifest, base);
+        const [meshIdx, heightIdx, texIdx] = await Promise.all([
             fetchIndex(meshIndexUrl(this.manifest, base)),
             fetchIndex(heightIndexUrl(this.manifest, base)),
+            texIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(texIndexUrl),
         ]);
         this.meshIndex = meshIdx;
         this.heightIndex = heightIdx;
+        this.cover.setIndex(texIdx);
         await this.heights.loadCoarse(heightIdx);
     }
 
@@ -715,6 +819,7 @@ export class TerrainEntity implements Entity {
         this.lastReconcile = now;
         this.detailScale = adjustDetailScale(this.detailScale, this.frameEmaMs);
         this.meshStore.nextGeneration();
+        this.cover.nextGeneration();
 
         const r = this.quadtree.update(
             camera,
@@ -724,10 +829,17 @@ export class TerrainEntity implements Entity {
             this.detailDistanceM,
             (id) => this.pinned.has(tileKeyString(id)),
             this.leafScale,
+            now,
         );
 
         this.streamer.setWants(r.wants, this.speculativeWants(camera, r.wants));
         this.drawList = r.draw;
+        // Land-use regions by size, see LANDUSE_REVEAL_MIN_PX: the pixel
+        // threshold in metres of distance per metre of width, for this view.
+        const sizeScale = this.landMaterial.uniforms.uSizeRevealScale;
+        if (sizeScale) {
+            sizeScale.value = landuseRevealScale(this.viewportHeightPx, camera.fov, this.revealPx);
+        }
         this.syncGroup(camera.position);
         publishTerrainStats({ ...this.stats, altitudeM: camera.position.y });
     }
@@ -829,8 +941,18 @@ export class TerrainEntity implements Entity {
                     disposeOceanPatch(standIn);
                     this.oceans.delete(node.key);
                 }
+                // Read per draw by tileBeforeRender. Mutated in place: this
+                // runs for every drawn tile every reconcile.
+                const lod = (meshes.group.userData.lod ??= { pushM: 0, fadeM: 0, fadeFromMs: 0 }) as TileLodState;
+                lod.pushM = node.under ? node.geometricErrorM * LOD_DEPTH_PUSH_SCALE : 0;
+                lod.fadeM = node.fadeM;
+                lod.fadeFromMs = node.fadeFromMs;
                 this.group.add(meshes.group);
                 this.drawnTriangles += countTriangles(meshes);
+                // Nearest first, like the meshes; a leaf never has one and
+                // returns from this at once.
+                this.cover.attach(node.id, meshes,
+                    PRIORITY_IN_FRUSTUM - Math.sqrt(node.center.distanceToSquared(camPos)));
                 continue;
             }
             const key = node.key;
@@ -892,6 +1014,8 @@ export class TerrainEntity implements Entity {
             uploadMs: this.streamer.stats.uploadMs,
             pendingUploads: this.streamer.pendingUploads,
             triangleBudgetHit: this.triangleBudgetHit,
+            textured: this.cover.stats.attached,
+            texturesInflight: this.cover.stats.inflight,
         };
     }
 }

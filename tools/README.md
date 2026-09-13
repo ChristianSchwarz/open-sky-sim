@@ -221,7 +221,19 @@ npm run bake:cover
 # 5. meshes: .pdm + .lvr + .plc -> draw-ready .ptm tiles + index_mesh.bin
 npm run bake:mesh
 npm run verify:planet -- --dir assets/terrain
+
+# 6. far-tile textures: leaf .ptm facets -> .ptx per coarse tile + index_tex.bin   (optional)
+npm run bake:tex
 ```
+
+Stage 6 rasterises every leaf's land facets top-down and folds the images up
+the quadtree, so a coarse tile can paint the leaf's land-use detail as a
+texture instead of one colour per facet (see `docs/terrain-far-textures.md`).
+It reads only stage 5's output; without it the runtime paints facets as before.
+In the game the *Far tile textures* switch on the World settings tab turns the
+textures off and on, and the F9 performance HUD's terrain streaming line
+(the one starting `Q`) shows `TEXn` for the number of resident tiles carrying
+one.
 
 Stage 5 is the only place terrain geometry is produced. The runtime fetches,
 decodes and draws — it never triangulates — so there is no fallback path that
@@ -400,6 +412,7 @@ npm run bake:airports -- --bbox 7.6,45.9,7.8,46.0
 npm run fetch:cover -- --bbox 7.6,45.9,7.8,46.0
 npm run bake:cover -- --bbox 7.6,45.9,7.8,46.0 --osm-landuse
 npm run bake:mesh -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:tex -- --bbox 7.6,45.9,7.8,46.0
 ```
 
 `--osm-landuse` (the F9 import pipeline passes it too — see
@@ -858,6 +871,16 @@ already oversamples it 1.6x.
 | `--limit N` | stop after N tiles, for a smoke bake |
 | `--swatches N` | colours in the baked swatch table (default 24) |
 | `--bbox W,S,E,N` | bake only the tiles overlapping this box |
+
+`bake_planet_tex.ts` (`npm run bake:tex -- ...`):
+
+| Flag | Meaning |
+| --- | --- |
+| `--dir DIR` | the mesh tree, read and written (default `assets/terrain`) |
+| `--cache DIR` | leaf rasters, keyed by each `.ptm`'s size and mtime (default `assets/planet/tex_cache`) |
+| `--size N` | texels across a tile, a power of two (default 256) |
+| `--min-zoom N` | coarsest level that gets a texture (default 6) |
+| `--bbox W,S,E,N` | re-rasterise only the leaves in this box, refold their ancestors, merge `index_tex.bin` |
 
 **`--bbox` is what makes a run additive.** Two whole-pyramid artefacts —
 `index_mesh.bin` and `swatch_histogram.bin` — are carried forward from disk only

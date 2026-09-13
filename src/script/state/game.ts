@@ -3259,7 +3259,9 @@ export class Game {
             terrainDetail: this.configService.terrainDetail,
             landuseBlend: this.configService.landuseBlend,
             landuseReach: this.configService.landuseReach,
+            landuseReveal: this.configService.landuseReveal,
             triangleBudget: this.configService.triangleBudget,
+            farTileTextures: this.configService.farTileTextures,
         });
         await this.planetTerrain.load(DEFAULT_TERRAIN_URL);
         this.planetTerrain.setLodCamera(this.playerCamera.main);
