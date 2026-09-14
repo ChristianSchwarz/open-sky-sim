@@ -326,3 +326,89 @@ tile mean 14178 -> 13883. Two percent, safe, and the last cheap one.
 What would move the coast-only tiles further is the cut itself, ~4
 triangles per boundary cell from marching squares; that needs a
 different shoreline triangulation, not a tweak.
+
+## The water sheet (2026-09-14, evening)
+
+Question: the water sheet was 745 of a z12 tile's triangles on Madeira,
+and a sixth of a z9-z11 tile; the sea is a plane, so why so many?
+
+A temporary breakdown by origin, Madeira z12, per tile: 554 water-side
+cut triangles and 191 uniform leaves, on 322 shore vertices, 26 border
+vertices and 205 interior ones. The interior ones should not exist on a
+plane. Two rules in `collapse.ts` were keeping them:
+
+- the cover-class test read the raster under a facet's bounding box, and
+  every facet beside the coast reaches a land node, so it was "mixed" and
+  its ring refused;
+- the facet normals and the height test sample `heights` bilinearly, and a
+  shore crossing sits between a wet node at sea level and a dry one at DEM
+  height, so every cut facet read as tilted by that blend and failed the
+  2° test.
+
+Lifting the cover test alone changed nothing (755); the tilt was the
+binding one. `collapse` now takes `isLandTriangle`, `isFlatWater` (the sea
+and any lake with one measured height: judged as a level plane, no height
+test), `waterClassOf` and `waterPasses`. The class is the facet's tone
+judged at its centre, and a collapse must leave every facet with the class
+it had, so the shallow band keeps its outline while the sheet on both sides
+merges. Two wrong turns on the way:
+
+- making the tone a hard ring class (every facet round a vertex alike)
+  locked a contour as long as the coast and made it worse (938);
+- letting a shore facet be shallow wherever its centre lay fanned the whole
+  sheet from a few shore vertices - 14000 cells² facets - painted as
+  shallows, and on a lake such a facet would sag from the clamped rim.
+  A shore facet whose centre is outside the band is now class -1, a shape
+  the pass may not produce. Largest shore facet after: 232 cells².
+
+The tone rule at output changed with it: a facet is shallow if its centre
+is within `max(SHALLOW_WATER_COAST_M, cell)` of the shore or it touches a
+shore vertex, where before it was the nearest corner.
+
+| water sheet per tile, Madeira | before | after |
+|---|---|---|
+| z9 | 745 | 459 |
+| z10 | 615 | 409 |
+| z11 | 878 | 497 |
+| z12 | 745 | 401 |
+
+Shore vertices are locked and unchanged, so the coastline itself is
+identical. Mean z12 tile 25662 -> 25280; the rest is fill and strokes.
+`BuildTileResult.searchTriangles` reports what the budget search judged,
+because the sheet now collapses well under the budget after the search.
+
+## Plan: simple-chord boundary leaves (2026-09-14, evening)
+
+The cut is what is left. A boundary cell is pinned at `minLeafSize` and
+cut by marching squares, about four triangles per cell, and the balance
+rule ripples one- and two-cell leaves out from every one of them: 65 %
+of a coast-only tile's surface.
+
+A block may instead become one boundary leaf at its own size when
+
+1. the region id changes exactly twice along its boundary ring of nodes
+   (two regions, one chord; a saddle or a third region refuses),
+2. every node inside lies on the same side of the straight chord between
+   the two crossings as its region says (the chord *is* the drawn shore,
+   so a node on the wrong side would draw the wrong ground), and
+3. the land fan and the water fan, built as below, keep every node in
+   the block within `maxErrorM` of the drawn heights, and within
+   `padErrorM` of the padded ones - the same test the collapse uses.
+
+The leaf is triangulated by walking its boundary ring - corners, a
+midpoint on any edge whose neighbour is finer, and the two crossings, in
+order along each edge - and splitting the ring at the crossings into two
+convex polygons, each fanned from one crossing. Both fans contain the
+chord as an edge, so the wall pass sees it exactly as it sees a cut
+cell's chord today. Crossing positions are solved on the one-cell
+sub-edge where the region changes, so a finer neighbour on that edge
+computes the same point and there is no crack.
+
+The balance step may split such a leaf; a child of a simple-chord
+block is itself simple (a line crosses a sub-square at most twice and
+its nodes were already consistent), and any child that is not falls
+back to one-cell cutting.
+
+Not changed: the budget search, `costWithSkirts`, walls, skirts, water
+heights, the three-plus-region cutter, rivers. Measured against the
+same HEAD on Madeira, coast-only tiles first.
