@@ -6,9 +6,7 @@ import { DEFAULT_SUN_HOURS, setSunTime } from '../../scene/materials/shaders/sun
 import { blendPalettes, daytimePalette } from './daytimePalette';
 import { HDMidnightPalette } from './hd-midnight';
 import { HDNoonPalette } from './hd-noon';
-import { PaletteCategory, PaletteColor, PaletteTime } from './palette';
-import { VGAMidnightPalette } from './vga-midnight';
-import { VGANoonPalette } from './vga-noon';
+import { Palette, PaletteCategory, PaletteColor, PaletteTime } from './palette';
 
 afterEach(() => setSunTime(DEFAULT_SUN_HOURS));
 
@@ -60,14 +58,19 @@ describe('blendPalettes', () => {
     it('switches HUD colours instead of interpolating them', () => {
         // The canvas painter pre-renders glyphs per colour, so HUD text has to
         // stay one of the literal palette entries at every time of day.
-        const day = PaletteColor(VGANoonPalette, PaletteCategory.HUD_TEXT);
-        const night = PaletteColor(VGAMidnightPalette, PaletteCategory.HUD_TEXT);
+        // The HD palettes share one HUD colour, so give the night palette its own.
+        const nightPalette: Palette = {
+            ...HDMidnightPalette,
+            colors: { ...HDMidnightPalette.colors, [PaletteCategory.HUD_TEXT]: '#FFAA00' },
+        };
+        const day = PaletteColor(HDNoonPalette, PaletteCategory.HUD_TEXT);
+        const night = PaletteColor(nightPalette, PaletteCategory.HUD_TEXT);
         assert.notStrictEqual(day, night);
 
         for (const mix of [0, 0.25, 0.49, 0.5, 0.75, 1]) {
             const sky = { ...plainSky(mix), ground: [3, 0.2, 0.2] as Rgb };
             const blended = PaletteColor(
-                blendPalettes(VGANoonPalette, VGAMidnightPalette, sky), PaletteCategory.HUD_TEXT);
+                blendPalettes(HDNoonPalette, nightPalette, sky), PaletteCategory.HUD_TEXT);
             assert.ok(blended === day || blended === night, `mix ${mix} gave ${blended}`);
         }
     });

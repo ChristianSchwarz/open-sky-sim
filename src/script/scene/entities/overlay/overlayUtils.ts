@@ -4,7 +4,7 @@ import { Font } from '../../../render/screen/text';
 import { AircraftDeviceState, PlayerEntity } from '../player';
 
 export interface OverlayLayout {
-    /** Controls tick/marker density (1 = VGA, 2 = SVGA/HD). */
+    /** Controls tick/marker density (1 = low, 2 = normal). */
     detailScale: number;
     /** Uniform visual zoom for HUD elements. */
     layoutScale: number;

@@ -2,13 +2,11 @@ import { AudioSystem } from './audio/audioSystem';
 import { ConfigService } from './config/configService';
 import { PaletteCategory } from './config/palettes/palette';
 import { HDNoonPalette } from './config/palettes/hd-noon';
-import { DisplayResolution, DisplayShading, FogQuality, TechProfile } from './config/profiles/profile';
+import { DisplayShading, FogQuality, TechProfile } from './config/profiles/profile';
 import { HDProfile } from './config/profiles/hd';
-import { SVGAProfile } from './config/profiles/svga';
-import { VGAProfile } from './config/profiles/vga';
 import { loadSettings } from './config/settingsStorage';
 import { Kernel } from './core/kernel';
-import { FPS_CAP, HD_FPS_CAP, H_RES, V_RES } from './defs';
+import { HD_FPS_CAP, H_RES, V_RES } from './defs';
 import { JoystickControlDevice } from './input/devices/joystickControlDevice';
 import { KeyboardControlDevice } from './input/devices/keyboardControlDevice';
 import { hideBootProgress, setBootProgress } from './osd/bootProgress';
@@ -40,7 +38,7 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
     // with the same client (see Game.setupCombat).
     const combatSim = new CombatSimClient();
     const config = new ConfigService(
-        { [TechProfiles.VGA]: VGAProfile, [TechProfiles.SVGA]: SVGAProfile, [TechProfiles.HD]: HDProfile },
+        { [TechProfiles.HD]: HDProfile },
         {
             [FlightModels.FM2]: new SimProxyFlightModel(combatSim, PLAYER_SIM_ID, false),
             [FlightModels.DEBUG]: new SimProxyFlightModel(combatSim, PLAYER_SIM_ID, true),
@@ -106,16 +104,10 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
 
     const kernel = new Kernel();
     const combatSimUsesShared = combatSim.usesSharedState();
-    const targetFpsFor = (profile: TechProfile): number | undefined => {
-        if (profile.fpsCap) {
-            return FPS_CAP;
-        }
-        // Without SharedArrayBuffer isolation, HD rAF can starve worker onmessage —
+    const targetFpsFor = (_profile: TechProfile): number | undefined => {
+        // Without SharedArrayBuffer isolation, rAF can starve worker onmessage —
         // soft-cap so the event loop can drain replies. With SAB pose mirror, uncap.
-        if (profile.resolution === DisplayResolution.HD_RES && !combatSimUsesShared) {
-            return HD_FPS_CAP;
-        }
-        return undefined;
+        return combatSimUsesShared ? undefined : HD_FPS_CAP;
     };
     kernel.setTargetFPS(targetFpsFor(config.techProfiles.getActive()));
     kernel.addUpdateTask(materials);

@@ -6,14 +6,6 @@ Quick and dirty attempt to replicate the visuals of late 80s / early 90s flight 
 
 [https://ruben3d.github.io/retroflightsim/dist](https://ruben3d.github.io/retroflightsim/dist)
 
-## Screenshots
-
-[<img src="doc/vga-day.png" width="320" height="200" />](doc/vga-day.png)
-[<img src="doc/vga-night.png" width="320" height="200" />](doc/vga-night.png)
-
-[<img src="doc/svga-day.png" width="320" height="200" />](doc/svga-day.png)
-[<img src="doc/svga-night.png" width="320" height="200" />](doc/svga-night.png)
-
 ## How to build
 
 You need node.js installed globally (I have been using 14.16.0).
@@ -100,13 +92,6 @@ fidelity (control surfaces + custom flight physics), include a
 
 ### Settings
 
-#### Generation
-
-The generation of choice will simulate the experience of a game of that era:
-* 386/VGA: early 90s
-* 486/SVGA: mid-90s before texture mapping
-* HD: full-color rendering at native viewport resolution with smooth shading and fog
-
 #### Flight model
 
 The flight model selects the physics driving the simulation:
@@ -191,7 +176,7 @@ The system supports a single device connected only. If the device has less than 
   expendable, so an arrestment consumes it and the deck crew needs ~12 s to
   lace a replacement. Status shows in the HUD device stack as `BARRICADE`.
 * `T`: Select target
-* `I`: Toggle night (386/VGA) or IR (486/SVGA/HD) for the tracking camera
+* `I`: Toggle IR for the tracking camera
 * `U`: Cycle through HUD focus modes (disabled, partial, full)
 
 ### Views

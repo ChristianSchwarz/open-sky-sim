@@ -14,8 +14,8 @@ import {
  *
  * The split of responsibility is deliberate:
  *
- * - The authored noon palette stays the artistic anchor. Every tech profile
- *   (VGA / SVGA / HD) keeps its own look with the sun high, exactly as drawn.
+ * - The authored noon palette stays the artistic anchor: it is the look with
+ *   the sun high, exactly as drawn.
  * - The atmosphere owns everything that *changes* as the sun moves. Each slot
  *   is scaled by the ratio of its own radiance now to its radiance at noon, so
  *   what lands in the palette is the physical change applied to the authored

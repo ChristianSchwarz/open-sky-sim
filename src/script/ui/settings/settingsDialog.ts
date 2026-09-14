@@ -19,7 +19,7 @@ import {
     KeyboardControlAction, KeyboardControlDevice, KeyboardControlLayoutId, KeyboardControlLayouts,
 } from '../../input/devices/keyboardControlDevice';
 import { formatSunTime } from '../../scene/materials/shaders/sun';
-import { AiPilotModels, FlightModels, TechProfiles, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
+import { AiPilotModels, FlightModels, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
 import { PLAY_ORIGIN } from '../../state/worldLayout';
 import {
     DETAIL_DISTANCE_OFF, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
@@ -120,12 +120,6 @@ interface Option<T> {
     value: T;
     label: string;
 }
-
-const TECH_PROFILE_OPTIONS: Option<string>[] = [
-    { value: TechProfiles.VGA, label: '386 / VGA' },
-    { value: TechProfiles.SVGA, label: '486 / SVGA' },
-    { value: TechProfiles.HD, label: 'HD' },
-];
 
 const TERRAIN_COLOUR_OPTIONS: Option<TerrainColours>[] = [
     { value: TerrainColours.LANDCOVER, label: 'Landcover (palette tones)' },
@@ -228,16 +222,6 @@ function sliderValue(event: Event): number {
             @switch (tab()) {
                 @case ('Graphics') {
                     <div class="flex flex-col gap-6">
-                        <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Generation</h3>
-                            <mat-radio-group class="grid grid-cols-1 sm:grid-cols-3"
-                                [value]="techProfile()" (change)="setTechProfile($event.value)">
-                                @for (option of techProfiles; track option.value) {
-                                    <mat-radio-button [value]="option.value">{{ option.label }}</mat-radio-button>
-                                }
-                            </mat-radio-group>
-                        </section>
-
                         <section>
                             <h3 class="m-0 mb-1 text-base font-medium">Terrain detail distance</h3>
                             <p class="m-0 mb-2 text-sm opacity-70">
@@ -546,7 +530,6 @@ export class SettingsDialog {
         { initialValue: inject(BreakpointObserver).isMatched(NARROW_QUERY) },
     );
 
-    readonly techProfiles = TECH_PROFILE_OPTIONS;
     readonly terrainColours = TERRAIN_COLOUR_OPTIONS;
     readonly terrainShadings = TERRAIN_SHADING_OPTIONS;
     readonly flightModels = FLIGHT_MODEL_OPTIONS;
@@ -559,7 +542,6 @@ export class SettingsDialog {
 
     readonly terrainImport = this.data.terrainImport;
     readonly tab = signal<SettingsTab>(this.data.initialTab ?? lastTab);
-    readonly techProfile = signal(this.config.techProfiles.getActiveKey());
     readonly terrainColour = signal(this.config.terrainColour.getActive());
     readonly terrainShading = signal(this.config.terrainShading.getActive());
     /** Percent of a land-use facet's colour taken from its land type's tone. */
@@ -642,12 +624,6 @@ export class SettingsDialog {
     selectTab(tab: SettingsTab) {
         lastTab = tab;
         this.tab.set(tab);
-    }
-
-    setTechProfile(id: string) {
-        this.config.techProfiles.setActive(id);
-        updateSettings({ techProfile: id });
-        this.techProfile.set(id);
     }
 
     setTerrainDetail(event: Event) {

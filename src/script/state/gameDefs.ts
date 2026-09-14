@@ -1,8 +1,6 @@
 import { TerrainColourMode } from '../terrain/tones';
 
 export enum TechProfiles {
-    VGA = 'VGA',
-    SVGA = 'SVGA',
     HD = 'HD',
 }
 

@@ -1,12 +1,6 @@
 
-export const FPS_CAP = 15; // FPS (VGA)
 /** Soft cap for HD when SharedArrayBuffer isolation is unavailable (worker onmessage starvation). */
 export const HD_FPS_CAP = 30;
-
-export const LO_H_RES = 320;
-export const LO_V_RES = 200;
-export const HI_H_RES = 640;
-export const HI_V_RES = 400;
 
 export const H_RES = 320;
 export const V_RES = 200;
