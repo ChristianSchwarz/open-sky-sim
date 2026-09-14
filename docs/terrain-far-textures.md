@@ -108,6 +108,9 @@ are rasterised at the finest size any parent wants and the cache is now
 gzip level 1, since a megabyte of mostly flat colour per leaf shrinks
 twentyfold. The runtime needs no change: every PTX1 carries its own size,
 and the mip builder and byte accounting take it from the header.
+Measured: 4757 leaves re-rasterised at 512 in 462 s; 1909 textures, 1.73 GB
+raw, 72.3 MB gzipped (z11 37.9 MB, z10 26.0 MB, the 256 levels 8.4 MB
+between them); the compressed leaf cache is 113 MB, down from 682.
 
 **Filtering.** Nearest, clamp to edge, with mip levels supplied by the
 loader (rgb box mean, class of the top-left texel per 2x2). Three's own
