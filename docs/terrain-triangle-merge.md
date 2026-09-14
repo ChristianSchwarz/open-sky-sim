@@ -412,3 +412,30 @@ back to one-cell cutting.
 Not changed: the budget search, `costWithSkirts`, walls, skirts, water
 heights, the three-plus-region cutter, rivers. Measured against the
 same HEAD on Madeira, coast-only tiles first.
+
+### Result (landed as 284cda5)
+
+Clean A/B in a separate worktree at HEAD, Madeira, chord leaves capped
+at four cells:
+
+| per tile | z12 before | z12 after | z11 before | z11 after |
+|---|---|---|---|---|
+| total | 21742 | 21853 | 6114 | 5600 |
+| surface | 4744 | 4408 | 5184 | 4894 |
+| walls | 578 | 378 | 674 | 433 |
+| water sheet | 851 | 569 | 954 | 636 |
+| fill / strokes | 7455 / 8709 | 7827 / 8971 | | |
+| coast-only tiles | 31 | 8 | 14 | 5 |
+| median tolerance | 24.1 m | 16.1 m | coast-only | 38.4 m |
+
+At z12 the total is unchanged: the budget the cut no longer eats is
+spent by the search on relief (tolerance 24 -> 16 m), and the extra
+interior facets cost a few more fill pieces and stroke crossings. At
+z11, where there is no fill, it is a straight 8 %. The cap of four
+cells exists because a chord leaf's water fan is painted one tone; a
+tile-sized one turned the whole sea shallow in a test.
+
+So: not fewer triangles at the leaf level, but coast-only tiles are
+now the exception and the same triangles draw finer terrain. To take
+it as fewer triangles instead, lower the budget or raise
+MIN_ERROR_CELLS.
