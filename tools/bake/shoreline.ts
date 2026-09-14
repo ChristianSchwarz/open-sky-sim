@@ -66,6 +66,13 @@ export interface ShorelineInput {
      * water, or no pads, it costs nothing.
      */
     paved?: (lon: number, lat: number) => boolean;
+    /**
+     * DEM heights per node, row-major `size * size`, NaN for nodata. Given,
+     * an unclaimed patch that never comes within INLAND_SEA_MIN_M of
+     * `seaLevel` is inland water following the terrain rather than sea.
+     */
+    heights?: Float32Array;
+    seaLevel?: number;
 }
 
 export interface Shoreline {
@@ -197,16 +204,39 @@ export const BORDER_SNAP_CELLS = 0.25;
 /** Pulls the last scanline row inside the grid; see `scanline` below. */
 const LAST_ROW_EPS = 1e-6;
 
-/** `v` snapped onto 0 or `cells` when within {@link BORDER_SNAP_CELLS}. */
-export function snapToBorder(v: number, cells: number): number {
-    if (Math.abs(v) < BORDER_SNAP_CELLS) {
+/**
+ * `v` snapped onto 0 or `cells` when within `tolerance` (default
+ * {@link BORDER_SNAP_CELLS}).
+ *
+ * The shoreline passes its simplification tolerance when that is larger:
+ * Douglas-Peucker treats any vertex within it as noise, and a border vertex
+ * it drops next to an inset one turns the whole edge into a chord that runs
+ * inside the tile. 11/2133/494 had a 0.38-cell spur on its west edge; at
+ * 0.5 cells the two border vertices beside it went and the entire west
+ * column came out as sea.
+ */
+export function snapToBorder(v: number, cells: number, tolerance = BORDER_SNAP_CELLS): number {
+    if (Math.abs(v) < tolerance) {
         return 0;
     }
-    if (Math.abs(v - cells) < BORDER_SNAP_CELLS) {
+    if (Math.abs(v - cells) < tolerance) {
         return cells;
     }
     return v;
 }
+
+/**
+ * Open water this far above the sea datum, in metres, is not the sea.
+ *
+ * A node the rings leave unclaimed defaults to open ocean. Where that is
+ * wrong - a river arm thinner than a cell subtracted from the land with no
+ * body ring covering the node, or a ring inset from the tile edge by more
+ * than the snap - the node is baked at sea level under a mountain and gets
+ * a wall down to it. A real sea component always reaches the shore, where
+ * the DEM is within a few metres of the datum (SRTM carries buildings, so
+ * not zero); a component whose lowest node is this high has no shore.
+ */
+export const INLAND_SEA_MIN_M = 50;
 
 export function buildShoreline(input: ShorelineInput): Shoreline {
     const { polygons, bounds, size } = input;
@@ -214,12 +244,13 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
     const lonSpan = bounds.east - bounds.west;
     const latSpan = bounds.north - bounds.south;
 
-    // lon/lat -> grid. y runs south, matching the row-major DEM layout.
-    // Snapped to the border: see BORDER_SNAP_CELLS.
-    const toGridX = (lon: number) => snapToBorder(((lon - bounds.west) / lonSpan) * cells, cells);
-    const toGridY = (lat: number) => snapToBorder(((bounds.north - lat) / latSpan) * cells, cells);
-
     const simplify = input.simplifyCells ?? 0;
+
+    // lon/lat -> grid. y runs south, matching the row-major DEM layout.
+    // Snapped to the border: see BORDER_SNAP_CELLS and snapToBorder.
+    const snapCells = Math.max(BORDER_SNAP_CELLS, simplify);
+    const toGridX = (lon: number) => snapToBorder(((lon - bounds.west) / lonSpan) * cells, cells, snapCells);
+    const toGridY = (lat: number) => snapToBorder(((bounds.north - lat) / latSpan) * cells, cells, snapCells);
     const rings: Ring[] = [];
     const outerRings: Ring[] = [];
     const holeRings: Ring[] = [];
@@ -461,6 +492,48 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
                 if (input.paved(bounds.west + (col / cells) * lonSpan, lat)) {
                     landNodes[i] = 1;
                     inlandNodes[i] = 0;
+                }
+            }
+        }
+    }
+
+    // Unclaimed patches with no shore are not the sea; see INLAND_SEA_MIN_M.
+    // Each 4-connected component of unclaimed nodes is taken together, so a
+    // real sea that reaches a high cliff keeps the cliff. The patch becomes
+    // inland water with no surface height, which the mesh drapes on the
+    // terrain: no water sheet at the datum, no wall down to it.
+    if (input.heights) {
+        const heights = input.heights;
+        const seaLevel = input.seaLevel ?? 0;
+        const seen = new Uint8Array(size * size);
+        const stack: number[] = [];
+        for (let start = 0; start < size * size; start++) {
+            if (seen[start] || landNodes[start] || inlandNodes[start]) {
+                continue;
+            }
+            const component: number[] = [];
+            let lowest = Infinity;
+            stack.push(start);
+            seen[start] = 1;
+            while (stack.length > 0) {
+                const i = stack.pop()!;
+                component.push(i);
+                const h = heights[i];
+                if (Number.isFinite(h) && h < lowest) {
+                    lowest = h;
+                }
+                const col = i % size;
+                if (col > 0 && !seen[i - 1] && !landNodes[i - 1] && !inlandNodes[i - 1]) { seen[i - 1] = 1; stack.push(i - 1); }
+                if (col < cells && !seen[i + 1] && !landNodes[i + 1] && !inlandNodes[i + 1]) { seen[i + 1] = 1; stack.push(i + 1); }
+                if (i >= size && !seen[i - size] && !landNodes[i - size] && !inlandNodes[i - size]) { seen[i - size] = 1; stack.push(i - size); }
+                if (i + size < size * size && !seen[i + size] && !landNodes[i + size] && !inlandNodes[i + size]) { seen[i + size] = 1; stack.push(i + size); }
+            }
+            // No finite height at all (a nodata patch) stays sea: there is
+            // nothing to say otherwise, and open ocean is what nodata is.
+            if (lowest !== Infinity && lowest > seaLevel + INLAND_SEA_MIN_M) {
+                for (const i of component) {
+                    inlandNodes[i] = 1;
+                    inlandHeights[i] = NaN;
                 }
             }
         }

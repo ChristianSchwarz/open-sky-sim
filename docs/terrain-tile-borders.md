@@ -229,7 +229,52 @@ down to sea level, and switched steep tiles into coast-only tolerance.
 | tolerance | coast-only | 125.6 m |
 
 The skirt count fell fivefold because the south edge is no longer cut at
-one-cell leaves. Not yet re-baked across an area; the Alps box
+one-cell leaves.
+
+### Step 2, same day: the tall walls that remained
+
+After the Alps re-bake the counters still showed 1294 wall triangles over
+150 m at z12, 6316 at z11 and 4308 at z10, with border sea nodes on 60
+tiles at each coarse level. Classified by where the wall bottom sits, all
+but 48 (real lake shores, drops of ~180 m) went down to **sea level**:
+still phantom sea, from two more shapes the quarter-cell snap does not
+reach.
+
+- **Simplification chords the edge.** `11/2133/494`'s land ring touched
+  the west edge either side of a 0.38-cell spur. Douglas-Peucker at 0.5
+  cells kept the spur and dropped both border vertices, so the ring ran
+  from corner to spur to corner and the whole west column fell out. The
+  snap tolerance is now `max(BORDER_SNAP_CELLS, simplifyCells)`: whatever
+  the simplifier treats as noise is already on the edge before it runs.
+- **Unclaimed patches with no shore.** `10/1066/251` had its land ring
+  63 m inside the west edge for 200 rows (the neighbour's east column is
+  all land), and the z12 tiles had isolated nodes in river arms thinner
+  than a cell that the body ring passed 0.1–1.5 cells away from, so the
+  adoption pass had no inland node to adopt from. `buildShoreline` now
+  takes the DEM: a 4-connected component of unclaimed nodes whose lowest
+  finite height is more than `INLAND_SEA_MIN_M` (50 m) above the datum is
+  not the sea and becomes inland water with no surface height, which the
+  mesh drapes on the terrain. Nodata patches stay sea. Two `buildTile`
+  tests that asserted sea level for water on an 820 m DEM were rewritten
+  to give the sea a shore at the datum; the hole case now asserts draping.
+
+Alps box, second re-bake, per zoom:
+
+| | tall walls before | after | border sea nodes before | after |
+|---|---|---|---|---|
+| z10 | 4308 | 48 | 4847 on 60 tiles | 0 |
+| z11 | 6316 | 62 | 2272 on 60 tiles | 0 |
+| z12 | 1294 | 90 | 20 on 4 tiles | 0 |
+
+Mean z12 tile 23789 -> 23349 triangles. What is left is the 48 lake
+shores plus a few walls at real cliffs where the sea component does reach
+the datum, which is what the counter should carry.
+
+Known trade: a sliver of real sea under a cliff whose every SRTM node
+reads above 50 m (a corner of a tile at a cliff foot) would now drape as
+water on the cliff instead of sitting at the datum behind a wall. Not
+seen in the Alps or Madeira counters; if it shows, the component size is
+the discriminator to add. Not yet re-baked across an area; the Alps box
 (`--bbox 5.80078125,45.3515625,8.4814453125,46.845703125`, 2170 z12
 tiles) is the natural first run, and `bake:tex` after it for the far
 textures of the re-meshed tiles.

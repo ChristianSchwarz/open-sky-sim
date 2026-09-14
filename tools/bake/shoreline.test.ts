@@ -469,3 +469,39 @@ describe('border snap', () => {
         assert.deepEqual(eastColumn(sh.landNodes, [10]), [0]);
     });
 });
+
+describe('unclaimed patches above the sea', () => {
+    const cells = SIZE - 1;
+    // Land everywhere except a notch on the east edge between rows 10 and 14,
+    // which no ring claims: the open-ocean default.
+    const notched = ringFromGrid([[0, 0], [32, 0], [32, 10], [28, 10], [28, 14], [32, 14], [32, 32], [0, 32]]);
+    const heights = (h: number) => new Float32Array(SIZE * SIZE).fill(h);
+    const at = (row: number, col: number) => row * SIZE + col;
+
+    it('turns a high unclaimed patch into terrain-following inland water', () => {
+        const sh = buildShoreline({ polygons: [notched], bounds: BOUNDS, size: SIZE, heights: heights(900), seaLevel: 0 });
+        assert.equal(sh.landNodes[at(12, 30)], 0);
+        assert.equal(sh.inlandNodes[at(12, 30)], 1);
+        assert.ok(Number.isNaN(sh.inlandHeights[at(12, 30)]));
+    });
+
+    it('leaves a low patch as sea', () => {
+        const sh = buildShoreline({ polygons: [notched], bounds: BOUNDS, size: SIZE, heights: heights(3), seaLevel: 0 });
+        assert.equal(sh.inlandNodes[at(12, 30)], 0);
+    });
+
+    it('leaves a nodata patch as sea', () => {
+        const sh = buildShoreline({ polygons: [notched], bounds: BOUNDS, size: SIZE, heights: heights(NaN), seaLevel: 0 });
+        assert.equal(sh.inlandNodes[at(12, 30)], 0);
+    });
+
+    it('does not drop a border vertex beside an inset spur when simplifying', () => {
+        // 11/2133/494 in miniature: the ring touches the west edge either side
+        // of a spur 0.38 cells inside it. Douglas-Peucker at 0.5 would keep
+        // the spur and drop both border vertices, chording the whole column.
+        const spur = ringFromGrid([[0.38, 15], [0, 15.1], [0, 0], [32, 0], [32, 32], [0, 32], [0, 14.9]]);
+        const sh = buildShoreline({ polygons: [spur], bounds: BOUNDS, size: SIZE, simplifyCells: 0.5 });
+        assert.deepEqual([5, 20, 30].map(r => sh.landNodes[at(r, 0)]), [1, 1, 1]);
+        void cells;
+    });
+});

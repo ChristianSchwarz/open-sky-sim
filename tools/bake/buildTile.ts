@@ -600,6 +600,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         size,
         simplifyCells: input.simplifyCells,
         paved,
+        heights,
+        seaLevel,
     });
 
     // A combined land/landuse partition, when this tile has one — see

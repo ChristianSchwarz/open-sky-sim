@@ -276,9 +276,11 @@ describe('buildTile', () => {
         it('bridges the land/water step with a wall instead of moving terrain', () => {
             // Terrain held high right where the coastline runs, which is the
             // real situation: OSM coastlines often follow the foot of a cliff
-            // whose DEM pixel reads the top.
+            // whose DEM pixel reads the top. The sea itself reads the datum
+            // a couple of cells out, as SRTM does; a patch of "sea" that never
+            // gets near the datum is not sea (INLAND_SEA_MIN_M).
             const r = buildTile(base({
-                heights: heightsFrom(() => 400),
+                heights: heightsFrom(x => (x <= 18 ? 400 : 0)),
                 polygons: [coastAt(16)],
                 skirtDepthM: 0,
             }));
@@ -1172,8 +1174,23 @@ describe('inland water height', () => {
     });
 
     it('leaves open ocean at sea level', () => {
-        // The same tile without an inland layer is what an LVR1 tile decodes
-        // to, and it must bake exactly as it always did.
+        // A coast with no inland layer is what an LVR1 tile decodes to. The
+        // sea reads the datum in the DEM, and stays there.
+        const r = buildTile(base({
+            heights: heightsFrom(x => (x <= 16 ? 820 : 0)),
+            polygons: [coastAt(16)],
+            skirtDepthM: 0,
+        }));
+        const hs = waterHeights(r);
+        assert.ok(hs.length > 0, 'no water vertices were produced');
+        for (const h of hs) {
+            assert.ok(Math.abs(h) < 1.5, `water vertex at ${h.toFixed(1)} m, expected ~0`);
+        }
+    });
+
+    it('drapes an unclaimed hole high above the sea on the terrain', () => {
+        // The same hole with no body ring used to bake at sea level: a slot
+        // 820 m deep with a wall round it. Nothing at that height is the sea.
         const r = buildTile(base({
             heights: heightsFrom(() => 820),
             polygons: [landWithHole(10, 10, 22, 22)],
@@ -1181,7 +1198,7 @@ describe('inland water height', () => {
         const hs = waterHeights(r);
         assert.ok(hs.length > 0, 'no water vertices were produced');
         for (const h of hs) {
-            assert.ok(Math.abs(h) < 1.5, `water vertex at ${h.toFixed(1)} m, expected ~0`);
+            assert.ok(Math.abs(h - 820) < 1.5, `water vertex at ${h.toFixed(1)} m, expected ~820`);
         }
     });
 
