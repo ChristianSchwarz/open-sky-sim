@@ -338,10 +338,17 @@ function runStep(
     });
 }
 
-interface Step { label: string; cmd: string; args: string[] }
+export interface Step { label: string; cmd: string; args: string[] }
 
-/** The stages, in order — the same command line as tools/README.md. */
-function plan(job: Job, withCover: boolean): Step[] {
+/**
+ * The stages, in order — the same command line as tools/README.md.
+ *
+ * The last two are the mesh bake and, always right after it over the same
+ * box, the far-tile texture bake: the meshes are what the textures are
+ * rasterised from, and a manifest re-written by the mesh bake only
+ * describes textures the texture bake then refreshes.
+ */
+export function plan(job: { name: string; bbox: readonly number[] }, withCover: boolean): Step[] {
     const bbox = job.bbox.join(',');
     const tif = path.join('data', 'imports', `${slug(job.name)}.tif`);
     const steps: Step[] = [
@@ -400,6 +407,27 @@ async function runImport(job: Job, withCover: boolean): Promise<void> {
     for (let i = 0; i < steps.length; i++) {
         await runStep(job, steps[i].label, i, steps[i].cmd, steps[i].args);
     }
+}
+
+/**
+ * Deleting an area: drop its tiles, then re-mesh and re-texture the
+ * survivors around the hole over the same box, in that order — see plan().
+ */
+export function deletePlan(name: string, bbox: readonly number[]): Step[] {
+    return [
+        {
+            label: 'removing baked tiles', cmd: PYTHON,
+            args: ['tools/delete_area.py', '--name', name],
+        },
+        {
+            label: 'rebaking surrounding meshes', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_mesh.ts', '--bbox', bbox.join(',')],
+        },
+        {
+            label: 'rebaking far-tile textures', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_tex.ts', '--bbox', bbox.join(',')],
+        },
+    ];
 }
 
 function runningJob(): Job | undefined {
@@ -518,20 +546,7 @@ export function startDelete(req: Request, res: Response): void {
     jobs.set(id, job);
     res.json({ ok: true, id });
 
-    const steps: Step[] = [
-        {
-            label: 'removing baked tiles', cmd: PYTHON,
-            args: ['tools/delete_area.py', '--name', name],
-        },
-        {
-            label: 'rebaking surrounding meshes', cmd: process.execPath,
-            args: ['--import', 'tsx', 'tools/bake_planet_mesh.ts', '--bbox', bbox.join(',')],
-        },
-        {
-            label: 'rebaking far-tile textures', cmd: process.execPath,
-            args: ['--import', 'tsx', 'tools/bake_planet_tex.ts', '--bbox', bbox.join(',')],
-        },
-    ];
+    const steps = deletePlan(name, bbox);
     finishJob(job, (async () => {
         for (let i = 0; i < steps.length; i++) {
             await runStep(job, steps[i].label, i, steps[i].cmd, steps[i].args);

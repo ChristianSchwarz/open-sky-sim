@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-    formatDuration, isProgressLine, parseProgress, snapBboxToTiles, splitStream,
+    Step, deletePlan, formatDuration, isProgressLine, parseProgress, plan, snapBboxToTiles, splitStream,
 } from './areaImport';
 
 /**
@@ -172,5 +172,29 @@ describe('formatDuration', () => {
     it('never prints a fractional second once it is showing minutes', () => {
         // 119.6s must round to 2m 0s, not 1m 60s.
         assert.equal(formatDuration(119600), '2m 0s');
+    });
+});
+
+describe('the bake plans end with meshes then textures over the same box', () => {
+    /** The mesh bake must be followed, immediately, by the texture bake with the same --bbox. */
+    function assertMeshThenTextures(steps: Step[]): void {
+        const tools = steps.map(s => s.args.find(a => a.startsWith('tools/')));
+        const mesh = tools.indexOf('tools/bake_planet_mesh.ts');
+        assert.ok(mesh >= 0, 'no mesh bake in the plan');
+        assert.equal(tools[mesh + 1], 'tools/bake_planet_tex.ts', 'texture bake does not follow the mesh bake');
+        assert.equal(mesh + 2, steps.length, 'something runs after the texture bake');
+        const bboxOf = (s: Step) => s.args[s.args.indexOf('--bbox') + 1];
+        assert.equal(bboxOf(steps[mesh + 1]), bboxOf(steps[mesh]));
+        assert.ok(bboxOf(steps[mesh]).split(',').length === 4, 'mesh bake has no box');
+    }
+
+    it('holds for an import, with and without cover', () => {
+        const job = { name: 'Test Area', bbox: [7.6, 45.9, 7.8, 46.0] };
+        assertMeshThenTextures(plan(job, true));
+        assertMeshThenTextures(plan(job, false));
+    });
+
+    it('holds for a delete', () => {
+        assertMeshThenTextures(deletePlan('mad', [-17.53, 32.3, -16.17, 33.35]));
     });
 });

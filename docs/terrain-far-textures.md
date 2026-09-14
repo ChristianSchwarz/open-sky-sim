@@ -8,6 +8,12 @@ uniform (`uCoverEnabled`) and stops new sidecar fetches; textures already
 attached stay with their tiles. `__terrainStats.textured` counts attached
 tiles and the F9 HUD's streaming line shows it as `TEXn`.
 
+Found 2026-09-14: `bake_planet_mesh.ts` rewrote the manifest from scratch
+and dropped the `texture` block, so a mesh re-bake of any area silently
+removed every texture from the runtime's view while all the `.ptx` files
+stayed on disk. The mesh bake now carries the block forward and says to
+re-run `bake:tex`; the import pipeline already does.
+
 Found the same day: a dev server started before `modserver.ts` learned to
 send `Content-Encoding: gzip` for `.ptx` hands the runtime raw gzip bytes,
 which failed to decode and left every far tile untextured with no visible

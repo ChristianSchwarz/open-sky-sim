@@ -810,6 +810,15 @@ async function main(): Promise<void> {
     }
     saveIndexMeta(args.out, tileMeta);
 
+    const outManifestPath = path.join(args.out, 'manifest.json');
+    const carriedTexture = fs.existsSync(outManifestPath)
+        ? (JSON.parse(fs.readFileSync(outManifestPath, 'utf8')) as { texture?: unknown }).texture
+        : undefined;
+    if (carriedTexture !== undefined) {
+        console.log('texture stream carried from the previous manifest; run `npm run bake:tex` '
+            + (args.bbox ? 'with the same --bbox ' : '') + 'to refresh it for the re-meshed tiles');
+    }
+
     const outManifest = {
         version: 4,
         scheme: 'retro-terrain/1',
@@ -867,6 +876,13 @@ async function main(): Promise<void> {
             version: '1.0.0',
             utc: new Date().toISOString(),
         },
+        // The far-tile texture stream is bake_planet_tex.ts's, written after
+        // this and described only by its block here. This bake knows nothing
+        // about it, so it must not drop it: a re-meshed area keeps its old
+        // textures (slightly stale, and drawn) until bake:tex is re-run,
+        // rather than losing every texture in the pyramid the moment any
+        // area is re-meshed.
+        texture: carriedTexture,
     };
     fs.writeFileSync(
         path.join(args.out, 'manifest.json'),
