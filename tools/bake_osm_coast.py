@@ -1293,6 +1293,24 @@ def _polygonal(geom) -> MultiPolygon:
     return MultiPolygon(parts)
 
 
+def _clip_rect(geom, west: float, south: float, east: float, north: float) -> MultiPolygon:
+    """The polygon parts of `geom` inside a rectangle.
+
+    `clip_by_rect` is a plain cut with no topology and is what makes the
+    block rasterize cheap, but GEOS refuses it on a zero-area part - a
+    collinear sliver the land union can carry after simplification, which
+    it reports as "Invalid number of points in LinearRing found 3". One
+    such sliver in a regional box killed a 33-minute bake at the last
+    stage. When the cut refuses, fall back to a topological intersection
+    of the repaired geometry, which drops the sliver and is only paid for
+    the block that holds one.
+    """
+    try:
+        return _polygonal(shapely.clip_by_rect(geom, west, south, east, north))
+    except shapely.errors.GEOSException:
+        return _polygonal(shapely.make_valid(geom).intersection(box(west, south, east, north)))
+
+
 def rasterize_block(land, z: int, tiles: Sequence[Tuple[int, int]], n: int) -> List[Tuple[int, int, bytearray]]:
     """Rasterize a block of tiles from the land clipped to the block.
 
@@ -1310,13 +1328,11 @@ def rasterize_block(land, z: int, tiles: Sequence[Tuple[int, int]], n: int) -> L
     nw = tile_bounds(z, min(xs), min(ys))
     se = tile_bounds(z, max(xs), max(ys))
     cell = (nw.north - nw.south) / max(1, n - 1)
-    block = _polygonal(shapely.clip_by_rect(
-        land, nw.west - cell, se.south - cell, se.east + cell, nw.north + cell))
+    block = _clip_rect(land, nw.west - cell, se.south - cell, se.east + cell, nw.north + cell)
     out: List[Tuple[int, int, bytearray]] = []
     for x, y in tiles:
         b = tile_bounds(z, x, y)
-        piece = _polygonal(shapely.clip_by_rect(
-            block, b.west - cell, b.south - cell, b.east + cell, b.north + cell))
+        piece = _clip_rect(block, b.west - cell, b.south - cell, b.east + cell, b.north + cell)
         out.append((x, y, rasterize_tile(None, piece, b, n)))
     return out
 

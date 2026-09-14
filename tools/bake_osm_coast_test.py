@@ -12,7 +12,7 @@ import tempfile
 import unittest
 import zlib
 
-from shapely.geometry import LineString, MultiPolygon, box
+from shapely.geometry import LineString, MultiPolygon, Polygon, box
 
 from bake_osm_coast import (
     LANDUSE_REGION_MIN_ZOOM,
@@ -24,6 +24,7 @@ from bake_osm_coast import (
     WATERWAY_FALLBACK_WIDTH_M,
     Bounds,
     Watercourse,
+    _clip_rect,
     _clip_worker_inline,
     _polygons_from_osm,
     clip_watercourses,
@@ -38,6 +39,21 @@ from osm_landuse import CLS_TREE, build_landuse_index
 TILE = Bounds(0.0, 0.0, 1.0, 1.0)
 MAX_ZOOM = 12
 SPAN = 180.0 / (1 << MAX_ZOOM)
+
+
+class ClipRectTest(unittest.TestCase):
+    def test_zero_area_sliver_does_not_abort_the_clip(self) -> None:
+        # GEOS's clip_by_rect throws "Invalid number of points in LinearRing
+        # found 3" on a collinear part; the helper must clip past it.
+        sliver = Polygon([(0, 0), (1, 0), (2, 0), (0, 0)])
+        land = MultiPolygon([Polygon([(0, 0), (4, 0), (4, 4), (0, 4)]), sliver])
+        out = _clip_rect(land, -1, -1, 1, 1)
+        self.assertEqual(out.geom_type, 'MultiPolygon')
+        self.assertAlmostEqual(out.area, 1.0)
+
+    def test_plain_land_clips_as_before(self) -> None:
+        land = MultiPolygon([Polygon([(0, 0), (4, 0), (4, 4), (0, 4)])])
+        self.assertAlmostEqual(_clip_rect(land, 1, 1, 3, 5).area, 6.0)
 
 
 class SnapBoundsTest(unittest.TestCase):
