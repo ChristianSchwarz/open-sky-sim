@@ -36,7 +36,7 @@
  * row-major DEM layout with v=0 at the north edge.
  */
 
-import { Vec2, cutCell, cutCellRegions } from './marchingSquares';
+import { MIN_AREA, Vec2, cutCell, cutCellRegions } from './marchingSquares';
 
 export interface DecimateInput {
     /** Node count per side; cells per side is `size - 1`. */
@@ -135,13 +135,46 @@ export interface DecimateResult {
     shorelineLeafCount: number;
 }
 
+/**
+ * A boundary block the shoreline crosses exactly once, as a straight chord
+ * between two crossings on its boundary. See `simpleChord`.
+ */
+interface Chord {
+    /** The two crossings, each on one boundary edge of the block. */
+    a: ChordCrossing;
+    b: ChordCrossing;
+    /** Whether the chord is a genuine shore (land meets water). */
+    shore: boolean;
+}
+
+interface ChordCrossing {
+    x: number;
+    y: number;
+    /** Boundary edge, 0 top, 1 right, 2 bottom, 3 left, clockwise. */
+    edge: number;
+    /** Position along that edge in [0, 1], in the edge's ring direction. */
+    t: number;
+}
+
 interface Leaf {
     x: number;
     y: number;
     size: number;
     uniform: boolean;
     regionId: number;
+    /** Set on a boundary leaf larger than minLeafSize; see Chord. */
+    chord?: Chord;
 }
+
+/**
+ * Largest simple-chord boundary leaf, in cells. The water fan beside the
+ * chord is painted one tone from its distance to the shore and the land
+ * fan one cover from its footprint, so a chord leaf the size of a tile
+ * would paint the whole sea shallow. Four cells is 120 m at z12, about
+ * the shallow band (SHALLOW_WATER_COAST_M), and already a sixteenth of
+ * the cut cells.
+ */
+const CHORD_MAX_LEAF_SIZE = 4;
 
 function isPow2(n: number): boolean {
     return n > 0 && (n & (n - 1)) === 0;
@@ -233,27 +266,236 @@ export function decimate(input: DecimateInput): DecimateResult {
     const padFits = (bx: number, by: number, s: number): boolean =>
         padHeights === undefined || blockError(padHeights, bx, by, s) <= padErrorM;
 
+    const defaultCrossing = () => undefined;
+    const edgeCrossing = input.edgeCrossing ?? defaultCrossing;
+    const isLandRegion = input.isLandRegion;
+
+    /**
+     * The block's boundary nodes in ring order, clockwise from its top-left
+     * corner, as (x, y, edge, t) where t runs along the edge.
+     */
+    const ringNodes = (bx: number, by: number, s: number): Array<{ x: number; y: number; edge: number; t: number }> => {
+        const out: Array<{ x: number; y: number; edge: number; t: number }> = [];
+        for (let k = 0; k < s; k++) out.push({ x: bx + k, y: by, edge: 0, t: k / s });
+        for (let k = 0; k < s; k++) out.push({ x: bx + s, y: by + k, edge: 1, t: k / s });
+        for (let k = 0; k < s; k++) out.push({ x: bx + s - k, y: by + s, edge: 2, t: k / s });
+        for (let k = 0; k < s; k++) out.push({ x: bx, y: by + s - k, edge: 3, t: k / s });
+        return out;
+    };
+
+    /**
+     * Whether a boundary block can be one leaf: two regions, the boundary
+     * between them crossing the block's edge exactly twice, every node on
+     * the side of the straight chord its region says, and the two fans the
+     * chord makes within tolerance of the drawn heights.
+     *
+     * The chord *is* the shore that gets drawn, so a node on the wrong side
+     * of it would be drawn as the wrong ground; that is why the second
+     * test is strict. Crossings are solved on the one-cell sub-edge where
+     * the region changes, so a finer neighbour on that edge lands on the
+     * same point and there is no crack.
+     */
+    const simpleChord = (bx: number, by: number, s: number): Chord | undefined => {
+        if (s > maxLeafSize || s > CHORD_MAX_LEAF_SIZE || !coverUniform(bx, by, s)) {
+            return undefined;
+        }
+        const ring = ringNodes(bx, by, s);
+        const changes: ChordCrossing[] = [];
+        const idA = regionIdAt(ring[0].x, ring[0].y);
+        let idB = -1;
+        for (let i = 0; i < ring.length; i++) {
+            const n0 = ring[i];
+            const n1 = ring[(i + 1) % ring.length];
+            const r0 = regionIdAt(n0.x, n0.y);
+            const r1 = regionIdAt(n1.x, n1.y);
+            if (r0 !== idA) {
+                if (idB === -1) idB = r0;
+                else if (r0 !== idB) return undefined;
+            }
+            if (r0 === r1) {
+                continue;
+            }
+            if (changes.length === 2) {
+                return undefined;
+            }
+            const t = edgeCrossing(n0.x, n0.y, n1.x, n1.y) ?? 0.5;
+            changes.push({
+                x: n0.x + (n1.x - n0.x) * t,
+                y: n0.y + (n1.y - n0.y) * t,
+                edge: n0.edge,
+                t: n0.t + t / s,
+            });
+        }
+        if (changes.length !== 2 || idB === -1) {
+            return undefined;
+        }
+        // Every node of the block, interior included, on the side of the
+        // chord its region says.
+        const [a, b] = changes;
+        const cx = b.x - a.x, cy = b.y - a.y;
+        let signA = 0;
+        for (let y = by; y <= by + s; y++) {
+            for (let x = bx; x <= bx + s; x++) {
+                const id = regionIdAt(x, y);
+                if (id !== idA && id !== idB) {
+                    return undefined;
+                }
+                const side = cx * (y - a.y) - cy * (x - a.x);
+                if (Math.abs(side) < 1e-9) {
+                    continue;
+                }
+                const want = id === idA ? 1 : -1;
+                if (signA === 0) {
+                    signA = Math.sign(side) * want;
+                } else if (Math.sign(side) * want !== signA) {
+                    return undefined;
+                }
+            }
+        }
+        const shore = isLandRegion ? isLandRegion(idA) !== isLandRegion(idB) : true;
+        const chord: Chord = { a, b, shore };
+        // Height test on the fans the chord will make, without midpoints:
+        // the drawn surface inside a fan is planar per triangle.
+        const polys = chordPolygons(bx, by, s, chord, [false, false, false, false]);
+        for (const poly of polys) {
+            const region = poly.regionId;
+            for (let j = 1; j + 1 < poly.ring.length; j++) {
+                const t0 = poly.ring[0], t1 = poly.ring[j], t2 = poly.ring[j + 1];
+                const det = (t1.y - t2.y) * (t0.x - t2.x) + (t2.x - t1.x) * (t0.y - t2.y);
+                if (Math.abs(det) < MIN_AREA) {
+                    continue;
+                }
+                const h0 = heightAt(heights, t0), h1 = heightAt(heights, t1), h2 = heightAt(heights, t2);
+                const p0 = padHeights && heightAt(padHeights, t0);
+                const p1 = padHeights && heightAt(padHeights, t1);
+                const p2 = padHeights && heightAt(padHeights, t2);
+                const minX = Math.ceil(Math.min(t0.x, t1.x, t2.x)), maxX = Math.floor(Math.max(t0.x, t1.x, t2.x));
+                const minY = Math.ceil(Math.min(t0.y, t1.y, t2.y)), maxY = Math.floor(Math.max(t0.y, t1.y, t2.y));
+                for (let y = minY; y <= maxY; y++) {
+                    for (let x = minX; x <= maxX; x++) {
+                        if (regionIdAt(x, y) !== region) {
+                            continue;
+                        }
+                        const l0 = ((t1.y - t2.y) * (x - t2.x) + (t2.x - t1.x) * (y - t2.y)) / det;
+                        const l1 = ((t2.y - t0.y) * (x - t2.x) + (t0.x - t2.x) * (y - t2.y)) / det;
+                        const l2 = 1 - l0 - l1;
+                        if (l0 < -1e-9 || l1 < -1e-9 || l2 < -1e-9) {
+                            continue;
+                        }
+                        if (Math.abs(h0 * l0 + h1 * l1 + h2 * l2 - heights[y * size + x]) > maxErrorM) {
+                            return undefined;
+                        }
+                        if (padHeights && Math.abs(p0! * l0 + p1! * l1 + p2! * l2 - padHeights[y * size + x]) > padErrorM) {
+                            return undefined;
+                        }
+                    }
+                }
+            }
+        }
+        return chord;
+    };
+
+    /** Bilinear height at a grid point that may be fractional. */
+    function heightAt(field: Float32Array, p: { x: number; y: number }): number {
+        const x0 = Math.min(size - 2, Math.max(0, Math.floor(p.x)));
+        const y0 = Math.min(size - 2, Math.max(0, Math.floor(p.y)));
+        const fx = p.x - x0, fy = p.y - y0;
+        return field[y0 * size + x0] * (1 - fx) * (1 - fy)
+            + field[y0 * size + x0 + 1] * fx * (1 - fy)
+            + field[(y0 + 1) * size + x0] * (1 - fx) * fy
+            + field[(y0 + 1) * size + x0 + 1] * fx * fy;
+    }
+
+    /**
+     * The two polygons a chord cuts a block into: the boundary ring -
+     * corners, a midpoint on each edge flagged in `needMid`, and the two
+     * crossings, in order along each edge - split at the crossings. Each
+     * starts at a crossing, so a fan from its first point has the chord as
+     * an edge. Both are convex: a straight cut through a square.
+     */
+    function chordPolygons(
+        bx: number, by: number, s: number, chord: Chord, needMid: boolean[],
+    ): Array<{ ring: Vec2[]; regionId: number }> {
+        const corners: Vec2[] = [
+            { x: bx, y: by }, { x: bx + s, y: by }, { x: bx + s, y: by + s }, { x: bx, y: by + s },
+        ];
+        const ring: Vec2[] = [];
+        const crossingAt: number[] = [];
+        for (let e = 0; e < 4; e++) {
+            ring.push(corners[e]);
+            const along: Array<{ t: number; p: Vec2; crossing: boolean }> = [];
+            if (needMid[e]) {
+                const a = corners[e], b = corners[(e + 1) % 4];
+                along.push({ t: 0.5, p: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, crossing: false });
+            }
+            for (const c of [chord.a, chord.b]) {
+                if (c.edge === e) {
+                    along.push({ t: c.t, p: { x: c.x, y: c.y, shore: chord.shore }, crossing: true });
+                }
+            }
+            along.sort((p, q) => p.t - q.t);
+            for (let i = 0; i < along.length; i++) {
+                // A crossing exactly on the midpoint is the midpoint.
+                if (i > 0 && Math.abs(along[i].t - along[i - 1].t) < 1e-9) {
+                    if (along[i].crossing) {
+                        ring[ring.length - 1] = along[i].p;
+                        crossingAt.push(ring.length - 1);
+                    }
+                    continue;
+                }
+                if (along[i].crossing) {
+                    crossingAt.push(ring.length);
+                }
+                ring.push(along[i].p);
+            }
+        }
+        const [i1, i2] = crossingAt;
+        const polyA = ring.slice(i1, i2 + 1);
+        const polyB = [...ring.slice(i2), ...ring.slice(0, i1 + 1)];
+        const regionOf = (poly: Vec2[]): number => {
+            for (const p of poly) {
+                if (p.shore === undefined && Number.isInteger(p.x) && Number.isInteger(p.y)) {
+                    return regionIdAt(p.x, p.y);
+                }
+            }
+            return regionIdAt(bx, by);
+        };
+        return [
+            { ring: polyA, regionId: regionOf(polyA) },
+            { ring: polyB, regionId: regionOf(polyB) },
+        ];
+    }
+
     // --- 1. Top-down subdivision -------------------------------------------
     const leaves: Leaf[] = [];
-    const subdivide = (bx: number, by: number, s: number): void => {
+    /** Leaves for a block, given that nothing above it merged. */
+    const subdivideInto = (out: Leaf[], bx: number, by: number, s: number, mergeUniform: boolean): void => {
         if (s <= minLeafSize) {
             const uniform = blockUniform(bx, by, s);
-            leaves.push({ x: bx, y: by, size: s, uniform, regionId: uniform ? regionIdAt(bx, by) : 0 });
+            out.push({ x: bx, y: by, size: s, uniform, regionId: uniform ? regionIdAt(bx, by) : 0 });
             return;
         }
         const uniform = blockUniform(bx, by, s);
-        if (uniform && s <= maxLeafSize && blockError(heights, bx, by, s) <= maxErrorM
-            && padFits(bx, by, s) && coverUniform(bx, by, s)) {
-            leaves.push({ x: bx, y: by, size: s, uniform: true, regionId: regionIdAt(bx, by) });
-            return;
+        if (uniform) {
+            if (!mergeUniform || (s <= maxLeafSize && blockError(heights, bx, by, s) <= maxErrorM
+                && padFits(bx, by, s) && coverUniform(bx, by, s))) {
+                out.push({ x: bx, y: by, size: s, uniform: true, regionId: regionIdAt(bx, by) });
+                return;
+            }
+        } else {
+            const chord = simpleChord(bx, by, s);
+            if (chord !== undefined) {
+                out.push({ x: bx, y: by, size: s, uniform: false, regionId: 0, chord });
+                return;
+            }
         }
         const half = s / 2;
-        subdivide(bx, by, half);
-        subdivide(bx + half, by, half);
-        subdivide(bx, by + half, half);
-        subdivide(bx + half, by + half, half);
+        subdivideInto(out, bx, by, half, mergeUniform);
+        subdivideInto(out, bx + half, by, half, mergeUniform);
+        subdivideInto(out, bx, by + half, half, mergeUniform);
+        subdivideInto(out, bx + half, by + half, half, mergeUniform);
     };
-    subdivide(0, 0, cells);
+    subdivideInto(leaves, 0, 0, cells, true);
 
     // --- 2. Balance so neighbours differ by at most one level ---------------
     // `owner[cell]` is the index of the leaf covering that cell.
@@ -306,18 +548,16 @@ export function decimate(input: DecimateInput): DecimateResult {
             if (finest >= l.size / 2) {
                 continue;
             }
-            // Split this leaf into four and re-paint.
+            // Split this leaf into four and re-paint. A uniform child is a
+            // leaf whatever its error, as it always was; a boundary child
+            // keeps its chord if it still has one, and is cut down to
+            // minLeafSize otherwise.
             const half = l.size / 2;
-            const kids: Leaf[] = [
-                { x: l.x, y: l.y, size: half, uniform: false, regionId: 0 },
-                { x: l.x + half, y: l.y, size: half, uniform: false, regionId: 0 },
-                { x: l.x, y: l.y + half, size: half, uniform: false, regionId: 0 },
-                { x: l.x + half, y: l.y + half, size: half, uniform: false, regionId: 0 },
-            ];
-            for (const k of kids) {
-                k.uniform = blockUniform(k.x, k.y, k.size);
-                k.regionId = k.uniform ? regionIdAt(k.x, k.y) : 0;
-            }
+            const kids: Leaf[] = [];
+            subdivideInto(kids, l.x, l.y, half, false);
+            subdivideInto(kids, l.x + half, l.y, half, false);
+            subdivideInto(kids, l.x, l.y + half, half, false);
+            subdivideInto(kids, l.x + half, l.y + half, half, false);
             leaves[i] = kids[0];
             paint(i);
             for (let j = 1; j < kids.length; j++) {
@@ -340,10 +580,31 @@ export function decimate(input: DecimateInput): DecimateResult {
         return idx >= 0 ? leaves[idx].size : Number.POSITIVE_INFINITY;
     };
 
-    const defaultCrossing = () => undefined;
-    const edgeCrossing = input.edgeCrossing ?? defaultCrossing;
-
     for (const l of leaves) {
+        if (!l.uniform && l.chord !== undefined) {
+            shorelineLeafCount++;
+            // A simple-chord leaf: two convex polygons, each fanned from
+            // the crossing it starts at, so both carry the chord as an edge.
+            const s = l.size;
+            const needMid = [
+                neighbourSizeAt(l.x, l.y - 1) < s || neighbourSizeAt(l.x + s - 1, l.y - 1) < s,
+                neighbourSizeAt(l.x + s, l.y) < s || neighbourSizeAt(l.x + s, l.y + s - 1) < s,
+                neighbourSizeAt(l.x, l.y + s) < s || neighbourSizeAt(l.x + s - 1, l.y + s) < s,
+                neighbourSizeAt(l.x - 1, l.y) < s || neighbourSizeAt(l.x - 1, l.y + s - 1) < s,
+            ];
+            for (const poly of chordPolygons(l.x, l.y, s, l.chord, needMid)) {
+                const apex = poly.ring[0];
+                for (let j = 1; j + 1 < poly.ring.length; j++) {
+                    const a = poly.ring[j], b = poly.ring[j + 1];
+                    const area = (a.x - apex.x) * (b.y - apex.y) - (a.y - apex.y) * (b.x - apex.x);
+                    if (Math.abs(area) / 2 < MIN_AREA) {
+                        continue;
+                    }
+                    triangles.push({ pts: [apex, a, b], regionId: poly.regionId, cut: true });
+                }
+            }
+            continue;
+        }
         if (!l.uniform) {
             shorelineLeafCount++;
             // Boundary leaf: cut it with marching squares. Nothing is finer

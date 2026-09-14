@@ -220,7 +220,10 @@ describe('restricted-quadtree decimation', () => {
             regionNodes: regions(SIZE, (x) => x < 16),
             maxErrorM: 1000, // would merge everything if region were ignored
         });
-        assert.ok(r.leafCount > 2, `expected refinement at the boundary, got ${r.leafCount} leaves`);
+        // A straight boundary on flat ground is a run of simple-chord leaves
+        // now, not a column of cut cells; what must hold is that the cut is
+        // where the regions say, exactly.
+        assert.ok(r.shorelineLeafCount >= 1, 'a boundary leaf exists');
         // 33 nodes puts the class boundary off-centre: nodes 0..15 are land, so
         // cells 0..14 are solid land, cell 15 is the boundary (split at its
         // midpoint) and cells 16..31 are solid water. That is 15.5 vs 16.5
@@ -279,9 +282,11 @@ describe('restricted-quadtree decimation', () => {
             size: SIZE, heights: grid(SIZE, () => 0), regionNodes: cls, maxErrorM: 1000,
             minLeafSize: 4,
         });
+        // Simple-chord leaves already cut a smooth circle at up to four
+        // cells at minLeafSize 1, so coarsening can only match or beat it.
         assert.ok(
-            coarse.triangles.length < fine.triangles.length,
-            `coarse ${coarse.triangles.length} should be under fine ${fine.triangles.length}`,
+            coarse.triangles.length <= fine.triangles.length,
+            `coarse ${coarse.triangles.length} should not exceed fine ${fine.triangles.length}`,
         );
         const cells = SIZE - 1;
         assert.ok(Math.abs(totalArea(coarse.triangles) - cells * cells) < 1e-6, 'still watertight');

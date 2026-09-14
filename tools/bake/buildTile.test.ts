@@ -398,9 +398,19 @@ describe('buildTile', () => {
                 triangleBudget: budget,
             }));
             assert.ok(r.triangleCount <= budget, `${r.triangleCount} over budget`);
+            // The count is not continuous in the tolerance - this noisy field
+            // merges all at once past its amplitude - so "near the ceiling"
+            // is the wrong test. What must hold is that the search did not
+            // over-coarsen: a step finer than where it settled would not fit.
+            const finer = buildTile(base({
+                heights: heightsFrom((x, y) => (x * 37 + y * 53) % 200),
+                polygons: [coastAt(16)],
+                maxErrorM: r.maxErrorM / 2,
+                triangleBudget: undefined,
+            }));
             assert.ok(
-                r.triangleCount > budget * 0.4,
-                `${r.triangleCount} wastes most of the ${budget} budget`,
+                finer.triangleCount > budget,
+                `${finer.triangleCount} at half the tolerance still fits the ${budget} budget`,
             );
         });
 
