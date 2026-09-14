@@ -281,3 +281,22 @@ walls, 465 skirts, 1080 water. The strokes are now bounded by the
 mapped ring points themselves, and the fill by the facets a polygon
 touches; the next lever on either is simplifying the rings at the leaf
 level, which today keeps every OSM vertex.
+
+## Leaf ring simplification, same day
+
+The leaf level kept every OSM vertex. `LANDUSE_LEAF_SIMPLIFY_CELLS`
+now runs Douglas-Peucker at a quarter cell (7.5 m at z12) on leaf
+rings; coarser levels keep their half cell.
+
+| Madeira z12, per tile | none | 0.1 cell | 0.25 cell |
+|---|---|---|---|
+| fill | 8185 | 7718 | 7288 |
+| strokes | 9901 | 9120 | 8433 |
+| total | 24509 | 23262 | 22145 |
+
+Mean per tile over the box: 15608 -> 14314; output 19.6 -> 18.1 MB.
+Diminishing: OSM vertices are already sparse against the cell, and
+most stroke vertices are now facet crossings, which no ring tolerance
+touches. Verified over LPMA: polygon outlines unchanged to the eye.
+
+Day total: 27662 -> 14314 mean triangles per tile, -48 %.

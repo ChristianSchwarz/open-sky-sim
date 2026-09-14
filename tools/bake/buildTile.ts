@@ -121,6 +121,14 @@ export const LANDUSE_DETAIL_MIN_ZOOM = 12;
  * nearest a z11 tile is ever drawn from. The leaf level keeps every vertex.
  */
 export const LANDUSE_SIMPLIFY_CELLS = 0.5;
+/**
+ * Douglas-Peucker tolerance for a landuse ring at the leaf level, in cells.
+ * The leaf used to keep every OSM vertex, and the fill and the outline
+ * strokes are both bounded by the ring's vertex count. A tenth of a cell is
+ * 3 m at z12, inside the outline stroke's own half-width, so nothing an
+ * edge does at that scale can show.
+ */
+export const LANDUSE_LEAF_SIMPLIFY_CELLS = 0.25;
 /** A landuse ring smaller than this, in cells^2, is not worth a fill. */
 export const LANDUSE_MIN_RING_AREA_CELLS = 1;
 
@@ -1445,7 +1453,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
 
     /**
      * A landuse ring in grid space, simplified for this zoom. Undefined when
-     * it is too small to draw at all. The leaf level keeps every vertex.
+     * it is too small to draw at all.
      */
     const landuseRing = (ring: LonLat[]): GridPoint[] | undefined => {
         const flat = new Float64Array(ring.length * 2);
@@ -1453,7 +1461,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             flat[i * 2] = ((ring[i].lon - bounds.west) / lonSpan) * cells;
             flat[i * 2 + 1] = ((bounds.north - ring[i].lat) / latSpan) * cells;
         }
-        const pts = leafZoom ? flat : simplifyRing(flat, LANDUSE_SIMPLIFY_CELLS);
+        const pts = simplifyRing(flat, leafZoom ? LANDUSE_LEAF_SIMPLIFY_CELLS : LANDUSE_SIMPLIFY_CELLS);
         const n = pts.length / 2;
         let area2 = 0;
         for (let i = 0, j = n - 1; i < n; j = i++) {
