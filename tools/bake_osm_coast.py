@@ -915,7 +915,12 @@ def assemble_land(
 
 def rasterize_tile(land_prep, land_geom, b: Bounds, n: int) -> bytearray:
     """Return row-major uint8 mask (LAND/WATER)."""
-    if HAS_RASTERIO and not land_geom.is_empty:
+    if land_geom.is_empty:
+        # No land reaches this tile: all water, whichever backend. The
+        # block path hands in a clipped piece with no prepared geometry,
+        # so this must not fall through to the point tests below.
+        return bytearray(bytes([WATER]) * (n * n))
+    if HAS_RASTERIO:
         # rasterio row 0 = north; matches PDM node ordering.
         transform = transform_from_bounds(b.west, b.south, b.east, b.north, n, n)
         geoms = land_geom.geoms if isinstance(land_geom, MultiPolygon) else [land_geom]
