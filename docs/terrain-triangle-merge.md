@@ -1,6 +1,7 @@
 # Terrain triangles: fewer where neighbouring facets are nearly coplanar
 
-Written 2026-09-14. Plan only, no code yet. Numbers below are from the
+Written 2026-09-14; steps 0-3 landed the same day, results at the end.
+Numbers below are from the
 current `assets/planet` pyramid: 60 tiles each at z12 and z10, interior
 decimation only (no coast, no cover boundaries), the tolerance doubled
 until the tile fits the 6144 budget the way `buildTile` does.
@@ -166,3 +167,49 @@ with a measurement from step 0 showing the ripple is still a large share.
 - Runtime: `__fieldStats` for scene triangles at the same camera pose over
   the same area, faceted and smooth shading; screenshots in the pane for
   tone steps and silhouettes.
+
+## Results (2026-09-14)
+
+Steps 0-3 are in. Step 5 was not needed. What landed:
+
+- `decimate.ts` fans a leaf from a corner (`2 + k`), and tags cut-leaf
+  triangles `cut` so a wall can only hang from a chord or a grid-aligned
+  edge, never a leaf diagonal. The corner fan made many diagonals between
+  two shore positions, and the old position-only wall rule grew a buried
+  wall from every one of them - which is how a budget test caught it.
+- `collapse.ts` is the coplanar pass, run once on the mesh the budget
+  search settled on. Running it inside the search made the bake four
+  times slower and handed the saving straight back to the tolerance.
+- `maxErrorForTile` floors the tolerance at `MIN_ERROR_CELLS` (0.25) of
+  the cell size, so a quiet tile keeps the saving instead of re-spending
+  it on sub-cell noise.
+- `bake_planet_mesh.ts` prints, per zoom, mean triangles, mean *surface*
+  triangles, median tolerance and collapsed vertices per tile.
+
+Interior-only, same 60 real tiles, at the tolerance the corner-fan mesh
+fits the budget at:
+
+| | z12 | z10 |
+|---|---|---|
+| corner fan | 243201 | 228411 |
+| + collapse at 2° | 226677 (-6.8 %) | 211231 (-7.5 %) |
+| + collapse at 4° | 210627 (-13.4 %) | 197317 (-13.6 %) |
+
+Madeira box, full bake, 137 tiles, before -> after:
+
+| | before | after |
+|---|---|---|
+| mean triangles per tile | 27662 | 25818 |
+| max | 92270 | 87365 |
+| output | 31.7 MB | 29.7 MB |
+| bake time | 16.2 s | 22.1 s |
+
+The whole-tile saving is 6.7 %, well under the interior saving, because
+at z12 the surface is only 5106 of a tile's 43164 triangles: the rest is
+the landuse polygon fill, walls, skirts and water. **The fill is now the
+triangle budget's real problem**, seven times the surface on a tile dense
+with OSM polygons, and nothing here touches it. That is the next plan.
+
+Verified in the pane over Madeira (LPMA, exterior camera): coast, walls
+and facets intact, no cracks at leaf seams, 358k scene triangles at
+detail scale 4 with 40 tiles drawn.

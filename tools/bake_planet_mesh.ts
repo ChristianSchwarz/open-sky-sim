@@ -622,6 +622,8 @@ async function main(): Promise<void> {
         ? loadHistogram(args.out)
         : newColorHistogram();
     const leafHistogram = new Map<number, number>();
+    /** Per zoom: tile count, triangles, settled tolerance, collapsed vertices. */
+    const zoomStats = new Map<number, { n: number; tris: number; mesh: number; errs: number[]; collapsed: number }>();
     const t0 = Date.now();
 
     // Each tile only reads its own inputs and writes its own .ptm, so the
@@ -685,6 +687,13 @@ async function main(): Promise<void> {
             coarsenedCoast++;
         }
         leafHistogram.set(r.minLeafSize, (leafHistogram.get(r.minLeafSize) ?? 0) + 1);
+        const zs = zoomStats.get(z) ?? { n: 0, tris: 0, mesh: 0, errs: [], collapsed: 0 };
+        zs.n++;
+        zs.tris += r.triangleCount;
+        zs.mesh += r.meshTriangles;
+        zs.errs.push(r.maxErrorM);
+        zs.collapsed += r.collapsedVertices;
+        zoomStats.set(z, zs);
     }
 
     const heightMaxZoom = Math.min(11, src.maxZoom);
@@ -874,6 +883,21 @@ async function main(): Promise<void> {
         const leaves = [...leafHistogram.entries()].sort((a, b) => a[0] - b[0]);
         console.log(`  shoreline leaf size: `
             + leaves.map(([k, v]) => `${k}cell x${v}`).join(', '));
+        // Judge a mesh change on both columns: triangles at the tolerance it
+        // settled on, and the tolerance it could afford at the budget.
+        // The tolerance is a median: a tile whose coast alone fills the
+        // budget settles at a sentinel far above any relief, and one of
+        // those swamps a mean.
+        for (const [z, zs] of [...zoomStats.entries()].sort((a, b) => a[0] - b[0])) {
+            const errs = zs.errs.slice().sort((a, b) => a - b);
+            const median = errs[Math.floor(errs.length / 2)];
+            const coastOnly = zs.errs.filter(e => e >= 1e9).length;
+            console.log(`  z${z}: ${zs.n} tiles, mean ${Math.round(zs.tris / zs.n)} triangles `
+                + `of which ${Math.round(zs.mesh / zs.n)} surface, `
+                + `median tolerance ${median >= 1e9 ? 'coast-only' : `${median.toFixed(1)} m`}`
+                + (coastOnly > 0 ? ` (${coastOnly} coast-only)` : '')
+                + `, ${Math.round(zs.collapsed / zs.n)} vertices collapsed per tile`);
+        }
     }
 }
 

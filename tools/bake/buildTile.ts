@@ -32,6 +32,7 @@ import {
     PTM_MAX_RIVER_VERTS, PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmTileId, encodePtm,
 } from '../../src/script/terrain/ptm';
 import { GridTriangle, decimate } from './decimate';
+import { collapse } from './collapse';
 import {
     CoastPolygon, InlandPolygon, LonLat, LonLatBounds, buildShoreline, simplifyRing,
 } from './shoreline';
@@ -160,6 +161,15 @@ const RIVER_LIFT_CELLS = 0.05;
 export const OUTLINE_HALF_WIDTH_M = 2;
 
 /**
+ * Largest normal deviation (deg) inside a vertex's ring that the coplanar
+ * collapse pass will try to remove; see collapse.ts. Two degrees: the pool
+ * roughly doubles at four, but the facets that survive are what the
+ * fixed-sun shading paints, and a four-degree kink merged away is a visible
+ * tone step in FACETED mode.
+ */
+export const COLLAPSE_MAX_ANGLE_DEG = 2;
+
+/**
  * Observed ground cover on the tile's own grid, written by
  * tools/bake_planet_cover.py and decoded by tools/bake/plc.ts.
  *
@@ -256,6 +266,14 @@ export interface BuildTileResult {
     minLeafSize: number;
     /** How many budget retries were needed. */
     attempts: number;
+    /** Vertices the coplanar collapse pass removed from the final mesh. */
+    collapsedVertices: number;
+    /**
+     * Triangles in the decimated surface itself, before walls, skirts, the
+     * landuse fill and the water sheet. The budget governs this number; the
+     * fill can be several times it on a tile dense with OSM polygons.
+     */
+    meshTriangles: number;
     centerHeightM: number;
     /** Three sRGB bytes per land triangle, for the bake's swatch histogram. */
     landColors: Uint8Array;
@@ -448,6 +466,10 @@ function chamferDistanceCells(
  * so the budget has to include them or a tile silently lands over budget.
  */
 function costWithSkirts(tris: GridTriangle[], cells: number, isLand: (t: GridTriangle) => boolean): number {
+    // The same position rule the wall pass uses below: the cutter drops the
+    // shore tag when a crossing lands exactly on a cell corner, so a chord
+    // endpoint is a shore vertex if *any* triangle tags that position.
+    const shore = shorePositionsOf(tris);
     let quads = 0;
     for (const t of tris) {
         for (let e = 0; e < 3; e++) {
@@ -459,12 +481,42 @@ function costWithSkirts(tris: GridTriangle[], cells: number, isLand: (t: GridTri
                 quads++;
             }
             // Land edge along the shore chord -> shore wall quad.
-            if (isLand(t) && a.shore && b.shore) {
+            if (canWall(t, a, b) && isLand(t) && shore.has(gridKey(a.x, a.y)) && shore.has(gridKey(b.x, b.y))) {
                 quads++;
             }
         }
     }
     return tris.length + quads * 2;
+}
+
+/**
+ * Whether a land edge between two shore positions is one a shore wall may
+ * hang from. Any edge of a cut triangle can be a chord. A uniform leaf's
+ * edges lie on grid lines and can carry the coast when it runs along one,
+ * but its diagonal never can: both corners can sit on the shore with the
+ * whole leaf on land, and a wall from that diagonal lies buried inside the
+ * ground, costing budget for nothing. The corner fan makes many more such
+ * diagonals than the centre fan did, which is how they were noticed.
+ */
+function canWall(t: GridTriangle, a: Vec2, b: Vec2): boolean {
+    return t.cut === true || a.x === b.x || a.y === b.y;
+}
+
+function gridKey(gx: number, gy: number): string {
+    return `${gx.toFixed(4)},${gy.toFixed(4)}`;
+}
+
+/** Every grid position some triangle tags as shore; see costWithSkirts. */
+function shorePositionsOf(tris: GridTriangle[]): Set<string> {
+    const out = new Set<string>();
+    for (const t of tris) {
+        for (const p of t.pts) {
+            if (p.shore) {
+                out.add(gridKey(p.x, p.y));
+            }
+        }
+    }
+    return out;
 }
 
 export function buildTile(input: BuildTileInput): BuildTileResult {
@@ -640,9 +692,11 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     }
 
     let attempts = 0;
+    let collapsedVertices = 0;
+    const collapseCellM = ((bounds.north - bounds.south) / cells) * 110540;
     const run = (err: number, leaf: number) => {
         attempts++;
-        return decimate({
+        const d = decimate({
             size,
             heights: meshHeights,
             padHeights: meshPadHeights,
@@ -655,6 +709,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             regionAt: regionField.regionAt,
             isLandRegion: (id: number) => regionField.regionTable[id].isLand,
         });
+        return d;
     };
 
     let maxErrorM = input.maxErrorM;
@@ -776,6 +831,31 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         tris = best.triangles;
     }
 
+    // --- 3b. coplanar collapse --------------------------------------------
+    //
+    // Once, on the mesh the search settled on, not inside the search. Run
+    // per attempt it made the bake four times slower, and it would only have
+    // handed the saving straight back to the tolerance: the search coarsens
+    // until the tile fits, so a cheaper mesh fits at a finer error and comes
+    // out the same size. Here the saving stays a saving. A collapse can only
+    // remove triangles, so the budget still holds; the one thing it can add
+    // is a wall on a new grid-aligned edge between two shore positions,
+    // which is rare and a quad.
+    const collapsed = collapse({
+        triangles: tris,
+        size,
+        heights: meshHeights,
+        cellM: collapseCellM,
+        maxErrorM: Number.isFinite(maxErrorM) ? maxErrorM : input.maxErrorM,
+        maxAngleDeg: COLLAPSE_MAX_ANGLE_DEG,
+        padHeights: meshPadHeights,
+        padErrorM: PAD_ERROR_M,
+        coverClasses: meshCoverClasses,
+    });
+    tris = collapsed.triangles;
+    collapsedVertices = collapsed.collapsed;
+    const meshTriangles = tris.length;
+
     // --- 4/5. projection, pad, depth bias ---------------------------------
     const lonSpan = bounds.east - bounds.west;
     const latSpan = bounds.north - bounds.south;
@@ -892,7 +972,6 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     };
 
     /** Grid -> ENU (absolute), including the pad and the water rules. */
-    const gridKey = (gx: number, gy: number) => `${gx.toFixed(4)},${gy.toFixed(4)}`;
 
     /**
      * Land and water become separate meshes with their own vertices, so
@@ -923,14 +1002,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
      * DecimateInput.isLandRegion — so nothing here needs to re-derive that
      * distinction.
      */
-    const shorePositions = new Set<string>();
-    for (const t of tris) {
-        for (const p of t.pts) {
-            if (p.shore) {
-                shorePositions.add(gridKey(p.x, p.y));
-            }
-        }
-    }
+    const shorePositions = shorePositionsOf(tris);
     const isShore = (gx: number, gy: number, tagged?: boolean) =>
         tagged === true || shorePositions.has(gridKey(gx, gy));
 
@@ -1471,7 +1543,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         for (let e = 0; e < 3; e++) {
             const a = t.pts[e];
             const b = t.pts[(e + 1) % 3];
-            if (!isShore(a.x, a.y, a.shore) || !isShore(b.x, b.y, b.shore)) {
+            if (!canWall(t, a, b) || !isShore(a.x, a.y, a.shore) || !isShore(b.x, b.y, b.shore)) {
                 continue;
             }
             const topA = project(a.x, a.y, true, a.shore);
@@ -1878,6 +1950,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         geometricErrorM,
         minLeafSize,
         attempts,
+        collapsedVertices,
+        meshTriangles,
         centerHeightM,
         landColors: new Uint8Array(landColor),
     };

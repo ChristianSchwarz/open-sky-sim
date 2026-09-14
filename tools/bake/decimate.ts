@@ -118,6 +118,14 @@ export interface GridTriangle {
     /** Grid-space corners; may be fractional where a region boundary cuts a cell. */
     pts: [Vec2, Vec2, Vec2];
     regionId: number;
+    /**
+     * From a boundary leaf, cut by marching squares. Only such a triangle can
+     * have a shoreline chord for an edge, so only such a triangle grows a
+     * shore wall downstream. A uniform leaf's diagonal can join two corners
+     * that happen to sit at shore positions, and a wall hung from it would
+     * lie buried inside the land, costing budget for nothing.
+     */
+    cut?: boolean;
 }
 
 export interface DecimateResult {
@@ -386,10 +394,10 @@ export function decimate(input: DecimateInput): DecimateResult {
                 const cut = cutCell({ corners: boolCorners, edgeCrossings: crossings, centreIsLand, shoreEdges });
                 const idB = c.find(id => id !== idA) ?? idA;
                 for (const t of cut.land) {
-                    triangles.push({ pts: [lift(t[0]), lift(t[1]), lift(t[2])], regionId: idA });
+                    triangles.push({ pts: [lift(t[0]), lift(t[1]), lift(t[2])], regionId: idA, cut: true });
                 }
                 for (const t of cut.water) {
-                    triangles.push({ pts: [lift(t[0]), lift(t[1]), lift(t[2])], regionId: idB });
+                    triangles.push({ pts: [lift(t[0]), lift(t[1]), lift(t[2])], regionId: idB, cut: true });
                 }
             } else {
                 // Three or four regions on one cell - a real landuse edge
@@ -400,7 +408,7 @@ export function decimate(input: DecimateInput): DecimateResult {
                 const cut = cutCellRegions({ corners: c, edgeCrossings: crossings, centreRegion, shoreEdges });
                 for (const [regionId, tris] of cut.byRegion) {
                     for (const t of tris) {
-                        triangles.push({ pts: [lift(t[0]), lift(t[1]), lift(t[2])], regionId });
+                        triangles.push({ pts: [lift(t[0]), lift(t[1]), lift(t[2])], regionId, cut: true });
                     }
                 }
             }
@@ -408,7 +416,15 @@ export function decimate(input: DecimateInput): DecimateResult {
         }
 
         // Uniform leaf: ring of corners plus a midpoint on any edge whose
-        // neighbour is one level finer, fanned from the leaf centre.
+        // neighbour is one level finer, fanned from one *corner*.
+        //
+        // It used to fan from the leaf centre, which costs `4 + k` triangles
+        // for `k` midpoints against `2 + k` from a corner. Measured on 60 real
+        // z12 tiles at the budget, fan leaves were a quarter of the leaves and
+        // half of the interior triangles, so the centre vertex was 17-19% of
+        // the tile. It bought nothing the merge test had not already paid
+        // for: the leaf merged because every node in it, the centre included,
+        // lies within maxErrorM of the surface through its corners.
         const s = l.size;
         const needMid = [
             neighbourSizeAt(l.x, l.y - 1) < s || neighbourSizeAt(l.x + s - 1, l.y - 1) < s,
@@ -431,16 +447,23 @@ export function decimate(input: DecimateInput): DecimateResult {
                 ring.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
             }
         }
-        if (ring.length === 4) {
-            triangles.push({ pts: [ring[0], ring[1], ring[2]], regionId: l.regionId });
-            triangles.push({ pts: [ring[0], ring[2], ring[3]], regionId: l.regionId });
-        } else {
-            const centre: Vec2 = { x: l.x + s / 2, y: l.y + s / 2 };
-            for (let i = 0; i < ring.length; i++) {
-                const a = ring[i];
-                const b = ring[(i + 1) % ring.length];
-                triangles.push({ pts: [centre, a, b], regionId: l.regionId });
+        // Fan from a corner with no midpoint on either of its edges when there
+        // is one, so no fan triangle is a sliver between a corner and the
+        // midpoint next to it; any corner is a valid triangulation of the
+        // ring otherwise.
+        let apexCorner = 0;
+        for (let c = 0; c < 4; c++) {
+            if (!needMid[c] && !needMid[(c + 3) % 4]) {
+                apexCorner = c;
+                break;
             }
+        }
+        const apexAt = ring.findIndex(p => p === corners[apexCorner]);
+        const apex = ring[apexAt];
+        for (let i = 1; i + 1 < ring.length; i++) {
+            const a = ring[(apexAt + i) % ring.length];
+            const b = ring[(apexAt + i + 1) % ring.length];
+            triangles.push({ pts: [apex, a, b], regionId: l.regionId });
         }
     }
 

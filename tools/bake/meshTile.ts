@@ -63,6 +63,12 @@ export interface TileProcessResult {
     skirtDepthM: number;
     /** The error bound written to the tile header. */
     geometricErrorM: number;
+    /** Interior tolerance the budget search settled on. */
+    maxErrorM: number;
+    /** Vertices the coplanar collapse pass removed. */
+    collapsedVertices: number;
+    /** See BuildTileResult.meshTriangles. */
+    meshTriangles: number;
 }
 
 /** Geographic quadtree: level z has 2^(z+1) columns by 2^z rows. */
@@ -92,9 +98,24 @@ export function skirtDepthForTile(parentErrM: number, edgeM: number): number {
     return Math.max(2 * Math.max(0, parentErrM), 0.01 * edgeM);
 }
 
-/** Interior tolerance: half the tile's own geometric error, floored so flats collapse. */
-export function maxErrorForTile(tileErrM: number): number {
-    return tileErrM <= 0 ? 1 : Math.max(1, tileErrM * 0.5);
+/**
+ * Floor on the interior tolerance, in cells. A tile is drawn from where
+ * its cells are a few pixels wide, and a bump under a quarter of a cell
+ * tall does not read at that range; before the floor a flat tile spent its
+ * whole budget resolving one-metre noise in 30 m cells. Measured at z12 the
+ * budget-bound tiles land near half a cell anyway (14 m on 30 m cells); the
+ * floor only touches the tiles that had room to go finer than that.
+ */
+export const MIN_ERROR_CELLS = 0.25;
+
+/**
+ * Interior tolerance: half the tile's own geometric error, floored at a
+ * metre so flats collapse and at MIN_ERROR_CELLS of the cell size so a
+ * quiet tile does not buy detail nobody can see.
+ */
+export function maxErrorForTile(tileErrM: number, cellM = 0): number {
+    const floor = Math.max(1, cellM * MIN_ERROR_CELLS);
+    return tileErrM <= 0 ? floor : Math.max(floor, tileErrM * 0.5);
 }
 
 /**
@@ -187,10 +208,10 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
     const bounds = tileBounds(z, x, y);
     const edgeM = tileEdgeMetres(z, x, y);
     const skirtDepthM = skirtDepthForTile(parentErrorM(cfg.src, z, x, y, dem.geometricErrorM), edgeM);
-    const maxErrorM = maxErrorForTile(dem.geometricErrorM);
+    const cellM = edgeM / (dem.size - 1);
+    const maxErrorM = maxErrorForTile(dem.geometricErrorM, cellM);
     // Simplify the coast to roughly the interior tolerance, in cells, floored
     // by zoom so a coarse tile's shoreline is not cut at fine-tile cost.
-    const cellM = edgeM / (dem.size - 1);
     const simplifyCells = cellM > 0
         ? Math.min(COAST_SIMPLIFY_MAX_CELLS, Math.max(coastSimplifyFloorCells(z), maxErrorM / cellM))
         : 0;
@@ -231,6 +252,9 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         riverTriangles: r.riverTriangles,
         minLeafSize: r.minLeafSize,
         geometricErrorM: r.geometricErrorM,
+        maxErrorM: r.maxErrorM,
+        collapsedVertices: r.collapsedVertices,
+        meshTriangles: r.meshTriangles,
         covered,
         imagery,
         inlandTile,
