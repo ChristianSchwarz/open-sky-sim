@@ -92,6 +92,10 @@ export function collapse(input: CollapseInput): CollapseResult {
     const verts: Vertex[] = [];
     const byKey = new Map<string, number>();
     const triVerts: number[][] = [];
+    // A shore vertex is one *any* triangle tags: the cutter drops the tag
+    // when a crossing lands on a cell corner, and the corner's other copies
+    // come from uniform leaves that never had one.
+    const shore: boolean[] = [];
     for (let ti = 0; ti < tris.length; ti++) {
         const t = tris[ti]!;
         const ids: number[] = [];
@@ -102,6 +106,10 @@ export function collapse(input: CollapseInput): CollapseResult {
                 vi = verts.length;
                 byKey.set(key, vi);
                 verts.push({ p, tris: [] });
+                shore.push(false);
+            }
+            if (p.shore) {
+                shore[vi] = true;
             }
             verts[vi].tris.push(ti);
             ids.push(vi);
@@ -186,7 +194,7 @@ export function collapse(input: CollapseInput): CollapseResult {
     const mean: number[] = [0, 0, 0];
     const ringDeviation = (vi: number): number | undefined => {
         const v = verts[vi];
-        if (onBorder(v.p) || v.p.shore) {
+        if (onBorder(v.p) || shore[vi]) {
             return undefined;
         }
         const region = tris[v.tris[0]]!.regionId;
@@ -197,9 +205,11 @@ export function collapse(input: CollapseInput): CollapseResult {
         mean[0] = 0; mean[1] = 0; mean[2] = 0;
         for (const ti of v.tris) {
             const t = tris[ti]!;
-            // A cut triangle's edges may be shoreline chords; leave the cut
-            // leaves exactly as the cutter made them.
-            if (t.cut || t.regionId !== region || coverOf(t) !== cover) {
+            // The shoreline chords are between shore vertices, and those are
+            // locked above; a cut triangle's other corners are ordinary
+            // ground and may go, which is what lets the ladder of one- and
+            // two-cell leaves beside the coast merge away.
+            if (t.regionId !== region || coverOf(t) !== cover) {
                 return undefined;
             }
             normalOf(t, n);
@@ -248,7 +258,7 @@ export function collapse(input: CollapseInput): CollapseResult {
             // Landing on a shore vertex would give some ring triangle an edge
             // with a shore vertex at both ends that is not a shoreline chord,
             // and downstream a wall hangs from every such edge.
-            if (u.p.shore) {
+            if (shore[ui]) {
                 continue;
             }
             // Triangles v and u share vanish; the rest have v moved onto u.
@@ -268,7 +278,7 @@ export function collapse(input: CollapseInput): CollapseResult {
                     ok = false;
                     break;
                 }
-                kept.push({ ti, tri: { pts, regionId: old.regionId }, ids: ids.map(id => (id === vi ? ui : id)) });
+                kept.push({ ti, tri: { pts, regionId: old.regionId, cut: old.cut }, ids: ids.map(id => (id === vi ? ui : id)) });
             }
             if (!ok) {
                 continue;

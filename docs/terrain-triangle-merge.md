@@ -300,3 +300,29 @@ most stroke vertices are now facet crossings, which no ring tolerance
 touches. Verified over LPMA: polygon outlines unchanged to the eye.
 
 Day total: 27662 -> 14314 mean triangles per tile, -48 %.
+
+## Shoreline measurement (2026-09-14, evening)
+
+Question: 611 of 2153 z12 tiles are coast-only, where the water cut
+alone fills the surface budget. Is it small inland bodies?
+
+No. Per z12 tile the coast perimeter is 216 cells and the inland-body
+perimeter 203, but bodies under 16 cells² contribute 21 cells and
+bodies under 4 cells² 10. On the 30 busiest tiles (over 3000 boundary
+cells) small bodies are 149 of ~3900. Drawing them as overlays would
+buy nothing.
+
+What a coast-only tile's 6000 surface triangles actually are (Madeira,
+31 tiles): 2384 cut-cell triangles, 594 one-cell and 900 two-cell
+uniform leaves beside them (the balance ripple), 1379 four-cell. So the
+cut is 40 % and its ripple 25 %.
+
+The collapse pass locked every vertex touching a cut triangle, which
+kept that ripple alive. It now locks only shore vertices (tagged by any
+triangle at that position). Clean A/B on the same HEAD, Madeira z12:
+surface 5043 -> 4744, water sheet 1061 -> 851, walls unchanged at 579,
+tile mean 14178 -> 13883. Two percent, safe, and the last cheap one.
+
+What would move the coast-only tiles further is the cut itself, ~4
+triangles per boundary cell from marching squares; that needs a
+different shoreline triangulation, not a tweak.
