@@ -34,7 +34,7 @@ import {
 import { GridTriangle, decimate } from './decimate';
 import { collapse } from './collapse';
 import {
-    CoastPolygon, InlandPolygon, LonLat, LonLatBounds, buildShoreline, simplifyRing,
+    CoastPolygon, InlandPolygon, LonLat, LonLatBounds, Shoreline, buildShoreline, simplifyRing,
 } from './shoreline';
 import { Watercourse } from './lvr';
 import { RegionPolygon, buildRegionField, regionFieldFromShoreline } from './regions';
@@ -273,6 +273,18 @@ export interface BuildTileResult {
     wallTriangles: number;
     /** Border skirts, land and water together. */
     skirtTriangles: number;
+    /**
+     * Shore walls taller than max(150 m, 3 x skirt depth). A real cliff at an
+     * OSM shoreline can be that tall; a fence from a mountain down to phantom
+     * sea water always is. See docs/terrain-tile-borders.md.
+     */
+    tallWallTriangles: number;
+    /**
+     * Border nodes classified as open water whose inward neighbour is land or
+     * inland water: a one-node strip of sea along the tile edge, which is
+     * almost always a ring inset from the border rather than geography.
+     */
+    borderWaterNodes: number;
     /** The water surface itself, before its skirts. */
     waterSheetTriangles: number;
     /** Tolerance actually used after any budget coarsening. */
@@ -533,6 +545,27 @@ function shorePositionsOf(tris: GridTriangle[]): Set<string> {
         }
     }
     return out;
+}
+
+/** See BuildTileResult.borderWaterNodes. */
+function countBorderWaterNodes(shoreline: Shoreline, size: number): number {
+    const last = size - 1;
+    const classified = (row: number, col: number) => {
+        const i = row * size + col;
+        return shoreline.landNodes[i] !== 0 || shoreline.inlandNodes[i] !== 0;
+    };
+    let n = 0;
+    for (let k = 0; k < size; k++) {
+        const probes: Array<[number, number, number, number]> = [
+            [k, 0, k, 1], [k, last, k, last - 1], [0, k, 1, k], [last, k, last - 1, k],
+        ];
+        for (const [row, col, inRow, inCol] of probes) {
+            if (!classified(row, col) && classified(inRow, inCol)) {
+                n++;
+            }
+        }
+    }
+    return n;
 }
 
 export function buildTile(input: BuildTileInput): BuildTileResult {
@@ -1555,6 +1588,12 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // shore chord, so drop a quad from it to the water surface below. Inland
     // that step is usually small — a lake is measured against its own shore —
     // and the "nothing to close" test below drops the wall entirely.
+    //
+    // The drop is read off ENU u, which is only the vertical near the frame
+    // origin, but a wall this tall is tall in any axis close to it; the count
+    // is a diagnostic, not geometry.
+    const tallWallM = Math.max(150, 3 * input.skirtDepthM);
+    let tallWallTriangles = 0;
     for (const t of tris) {
         if (!isLandTriangle(t)) {
             continue;
@@ -1578,6 +1617,9 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             const facet = coverOf(t);
             pushLandTriangle(topA, topB, botB, facet, t);
             pushLandTriangle(topA, botB, botA, facet, t);
+            if (Math.max(topA.u - botA.u, topB.u - botB.u) > tallWallM) {
+                tallWallTriangles += 2;
+            }
         }
     }
 
@@ -2057,6 +2099,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         fillTriangles,
         wallTriangles,
         skirtTriangles,
+        tallWallTriangles,
+        borderWaterNodes: countBorderWaterNodes(shoreline, size),
         waterSheetTriangles,
         maxErrorM,
         geometricErrorM,

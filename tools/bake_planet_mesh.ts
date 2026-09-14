@@ -625,6 +625,7 @@ async function main(): Promise<void> {
     /** Per zoom: tile count, triangles, settled tolerance, collapsed vertices. */
     const zoomStats = new Map<number, {
         n: number; tris: number; mesh: number; fill: number; walls: number; skirts: number; water: number; strokes: number;
+        tallWalls: number; borderWater: number; borderWaterTiles: number;
         errs: number[]; collapsed: number;
     }>();
     const t0 = Date.now();
@@ -691,13 +692,21 @@ async function main(): Promise<void> {
         }
         leafHistogram.set(r.minLeafSize, (leafHistogram.get(r.minLeafSize) ?? 0) + 1);
         const zs = zoomStats.get(z)
-            ?? { n: 0, tris: 0, mesh: 0, fill: 0, walls: 0, skirts: 0, water: 0, strokes: 0, errs: [], collapsed: 0 };
+            ?? {
+                n: 0, tris: 0, mesh: 0, fill: 0, walls: 0, skirts: 0, water: 0, strokes: 0,
+                tallWalls: 0, borderWater: 0, borderWaterTiles: 0, errs: [], collapsed: 0,
+            };
         zs.n++;
         zs.tris += r.triangleCount;
         zs.mesh += r.meshTriangles;
         zs.fill += r.fillTriangles;
         zs.walls += r.wallTriangles;
         zs.skirts += r.skirtTriangles;
+        zs.tallWalls += r.tallWallTriangles;
+        zs.borderWater += r.borderWaterNodes;
+        if (r.borderWaterNodes > 0) {
+            zs.borderWaterTiles++;
+        }
         zs.water += r.waterSheetTriangles;
         zs.strokes += r.strokeTriangles;
         zs.errs.push(r.maxErrorM);
@@ -923,7 +932,9 @@ async function main(): Promise<void> {
                 + `${per(zs.skirts)} skirts, ${per(zs.water)} water, ${per(zs.strokes)} strokes), `
                 + `median tolerance ${median >= 1e9 ? 'coast-only' : `${median.toFixed(1)} m`}`
                 + (coastOnly > 0 ? ` (${coastOnly} coast-only)` : '')
-                + `, ${Math.round(zs.collapsed / zs.n)} vertices collapsed per tile`);
+                + `, ${Math.round(zs.collapsed / zs.n)} vertices collapsed per tile`
+                + `, ${zs.tallWalls} wall triangles over 150 m`
+                + `, ${zs.borderWater} border sea nodes on ${zs.borderWaterTiles} tiles`);
         }
     }
 }

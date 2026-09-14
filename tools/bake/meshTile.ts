@@ -72,6 +72,8 @@ export interface TileProcessResult {
     fillTriangles: number;
     wallTriangles: number;
     skirtTriangles: number;
+    tallWallTriangles: number;
+    borderWaterNodes: number;
     waterSheetTriangles: number;
     /** Watercourse and outline strokes: what is left of triangleCount. */
     strokeTriangles: number;
@@ -264,6 +266,8 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         fillTriangles: r.fillTriangles,
         wallTriangles: r.wallTriangles,
         skirtTriangles: r.skirtTriangles,
+        tallWallTriangles: r.tallWallTriangles,
+        borderWaterNodes: r.borderWaterNodes,
         waterSheetTriangles: r.waterSheetTriangles,
         strokeTriangles: r.triangleCount - r.landTriangles - r.waterTriangles,
         covered,

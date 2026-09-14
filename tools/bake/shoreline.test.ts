@@ -445,3 +445,27 @@ describe('inland water against a simplified land ring', () => {
             `${wet} of ${SIZE * SIZE} nodes claimed by one small lake; the fill cascaded`);
     });
 });
+
+describe('border snap', () => {
+    // 12/4285/991 in miniature: the land ring leaves the east edge a hair
+    // inside the tile and runs back to the corner from there, so every row
+    // between had its right crossing under `cells` and the border column
+    // fell through to open ocean.
+    const eastInset = (inset: number) => ringFromGrid([
+        [32, 0], [32 - inset, 20], [28, 20], [28, 25], [32, 25], [32, 32], [0, 32], [0, 0],
+    ]);
+    const eastColumn = (landNodes: Uint8Array, rows: number[]) =>
+        rows.map(r => landNodes[r * SIZE + 32]);
+
+    it('claims the border column when the ring is inset by less than the snap distance', () => {
+        const sh = buildShoreline({ polygons: [eastInset(0.08)], bounds: BOUNDS, size: SIZE });
+        assert.deepEqual(eastColumn(sh.landNodes, [1, 10, 19]), [1, 1, 1]);
+        // The notch between rows 20 and 25 is genuinely water.
+        assert.deepEqual(eastColumn(sh.landNodes, [22]), [0]);
+    });
+
+    it('leaves a ring that really sits inside the edge alone', () => {
+        const sh = buildShoreline({ polygons: [eastInset(1.5)], bounds: BOUNDS, size: SIZE });
+        assert.deepEqual(eastColumn(sh.landNodes, [10]), [0]);
+    });
+});

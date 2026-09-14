@@ -180,6 +180,34 @@ export function simplifyRing(pts: Float64Array, epsilon: number): Float64Array {
     return out;
 }
 
+/**
+ * A ring vertex this close to a tile edge, in cells, is moved onto it.
+ *
+ * The scanline fill below claims `ceil(x0) .. floor(x1)` per row, so a ring
+ * edge that runs along the tile border but sits a hair inside it leaves the
+ * border column (or row) to the open-ocean default. Measured on 12/4285/991:
+ * the land ring left the east edge at x = 255.922, 1.5 m inside, and 165
+ * border nodes came out as sea, with a 2.5 km wall from the Alps down to
+ * them. Across the pyramid the snap reclassifies ~63k such nodes on ~700
+ * tiles. A quarter cell is 5 m at z12 and 20 m at z10; a vertex genuinely
+ * that close to the edge moves that far, which nothing can see.
+ */
+export const BORDER_SNAP_CELLS = 0.25;
+
+/** Pulls the last scanline row inside the grid; see `scanline` below. */
+const LAST_ROW_EPS = 1e-6;
+
+/** `v` snapped onto 0 or `cells` when within {@link BORDER_SNAP_CELLS}. */
+export function snapToBorder(v: number, cells: number): number {
+    if (Math.abs(v) < BORDER_SNAP_CELLS) {
+        return 0;
+    }
+    if (Math.abs(v - cells) < BORDER_SNAP_CELLS) {
+        return cells;
+    }
+    return v;
+}
+
 export function buildShoreline(input: ShorelineInput): Shoreline {
     const { polygons, bounds, size } = input;
     const cells = size - 1;
@@ -187,8 +215,9 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
     const latSpan = bounds.north - bounds.south;
 
     // lon/lat -> grid. y runs south, matching the row-major DEM layout.
-    const toGridX = (lon: number) => ((lon - bounds.west) / lonSpan) * cells;
-    const toGridY = (lat: number) => ((bounds.north - lat) / latSpan) * cells;
+    // Snapped to the border: see BORDER_SNAP_CELLS.
+    const toGridX = (lon: number) => snapToBorder(((lon - bounds.west) / lonSpan) * cells, cells);
+    const toGridY = (lat: number) => snapToBorder(((bounds.north - lat) / latSpan) * cells, cells);
 
     const simplify = input.simplifyCells ?? 0;
     const rings: Ring[] = [];
@@ -241,7 +270,11 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
     const xs: number[] = [];
     const scanline = (src: Ring[], onSpan: (row: number, from: number, to: number) => void) => {
         for (let row = 0; row < size; row++) {
-            const py = row;
+            // The crossing test below only fires where some part of the ring
+            // has y strictly greater than the row, which nothing has for the
+            // last row: a ring running exactly along the south edge would
+            // leave that whole row unclaimed. Same fix as regions.ts.
+            const py = row === cells ? row - LAST_ROW_EPS : row;
             xs.length = 0;
             for (const r of src) {
                 const p = r.pts;

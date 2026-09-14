@@ -21,7 +21,7 @@
  * its final vertex count.
  */
 
-import { LonLat, LonLatBounds, Shoreline } from './shoreline';
+import { LonLat, LonLatBounds, Shoreline, snapToBorder } from './shoreline';
 
 export interface RegionPolygon {
     exterior: LonLat[];
@@ -81,8 +81,10 @@ export function buildRegionField(input: RegionFieldInput): RegionField {
     const cells = size - 1;
     const lonSpan = bounds.east - bounds.west;
     const latSpan = bounds.north - bounds.south;
-    const toGridX = (lon: number) => ((lon - bounds.west) / lonSpan) * cells;
-    const toGridY = (lat: number) => ((bounds.north - lat) / latSpan) * cells;
+    // Snapped to the border the same way the shoreline is, so the landuse
+    // partition and the land/water cut agree at the tile edge.
+    const toGridX = (lon: number) => snapToBorder(((lon - bounds.west) / lonSpan) * cells, cells);
+    const toGridY = (lat: number) => snapToBorder(((bounds.north - lat) / latSpan) * cells, cells);
 
     const regionTable: RegionMeta[] = regions.map(r => (
         { isLand: r.isLand, landuseClass: r.landuseClass }
