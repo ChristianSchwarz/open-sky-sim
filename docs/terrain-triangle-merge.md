@@ -213,3 +213,35 @@ with OSM polygons, and nothing here touches it. That is the next plan.
 Verified in the pane over Madeira (LPMA, exterior camera): coast, walls
 and facets intact, no cracks at leaf seams, 358k scene triangles at
 detail scale 4 with 40 tiles drawn.
+
+## The fill, same day
+
+With the surface at 5106 of a z12 tile's 43164 triangles, the land-use
+fill was measured next (temporary instrumentation, Madeira z12, 75 tiles):
+
+| per tile | facets | pieces |
+|---|---|---|
+| fill pieces in total | | 22616 |
+| facets fully covered by one polygon | 1758 | 7899 |
+| facets partly covered | 1849 | 14717 |
+
+`landuseFill` clipped each polygon *triangle* to each facet, so a facet
+lying wholly inside a forest was cut into as many pieces as triangulation
+diagonals crossed it. `mergePieces` now unions the fragments one region
+left on one facet by cancelling shared edges, drops the collinear crossing
+points along the facet edges, and re-triangulates the single loop; any
+group that does not close into one loop keeps its fragments.
+
+| Madeira, 137 tiles | original | after mesh work | after fill merge |
+|---|---|---|---|
+| mean triangles per tile | 27662 | 25818 | 17918 |
+| z12 mean | ~44000 | 43164 | 28733 |
+| output | 31.7 MB | 29.7 MB | 22.2 MB |
+
+35 % fewer triangles than this morning. Verified in the pane: the
+polygons draw on the same outlines, and the scene over LPMA went from
+358k to 222k triangles for the same tiles.
+
+Of a z12 tile's 28733, roughly 5100 are surface and 12-13k the fill;
+the remaining ~11k are walls, skirts and the water sheet, which nobody
+has measured yet.

@@ -190,5 +190,164 @@ export function landuseFill(
             }
         }
     }
-    return pieces;
+    return mergePieces(pieces, facets);
+}
+
+/**
+ * Snap tolerance for matching piece edges, in cells. Two region triangles
+ * sharing a diagonal clip it against the same facet edge from opposite
+ * ends, and the two intersections differ in the last bits.
+ */
+const MERGE_SNAP = 1e-7;
+
+/** Below this, a loop vertex is collinear with its neighbours and dropped. */
+const COLLINEAR_EPS = 1e-9;
+
+/**
+ * Merges the fragments one region left on one facet back into a single
+ * outline, re-triangulated.
+ *
+ * Clipping the region's *triangles* to the facet leaves a facet lying wholly
+ * inside a forest cut into as many pieces as triangulation diagonals cross
+ * it, and a facet on the forest's edge into a fan of slivers per diagonal.
+ * Measured on Madeira z12: 22.6k pieces per tile over 5.1k facets, of which
+ * 1.8k facets were fully covered and cost 7.9k pieces, and 1.8k partly
+ * covered cost 14.7k. The union of the fragments is the region clipped to
+ * the facet, which is what was wanted all along: one triangle for a covered
+ * facet, and n - 2 for an outline of n corners.
+ *
+ * The union is found by cancelling shared edges. Any group whose boundary
+ * does not close into exactly one loop - a region touching the facet in two
+ * places, or a hole inside it - keeps its fragments as they were.
+ */
+export function mergePieces(pieces: FillPiece[], facets: readonly GridTri[]): FillPiece[] {
+    const groups = new Map<number, FillPiece[]>();
+    for (const piece of pieces) {
+        const key = piece.facet * 65536 + piece.region;
+        const list = groups.get(key);
+        if (list) {
+            list.push(piece);
+        } else {
+            groups.set(key, [piece]);
+        }
+    }
+    const out: FillPiece[] = [];
+    for (const group of groups.values()) {
+        const merged = group.length > 1 ? mergeGroup(group, facets[group[0].facet]) : undefined;
+        for (const piece of merged ?? group) {
+            out.push(piece);
+        }
+    }
+    return out;
+}
+
+function mergeGroup(group: FillPiece[], facet: GridTri): FillPiece[] | undefined {
+    // Snap every corner to a shared vertex id.
+    const verts: GridPoint[] = [];
+    const idOf = (p: GridPoint): number => {
+        for (let i = 0; i < verts.length; i++) {
+            if (Math.abs(verts[i].x - p.x) <= MERGE_SNAP && Math.abs(verts[i].y - p.y) <= MERGE_SNAP) {
+                return i;
+            }
+        }
+        verts.push(p);
+        return verts.length - 1;
+    };
+    // Directed edges, with every fragment wound the facet's way first.
+    const sign = signedArea(facet) >= 0 ? 1 : -1;
+    const EDGE_BASE = 1048576;
+    const count = new Map<number, number>();
+    let area = 0;
+    for (const piece of group) {
+        const a = signedArea(piece.pts);
+        area += Math.abs(a);
+        const pts = a * sign >= 0 ? piece.pts : [piece.pts[0], piece.pts[2], piece.pts[1]];
+        const ids = pts.map(idOf);
+        for (let e = 0; e < 3; e++) {
+            const u = ids[e];
+            const v = ids[(e + 1) % 3];
+            if (u === v) {
+                continue;
+            }
+            const k = u * EDGE_BASE + v;
+            count.set(k, (count.get(k) ?? 0) + 1);
+        }
+    }
+    // A boundary edge has no twin. An edge seen twice in the same direction
+    // means overlapping fragments, which no union describes.
+    const next = new Map<number, number>();
+    let boundary = 0;
+    for (const [k, n] of count) {
+        if (n !== 1) {
+            return undefined;
+        }
+        const u = Math.floor(k / EDGE_BASE);
+        const v = k % EDGE_BASE;
+        if (count.has(v * EDGE_BASE + u)) {
+            continue;
+        }
+        if (next.has(u)) {
+            return undefined;
+        }
+        next.set(u, v);
+        boundary++;
+    }
+    if (boundary < 3) {
+        return undefined;
+    }
+    // Walk what must be a single loop.
+    const start = next.keys().next().value as number;
+    const loop: number[] = [];
+    let cur = start;
+    do {
+        loop.push(cur);
+        const n = next.get(cur);
+        if (n === undefined) {
+            return undefined;
+        }
+        cur = n;
+    } while (cur !== start && loop.length <= boundary);
+    if (cur !== start || loop.length !== boundary) {
+        return undefined;
+    }
+    // Drop collinear corners: a facet edge crossed by many diagonals carries
+    // a vertex per crossing, and each would cost a triangle.
+    const ring: GridPoint[] = [];
+    for (let i = 0; i < loop.length; i++) {
+        const p = verts[loop[(i + loop.length - 1) % loop.length]];
+        const q = verts[loop[i]];
+        const r = verts[loop[(i + 1) % loop.length]];
+        const cross = (q.x - p.x) * (r.y - q.y) - (q.y - p.y) * (r.x - q.x);
+        if (Math.abs(cross) > COLLINEAR_EPS) {
+            ring.push(q);
+        }
+    }
+    if (ring.length < 3) {
+        return undefined;
+    }
+    let faces: number[][];
+    if (ring.length === 3) {
+        faces = [[0, 1, 2]];
+    } else {
+        try {
+            faces = ShapeUtils.triangulateShape(ring.map(p => new Vector2(p.x, p.y)), []);
+        } catch {
+            return undefined;
+        }
+    }
+    const merged: FillPiece[] = [];
+    let mergedArea = 0;
+    for (const f of faces) {
+        const pts: [GridPoint, GridPoint, GridPoint] = [ring[f[0]], ring[f[1]], ring[f[2]]];
+        const a = Math.abs(signedArea(pts));
+        if (a >= MIN_PIECE_AREA) {
+            merged.push({ facet: group[0].facet, region: group[0].region, pts });
+            mergedArea += a;
+        }
+    }
+    // The union must cover exactly what the fragments did, and be cheaper.
+    if (Math.abs(mergedArea - area) > 1e-6 * Math.max(1, area) || merged.length >= group.length) {
+        return undefined;
+    }
+    return merged;
 }

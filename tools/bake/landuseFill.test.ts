@@ -1,6 +1,63 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { GridPoint, GridTri, clipToTriangle, landuseFill } from './landuseFill';
+import { GridPoint, GridTri, clipToTriangle, landuseFill, mergePieces } from './landuseFill';
+
+describe('mergePieces', () => {
+    const tri = (a: [number, number], b: [number, number], c: [number, number]): [GridPoint, GridPoint, GridPoint] =>
+        [{ x: a[0], y: a[1] }, { x: b[0], y: b[1] }, { x: c[0], y: c[1] }];
+    const triArea = (t: readonly GridPoint[]) => {
+        let s = 0;
+        for (let i = 0, j = t.length - 1; i < t.length; j = i++) {
+            s += t[j].x * t[i].y - t[i].x * t[j].y;
+        }
+        return Math.abs(s) / 2;
+    };
+    const facet: GridTri = tri([0, 0], [4, 0], [0, 4]);
+    const c: [number, number] = [4 / 3, 4 / 3];
+
+    it('turns a facet fully covered by many fragments into one triangle', () => {
+        const pieces = [
+            { facet: 0, region: 0, pts: tri([0, 0], [4, 0], c) },
+            { facet: 0, region: 0, pts: tri([4, 0], [0, 4], c) },
+            { facet: 0, region: 0, pts: tri([0, 4], [0, 0], c) },
+        ];
+        const merged = mergePieces(pieces, [facet]);
+        assert.equal(merged.length, 1);
+        assert.ok(Math.abs(triArea(merged[0].pts) - 8) < 1e-9);
+    });
+
+    it('drops crossing points along a facet edge and keeps the area', () => {
+        // Left strip x <= 1 of the facet, cut into three by two diagonals
+        // that meet the facet edge y = 0 at x = 0.5 and the line x = 1.
+        const pieces = [
+            { facet: 0, region: 0, pts: tri([0, 0], [0.5, 0], [1, 3]) },
+            { facet: 0, region: 0, pts: tri([0.5, 0], [1, 0], [1, 3]) },
+            { facet: 0, region: 0, pts: tri([0, 0], [1, 3], [0, 4]) },
+        ];
+        const merged = mergePieces(pieces, [facet]);
+        // Outline (0,0) (1,0) (1,3) (0,4): four corners, two triangles.
+        assert.equal(merged.length, 2);
+        const total = merged.reduce((s, p) => s + triArea(p.pts), 0);
+        assert.ok(Math.abs(total - 3.5) < 1e-9, `area ${total}`);
+    });
+
+    it('keeps fragments that do not form one loop', () => {
+        const pieces = [
+            { facet: 0, region: 0, pts: tri([0, 0], [1, 0], [0, 1]) },
+            { facet: 0, region: 0, pts: tri([2, 0], [3, 0], [2, 1]) },
+        ];
+        assert.equal(mergePieces(pieces, [facet]).length, 2);
+    });
+
+    it('does not merge across regions', () => {
+        const pieces = [
+            { facet: 0, region: 0, pts: tri([0, 0], [4, 0], c) },
+            { facet: 0, region: 1, pts: tri([4, 0], [0, 4], c) },
+            { facet: 0, region: 1, pts: tri([0, 4], [0, 0], c) },
+        ];
+        assert.equal(mergePieces(pieces, [facet]).length, 3);
+    });
+});
 
 const area = (pts: readonly GridPoint[]): number => {
     let a = 0;
