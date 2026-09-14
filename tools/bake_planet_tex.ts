@@ -17,8 +17,10 @@
  *
  *     --dir DIR        the mesh tree, read and written   (default assets/terrain)
  *     --cache DIR      leaf rasters                      (default assets/planet/tex_cache)
- *     --size N         texels across a tile              (default 256)
- *     --min-zoom N     coarsest level that gets one      (default 6)
+ *     --size N         texels across a far tile          (default 256)
+ *     --near-size N    texels across a near tile         (default 512)
+ *     --near-zoom N    first level counted as near       (default 10)
+ *     --min-zoom N     coarsest level that gets one      (default 4)
  *     --bbox w,s,e,n   re-rasterise only the leaves in this box, refold their
  *                      ancestors, and merge the index with what is there
  */
@@ -30,19 +32,38 @@ import { makeEnuBasis } from '../src/script/terrain/geodesy';
 import { decodePtm } from '../src/script/terrain/ptm';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import {
-    PTX_HEADER_BYTES, boundsOf, decodePtx, downsample2x2, emptyRaster, encodePtx, isEmptyRaster,
-    mergeQuadrant, quadrantOf, rasterizeLeaf,
+    PTX_HEADER_BYTES, boundsOf, decodePtx, emptyRaster, encodePtx, isEmptyRaster,
+    mergeQuadrant, quadrantOf, rasterizeLeaf, shrinkTo,
 } from './bake/coverTex';
 import { LonLatBounds } from './bake/shoreline';
 
 const DEFAULT_SIZE = 256;
-const DEFAULT_MIN_ZOOM = 6;
+/**
+ * The levels just under the leaf cut are the textured tiles drawn nearest
+ * the camera - a z11 tile sits right behind the last leaf - and the ones
+ * where a texel per pixel is not quite enough. They get a finer raster;
+ * everything coarser, which is drawn from much further away, stays at
+ * `--size`. A level's size only ever goes up toward the leaf, so folding a
+ * child into a coarser parent is one more halving, never an upsample.
+ */
+const DEFAULT_NEAR_SIZE = 512;
+const DEFAULT_NEAR_ZOOM = 10;
+/**
+ * Coarsest level that gets a texture. The runtime maps a vertex into the
+ * raster on the tile's tangent plane with one first-order term for the lon
+ * span narrowing toward the pole; the second-order remainder grows with the
+ * square of the tile's angular size and is under two texels of 256 at z4
+ * (11 degrees), but a dozen at z3. Below z4 the facets stay.
+ */
+const DEFAULT_MIN_ZOOM = 4;
 const CACHE_META_FILE = 'meta.json';
 
 interface Args {
     dir: string;
     cache: string;
     size: number;
+    nearSize: number;
+    nearZoom: number;
     minZoom: number;
     bbox?: LonLatBounds;
 }
@@ -68,6 +89,8 @@ function parseArgs(argv: string[]): Args {
         dir: 'assets/terrain',
         cache: path.join('assets', 'planet', 'tex_cache'),
         size: DEFAULT_SIZE,
+        nearSize: DEFAULT_NEAR_SIZE,
+        nearZoom: DEFAULT_NEAR_ZOOM,
         minZoom: DEFAULT_MIN_ZOOM,
     };
     for (let i = 0; i < argv.length; i++) {
@@ -76,12 +99,19 @@ function parseArgs(argv: string[]): Args {
         if (k === '--dir') a.dir = next();
         else if (k === '--cache') a.cache = next();
         else if (k === '--size') a.size = Number(next());
+        else if (k === '--near-size') a.nearSize = Number(next());
+        else if (k === '--near-zoom') a.nearZoom = Number(next());
         else if (k === '--min-zoom') a.minZoom = Number(next());
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else throw new Error(`unknown argument ${k}`);
     }
-    if (!Number.isInteger(a.size) || a.size < 2 || (a.size & (a.size - 1)) !== 0) {
-        throw new Error(`--size must be a power of two, got ${a.size}`);
+    for (const [name, v] of [['--size', a.size], ['--near-size', a.nearSize]] as const) {
+        if (!Number.isInteger(v) || v < 2 || (v & (v - 1)) !== 0) {
+            throw new Error(`${name} must be a power of two, got ${v}`);
+        }
+    }
+    if (a.nearSize < a.size) {
+        throw new Error(`--near-size ${a.nearSize} is smaller than --size ${a.size}; a level's size never drops toward the leaf`);
     }
     return a;
 }
@@ -127,11 +157,17 @@ const keyOf = (k: TileKey) => `${k.z}/${k.x}/${k.y}`;
 const tilePath = (dir: string, k: TileKey, ext: string) =>
     path.join(dir, String(k.z), String(k.x), `${k.y}${ext}`);
 
-function readPtx(p: string): Uint8Array | undefined {
+interface Raster {
+    texels: Uint8Array;
+    size: number;
+}
+
+function readPtx(p: string): Raster | undefined {
     if (!fs.existsSync(p)) {
         return undefined;
     }
-    return decodePtx(zlib.gunzipSync(fs.readFileSync(p))).texels;
+    const { texels, size } = decodePtx(zlib.gunzipSync(fs.readFileSync(p)));
+    return { texels, size };
 }
 
 function writePtx(p: string, id: TileKey, size: number, texels: Uint8Array): number {
@@ -164,11 +200,15 @@ function main(): void {
         list.push(k);
     }
     const inScope = (k: TileKey) => args.bbox === undefined || overlaps(boundsOf(k), args.bbox);
+    const sizeAt = (z: number) => (z >= args.nearZoom ? args.nearSize : args.size);
+    // Leaves are rasterised at the finest size any parent wants.
+    const leafSize = Math.max(args.size, args.nearSize);
 
     // --- leaves: rasterise into the cache -----------------------------------
     const leaves = (meshByLevel.get(leafZoom) ?? []).filter(inScope);
     const cacheMeta = loadCacheMeta(args.cache);
-    console.log(`bake_planet_tex: ${leaves.length} leaves at z${leafZoom}, ${args.size} texels, `
+    console.log(`bake_planet_tex: ${leaves.length} leaves at z${leafZoom}, `
+        + `${args.nearSize} texels from z${args.nearZoom}, ${args.size} below, `
         + `textures z${args.minZoom}..z${leafZoom - 1}${args.bbox ? ' (scoped)' : ''}`);
     let rasterised = 0;
     let fromCache = 0;
@@ -186,15 +226,16 @@ function main(): void {
         const known = cacheMeta[key];
         const cachePath = tilePath(args.cache, k, '.ptx');
         if (known && known.size === st.size && known.mtimeMs === st.mtimeMs
-            && known.texSize === args.size && fs.existsSync(cachePath)) {
+            && known.texSize === leafSize && fs.existsSync(cachePath)) {
             fromCache++;
         } else {
             const tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
-            const raster = rasterizeLeaf(tile, basis, args.size);
+            const raster = rasterizeLeaf(tile, basis, leafSize);
             fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-            // Uncompressed: read back once per run, and the cache is local.
-            fs.writeFileSync(cachePath, encodePtx(k, args.size, raster));
-            cacheMeta[key] = { size: st.size, mtimeMs: st.mtimeMs, texSize: args.size };
+            // Lightly compressed: a megabyte of mostly flat colour per leaf
+            // shrinks twentyfold, and the cache holds thousands of them.
+            fs.writeFileSync(cachePath, zlib.gzipSync(encodePtx(k, leafSize, raster), { level: 1 }));
+            cacheMeta[key] = { size: st.size, mtimeMs: st.mtimeMs, texSize: leafSize };
             rasterised++;
         }
         if (Date.now() - lastLine > 500 || i === leaves.length - 1) {
@@ -210,25 +251,29 @@ function main(): void {
     // A level's rasters are kept only until its parents are folded. A child
     // outside a scoped run's box is read back from its .ptx on disk, or from
     // the leaf cache, so the parent still sees all four quadrants.
-    const leafRaster = (k: TileKey): Uint8Array | undefined => {
+    const leafRaster = (k: TileKey): Raster | undefined => {
         const p = tilePath(args.cache, k, '.ptx');
         if (!fs.existsSync(p)) {
             return undefined;
         }
-        return decodePtx(fs.readFileSync(p)).texels;
+        const bytes = fs.readFileSync(p);
+        // A cache written before it was compressed is still readable.
+        const { texels, size } = decodePtx(bytes[0] === 0x1f && bytes[1] === 0x8b ? zlib.gunzipSync(bytes) : bytes);
+        return { texels, size };
     };
-    let previous = new Map<string, Uint8Array>();
+    let previous = new Map<string, Raster>();
     const written: TileKey[] = [];
     const emptied: TileKey[] = [];
-    const perLevel: Array<{ z: number; count: number; raw: number; gz: number }> = [];
+    const perLevel: Array<{ z: number; size: number; count: number; raw: number; gz: number }> = [];
     for (let z = leafZoom - 1; z >= args.minZoom; z--) {
-        const current = new Map<string, Uint8Array>();
+        const current = new Map<string, Raster>();
         const parents = (meshByLevel.get(z) ?? []).filter(inScope);
+        const size = sizeAt(z);
         let raw = 0;
         let gz = 0;
         let count = 0;
         for (const k of parents) {
-            const parent = emptyRaster(args.size);
+            const parent = emptyRaster(size);
             for (let dy = 0; dy < 2; dy++) {
                 for (let dx = 0; dx < 2; dx++) {
                     const child: TileKey = { z: z + 1, x: k.x * 2 + dx, y: k.y * 2 + dy };
@@ -243,7 +288,7 @@ function main(): void {
                         continue;
                     }
                     const { qx, qy } = quadrantOf(child);
-                    mergeQuadrant(parent, args.size, downsample2x2(raster, args.size), qx, qy);
+                    mergeQuadrant(parent, size, shrinkTo(raster.texels, raster.size, size / 2), qx, qy);
                 }
             }
             const outPath = tilePath(args.dir, k, '.ptx');
@@ -256,13 +301,13 @@ function main(): void {
                 emptied.push(k);
                 continue;
             }
-            current.set(keyOf(k), parent);
-            gz += writePtx(outPath, k, args.size, parent);
+            current.set(keyOf(k), { texels: parent, size });
+            gz += writePtx(outPath, k, size, parent);
             raw += PTX_HEADER_BYTES + parent.byteLength;
             count++;
             written.push(k);
         }
-        perLevel.push({ z, count, raw, gz });
+        perLevel.push({ z, size, count, raw, gz });
         previous = current;
     }
 
@@ -291,21 +336,23 @@ function main(): void {
         encoding: 'PTX1',
         transport: 'gzip',
         size: args.size,
+        nearSize: args.nearSize,
+        nearZoom: args.nearZoom,
         minZoom: args.minZoom,
         maxZoom,
     };
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
     const mb = (n: number) => (n / 1048576).toFixed(1);
-    console.log('  level  tiles   raw MB    gz MB');
+    console.log('  level  texels  tiles   raw MB    gz MB');
     let totalRaw = 0;
     let totalGz = 0;
     for (const l of perLevel) {
-        console.log(`  z${String(l.z).padEnd(4)} ${String(l.count).padStart(6)} ${mb(l.raw).padStart(8)} ${mb(l.gz).padStart(8)}`);
+        console.log(`  z${String(l.z).padEnd(4)} ${String(l.size).padStart(7)} ${String(l.count).padStart(6)} ${mb(l.raw).padStart(8)} ${mb(l.gz).padStart(8)}`);
         totalRaw += l.raw;
         totalGz += l.gz;
     }
-    console.log(`  total  ${String(written.length).padStart(6)} ${mb(totalRaw).padStart(8)} ${mb(totalGz).padStart(8)}`);
+    console.log(`  total          ${String(written.length).padStart(6)} ${mb(totalRaw).padStart(8)} ${mb(totalGz).padStart(8)}`);
     if (carried > 0) {
         console.log(`index: ${written.length} baked + ${carried} carried `
             + `- ${emptied.length} emptied -> ${all.length} tiles`);

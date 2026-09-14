@@ -47,7 +47,11 @@ export interface TextureStreamManifest {
     indexPath: string;
     encoding: string;
     transport?: string;
+    /** Texels across a far tile. Informational: every PTX1 carries its own size. */
     size: number;
+    /** Texels across a tile at `nearZoom` and finer, where a texel per pixel is tight. */
+    nearSize?: number;
+    nearZoom?: number;
     minZoom: number;
     /** The leaf zoom less one: a leaf draws its own facets. */
     maxZoom: number;

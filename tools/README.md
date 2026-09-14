@@ -878,8 +878,10 @@ already oversamples it 1.6x.
 | --- | --- |
 | `--dir DIR` | the mesh tree, read and written (default `assets/terrain`) |
 | `--cache DIR` | leaf rasters, keyed by each `.ptm`'s size and mtime (default `assets/planet/tex_cache`) |
-| `--size N` | texels across a tile, a power of two (default 256) |
-| `--min-zoom N` | coarsest level that gets a texture (default 6) |
+| `--size N` | texels across a far tile, a power of two (default 256) |
+| `--near-size N` | texels across a near tile, at `--near-zoom` and finer (default 512) |
+| `--near-zoom N` | first level counted as near; z10 and z11 by default sit right behind the leaf cut |
+| `--min-zoom N` | coarsest level that gets a texture (default 4); below it the tangent-plane mapping drifts past a texel |
 | `--bbox W,S,E,N` | re-rasterise only the leaves in this box, refold their ancestors, merge `index_tex.bin` |
 
 **`--bbox` is what makes a run additive.** Two whole-pyramid artefacts —

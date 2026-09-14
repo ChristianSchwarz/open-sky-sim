@@ -26,8 +26,9 @@ tile centre, scaled to tile fractions) plus the pole-ward lon shrink `k`;
 `terrainCover.ts`. Verified in the browser from the 10 km preset with the
 quadtree capped at z10: textured tiles show the airfield and field
 polygons, the same tiles with their bindings removed are flat blobs. The
-`Space` preset is not a useful vantage point - at 100 km the cut sits at
-z5, below the texture range.
+`Space` preset sat below the texture range while the floor was z6; since
+the floor moved to z4 (2026-09-14) its z5 tiles are textured too, and every
+baked area - alps, can, can2, crim1, mad, pb - has textures from z4 to z11.
 
 Measured after step 2, full pyramid (2683 leaves): 120 s, 1154 textures,
 288 MB raw and 20.6 MB gzipped (z11 alone 10 MB), so the shipped-bytes
@@ -86,13 +87,27 @@ version, size, z, x, y) and raw RGBA8, gzip on disk and served the way
 `.ptm` already is (manifest `transport: gzip`). Decode is a typed-array
 view, matching the PTM rule.
 
-**Size 256 for z11 and below, ships z11..z6.** A parent is only drawn when
+**Size 256 for z11 and below, ships z11..z4** (z6 at first; lowered to z4 on
+2026-09-14 so the Space preset's z5 cut shows detail too - the tangent-plane
+mapping's second-order error is under two texels at z4 and a dozen at z3,
+which is where it stops). A parent is only drawn when
 its projected width is a few hundred pixels at most, so 256 texels across
 is about a texel per pixel. z12 rasters (also 256) are bake intermediates
 only, kept in a cache directory and box-filtered into their parent's
 quadrant. Rough shipped size, current pyramid: 1033 z11 + 310 z10 + 110 z9
 + ~60 below, x 256 KB raw = ~390 MB raw; flat-colour content should gzip
 to a tenth or less. Measure after step 2 and drop z11 to 128 if it has to.
+
+**Two sizes by level (2026-09-14).** The tiles just under the leaf cut,
+z10 and z11, are the textured tiles drawn nearest the camera and the ones
+where 256 texels ran short of a texel per pixel; they get 512
+(`--near-size`, from `--near-zoom`). Everything coarser stays at 256. A
+level's size only ever rises toward the leaf, so folding a child into a
+coarser parent is one more halving (`shrinkTo`), never an upsample. Leaves
+are rasterised at the finest size any parent wants and the cache is now
+gzip level 1, since a megabyte of mostly flat colour per leaf shrinks
+twentyfold. The runtime needs no change: every PTX1 carries its own size,
+and the mip builder and byte accounting take it from the header.
 
 **Filtering.** Nearest, clamp to edge, with mip levels supplied by the
 loader (rgb box mean, class of the top-left texel per 2x2). Three's own

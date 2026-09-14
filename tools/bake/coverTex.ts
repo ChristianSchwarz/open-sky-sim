@@ -221,6 +221,25 @@ export function downsample2x2(src: Uint8Array, size: number): Uint8Array {
 }
 
 /**
+ * Halve a raster until it is `target` texels across. A level's size never
+ * drops toward the leaf, so a child is always at least as fine as its
+ * parent wants and this is one or more halvings; a coarser child would need
+ * an upsample, which is a bake configuration error rather than a case.
+ */
+export function shrinkTo(texels: Uint8Array, size: number, target: number): Uint8Array {
+    if (size < target) {
+        throw new Error(`cannot grow a ${size}-texel raster to ${target}`);
+    }
+    let out = texels;
+    let n = size;
+    while (n > target) {
+        out = downsample2x2(out, n);
+        n /= 2;
+    }
+    return out;
+}
+
+/**
  * Copy a child's raster, already halved to `size / 2`, into the quadrant of
  * a `size` parent raster it covers. Quadrant (0, 0) is the north-west
  * child, (1, 1) the south-east - `x & 1`, `y & 1` of the child's key.

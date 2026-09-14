@@ -196,3 +196,18 @@ describe('PTX1', () => {
         assert.throws(() => decodePtx(encodePtx({ z: 1, x: 1, y: 1 }, 2, emptyRaster(2)).subarray(0, 20)));
     });
 });
+
+describe('shrinkTo', () => {
+    it('halves repeatedly down to the target and refuses to grow', async () => {
+        const { shrinkTo } = await import('./coverTex');
+        const src = emptyRaster(8);
+        for (let i = 0; i < 8 * 8; i++) {
+            src.set([i, 2 * i, 3 * i, 5], i * 4);
+        }
+        assert.equal(shrinkTo(src, 8, 8), src);
+        const two = shrinkTo(src, 8, 2);
+        assert.equal(two.byteLength, 2 * 2 * 4);
+        assert.equal(two[3], 5);
+        assert.throws(() => shrinkTo(src, 8, 16), /grow/);
+    });
+});
