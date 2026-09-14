@@ -1,7 +1,7 @@
 # FM3 — Physical Flight Model
 
 > **Status: planned 2026-09-11, no code yet.** A fourth entry for the settings
-> menu's *Flight model* list, next to FM2, Debug and JSBSim.
+> menu's *Flight model* list, next to FM2 and Debug.
 
 A 6-DOF rigid body in which every force comes from a physical mechanism at its
 real location:

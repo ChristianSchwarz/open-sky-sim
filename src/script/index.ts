@@ -13,7 +13,6 @@ import { JoystickControlDevice } from './input/devices/joystickControlDevice';
 import { KeyboardControlDevice } from './input/devices/keyboardControlDevice';
 import { hideBootProgress, setBootProgress } from './osd/bootProgress';
 import { setupOSD } from './osd/osdPanel';
-import { WorkerJsbsimFlightModel } from './physics/model/workerJsbsimFlightModel';
 import { CombatSimClient } from './physics/sim/combatSimClient';
 import { SimProxyFlightModel } from './physics/model/simProxyFlightModel';
 import { PLAYER_SIM_ID } from './physics/sim/simIds';
@@ -37,15 +36,14 @@ import { DETAIL_DISTANCE_OFF } from './terrain/lod';
 async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, JoystickControlDevice, Game, AudioSystem]> {
     const settings = loadSettings();
     // Single authoritative combat sim worker. The player's FM2/DEBUG models are
-    // render-side proxies bound to it (id PLAYER_SIM_ID); JSBSim keeps its own
-    // worker. AI opponents register with the same client (see Game.setupCombat).
+    // render-side proxies bound to it (id PLAYER_SIM_ID). AI opponents register
+    // with the same client (see Game.setupCombat).
     const combatSim = new CombatSimClient();
     const config = new ConfigService(
         { [TechProfiles.VGA]: VGAProfile, [TechProfiles.SVGA]: SVGAProfile, [TechProfiles.HD]: HDProfile },
         {
             [FlightModels.FM2]: new SimProxyFlightModel(combatSim, PLAYER_SIM_ID, false),
             [FlightModels.DEBUG]: new SimProxyFlightModel(combatSim, PLAYER_SIM_ID, true),
-            [FlightModels.JSBSIM]: new WorkerJsbsimFlightModel(),
         },
         settings.techProfile,
         settings.flightModel,

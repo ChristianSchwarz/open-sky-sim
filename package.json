@@ -19,14 +19,12 @@
         "verify:planet": "node --import tsx tools/verify_planet.ts",
         "preserve": "npm run build",
         "serve": "tsx tools/modserver.ts",
-        "test": "node --import tsx --test src/script/config/**/*.test.ts src/script/physics/**/*.test.ts src/script/ai/**/*.test.ts src/script/weapons/**/*.test.ts src/script/state/**/*.test.ts src/script/render/**/*.test.ts src/script/scene/**/*.test.ts src/script/planet/**/*.test.ts src/script/terrain/**/*.test.ts src/script/ui/**/*.test.ts tools/bake/**/*.test.ts tools/*.test.ts",
-        "postinstall": "patch-package"
+        "test": "node --import tsx --test src/script/config/**/*.test.ts src/script/physics/**/*.test.ts src/script/ai/**/*.test.ts src/script/weapons/**/*.test.ts src/script/state/**/*.test.ts src/script/render/**/*.test.ts src/script/scene/**/*.test.ts src/script/planet/**/*.test.ts src/script/terrain/**/*.test.ts src/script/ui/**/*.test.ts tools/bake/**/*.test.ts tools/*.test.ts"
     },
     "author": "Ruben Moreno Montoliu <ruben3d@gmail.com>",
     "license": "MIT",
     "homepage": "https://github.com/ruben3d/retroflightsim",
     "dependencies": {
-        "@0x62/jsbsim-wasm": "^1.2.4-beta.4",
         "@angular/cdk": "~22.1.6",
         "@angular/common": "~22.1.6",
         "@angular/compiler": "~22.1.6",
@@ -54,7 +52,6 @@
         "local-web-server": "~5.4.0",
         "mini-css-extract-plugin": "^2.10.2",
         "multer": "^2.2.0",
-        "patch-package": "^8.0.1",
         "postcss": "^8.5.28",
         "postcss-loader": "^8.2.1",
         "tailwindcss": "~4.3.3",

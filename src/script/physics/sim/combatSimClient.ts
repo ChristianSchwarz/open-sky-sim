@@ -235,7 +235,7 @@ export class CombatSimClient {
         this.post({ type: 'snapPhysicsState', id });
     }
 
-    /** Inject an externally-simulated combatant (e.g. player on the JSBSim worker). */
+    /** Inject an externally-simulated combatant (e.g. a player model outside the sim worker). */
     setExternalState(id: string, faction: Faction, position: THREE.Vector3, velocity: THREE.Vector3, alive: boolean): void {
         this.post({
             type: 'setExternalState', id, enabled: true, faction,

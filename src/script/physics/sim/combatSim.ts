@@ -510,7 +510,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
 
 /**
  * A combatant whose kinematic state is injected from the main thread (e.g. the
- * player while flying the separate JSBSim worker). AI pilots can target it, and
+ * player flying a model outside the sim worker). AI pilots can target it, and
  * projectiles can hit it, without it being simulated here.
  */
 class ExternalCombatant implements Combatant {

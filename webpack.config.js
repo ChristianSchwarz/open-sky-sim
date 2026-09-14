@@ -70,16 +70,6 @@ module.exports = (_env, argv) => ({
                     },
                 ],
             },
-            {
-                // @0x62/jsbsim-wasm ships its Emscripten glue module and the wasm
-                // binary and references them via `new URL(..., import.meta.url)`
-                // (see its dist/wasm.js). Treat both as raw, uncompiled assets so
-                // webpack copies them to the output and rewrites the URLs, instead
-                // of trying to parse the Emscripten glue as a normal JS module.
-                test: /\.(wasm|mjs)$/,
-                type: 'asset/resource',
-                include: path.resolve(__dirname, 'node_modules/@0x62/jsbsim-wasm'),
-            },
         ],
     },
     resolve: {
@@ -114,13 +104,6 @@ module.exports = (_env, argv) => ({
                     from: 'assets/*',
                     to: 'assets/[name][ext]',
                     filter: (resourcePath) => !isModAsset(resourcePath),
-                },
-                {
-                    // Bundled JSBSim aircraft/engine/systems data (see assets/jsbsim/),
-                    // fetched at runtime by the JSBSim worker. Copied as a whole
-                    // directory tree so the JSBSim-native folder layout survives.
-                    from: 'assets/jsbsim',
-                    to: 'assets/jsbsim',
                 },
                 // Development serves assets/terrain from the repo; only a
                 // production build copies it into dist/ (see the note above).

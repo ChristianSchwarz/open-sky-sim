@@ -112,7 +112,6 @@ The generation of choice will simulate the experience of a game of that era:
 The flight model selects the physics driving the simulation:
 * FM2 (Rigid body): The game's own 6-DOF aerodynamic model (lift, drag, and speed-dependent control authority), configured per-aircraft.
 * Debug (Free-fly): A no-aerodynamics "free-fly" mode of the same rigid-body model, intended for debugging/inspecting scenery and models — the stick rotates the airframe directly and the plane can be stopped midair.
-* JSBSim (WASM, F-16): The official [JSBSim](https://github.com/JSBSim-Team/jsbsim) flight dynamics model, running in a WebAssembly build ([`@0x62/jsbsim-wasm`](https://www.npmjs.com/package/@0x62/jsbsim-wasm)) inside a dedicated Web Worker, flying JSBSim's own stock F-16A Block-32 model (`assets/jsbsim/aircraft/f16/`). Unlike FM2, this option always flies that one bundled F-16 airframe, independent of whichever in-game aircraft/mod is selected — the visible aircraft model and livery still follow your selection, but the underlying aerodynamics, engine, FCS, and ground reactions are always JSBSim's F-16. JSBSim's own aircraft/engine data ships under the JSBSim project's LGPL-2.1 terms (see `assets/jsbsim/`).
 
 #### Keyboard layout
 

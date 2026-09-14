@@ -37,7 +37,7 @@ enum Stick {
 /**
  * Captures keyboard events on the main thread and forwards them to the combat
  * sim worker. Stick/throttle integration runs in the worker; only raw key
- * down/up events cross the thread boundary (JSBSim mode keeps the legacy
+ * down/up events cross the thread boundary (non-worker models keep the legacy
  * main-thread stick path).
  */
 export class KeyboardControlDevice implements KernelTask {
@@ -148,7 +148,7 @@ export class KeyboardControlDevice implements KernelTask {
         });
     }
 
-    /** Legacy main-thread stick integration for JSBSim and other non-worker models. */
+    /** Legacy main-thread stick integration for non-worker models. */
     private updateLegacyMainThread(delta: number) {
         if (!this.player.controlsEnabled || this.player.isAutopilotEnabled) {
             return;

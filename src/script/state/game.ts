@@ -645,8 +645,8 @@ export class Game {
             flightModel.activate();
             this.player.setFlightModel(flightModel);
             flightModel.setAircraft(flightConfigWithArrestorHook(this.currentDef));
-            // FM2/DEBUG are simulated in the combat worker; JSBSim runs in its own
-            // worker, so the sim-owned player aircraft is disabled and its state is
+            // FM2/DEBUG are simulated in the combat worker. A model that is not
+            // sim-owned has the sim's player aircraft disabled and its state
             // injected as an external combatant (see update) for AI targeting.
             const simOwned = flightModel instanceof SimProxyFlightModel;
             this.combatSim.setEnabled(PLAYER_SIM_ID, simOwned);
@@ -1904,8 +1904,8 @@ export class Game {
 
     /**
      * Pump one frame into the combat sim worker after entities have latched their
-     * inputs. When the player is flying the separate JSBSim worker (not sim-owned),
-     * inject its live state so in-worker AI pilots can still target it.
+     * inputs. When the player's model is not sim-owned, inject its live state so
+     * in-worker AI pilots can still target it.
      */
     private pumpCombatSim(delta: number): void {
         this.updateHeightFieldMirror(delta);

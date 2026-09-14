@@ -157,8 +157,7 @@ export function enuToGeodeticApprox(basis: EnuBasis, e: number, n: number, u: nu
  * position expressed in it comes out as the mirror image of the place it
  * describes — an island's east coast drawn on the pilot's west side. It also
  * has to agree with the rest of the sim, which settled this long before the
- * terrain existed: `vectorHeading` reads a bearing as atan2(x, −z), and the
- * JSBSim bridge maps NED north onto −z (see jsbsimCoordinateFrame).
+ * terrain existed: `vectorHeading` reads a bearing as atan2(x, −z).
  *
  * Everything crossing the ENU ↔ scene boundary goes through these two, so the
  * flip lives in one place instead of being re-derived at each call site.

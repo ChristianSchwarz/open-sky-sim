@@ -142,7 +142,6 @@ const TERRAIN_SHADING_OPTIONS: Option<TerrainShading>[] = [
 const FLIGHT_MODEL_OPTIONS: Option<string>[] = [
     { value: FlightModels.FM2, label: 'FM2 (Rigid body)' },
     { value: FlightModels.DEBUG, label: 'Debug (Free-fly)' },
-    { value: FlightModels.JSBSIM, label: 'JSBSim (WASM, F-16)' },
 ];
 
 const AI_PILOT_MODEL_OPTIONS: Option<AiPilotModels>[] = [

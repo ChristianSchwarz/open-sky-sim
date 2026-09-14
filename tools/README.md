@@ -580,7 +580,7 @@ right-handed with +Y up, so east × up is *south*; calling +z north makes the
 frame left-handed and every position expressed in it comes out mirrored, with
 what is really east of the pilot drawn to the west. It is also the sign the
 rest of the sim has always used: `vectorHeading` reads a bearing as
-atan2(x, −z), and the JSBSim bridge maps NED north onto −z.
+atan2(x, −z).
 
 The bake writes tile vertices and normals in those axes directly (the runtime
 binds them to the GPU untouched), and `sceneFromEnu` / `enuFromScene` in
