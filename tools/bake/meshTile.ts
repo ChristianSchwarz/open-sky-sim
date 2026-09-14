@@ -69,6 +69,12 @@ export interface TileProcessResult {
     collapsedVertices: number;
     /** See BuildTileResult.meshTriangles. */
     meshTriangles: number;
+    fillTriangles: number;
+    wallTriangles: number;
+    skirtTriangles: number;
+    waterSheetTriangles: number;
+    /** Watercourse and outline strokes: what is left of triangleCount. */
+    strokeTriangles: number;
 }
 
 /** Geographic quadtree: level z has 2^(z+1) columns by 2^z rows. */
@@ -255,6 +261,11 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         maxErrorM: r.maxErrorM,
         collapsedVertices: r.collapsedVertices,
         meshTriangles: r.meshTriangles,
+        fillTriangles: r.fillTriangles,
+        wallTriangles: r.wallTriangles,
+        skirtTriangles: r.skirtTriangles,
+        waterSheetTriangles: r.waterSheetTriangles,
+        strokeTriangles: r.triangleCount - r.landTriangles - r.waterTriangles,
         covered,
         imagery,
         inlandTile,

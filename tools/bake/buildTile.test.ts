@@ -1406,8 +1406,11 @@ describe('watercourse strokes', () => {
         // would be one quad flying over everything between them.
         const tile = decodePtm(
             buildTile(base({ ...LAND, watercourses: [canal()] })).bytes);
+        // Sampled wherever the reach crosses from one facet to the next, so
+        // the count follows the mesh, not the cell size; what matters is
+        // that it is more than the two nodes and that it follows the ground.
         const pairs = tile.riverHalfWidths.length / 2;
-        assert.ok(pairs > CELLS / 2, `only ${pairs} centreline points`);
+        assert.ok(pairs > 2, `only ${pairs} centreline points`);
         const heights = new Set<number>();
         for (let v = 0; v < tile.riverHalfWidths.length; v++) {
             heights.add(tile.riverPositions[v * 3 + 1]);
@@ -1471,7 +1474,7 @@ describe('watercourse strokes', () => {
             assert.ok(y >= ground - 0.05,
                 `stroke ${y.toFixed(2)} below drawn land ${ground.toFixed(2)}`);
         }
-        assert.ok(checked > 4, `only ${checked} points landed on the mesh`);
+        assert.ok(checked > 2, `only ${checked} points landed on the mesh`);
     });
 
     it('runs the offset across the flow, not along it', () => {

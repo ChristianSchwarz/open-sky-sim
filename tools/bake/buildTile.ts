@@ -259,6 +259,14 @@ export interface BuildTileResult {
     landTriangles: number;
     waterTriangles: number;
     riverTriangles: number;
+    /** Landuse polygon fill pieces laid over the land facets. */
+    fillTriangles: number;
+    /** Shore walls between land and water. */
+    wallTriangles: number;
+    /** Border skirts, land and water together. */
+    skirtTriangles: number;
+    /** The water surface itself, before its skirts. */
+    waterSheetTriangles: number;
     /** Tolerance actually used after any budget coarsening. */
     maxErrorM: number;
     /** Error bound written to the header; see PtmEncodeInput.geometricErrorM. */
@@ -1464,6 +1472,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // Landuse fill: each tagged polygon clipped to the land facets it lies on
     // and lifted a hair off them, so it follows the drawn surface exactly and
     // its edge sits where OSM has it. See landuseFill.ts.
+    const surfaceLandTriangles = landClass.length;
     if (landuseDetail) {
         // Below the strokes' own lift (RIVER_LIFT_CELLS), so an outline or a
         // river crossing a field still draws over the fill. The fill is
@@ -1518,6 +1527,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         }
     }
 
+    const fillTriangles = landClass.length - surfaceLandTriangles;
+
     // Skirts: every triangle edge lying on the tile border belongs to exactly
     // one triangle, so each becomes one skirt quad hanging below the surface.
     const onBorder = (p: { x: number; y: number }) =>
@@ -1561,6 +1572,9 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             pushLandTriangle(topA, botB, botA, facet, t);
         }
     }
+
+    const wallTriangles = landClass.length - surfaceLandTriangles - fillTriangles;
+    const waterBeforeSkirts = waterTone.length;
 
     // Skirts hang along the local vertical, which means re-projecting the
     // vertex at a lower geodetic height — not subtracting from its ENU u.
@@ -1616,6 +1630,10 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             }
         }
     }
+
+    const skirtTriangles = landClass.length - surfaceLandTriangles - fillTriangles - wallTriangles
+        + waterTone.length - waterBeforeSkirts;
+    const waterSheetTriangles = waterBeforeSkirts;
 
     // --- 6b. watercourse strokes ------------------------------------------
     //
@@ -1774,11 +1792,93 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // Resampled so the stroke follows the terrain. An OSM way can run straight
     // for kilometres between vertices, and a stroke hung off those two points
     // alone would fly over every valley in between.
+    // Last segment that tested each facet, so a facet bucketed under many
+    // cells is tested once per segment.
+    const crossingStamp = new Int32Array(tris.length);
+    let crossingSerial = 0;
+    /** Every parameter in (0, 1) at which segment a-b crosses a facet edge. */
+    const facetCrossings = (a: GridPoint, b: GridPoint): number[] | undefined => {
+        const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x)));
+        const x1 = Math.min(cells - 1, Math.floor(Math.max(a.x, b.x)));
+        const y0 = Math.max(0, Math.floor(Math.min(a.y, b.y)));
+        const y1 = Math.min(cells - 1, Math.floor(Math.max(a.y, b.y)));
+        if ((x1 - x0 + 1) * (y1 - y0 + 1) > RIVER_MAX_SUBDIVISIONS) {
+            return undefined;
+        }
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const minX = Math.min(a.x, b.x), maxX = Math.max(a.x, b.x);
+        const minY = Math.min(a.y, b.y), maxY = Math.max(a.y, b.y);
+        const ts: number[] = [];
+        const serial = ++crossingSerial;
+        for (let row = y0; row <= y1; row++) {
+            for (let col = x0; col <= x1; col++) {
+                const list = surfaceBuckets.get(row * cells + col);
+                if (list === undefined) {
+                    continue;
+                }
+                for (const t of list) {
+                    if (crossingStamp[t] === serial) {
+                        continue;
+                    }
+                    crossingStamp[t] = serial;
+                    const q = tris[t].pts;
+                    if (Math.min(q[0].x, q[1].x, q[2].x) > maxX || Math.max(q[0].x, q[1].x, q[2].x) < minX
+                        || Math.min(q[0].y, q[1].y, q[2].y) > maxY || Math.max(q[0].y, q[1].y, q[2].y) < minY) {
+                        continue;
+                    }
+                    for (let e = 0; e < 3; e++) {
+                        const q0 = q[e];
+                        const q1 = q[(e + 1) % 3];
+                        const ex = q1.x - q0.x;
+                        const ey = q1.y - q0.y;
+                        const denom = dx * ey - dy * ex;
+                        if (Math.abs(denom) < 1e-12) {
+                            continue;
+                        }
+                        const u = ((q0.x - a.x) * ey - (q0.y - a.y) * ex) / denom;
+                        const v = ((q0.x - a.x) * dy - (q0.y - a.y) * dx) / denom;
+                        if (u > 1e-6 && u < 1 - 1e-6 && v >= -1e-6 && v <= 1 + 1e-6) {
+                            ts.push(u);
+                        }
+                    }
+                }
+            }
+        }
+        ts.sort((p, q) => p - q);
+        const out: number[] = [];
+        for (const u of ts) {
+            if (out.length === 0 || u - out[out.length - 1] > 1e-6) {
+                out.push(u);
+            }
+        }
+        return out;
+    };
+
+    /**
+     * Samples a polyline where it crosses from one facet to the next.
+     *
+     * A stroke is draped on the drawn surface, and that surface is planar
+     * inside a facet, so a straight segment needs a vertex only where it
+     * leaves one facet for another: sampled there it lies on the surface
+     * exactly. It used to be resampled every cell instead, which on Madeira
+     * z12 turned 2.5k outline points per tile into 7.3k and 14k stroke
+     * triangles - half the tile. Falls back to one sample per cell for a
+     * segment too long to search, or a tile with no facets bucketed.
+     */
     const resample = (pts: readonly GridPoint[]): GridPoint[] => {
         const grid: GridPoint[] = [];
         for (const p of pts) {
             const prev = grid[grid.length - 1];
             if (prev === undefined) {
+                grid.push(p);
+                continue;
+            }
+            const crossings = surfaceBuckets.size > 0 ? facetCrossings(prev, p) : undefined;
+            if (crossings !== undefined) {
+                for (const t of crossings) {
+                    grid.push({ x: prev.x + (p.x - prev.x) * t, y: prev.y + (p.y - prev.y) * t });
+                }
                 grid.push(p);
                 continue;
             }
@@ -1946,6 +2046,10 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         landTriangles: landClass.length,
         waterTriangles: waterTone.length,
         riverTriangles: waterStrokeTriangles,
+        fillTriangles,
+        wallTriangles,
+        skirtTriangles,
+        waterSheetTriangles,
         maxErrorM,
         geometricErrorM,
         minLeafSize,

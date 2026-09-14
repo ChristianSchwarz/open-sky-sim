@@ -623,7 +623,10 @@ async function main(): Promise<void> {
         : newColorHistogram();
     const leafHistogram = new Map<number, number>();
     /** Per zoom: tile count, triangles, settled tolerance, collapsed vertices. */
-    const zoomStats = new Map<number, { n: number; tris: number; mesh: number; errs: number[]; collapsed: number }>();
+    const zoomStats = new Map<number, {
+        n: number; tris: number; mesh: number; fill: number; walls: number; skirts: number; water: number; strokes: number;
+        errs: number[]; collapsed: number;
+    }>();
     const t0 = Date.now();
 
     // Each tile only reads its own inputs and writes its own .ptm, so the
@@ -687,10 +690,16 @@ async function main(): Promise<void> {
             coarsenedCoast++;
         }
         leafHistogram.set(r.minLeafSize, (leafHistogram.get(r.minLeafSize) ?? 0) + 1);
-        const zs = zoomStats.get(z) ?? { n: 0, tris: 0, mesh: 0, errs: [], collapsed: 0 };
+        const zs = zoomStats.get(z)
+            ?? { n: 0, tris: 0, mesh: 0, fill: 0, walls: 0, skirts: 0, water: 0, strokes: 0, errs: [], collapsed: 0 };
         zs.n++;
         zs.tris += r.triangleCount;
         zs.mesh += r.meshTriangles;
+        zs.fill += r.fillTriangles;
+        zs.walls += r.wallTriangles;
+        zs.skirts += r.skirtTriangles;
+        zs.water += r.waterSheetTriangles;
+        zs.strokes += r.strokeTriangles;
         zs.errs.push(r.maxErrorM);
         zs.collapsed += r.collapsedVertices;
         zoomStats.set(z, zs);
@@ -892,8 +901,10 @@ async function main(): Promise<void> {
             const errs = zs.errs.slice().sort((a, b) => a - b);
             const median = errs[Math.floor(errs.length / 2)];
             const coastOnly = zs.errs.filter(e => e >= 1e9).length;
-            console.log(`  z${z}: ${zs.n} tiles, mean ${Math.round(zs.tris / zs.n)} triangles `
-                + `of which ${Math.round(zs.mesh / zs.n)} surface, `
+            const per = (v: number) => Math.round(v / zs.n);
+            console.log(`  z${z}: ${zs.n} tiles, mean ${per(zs.tris)} triangles `
+                + `(${per(zs.mesh)} surface, ${per(zs.fill)} fill, ${per(zs.walls)} walls, `
+                + `${per(zs.skirts)} skirts, ${per(zs.water)} water, ${per(zs.strokes)} strokes), `
                 + `median tolerance ${median >= 1e9 ? 'coast-only' : `${median.toFixed(1)} m`}`
                 + (coastOnly > 0 ? ` (${coastOnly} coast-only)` : '')
                 + `, ${Math.round(zs.collapsed / zs.n)} vertices collapsed per tile`);

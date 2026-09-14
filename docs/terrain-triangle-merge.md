@@ -245,3 +245,39 @@ polygons draw on the same outlines, and the scene over LPMA went from
 Of a z12 tile's 28733, roughly 5100 are surface and 12-13k the fill;
 the remaining ~11k are walls, skirts and the water sheet, which nobody
 has measured yet.
+
+## The strokes, same day
+
+With per-stage counts in the bake summary the remainder turned out to be
+the land-use outline strokes: 14125 of a z12 tile's 28733 triangles, and
+the walls, skirts and water sheet only 2400 together.
+
+| Madeira z12, per tile | |
+|---|---|
+| outline rings | 85 |
+| ring points as mapped | 2484 |
+| points after resampling every cell | 7321 |
+| stroke triangles | 14125 |
+
+A stroke is draped on the drawn surface, which is planar inside a facet,
+so a straight segment needs a vertex only where it crosses from one
+facet to the next. `resample` in `buildTile.ts` now samples at those
+crossings, found through the facet buckets the drape already keeps, and
+falls back to one sample per cell for a segment too long to search.
+
+| Madeira, 137 tiles | original | mesh | fill | strokes |
+|---|---|---|---|---|
+| mean triangles per tile | 27662 | 25818 | 17918 | 15608 |
+| z12 mean | ~44000 | 43164 | 28733 | 24509 |
+| z12 strokes | | | 14125 | 9901 |
+| output | 31.7 MB | 29.7 MB | 22.2 MB | 19.6 MB |
+
+44 % fewer triangles than the morning's bake. Bake time is unchanged at
+about 25 s; a run that read 55 s was the game running in the browser
+pane at the same time, not the code.
+
+What is left on a z12 tile: 5106 surface, 8185 fill, 9901 strokes, 853
+walls, 465 skirts, 1080 water. The strokes are now bounded by the
+mapped ring points themselves, and the fill by the facets a polygon
+touches; the next lever on either is simplifying the rings at the leaf
+level, which today keeps every OSM vertex.
