@@ -19,7 +19,7 @@ import {
     KeyboardControlAction, KeyboardControlDevice, KeyboardControlLayoutId, KeyboardControlLayouts,
 } from '../../input/devices/keyboardControlDevice';
 import { formatSunTime } from '../../scene/materials/shaders/sun';
-import { AiPilotModels, FlightModels, ShadowQualities, TechProfiles, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
+import { AiPilotModels, FlightModels, TechProfiles, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
 import { PLAY_ORIGIN } from '../../state/worldLayout';
 import {
     DETAIL_DISTANCE_OFF, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
@@ -125,14 +125,6 @@ const TECH_PROFILE_OPTIONS: Option<string>[] = [
     { value: TechProfiles.VGA, label: '386 / VGA' },
     { value: TechProfiles.SVGA, label: '486 / SVGA' },
     { value: TechProfiles.HD, label: 'HD' },
-];
-
-const SHADOW_QUALITY_OPTIONS: Option<ShadowQualities>[] = [
-    { value: ShadowQualities.OFF, label: 'Off (planform silhouette)' },
-    { value: ShadowQualities.LOW, label: 'Low (2048)' },
-    { value: ShadowQualities.MEDIUM, label: 'Medium (4096)' },
-    { value: ShadowQualities.HIGH, label: 'High (8192)' },
-    { value: ShadowQualities.ULTRA, label: 'Ultra (16384) — needs >2 GB VRAM' },
 ];
 
 const TERRAIN_COLOUR_OPTIONS: Option<TerrainColours>[] = [
@@ -242,19 +234,6 @@ function sliderValue(event: Event): number {
                             <mat-radio-group class="grid grid-cols-1 sm:grid-cols-3"
                                 [value]="techProfile()" (change)="setTechProfile($event.value)">
                                 @for (option of techProfiles; track option.value) {
-                                    <mat-radio-button [value]="option.value">{{ option.label }}</mat-radio-button>
-                                }
-                            </mat-radio-group>
-                        </section>
-
-                        <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Shadows</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Resolution of the near cascade; the wide one follows it up to 8192.
-                            </p>
-                            <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
-                                [value]="shadowQuality()" (change)="setShadowQuality($event.value)">
-                                @for (option of shadowQualities; track option.value) {
                                     <mat-radio-button [value]="option.value">{{ option.label }}</mat-radio-button>
                                 }
                             </mat-radio-group>
@@ -433,7 +412,7 @@ function sliderValue(event: Event): number {
                         <section>
                             <h3 class="m-0 mb-1 text-base font-medium">Time of day</h3>
                             <p class="m-0 mb-2 text-sm opacity-70">
-                                Local solar time. Moves the sun, so sky, terrain and cast shadows follow
+                                Local solar time. Moves the sun, so sky, terrain and aircraft silhouettes follow
                                 it. Sunrise 06:00, sunset 18:00. N flips between afternoon and midnight.
                             </p>
                             <div class="flex items-center gap-4">
@@ -569,7 +548,6 @@ export class SettingsDialog {
     );
 
     readonly techProfiles = TECH_PROFILE_OPTIONS;
-    readonly shadowQualities = SHADOW_QUALITY_OPTIONS;
     readonly terrainColours = TERRAIN_COLOUR_OPTIONS;
     readonly terrainShadings = TERRAIN_SHADING_OPTIONS;
     readonly flightModels = FLIGHT_MODEL_OPTIONS;
@@ -583,7 +561,6 @@ export class SettingsDialog {
     readonly terrainImport = this.data.terrainImport;
     readonly tab = signal<SettingsTab>(this.data.initialTab ?? lastTab);
     readonly techProfile = signal(this.config.techProfiles.getActiveKey());
-    readonly shadowQuality = signal(this.config.shadowQuality.getActive());
     readonly terrainColour = signal(this.config.terrainColour.getActive());
     readonly terrainShading = signal(this.config.terrainShading.getActive());
     /** Percent of a land-use facet's colour taken from its land type's tone. */
@@ -672,12 +649,6 @@ export class SettingsDialog {
         this.config.techProfiles.setActive(id);
         updateSettings({ techProfile: id });
         this.techProfile.set(id);
-    }
-
-    setShadowQuality(quality: ShadowQualities) {
-        this.config.shadowQuality.setActive(quality);
-        updateSettings({ shadowQuality: quality });
-        this.shadowQuality.set(quality);
     }
 
     setTerrainDetail(event: Event) {

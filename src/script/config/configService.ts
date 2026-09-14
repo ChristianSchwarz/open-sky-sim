@@ -1,6 +1,6 @@
 import { FlightModel } from "../physics/model/flightModel";
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
-import { AiPilotModels, ShadowQualities, TerrainColours, TerrainShading, UnitSystems } from "../state/gameDefs";
+import { AiPilotModels, TerrainColours, TerrainShading, UnitSystems } from "../state/gameDefs";
 import { assertExpr, assertIsDefined } from "../utils/asserts";
 import {
     LANDUSE_REVEAL_MIN_PX, LEAF_REFINE_DISTANCE_SCALE, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
@@ -13,7 +13,6 @@ export type ProfileChangeListener = (profile: TechProfile, newId: string, oldId:
 export type FlightModelChangeListener = (flightModel: FlightModel, newId: string, oldId: string) => void;
 export type UnitSystemChangeListener = (unitSystem: UnitSystems) => void;
 export type AiPilotModelChangeListener = (model: AiPilotModels) => void;
-export type ShadowQualityChangeListener = (quality: ShadowQualities) => void;
 export type TerrainColourChangeListener = (mode: TerrainColours) => void;
 export type TerrainShadingChangeListener = (mode: TerrainShading) => void;
 export type LanduseBlendChangeListener = (blend: number) => void;
@@ -30,7 +29,6 @@ export class ConfigService {
     readonly flightModels: ConfigSet<FlightModel>;
     readonly unitSystem: UnitSystemSetting;
     readonly aiPilotModels: AiPilotModelSetting;
-    readonly shadowQuality: ShadowQualitySetting;
     readonly terrainColour: TerrainColourSetting;
     readonly terrainShading: TerrainShadingSetting;
     readonly landuseBlend: LanduseBlendSetting;
@@ -47,7 +45,6 @@ export class ConfigService {
         initialTechProfile?: string,
         initialFlightModel?: string,
         initialAiPilotModel?: AiPilotModels,
-        initialShadowQuality?: ShadowQualities,
         initialDaytime?: number,
         initialTerrainColour?: TerrainColours,
         initialTerrainDetailM?: number,
@@ -62,7 +59,6 @@ export class ConfigService {
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
         this.unitSystem = new UnitSystemSetting();
         this.aiPilotModels = new AiPilotModelSetting(initialAiPilotModel);
-        this.shadowQuality = new ShadowQualitySetting(initialShadowQuality);
         this.terrainColour = new TerrainColourSetting(initialTerrainColour);
         this.terrainShading = new TerrainShadingSetting(initialTerrainShading);
         this.landuseBlend = new LanduseBlendSetting(initialLanduseBlend);
@@ -551,40 +547,6 @@ export class TerrainShadingSetting {
     }
 
     removeChangeListener(listener: TerrainShadingChangeListener) {
-        this.listeners.delete(listener);
-    }
-}
-
-export class ShadowQualitySetting {
-    private active: ShadowQualities;
-    private listeners: Set<ShadowQualityChangeListener> = new Set();
-
-    constructor(initialActive: ShadowQualities = ShadowQualities.LOW) {
-        this.active = initialActive;
-    }
-
-    getActive(): ShadowQualities {
-        return this.active;
-    }
-
-    setActive(quality: ShadowQualities) {
-        if (quality === this.active) return;
-        this.active = quality;
-        this.notifyActive();
-    }
-
-    /** Push the current value to listeners (used once after they register). */
-    notifyActive() {
-        for (const listener of this.listeners.values()) {
-            listener(this.active);
-        }
-    }
-
-    addChangeListener(listener: ShadowQualityChangeListener) {
-        this.listeners.add(listener);
-    }
-
-    removeChangeListener(listener: ShadowQualityChangeListener) {
         this.listeners.delete(listener);
     }
 }

@@ -14,7 +14,6 @@ import { SceneMaterialManager } from '../materials/materials';
 import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef } from './aircraftDef';
 import { AircraftFx } from './aircraftFx';
 import { setAircraftShadowPose } from './aircraftShadow';
-import { SHADOW_SETTINGS } from '../../render/shadowVolumes';
 import { SUN_STATE } from '../materials/shaders/sun';
 import { ModelManager } from '../models/models';
 import { Scene, SceneLayers } from '../scene';
@@ -463,9 +462,8 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             this.displayVelocity,
         );
 
-        // No planform silhouette once the sun is too low to cast one; the
-        // realtime shadow map fades out on the same ramp.
-        if (!SHADOW_SETTINGS.enabled && !this.isCrashed() && SUN_STATE.shadowStrength > 0) {
+        // No planform silhouette once the sun is too low to cast one.
+        if (!this.isCrashed() && SUN_STATE.shadowStrength > 0) {
             setAircraftShadowPose(
                 this.displayPosition, this.displayQuaternion, this.groundHeightAt,
                 0.5 * this.modelShadow.model.maxSize,

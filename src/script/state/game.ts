@@ -635,14 +635,11 @@ export class Game {
             this.renderer.setTextEffect(profile.textEffect);
         });
         this.configService.daytime.addChangeListener(hours => {
-            // Moves the sun for the shaded ramp and the shadow prisms, then
+            // Moves the sun for the shaded ramp and the planform silhouettes, then
             // rebuilds the sky/terrain palette that goes with it.
             setSunTime(hours);
             this.refreshDaytimePalette();
             this.updateSunEntity();
-        });
-        this.configService.shadowQuality.addChangeListener(quality => {
-            this.renderer.setShadowQuality(quality);
         });
         this.configService.flightModels.addChangeListener(flightModel => {
             flightModel.activate();
@@ -672,8 +669,7 @@ export class Game {
             {
                 target: MAIN_RENDER_TARGET_LO,
                 camera: this.playerCamera.main,
-                lists: [SceneLayers.Terrain, SceneLayers.EntityFlats, SceneLayers.EntityVolumes, SceneLayers.EntityFX],
-                shadows: true
+                lists: [SceneLayers.Terrain, SceneLayers.EntityFlats, SceneLayers.EntityVolumes, SceneLayers.EntityFX]
             },
             {
                 target: MAIN_RENDER_TARGET_LO,
@@ -699,8 +695,7 @@ export class Game {
             {
                 target: MAIN_RENDER_TARGET_HI,
                 camera: this.playerCamera.main,
-                lists: [SceneLayers.Terrain, SceneLayers.EntityFlats, SceneLayers.EntityVolumes, SceneLayers.EntityFX],
-                shadows: true
+                lists: [SceneLayers.Terrain, SceneLayers.EntityFlats, SceneLayers.EntityVolumes, SceneLayers.EntityFX]
             },
             {
                 target: MAIN_RENDER_TARGET_HI,
@@ -819,8 +814,7 @@ export class Game {
             {
                 target: MAIN_RENDER_TARGET_HD,
                 camera: this.playerCamera.main,
-                lists: [SceneLayers.Terrain, SceneLayers.EntityFlats, SceneLayers.EntityVolumes, SceneLayers.EntityFX],
-                shadows: true
+                lists: [SceneLayers.Terrain, SceneLayers.EntityFlats, SceneLayers.EntityVolumes, SceneLayers.EntityFX]
             },
             {
                 target: MAIN_RENDER_TARGET_HD,
@@ -3857,7 +3851,7 @@ export class Game {
             paintSunBloom(this.sunModel, this.noonPalette, this.midnightPalette,
                 SUN_STATE.nightMix, SUN_DIRECTION, this.palette);
         }
-        // Dev aids, alongside __terrain / __shadowSettings. The sun is worth
+        // Dev aids, alongside __terrain. The sun is worth
         // reaching for because its two halves are drawn in different passes,
         // and the only way to see that from outside is to walk their parents.
         (globalThis as Record<string, unknown>).__probe =

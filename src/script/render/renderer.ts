@@ -12,20 +12,6 @@ import { clearRenderOrigin, setRenderOrigin } from './renderOrigin';
 import { BlitPass } from './blitPass';
 import { GpuPassTimer } from './gpuPassTimer';
 import { SceneDepthPass } from './sceneDepthPass';
-import { SHADOW_SETTINGS, ShadowVolumePass } from './shadowVolumes';
-import { SUN_STATE } from '../scene/materials/shaders/sun';
-import { DisplayShading } from '../config/profiles/profile';
-import { ShadowQualities } from '../state/gameDefs';
-
-/**
- * Render lists whose objects can carry the shadow-caster layer. Solid model
- * meshes all land in EntityVolumes; terrain, ground decals and FX never cast,
- * so the shadow pass never needs to walk them.
- */
-const SHADOW_CASTER_LISTS: string[] = [SceneLayers.EntityVolumes];
-
-/** Scratch: the caster lists handed to the shadow pass for one layer. */
-const SHADOW_ROOTS: THREE.Object3D[] = [];
 
 export interface RendererOptions {
     textColors?: string[];
@@ -87,12 +73,6 @@ export interface RenderLayer {
      */
     entityFilter?: (entity: Entity) => boolean;
     /**
-     * Render the realtime sun shadow map for this pass and let its lists
-     * receive it. The map is built in this camera's relative space, so only the
-     * layer that renders it can sample it; every other pass draws unshadowed.
-     */
-    shadows?: boolean;
-    /**
      * Resolve the depth already standing in this target before the layer draws,
      * so its materials can sample how far away what they cover is. Set on the
      * foreground sky pass, whose glare veils the scene rather than replacing it.
@@ -133,7 +113,6 @@ export class Renderer {
     /** Camera-relative offset root: children drawn at world − camera.position. */
     private readonly relativeRoot = new THREE.Group();
     private readonly savedCamPos = new THREE.Vector3();
-    private readonly shadowPass = new ShadowVolumePass();
     private readonly sceneDepthPass = new SceneDepthPass();
     private readonly blitPass = new BlitPass();
     /**
@@ -156,8 +135,6 @@ export class Renderer {
      * dither structure to smear into blocks.
      */
     private static readonly BACKGROUND_SKY_SCALE = 0.25;
-    /** Palette shadow tone, refreshed per shadowed pass. */
-    private readonly shadowColor = new THREE.Color();
     private renderListGeneration = 0;
     /**
      * Mipmap-based supersample downsampling needs generateMipmap() on a
@@ -200,14 +177,6 @@ export class Renderer {
     setPalette(palette: Palette) {
         this.palette = palette;
         this.materials.setPalette(palette);
-    }
-
-    /**
-     * Applies the menu's shadow setting. OFF skips the stencil pass, which also
-     * brings the flat planform silhouettes back under the aircraft.
-     */
-    setShadowQuality(quality: ShadowQualities) {
-        this.shadowPass.setQuality(quality);
     }
 
     setTextEffect(effect: TextEffect) {
@@ -533,10 +502,6 @@ export class Renderer {
             }
             this.renderer.render(this.mergedListScene, cam);
             this.recordDrawStats(layer);
-            // Shadows last: the stencil count is taken against the depth buffer
-            // this submit just wrote, with the caster lists still parented under
-            // the camera-relative root they were drawn from.
-            this.renderShadowVolumes(layer, palette);
             while (this.relativeRoot.children.length > 0) {
                 this.relativeRoot.remove(this.relativeRoot.children[0]);
             }
@@ -563,38 +528,6 @@ export class Renderer {
         const only = this.current3DRenderLists.get(layer.lists[0]);
         assertIsDefined(only);
         this.renderer.render(only, cam);
-    }
-
-    /**
-     * Casts the shadows of this pass's casters into the target the scene was
-     * just drawn into. Runs with the lists still parented under the
-     * camera-relative root, so the volumes and what they fall on share one
-     * space, and after the main submit, because the stencil count is taken
-     * against the depth it wrote.
-     */
-    private renderShadowVolumes(layer: RenderLayer, palette: Palette): void {
-        // Shadows fade out as the sun drops towards the horizon and the pass is
-        // skipped entirely below it: see SUN_STATE.shadowStrength.
-        const sunStrength = SUN_STATE.shadowStrength;
-        if (!layer.shadows || !SHADOW_SETTINGS.enabled || sunStrength <= 0) {
-            return;
-        }
-        SHADOW_ROOTS.length = 0;
-        for (const listId of SHADOW_CASTER_LISTS) {
-            const list = this.current3DRenderLists.get(listId);
-            if (list !== undefined) {
-                SHADOW_ROOTS.push(list);
-            }
-        }
-        if (SHADOW_ROOTS.length === 0) {
-            return;
-        }
-        this.shadowColor.set(PaletteColor(palette, PaletteCategory.SCENERY_TREE_SHADOW));
-        // Every shading mode but FULL quantises vertices to the raster grid, and
-        // the volumes have to be quantised with them.
-        const snapping = this.materials.getShadingType() !== DisplayShading.FULL;
-        this.shadowPass.render(this.renderer, SHADOW_ROOTS, layer.camera, this.shadowColor,
-            sunStrength, snapping, this.savedCamPos.y);
     }
 
     render2D(renderTarget: CanvasRenderTarget, scene: Scene, layer: RenderLayer, palette: Palette) {
@@ -632,13 +565,9 @@ export class Renderer {
                 magFilter: THREE.NearestFilter,
                 generateMipmaps: mipmapped,
                 format: THREE.RGBFormat,
-                // The shadow volumes count into this; three leaves the stencil
-                // out by default and it cannot be attached afterwards.
-                stencilBuffer: true,
                 // Depth as a texture rather than a renderbuffer, so a later
                 // pass in this same target can be told what it is covering
-                // (SceneDepthPass). Packed with the stencil, which the shadow
-                // volumes still need - the two share one attachment.
+                // (SceneDepthPass).
                 depthTexture: sceneDepthTexture(textureWidth, textureHeight)
             });
             const compositorObj = new THREE.Mesh(

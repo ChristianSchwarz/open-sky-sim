@@ -5,7 +5,6 @@
  *
  * Near the camera: thin black mesh ribbons. Beyond ~350 m: 1px THREE.Line strokes
  * so the wires stay readable when the ribbon would shrink below a pixel.
- * Deck shadows are stippled mesh strips (always on), Y-sampled from solid ground.
  *
  * The root tracks the live carrier pose each frame so cables stay on the deck
  * even if the ship translates or yaws.
@@ -20,7 +19,6 @@ import { updateUniforms } from '../utils';
 import { Entity } from '../entity';
 import { Scene, SceneLayers } from '../scene';
 import { PlayerEntity } from './player';
-import { SHADOW_ALPHA_DITHER, SHADOW_SURFACE_EPSILON_M } from './aircraftShadow';
 import {
     ARRESTOR_CABLE_Y,
     arrestorCableLocals,
@@ -36,8 +34,6 @@ const ARRESTOR_DECK_Y_FALLBACK = 13.55;
 const ARRESTOR_CABLE_CLEARANCE_M = 0.35;
 /** Visible cable ribbon half-width (m) — thin wire, still readable as a mesh. */
 const ARRESTOR_CABLE_HALF_W_M = 0.04;
-/** Shadow strip half-width on the deck (m). */
-const ARRESTOR_SHADOW_HALF_W_M = 0.11;
 /** Camera distance (m) at which ribbons switch to 1px lines. */
 const ARRESTOR_LOD_LINE_M = 350;
 /** Hysteresis band (m) around the LOD switch to avoid flicker. */
@@ -54,12 +50,6 @@ type CableRibbon = {
     /** Far LOD: 1px polyline A → mid → B. */
     line: THREE.Line;
     linePos: THREE.BufferAttribute;
-    /** Shadow segment sheave A → mid. */
-    shadowA: THREE.Mesh;
-    shadowAPos: THREE.BufferAttribute;
-    /** Shadow segment mid → sheave B. */
-    shadowB: THREE.Mesh;
-    shadowBPos: THREE.BufferAttribute;
 };
 
 export class ArrestorCablesEntity implements Entity {
@@ -116,15 +106,6 @@ export class ArrestorCablesEntity implements Entity {
             rawColor: '#000000',
         });
 
-        const shadowMat = materials.build({
-            type: SceneMaterialPrimitiveType.MESH,
-            category: PaletteCategory.SCENERY_TREE_SHADOW,
-            shaded: false,
-            depthWrite: false,
-            colorDither: false,
-            alphaDither: SHADOW_ALPHA_DITHER,
-        });
-
         // LOD distance is measured to the mean of all cable midpoints.
         let sumX = 0;
         let sumZ = 0;
@@ -141,12 +122,8 @@ export class ArrestorCablesEntity implements Entity {
 
             const cableA = this.makeQuad(cableMat);
             const cableB = this.makeQuad(cableMat);
-            const shadowA = this.makeQuad(shadowMat);
-            const shadowB = this.makeQuad(shadowMat);
             const cableAPos = cableA.geometry.getAttribute('position') as THREE.BufferAttribute;
             const cableBPos = cableB.geometry.getAttribute('position') as THREE.BufferAttribute;
-            const shadowAPos = shadowA.geometry.getAttribute('position') as THREE.BufferAttribute;
-            const shadowBPos = shadowB.geometry.getAttribute('position') as THREE.BufferAttribute;
 
             const lineGeom = new THREE.BufferGeometry();
             const linePos = new THREE.BufferAttribute(new Float32Array(9), 3);
@@ -155,8 +132,6 @@ export class ArrestorCablesEntity implements Entity {
             line.frustumCulled = false;
             line.onBeforeRender = updateUniforms;
 
-            this.root.add(shadowA);
-            this.root.add(shadowB);
             this.root.add(cableA);
             this.root.add(cableB);
             this.root.add(line);
@@ -165,12 +140,9 @@ export class ArrestorCablesEntity implements Entity {
                 local,
                 cableA, cableAPos, cableB, cableBPos,
                 line, linePos,
-                shadowA, shadowAPos, shadowB, shadowBPos,
             });
             this.placeCableQuad(cableA, cableAPos, local.ax, local.az, midX, midZ);
             this.placeCableQuad(cableB, cableBPos, midX, midZ, local.bx, local.bz);
-            this.placeShadowQuad(shadowA, shadowAPos, local.ax, local.az, midX, midZ);
-            this.placeShadowQuad(shadowB, shadowBPos, midX, midZ, local.bx, local.bz);
             this.placeCableLine(linePos, local.ax, local.az, midX, midZ, local.bx, local.bz);
         }
         this.applyLodVisibility();
@@ -217,10 +189,6 @@ export class ArrestorCablesEntity implements Entity {
         return deckWorld + liftM - this.root.position.y;
     }
 
-    private shadowLocalY(localX: number, localZ: number): number {
-        return this.deckLocalY(localX, localZ, SHADOW_SURFACE_EPSILON_M);
-    }
-
     private cableLocalY(localX: number, localZ: number): number {
         return this.deckLocalY(localX, localZ, ARRESTOR_CABLE_CLEARANCE_M);
     }
@@ -265,18 +233,6 @@ export class ArrestorCablesEntity implements Entity {
         ax: number, az: number, bx: number, bz: number,
     ): void {
         this.placeRibbonQuad(mesh, pos, ax, az, bx, bz, ARRESTOR_CABLE_HALF_W_M, (x, z) => this.cableLocalY(x, z));
-    }
-
-    private placeShadowQuad(
-        mesh: THREE.Mesh,
-        pos: THREE.BufferAttribute,
-        ax: number, az: number, bx: number, bz: number,
-    ): void {
-        this.placeRibbonQuad(mesh, pos, ax, az, bx, bz, ARRESTOR_SHADOW_HALF_W_M, (x, z) => this.shadowLocalY(x, z));
-        // Shadows stay visible regardless of cable LOD (re-assert after placeRibbonQuad).
-        const dx = bx - ax;
-        const dz = bz - az;
-        mesh.visible = Math.hypot(dx, dz) >= 1e-4;
     }
 
     private placeCableLine(
@@ -382,8 +338,6 @@ export class ArrestorCablesEntity implements Entity {
             }
             this.placeCableQuad(c.cableA, c.cableAPos, L.ax, L.az, midX, midZ);
             this.placeCableQuad(c.cableB, c.cableBPos, midX, midZ, L.bx, L.bz);
-            this.placeShadowQuad(c.shadowA, c.shadowAPos, L.ax, L.az, midX, midZ);
-            this.placeShadowQuad(c.shadowB, c.shadowBPos, midX, midZ, L.bx, L.bz);
 
             let midY = this.cableLocalY(midX, midZ);
             if (i === latch) {

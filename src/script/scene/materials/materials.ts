@@ -621,7 +621,7 @@ export class SceneMaterialManager implements KernelTask {
     }
 
     // This shouldn't be handled by the material system
-    /** Current shading mode; the shadow pass mirrors its vertex snapping. */
+    /** Current shading mode. */
     getShadingType(): DisplayShading {
         return this.shading;
     }

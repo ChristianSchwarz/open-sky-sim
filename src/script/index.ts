@@ -50,7 +50,6 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
         settings.techProfile,
         settings.flightModel,
         settings.aiPilotModel,
-        settings.shadowQuality,
         settings.daytime,
         settings.terrainColour,
         settings.terrainDetailDistanceM ?? DETAIL_DISTANCE_OFF,
@@ -63,7 +62,7 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
     );
     config.flightModels.getActive().activate();
     // Place the sun before the first material is built, so the shaded ramp and
-    // the shadow prisms start on the persisted time of day.
+    // the planform silhouettes start on the persisted time of day.
     setSunTime(config.daytime.getActive());
     const materials = new SceneMaterialManager(HDNoonPalette, FogQuality.HIGH, DisplayShading.FULL);
     const renderer = new Renderer(materials, H_RES, V_RES, HDNoonPalette);
@@ -90,7 +89,6 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
     // Apply persisted settings after Game registers change listeners.
     config.techProfiles.notifyActive();
     config.flightModels.notifyActive();
-    config.shadowQuality.notifyActive();
     config.daytime.notifyActive();
     await game.setup();
 

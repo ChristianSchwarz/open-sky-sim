@@ -45,8 +45,7 @@ export function updateUniforms(this: THREE.Mesh, renderer: THREE.WebGLRenderer, 
     const u = m.uniforms as SceneMaterialUniforms;
     const data = m.userData as SceneMaterialData | undefined;
 
-    // The shadow pass swaps in its own depth material, which carries none of
-    // the uniforms below. Nothing to refresh for it.
+    // A material without scene data carries none of the uniforms below.
     if (!data || !('category' in data)) {
         return;
     }

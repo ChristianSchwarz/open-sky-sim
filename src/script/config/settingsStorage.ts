@@ -1,6 +1,6 @@
 import { KeyboardControlLayoutId } from "../input/devices/keyboardControlDevice";
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
-import { AiPilotModels, FlightModels, ShadowQualities, TechProfiles, TerrainColours, TerrainShading } from "../state/gameDefs";
+import { AiPilotModels, FlightModels, TechProfiles, TerrainColours, TerrainShading } from "../state/gameDefs";
 import {
     LANDUSE_REVEAL_MIN_PX, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
     LEAF_REFINE_DISTANCE_SCALE, LEAF_REFINE_DISTANCE_SCALE_MAX, LEAF_REFINE_DISTANCE_SCALE_MIN,
@@ -19,8 +19,6 @@ export interface AppSettings {
     flightModel: string;
     keyboardLayout: KeyboardControlLayoutId;
     aiPilotModel: AiPilotModels;
-    /** Realtime sun shadow map resolution (OFF disables shadows). */
-    shadowQuality: ShadowQualities;
     /** How baked terrain cover turns into colour on screen. */
     terrainColour: TerrainColours;
     /** Flat per-facet colour, or smooth (Gouraud) interpolation across it. */
@@ -34,7 +32,7 @@ export interface AppSettings {
     aircraftId: string;
     /** Last spawn mode used to start a flight. */
     spawnMode: SpawnMode;
-    /** Local solar time of day in hours (0..24); drives sun, palette and shadows. */
+    /** Local solar time of day in hours (0..24); drives sun, palette and planform silhouettes. */
     daytime: number;
     /**
      * Name of the baked terrain area to fly in, from the terrain manifest's
@@ -75,7 +73,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
     flightModel: FlightModels.FM2,
     keyboardLayout: KeyboardControlLayoutId.ARROWS,
     aiPilotModel: AiPilotModels.CLASSIC,
-    shadowQuality: ShadowQualities.LOW,
     terrainColour: TerrainColours.HYBRID,
     terrainShading: TerrainShading.FACETED,
     landuseBlend: LANDUSE_BLEND_DEFAULT,
@@ -95,7 +92,6 @@ const TECH_PROFILES = new Set<string>(Object.values(TechProfiles));
 const FLIGHT_MODELS = new Set<string>(Object.values(FlightModels));
 const KEYBOARD_LAYOUTS = new Set<number>(Object.values(KeyboardControlLayoutId).filter(v => typeof v === 'number') as number[]);
 const AI_PILOT_MODELS = new Set<string>(Object.values(AiPilotModels));
-const SHADOW_QUALITIES = new Set<string>(Object.values(ShadowQualities));
 const TERRAIN_COLOURS = new Set<string>(Object.values(TerrainColours));
 const TERRAIN_SHADING_VALUES = new Set<string>(Object.values(TerrainShading));
 const SPAWN_MODES = new Set<SpawnMode>([
@@ -115,7 +111,6 @@ export function loadSettings(): AppSettings {
             flightModel: isValidFlightModel(parsed.flightModel) ? parsed.flightModel : DEFAULT_SETTINGS.flightModel,
             keyboardLayout: isValidKeyboardLayout(parsed.keyboardLayout) ? parsed.keyboardLayout : DEFAULT_SETTINGS.keyboardLayout,
             aiPilotModel: isValidAiPilotModel(parsed.aiPilotModel) ? parsed.aiPilotModel : DEFAULT_SETTINGS.aiPilotModel,
-            shadowQuality: isValidShadowQuality(parsed.shadowQuality) ? parsed.shadowQuality : DEFAULT_SETTINGS.shadowQuality,
             terrainColour: isValidTerrainColour(parsed.terrainColour) ? parsed.terrainColour : DEFAULT_SETTINGS.terrainColour,
             terrainShading: isValidTerrainShading(parsed.terrainShading) ? parsed.terrainShading : DEFAULT_SETTINGS.terrainShading,
             landuseBlend: isValidLanduseBlend(parsed.landuseBlend) ? parsed.landuseBlend : DEFAULT_SETTINGS.landuseBlend,
@@ -172,10 +167,6 @@ function isValidKeyboardLayout(value: unknown): value is KeyboardControlLayoutId
 
 function isValidAiPilotModel(value: unknown): value is AiPilotModels {
     return typeof value === 'string' && AI_PILOT_MODELS.has(value);
-}
-
-function isValidShadowQuality(value: unknown): value is ShadowQualities {
-    return typeof value === 'string' && SHADOW_QUALITIES.has(value);
 }
 
 function isValidTerrainColour(value: unknown): value is TerrainColours {
