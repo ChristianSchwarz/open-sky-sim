@@ -631,5 +631,13 @@ class StageProgressTest(unittest.TestCase):
             self.assertEqual(p.percent(), 100.0)
 
 
+
+class ExitCodeTest(unittest.TestCase):
+    def test_partial_is_distinct_from_failure(self):
+        # The importer keys on this: 2 is "manifest written, an area's
+        # airfields carried over because Overpass failed", 1 is a broken bake.
+        self.assertEqual(bake_osm_airports.EXIT_PARTIAL, 2)
+        self.assertNotIn(bake_osm_airports.EXIT_PARTIAL, (0, 1))
+
 if __name__ == '__main__':
     unittest.main()

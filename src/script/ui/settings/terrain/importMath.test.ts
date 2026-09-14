@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-    BAKE_ZOOM, bakeTiles, blockedReason, latToWorld, lonToWorld, TILE_PX, worldToLat, worldToLon,
+    BAKE_ZOOM, bakeTiles, blockedReason, crossesAntimeridian, latToWorld, lonToWorld, TILE_PX, worldToLat,
+    worldToLon, wrapLon,
 } from './importMath';
 
 describe('Web Mercator', () => {
@@ -47,5 +48,21 @@ describe('blockedReason', () => {
 
     it('is ready with a box within the limit and a name', () => {
         assert.equal(blockedReason(false, box, 'alps'), undefined);
+    });
+
+    it('refuses a box that straddles the antimeridian', () => {
+        const chatham = { west: 179, south: -45, east: 181, north: -43 };
+        assert.ok(crossesAntimeridian(chatham));
+        assert.match(blockedReason(false, chatham, 'chatham') ?? '', /antimeridian/);
+    });
+});
+
+describe('wrapLon', () => {
+    it('brings a longitude panned past New Zealand back onto the sheet', () => {
+        assert.equal(wrapLon(182.0215), 182.0215 - 360);
+        assert.equal(wrapLon(-183), 177);
+        assert.equal(wrapLon(180), -180);
+        assert.equal(wrapLon(-180), -180);
+        assert.equal(wrapLon(10), 10);
     });
 });

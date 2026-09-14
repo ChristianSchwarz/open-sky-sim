@@ -178,6 +178,13 @@ export const OUTLINE_HALF_WIDTH_M = 2;
 export const COLLAPSE_MAX_ANGLE_DEG = 2;
 
 /**
+ * Extra collapse passes over the water sheet. It is a flat plane with no
+ * error to keep, so a pass costs nothing but time; three is where a Madeira
+ * bake stopped finding vertices to remove.
+ */
+export const WATER_COLLAPSE_PASSES = 3;
+
+/**
  * Observed ground cover on the tile's own grid, written by
  * tools/bake_planet_cover.py and decoded by tools/bake/plc.ts.
  *
@@ -294,6 +301,12 @@ export interface BuildTileResult {
     minLeafSize: number;
     /** How many budget retries were needed. */
     attempts: number;
+    /**
+     * Cost of the mesh the budget search settled on, surface and skirts,
+     * before the collapse pass: what the budget was judged against. The
+     * pass only removes triangles, and on a water-heavy tile removes many.
+     */
+    searchTriangles: number;
     /** Vertices the coplanar collapse pass removed from the final mesh. */
     collapsedVertices: number;
     /**
@@ -881,33 +894,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         }
         tris = best.triangles;
     }
+    const searchTriangles = costWithSkirts(tris, cells, isLandTriangle);
 
-    // --- 3b. coplanar collapse --------------------------------------------
-    //
-    // Once, on the mesh the search settled on, not inside the search. Run
-    // per attempt it made the bake four times slower, and it would only have
-    // handed the saving straight back to the tolerance: the search coarsens
-    // until the tile fits, so a cheaper mesh fits at a finer error and comes
-    // out the same size. Here the saving stays a saving. A collapse can only
-    // remove triangles, so the budget still holds; the one thing it can add
-    // is a wall on a new grid-aligned edge between two shore positions,
-    // which is rare and a quad.
-    const collapsed = collapse({
-        triangles: tris,
-        size,
-        heights: meshHeights,
-        cellM: collapseCellM,
-        maxErrorM: Number.isFinite(maxErrorM) ? maxErrorM : input.maxErrorM,
-        maxAngleDeg: COLLAPSE_MAX_ANGLE_DEG,
-        padHeights: meshPadHeights,
-        padErrorM: PAD_ERROR_M,
-        coverClasses: meshCoverClasses,
-    });
-    tris = collapsed.triangles;
-    collapsedVertices = collapsed.collapsed;
-    const meshTriangles = tris.length;
-
-    // --- 4/5. projection, pad, depth bias ---------------------------------
     const lonSpan = bounds.east - bounds.west;
     const latSpan = bounds.north - bounds.south;
     const distCells = chamferDistanceCells(shoreline.landNodes, size, 1);
@@ -993,6 +981,70 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         }
         return undefined;
     };
+
+    /**
+     * Merge class of a water facet, for the collapse pass: its tone, judged
+     * at its centre, or -1 for a facet that touches the shore while its
+     * centre lies outside the band. The centre decides the tone so a facet
+     * the collapse has grown does not carry the shallow tone as far as its
+     * farthest corner. A shore facet is always painted shallow, so left
+     * unchecked the pass fanned the whole sheet from a few shore vertices -
+     * 14000 cells² on Madeira - and painted it all as shallows; a lake's rim
+     * vertex is also clamped to the ground it meets, and a facet spanning the
+     * lake from it would sag. So such a facet is a shape the pass may not
+     * produce: the shallow rim stays within the band, and the sheet beyond
+     * it merges freely. The band is at least a cell so a coarse tile keeps
+     * its rim.
+     */
+    const waterBandM = Math.max(SHALLOW_WATER_COAST_M, metresPerCell);
+    /** See CollapseInput.isFlatWater. */
+    const isFlatWater = (t: GridTriangle): boolean => {
+        const [p0, p1, p2] = t.pts;
+        const surface = inlandSurfaceAt((p0.x + p1.x + p2.x) / 3, (p0.y + p1.y + p2.y) / 3);
+        return surface === undefined || Number.isFinite(surface);
+    };
+    const waterClassOf = (t: GridTriangle): number => {
+        const [p0, p1, p2] = t.pts;
+        const d = sampleDist((p0.x + p1.x + p2.x) / 3, (p0.y + p1.y + p2.y) / 3);
+        if (d <= waterBandM) {
+            return TerrainTone.ShallowWater;
+        }
+        return p0.shore || p1.shore || p2.shore ? -1 : TerrainTone.Water;
+    };
+    const waterToneOf = (t: GridTriangle): TerrainTone =>
+        (waterClassOf(t) === TerrainTone.Water ? TerrainTone.Water : TerrainTone.ShallowWater);
+
+    // --- 3b. coplanar collapse --------------------------------------------
+    //
+    // Once, on the mesh the search settled on, not inside the search. Run
+    // per attempt it made the bake four times slower, and it would only have
+    // handed the saving straight back to the tolerance: the search coarsens
+    // until the tile fits, so a cheaper mesh fits at a finer error and comes
+    // out the same size. Here the saving stays a saving. A collapse can only
+    // remove triangles, so the budget still holds; the one thing it can add
+    // is a wall on a new grid-aligned edge between two shore positions,
+    // which is rare and a quad.
+    const collapsed = collapse({
+        triangles: tris,
+        size,
+        heights: meshHeights,
+        cellM: collapseCellM,
+        maxErrorM: Number.isFinite(maxErrorM) ? maxErrorM : input.maxErrorM,
+        maxAngleDeg: COLLAPSE_MAX_ANGLE_DEG,
+        padHeights: meshPadHeights,
+        padErrorM: PAD_ERROR_M,
+        coverClasses: meshCoverClasses,
+        isLandTriangle,
+        waterClassOf,
+        isFlatWater,
+        waterPasses: WATER_COLLAPSE_PASSES,
+    });
+    tris = collapsed.triangles;
+    collapsedVertices = collapsed.collapsed;
+    const meshTriangles = tris.length;
+
+    // --- 4/5. projection, pad, depth bias ---------------------------------
+
 
     /**
      * Height of the water surface at a grid point.
@@ -1470,19 +1522,12 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
                     rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2]);
             }
         } else {
-            const shore = Math.min(
-                sampleDist(p0.x, p0.y),
-                sampleDist(p1.x, p1.y),
-                sampleDist(p2.x, p2.y),
-            );
             waterIdx.push(
                 waterVertex(p0.x, p0.y, p0.shore),
                 waterVertex(p1.x, p1.y, p1.shore),
                 waterVertex(p2.x, p2.y, p2.shore),
             );
-            waterTone.push(
-                shore <= SHALLOW_WATER_COAST_M ? TerrainTone.ShallowWater : TerrainTone.Water,
-            );
+            waterTone.push(waterToneOf(t));
         }
     }
 
@@ -1671,10 +1716,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
                 };
                 const ja = bottom(a.x, a.y);
                 const jb = bottom(b.x, b.y);
-                const shore = Math.min(sampleDist(a.x, a.y), sampleDist(b.x, b.y));
-                const tone = shore <= SHALLOW_WATER_COAST_M
-                    ? TerrainTone.ShallowWater
-                    : TerrainTone.Water;
+                const tone = waterToneOf(t);
                 waterIdx.push(ia, ib, jb);
                 waterTone.push(tone);
                 waterIdx.push(ia, jb, ja);
@@ -2108,6 +2150,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         geometricErrorM,
         minLeafSize,
         attempts,
+        searchTriangles,
         collapsedVertices,
         meshTriangles,
         centerHeightM,

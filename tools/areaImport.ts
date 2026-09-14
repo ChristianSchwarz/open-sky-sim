@@ -103,6 +103,13 @@ interface Job {
     /** Progress within the current step, 0..100, when the tool reports it. */
     percent: number;
     error?: string;
+    /**
+     * Steps that finished with something left undone but nothing broken -
+     * an airfield bake that skipped an area because Overpass was down. The
+     * job still counts as done; these are repeated in its closing line so
+     * the user knows a re-run is owed.
+     */
+    warnings: string[];
     subscribers: Set<Response>;
 }
 
@@ -297,8 +304,26 @@ export function formatDuration(ms: number): string {
     return `${minutes}m ${seconds}s`;
 }
 
+/**
+ * What a step's exit code means for the job. Zero is done; a step's declared
+ * `partialCode` is done-with-a-warning, the tool having written its outputs
+ * but left part of the work for a re-run; anything else fails the job.
+ */
+export function stepOutcome(
+    code: number | null, step: Pick<Step, 'partialCode'>,
+): 'done' | 'partial' | 'failed' {
+    if (code === 0) {
+        return 'done';
+    }
+    if (step.partialCode !== undefined && code === step.partialCode) {
+        return 'partial';
+    }
+    return 'failed';
+}
+
 function runStep(
     job: Job, label: string, index: number, cmd: string, args: string[],
+    partial?: { code: number; warning: string },
 ): Promise<void> {
     return new Promise((resolve, reject) => {
         job.step = label;
@@ -328,8 +353,15 @@ function runStep(
                 line(job, tail);
             }
             const elapsed = formatDuration(Date.now() - startedAt);
-            if (code === 0) {
+            const outcome = stepOutcome(code, { partialCode: partial?.code });
+            if (outcome === 'done') {
                 line(job, `${label} - done in ${elapsed}`);
+                resolve();
+            } else if (outcome === 'partial' && partial) {
+                // The tool wrote what it could and said so on its own last
+                // lines; the steps after it still have everything they need.
+                job.warnings.push(`${label}: ${partial.warning}`);
+                line(job, `${label} - done with a warning in ${elapsed}: ${partial.warning}`);
                 resolve();
             } else {
                 reject(new Error(`${label} exited with code ${code} after ${elapsed}`));
@@ -338,7 +370,17 @@ function runStep(
     });
 }
 
-export interface Step { label: string; cmd: string; args: string[] }
+export interface Step {
+    label: string;
+    cmd: string;
+    args: string[];
+    /**
+     * An exit code that means "outputs written, part of the work skipped" -
+     * the job goes on and finishes with `partialWarning` instead of failing.
+     */
+    partialCode?: number;
+    partialWarning?: string;
+}
 
 /**
  * The stages, in order — the same command line as tools/README.md.
@@ -372,9 +414,18 @@ export function plan(job: { name: string; bbox: readonly number[] }, withCover: 
         // water is one the terrain will refuse to flatten. Before the cover,
         // so the ground under the pavement can be painted as built rather than
         // left as whatever grew there.
+        // Exit 2 (EXIT_PARTIAL in the tool) is "every Overpass mirror failed
+        // for an area, so its airfields were carried from the last bake, not
+        // refreshed". The manifest is intact and the mesh flattens whatever it
+        // holds, so the import goes on: aborting here threw away the DEM and
+        // coast stages' half hour and left no meshes at all, over data that a
+        // re-run of the same box picks up in minutes once Overpass is back.
         {
             label: 'baking airfields', cmd: PYTHON,
             args: ['tools/bake_osm_airports.py', `--bbox=${bbox}`],
+            partialCode: 2,
+            partialWarning: 'Overpass failed for at least one area, so its airfields were '
+                + 'carried from an earlier bake - re-run this import to refresh them',
         },
     ];
     if (withCover) {
@@ -405,7 +456,11 @@ async function runImport(job: Job, withCover: boolean): Promise<void> {
     const steps = plan(job, withCover);
     job.stepCount = steps.length;
     for (let i = 0; i < steps.length; i++) {
-        await runStep(job, steps[i].label, i, steps[i].cmd, steps[i].args);
+        const s = steps[i];
+        const partial = s.partialCode !== undefined && s.partialWarning
+            ? { code: s.partialCode, warning: s.partialWarning }
+            : undefined;
+        await runStep(job, s.label, i, s.cmd, s.args, partial);
     }
 }
 
@@ -447,7 +502,17 @@ function finishJob(job: Job, work: Promise<void>, doneLine: string): void {
         job.step = 'done';
         job.stepIndex = Math.max(0, job.stepCount - 1);
         job.percent = 100;
-        line(job, `\n${doneLine} (${formatDuration(Date.now() - startedAt)} total)`);
+        const total = formatDuration(Date.now() - startedAt);
+        if (job.warnings.length > 0) {
+            line(job, `
+${doneLine} (${total} total), with ${job.warnings.length} warning(s):`);
+            for (const w of job.warnings) {
+                line(job, `  ${w}`);
+            }
+        } else {
+            line(job, `
+${doneLine} (${total} total)`);
+        }
     }).catch((err: Error) => {
         job.state = 'failed';
         job.error = err.message;
@@ -486,6 +551,13 @@ export function startImport(req: Request, res: Response): void {
         res.status(400).json({ ok: false, error: 'bbox is inside out' });
         return;
     }
+    if (west < -180 || east > 180 || south < -90 || north > 90) {
+        res.status(400).json({
+            ok: false,
+            error: 'bbox must lie inside the WGS84 domain (boxes across the antimeridian are not supported)',
+        });
+        return;
+    }
     if (Math.max(east - west, north - south) > MAX_SPAN_DEG) {
         res.status(400).json({
             ok: false,
@@ -502,7 +574,7 @@ export function startImport(req: Request, res: Response): void {
     const id = `${slug(name)}-${jobs.size}-${process.hrtime.bigint().toString(36)}`;
     const job: Job = {
         id, name, bbox: snapBboxToTiles([west, south, east, north]),
-        state: 'running', log: [], step: 'starting',
+        state: 'running', log: [], warnings: [], step: 'starting',
         stepIndex: 0, stepCount: withCover ? 6 : 4, percent: 0,
         subscribers: new Set(),
     };
@@ -539,7 +611,7 @@ export function startDelete(req: Request, res: Response): void {
     const id = `delete-${slug(name)}-${jobs.size}-${process.hrtime.bigint().toString(36)}`;
     const job: Job = {
         id, name: `delete ${name}`, bbox,
-        state: 'running', log: [], step: 'starting',
+        state: 'running', log: [], warnings: [], step: 'starting',
         stepIndex: 0, stepCount: 3, percent: 0,
         subscribers: new Set(),
     };

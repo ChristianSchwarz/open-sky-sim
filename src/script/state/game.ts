@@ -2510,48 +2510,62 @@ export class Game {
         }
         this.applySelectedAircraft();
         this.state = GameState.PLAYER;
-        this.player.setSimulationPaused(false);
+        // Held until the terrain under the spawn is in (see below); the menu
+        // already paused it, the boot path has not.
+        this.player.setSimulationPaused(true);
         this.spawnMenu.enabled = false;
         this.spawnPanel.hide();
         this.damageSmoke?.reset();
 
-        // Warm DEM/meshes *before* the plane is placed: the sim worker keeps
-        // stepping through this await, and a spawn half a second from the ramp
-        // would otherwise spend its whole groove waiting for tiles.
+        // Place the plane first, then warm DEM/meshes around it with the
+        // simulation still paused from the menu. The other order - warm, then
+        // place - left the aircraft sitting live on the runway for the whole
+        // preload, which for the 10 km spawn is several hundred tiles: long
+        // enough to read as the spawn having done nothing. Pausing rather
+        // than stepping through the wait means an airborne spawn does not
+        // spend its groove falling into terrain that is not there yet.
+        const place = () => {
+            if (spawn === 'runway') {
+                this.player.reset(this.runwaySpawnPosition(), this.baseHeading, PLAYER_LAND_SPAWN);
+            } else if (spawn === 'carrier') {
+                this.player.reset(
+                    this.carrierApproachSpawnPosition(),
+                    PLAYER_CARRIER_HEADING,
+                    this.carrierApproachSpawn(),
+                );
+            } else if (spawn === 'carrierBarricade') {
+                this.player.reset(
+                    this.carrierBarricadeSpawnPosition(),
+                    PLAYER_CARRIER_HEADING,
+                    this.carrierBarricadeSpawn(),
+                );
+            } else if (spawn === 'carrierTakeoff') {
+                this.player.reset(
+                    this.carrierTakeoffSpawnPosition(),
+                    PLAYER_CARRIER_TAKEOFF_HEADING,
+                    this.carrierTakeoffSpawn(),
+                );
+            } else if (spawn === 'highAlt') {
+                this.player.reset(this.highAltSpawnPosition(), this.baseHeading,
+                    this.approachSpawnState(PLAYER_SPACE_SPAWN.throttle));
+            } else if (spawn === 'space') {
+                this.player.reset(this.spaceSpawnPosition(), this.baseHeading,
+                    this.approachSpawnState(PLAYER_SPACE_SPAWN.throttle));
+            } else {
+                // Approach and head-on both start on a short final toward the runway.
+                this.player.reset(this.landApproachSpawnPosition(), this.baseHeading,
+                    this.approachSpawnState(PLAYER_APPROACH_SPAWN.throttle));
+            }
+        };
+        place();
         const center = this.spawnCenterEnu(spawn);
         await this.preloadTerrainAroundPlane(center.x, center.z, spawn);
+        // Again, now that the DEM under the spawn is resident: a runway or
+        // final picked at another airfield was placed above whatever height
+        // the coarse tier answered.
+        place();
+        this.player.setSimulationPaused(false);
 
-        if (spawn === 'runway') {
-            this.player.reset(this.runwaySpawnPosition(), this.baseHeading, PLAYER_LAND_SPAWN);
-        } else if (spawn === 'carrier') {
-            this.player.reset(
-                this.carrierApproachSpawnPosition(),
-                PLAYER_CARRIER_HEADING,
-                this.carrierApproachSpawn(),
-            );
-        } else if (spawn === 'carrierBarricade') {
-            this.player.reset(
-                this.carrierBarricadeSpawnPosition(),
-                PLAYER_CARRIER_HEADING,
-                this.carrierBarricadeSpawn(),
-            );
-        } else if (spawn === 'carrierTakeoff') {
-            this.player.reset(
-                this.carrierTakeoffSpawnPosition(),
-                PLAYER_CARRIER_TAKEOFF_HEADING,
-                this.carrierTakeoffSpawn(),
-            );
-        } else if (spawn === 'highAlt') {
-            this.player.reset(this.highAltSpawnPosition(), this.baseHeading,
-                this.approachSpawnState(PLAYER_SPACE_SPAWN.throttle));
-        } else if (spawn === 'space') {
-            this.player.reset(this.spaceSpawnPosition(), this.baseHeading,
-                this.approachSpawnState(PLAYER_SPACE_SPAWN.throttle));
-        } else {
-            // Approach and head-on both start on a short final toward the runway.
-            this.player.reset(this.landApproachSpawnPosition(), this.baseHeading,
-                this.approachSpawnState(PLAYER_APPROACH_SPAWN.throttle));
-        }
         if (spawn === 'carrierBarricade') {
             // A barricade arrival is a deck exercise, not a sortie: an opponent
             // spawned a few hundred metres ahead would be inside the ship.

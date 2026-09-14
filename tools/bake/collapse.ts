@@ -49,6 +49,39 @@ export interface CollapseInput {
     padErrorM?: number;
     /** See DecimateInput.coverClasses. */
     coverClasses?: Uint8Array;
+    /**
+     * Which triangles are land. Water rings are judged by `waterClassOf`
+     * instead of the cover raster, and get `waterPasses` extra passes.
+     */
+    isLandTriangle?: (t: GridTriangle) => boolean;
+    /**
+     * Class of a water triangle - its tone, in practice, or -1 for a shape no
+     * collapse may produce. A water vertex only goes when every triangle the
+     * collapse leaves keeps the class it had, so the band a tone paints keeps
+     * its outline while the sheet on either side merges. Water is drawn as a flat
+     * sheet, so the cover raster under it - bathymetry, speckle, and the land
+     * nodes a shore-side triangle's footprint reaches - says nothing about
+     * whether two water facets may merge; measured on Madeira it kept three
+     * quarters of the sheet at cell resolution along every coast.
+     */
+    waterClassOf?: (t: GridTriangle) => number;
+    /**
+     * Whether a water triangle is drawn as a level sheet - the sea, or a lake
+     * at one measured height. Such a facet is judged flat and skips the
+     * height test: `heights` is bilinear across the cell, so a shore crossing
+     * between a wet node and a dry one reads a blend of the two, and every
+     * facet the cutter left beside the coast came out tilted by that blend
+     * and refused. A body that follows the DEM answers false and is judged
+     * like ground.
+     */
+    isFlatWater?: (t: GridTriangle) => boolean;
+    /**
+     * Further passes over all-water rings after the first, until one removes
+     * nothing. A flat sheet has no error to spend, so every pass is free; the
+     * first stops early only because a ring grown by a neighbour's collapse is
+     * not revisited. Default 0.
+     */
+    waterPasses?: number;
 }
 
 export interface CollapseResult {
@@ -81,7 +114,9 @@ function signedArea(a: Vec2, b: Vec2, c: Vec2): number {
 }
 
 export function collapse(input: CollapseInput): CollapseResult {
-    const { size, heights, cellM, maxErrorM, coverClasses } = input;
+    const { size, heights, cellM, maxErrorM, coverClasses, isLandTriangle, waterClassOf } = input;
+    const isWater = (t: GridTriangle): boolean =>
+        isLandTriangle !== undefined && waterClassOf !== undefined && !isLandTriangle(t);
     const cells = size - 1;
     const cosMax = Math.cos(input.maxAngleDeg * Math.PI / 180);
     const padHeights = input.padHeights;
@@ -118,7 +153,12 @@ export function collapse(input: CollapseInput): CollapseResult {
     }
 
     // --- per-facet plane, in metres --------------------------------------
+    const flat = (t: GridTriangle): boolean => isWater(t) && input.isFlatWater !== undefined && input.isFlatWater(t);
     const normalOf = (t: GridTriangle, out: number[]): void => {
+        if (flat(t)) {
+            out[0] = 0; out[1] = 0; out[2] = 1;
+            return;
+        }
         const [a, b, c] = t.pts;
         const ah = heightAt(heights, size, a.x, a.y);
         const bh = heightAt(heights, size, b.x, b.y);
@@ -192,13 +232,18 @@ export function collapse(input: CollapseInput): CollapseResult {
     // --- candidates, flattest ring first ----------------------------------
     const n: number[] = [0, 0, 0];
     const mean: number[] = [0, 0, 0];
-    const ringDeviation = (vi: number): number | undefined => {
+    const ringDeviation = (vi: number, waterOnly: boolean): number | undefined => {
         const v = verts[vi];
-        if (onBorder(v.p) || shore[vi]) {
+        if (v.tris.length === 0 || onBorder(v.p) || shore[vi]) {
             return undefined;
         }
-        const region = tris[v.tris[0]]!.regionId;
-        const cover = coverOf(tris[v.tris[0]]!);
+        const first = tris[v.tris[0]]!;
+        if (waterOnly && !isWater(first)) {
+            return undefined;
+        }
+        const region = first.regionId;
+        const water = isWater(first);
+        const cover = water ? 0 : coverOf(first);
         if (cover === -1) {
             return undefined;
         }
@@ -209,7 +254,10 @@ export function collapse(input: CollapseInput): CollapseResult {
             // locked above; a cut triangle's other corners are ordinary
             // ground and may go, which is what lets the ladder of one- and
             // two-cell leaves beside the coast merge away.
-            if (t.regionId !== region || coverOf(t) !== cover) {
+            // A water ring may mix tones: the tone is per facet and the
+            // collapse below keeps each facet's own, so the band's outline
+            // slides along itself but never across a facet.
+            if (t.regionId !== region || (!water && coverOf(t) !== cover)) {
                 return undefined;
             }
             normalOf(t, n);
@@ -228,111 +276,135 @@ export function collapse(input: CollapseInput): CollapseResult {
         return worst >= cosMax ? worst : undefined;
     };
 
-    const order: Array<{ vi: number; d: number }> = [];
-    for (let vi = 0; vi < verts.length; vi++) {
-        const d = ringDeviation(vi);
-        if (d !== undefined) {
-            order.push({ vi, d });
-        }
-    }
-    order.sort((a, b) => b.d - a.d);
-
     // --- collapse -----------------------------------------------------------
     let collapsed = 0;
-    for (const { vi } of order) {
-        const v = verts[vi];
-        // The ring may have changed under a neighbour's collapse; re-check.
-        if (v.tris.length === 0 || ringDeviation(vi) === undefined) {
-            continue;
-        }
-        const neighbours = new Set<number>();
-        for (const ti of v.tris) {
-            for (const u of triVerts[ti]) {
-                if (u !== vi) {
-                    neighbours.add(u);
-                }
+    const pass = (waterOnly: boolean): number => {
+        const order: Array<{ vi: number; d: number }> = [];
+        for (let vi = 0; vi < verts.length; vi++) {
+            const d = ringDeviation(vi, waterOnly);
+            if (d !== undefined) {
+                order.push({ vi, d });
             }
         }
-        for (const ui of neighbours) {
-            const u = verts[ui];
-            // Landing on a shore vertex would give some ring triangle an edge
-            // with a shore vertex at both ends that is not a shoreline chord,
-            // and downstream a wall hangs from every such edge.
-            if (shore[ui]) {
+        order.sort((a, b) => b.d - a.d);
+
+        let removed = 0;
+        for (const { vi } of order) {
+            const v = verts[vi];
+            // The ring may have changed under a neighbour's collapse; re-check.
+            if (v.tris.length === 0 || ringDeviation(vi, waterOnly) === undefined) {
                 continue;
             }
-            // Triangles v and u share vanish; the rest have v moved onto u.
-            const kept: Array<{ ti: number; tri: GridTriangle; ids: number[] }> = [];
-            let ok = true;
+            const water = isWater(tris[v.tris[0]]!);
+            const neighbours = new Set<number>();
             for (const ti of v.tris) {
-                const ids = triVerts[ti];
-                if (ids.includes(ui)) {
+                for (const u of triVerts[ti]) {
+                    if (u !== vi) {
+                        neighbours.add(u);
+                    }
+                }
+            }
+            for (const ui of neighbours) {
+                const u = verts[ui];
+                // Landing on a shore vertex would give some ring triangle an edge
+                // with a shore vertex at both ends that is not a shoreline chord,
+                // and downstream a wall hangs from every such edge.
+                if (shore[ui]) {
                     continue;
                 }
-                const old = tris[ti]!;
-                // Points are per-triangle objects; the weld was by coordinate.
-                const pts = old.pts.map(p => (p.x === v.p.x && p.y === v.p.y ? u.p : p)) as [Vec2, Vec2, Vec2];
-                const before = signedArea(old.pts[0], old.pts[1], old.pts[2]);
-                const after = signedArea(pts[0], pts[1], pts[2]);
-                if (Math.abs(after) < MIN_AREA || Math.sign(after) !== Math.sign(before)) {
-                    ok = false;
-                    break;
-                }
-                kept.push({ ti, tri: { pts, regionId: old.regionId, cut: old.cut }, ids: ids.map(id => (id === vi ? ui : id)) });
-            }
-            if (!ok) {
-                continue;
-            }
-            // Every node under the ring must stay within tolerance of the
-            // DEM under whichever new triangle now covers it.
-            let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-            for (const ti of v.tris) {
-                for (const p of tris[ti]!.pts) {
-                    x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
-                    y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
-                }
-            }
-            for (let y = Math.ceil(y0); y <= Math.floor(y1) && ok; y++) {
-                for (let x = Math.ceil(x0); x <= Math.floor(x1); x++) {
-                    for (const k of kept) {
-                        const h = planeHeight(k.tri, x, y);
-                        if (h === undefined) {
-                            continue;
-                        }
-                        if (Math.abs(h - heights[y * size + x]) > maxErrorM
-                            || (padHeights !== undefined
-                                && Math.abs(padPlaneHeight(k.tri, x, y) - padHeights[y * size + x]) > padErrorM)) {
-                            ok = false;
-                        }
+                // Triangles v and u share vanish; the rest have v moved onto u.
+                const kept: Array<{ ti: number; tri: GridTriangle; ids: number[] }> = [];
+                let ok = true;
+                for (const ti of v.tris) {
+                    const ids = triVerts[ti];
+                    if (ids.includes(ui)) {
+                        continue;
+                    }
+                    const old = tris[ti]!;
+                    // Points are per-triangle objects; the weld was by coordinate.
+                    const pts = old.pts.map(p => (p.x === v.p.x && p.y === v.p.y ? u.p : p)) as [Vec2, Vec2, Vec2];
+                    const before = signedArea(old.pts[0], old.pts[1], old.pts[2]);
+                    const after = signedArea(pts[0], pts[1], pts[2]);
+                    if (Math.abs(after) < MIN_AREA || Math.sign(after) !== Math.sign(before)) {
+                        ok = false;
                         break;
                     }
-                    if (!ok) {
+                    const tri: GridTriangle = { pts, regionId: old.regionId, cut: old.cut };
+                    // A water facet that grew across the band's outline would
+                    // paint the far tone up to the shore.
+                    const cls = water ? waterClassOf!(tri) : 0;
+                    if (water && (cls === -1 || cls !== waterClassOf!(old))) {
+                        ok = false;
                         break;
                     }
+                    kept.push({ ti, tri, ids: ids.map(id => (id === vi ? ui : id)) });
                 }
-            }
-            if (!ok) {
-                continue;
-            }
-            // Commit.
-            for (const ti of v.tris) {
-                if (triVerts[ti].includes(ui)) {
-                    tris[ti] = undefined;
-                    for (const w of triVerts[ti]) {
-                        if (w !== vi) {
-                            const list = verts[w].tris;
-                            list.splice(list.indexOf(ti), 1);
+                if (!ok) {
+                    continue;
+                }
+                // Every node under the ring must stay within tolerance of the
+                // DEM under whichever new triangle now covers it.
+                let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+                for (const ti of v.tris) {
+                    for (const p of tris[ti]!.pts) {
+                        x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
+                        y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
+                    }
+                }
+                for (let y = Math.ceil(y0); y <= Math.floor(y1) && ok; y++) {
+                    for (let x = Math.ceil(x0); x <= Math.floor(x1); x++) {
+                        for (const k of kept) {
+                            const h = planeHeight(k.tri, x, y);
+                            if (h === undefined) {
+                                continue;
+                            }
+                            if (flat(k.tri)) {
+                                break;
+                            }
+                            if (Math.abs(h - heights[y * size + x]) > maxErrorM
+                                || (padHeights !== undefined
+                                    && Math.abs(padPlaneHeight(k.tri, x, y) - padHeights[y * size + x]) > padErrorM)) {
+                                ok = false;
+                            }
+                            break;
+                        }
+                        if (!ok) {
+                            break;
                         }
                     }
                 }
+                if (!ok) {
+                    continue;
+                }
+                // Commit.
+                for (const ti of v.tris) {
+                    if (triVerts[ti].includes(ui)) {
+                        tris[ti] = undefined;
+                        for (const w of triVerts[ti]) {
+                            if (w !== vi) {
+                                const list = verts[w].tris;
+                                list.splice(list.indexOf(ti), 1);
+                            }
+                        }
+                    }
+                }
+                for (const k of kept) {
+                    tris[k.ti] = k.tri;
+                    triVerts[k.ti] = k.ids;
+                    u.tris.push(k.ti);
+                }
+                v.tris = [];
+                removed++;
+                break;
             }
-            for (const k of kept) {
-                tris[k.ti] = k.tri;
-                triVerts[k.ti] = k.ids;
-                u.tris.push(k.ti);
-            }
-            v.tris = [];
-            collapsed++;
+        }
+        collapsed += removed;
+        return removed;
+    };
+
+    pass(false);
+    for (let i = 0; i < (input.waterPasses ?? 0); i++) {
+        if (pass(true) === 0) {
             break;
         }
     }

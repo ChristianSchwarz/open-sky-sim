@@ -3,7 +3,8 @@ import {
 } from '@angular/core';
 import { AreaImportService } from './areaImportService';
 import {
-    Box, MAX_SPAN_DEG, MAX_ZOOM, MIN_ZOOM, TILE_PX, boxSpanDeg, latToWorld, lonToWorld, worldToLat, worldToLon,
+    Box, MAX_SPAN_DEG, MAX_ZOOM, MIN_ZOOM, TILE_PX, boxSpanDeg, crossesAntimeridian, latToWorld, lonToWorld,
+    worldToLat, worldToLon, wrapLon,
 } from './importMath';
 
 /** OSM tiles, kept for the session so reopening the dialog does not refetch them. */
@@ -150,7 +151,7 @@ export class TerrainMap implements AfterViewInit, OnDestroy {
             const o = this.origin();
             const { w, h } = this.viewSize();
             const view = this.service.view;
-            view.centreLon = worldToLon(o.x - (p.x - this.dragging.x) + w / 2, view.zoom);
+            view.centreLon = wrapLon(worldToLon(o.x - (p.x - this.dragging.x) + w / 2, view.zoom));
             view.centreLat = worldToLat(o.y - (p.y - this.dragging.y) + h / 2, view.zoom);
             this.dragging.x = p.x;
             this.dragging.y = p.y;
@@ -185,7 +186,7 @@ export class TerrainMap implements AfterViewInit, OnDestroy {
         const before = this.screenToLonLat(p.x, p.y);
         view.zoom = next;
         const after = this.screenToLonLat(p.x, p.y);
-        view.centreLon += before.lon - after.lon;
+        view.centreLon = wrapLon(view.centreLon + before.lon - after.lon);
         view.centreLat += before.lat - after.lat;
         this.draw();
     }
@@ -196,8 +197,13 @@ export class TerrainMap implements AfterViewInit, OnDestroy {
         }
         const a = this.screenToLonLat(this.dragging.x, this.dragging.y);
         const b = this.screenToLonLat(this.dragTo.x, this.dragTo.y);
+        // The pointer maths runs on unwrapped world pixels, so a drag beyond
+        // the antimeridian reads 182 for -178. Wrap the west edge and keep
+        // the width; an east edge still past 180 then means the box really
+        // does straddle the line, which blockedReason reports.
+        const west = wrapLon(Math.min(a.lon, b.lon));
         const box = {
-            west: Math.min(a.lon, b.lon), east: Math.max(a.lon, b.lon),
+            west, east: west + Math.abs(a.lon - b.lon),
             south: Math.min(a.lat, b.lat), north: Math.max(a.lat, b.lat),
         };
         this.service.selection.set(
@@ -257,7 +263,7 @@ export class TerrainMap implements AfterViewInit, OnDestroy {
         }
         const selection = this.service.selection();
         if (selection) {
-            const tooBig = boxSpanDeg(selection) > MAX_SPAN_DEG;
+            const tooBig = boxSpanDeg(selection) > MAX_SPAN_DEG || crossesAntimeridian(selection);
             this.strokeBox(
                 ctx,
                 selection,
@@ -270,6 +276,13 @@ export class TerrainMap implements AfterViewInit, OnDestroy {
     private strokeBox(ctx: CanvasRenderingContext2D, b: Box, stroke: string, fill: string, label?: string): void {
         const a = this.lonLatToScreen(b.west, b.north);
         const c = this.lonLatToScreen(b.east, b.south);
+        // The view's centre longitude is kept wrapped while the tiles repeat,
+        // so draw the box in whichever copy of the world lies nearest the
+        // middle of the view rather than a world width off screen.
+        const worldW = TILE_PX * (1 << this.service.view.zoom);
+        const shift = Math.round((this.viewSize().w / 2 - (a.x + c.x) / 2) / worldW) * worldW;
+        a.x += shift;
+        c.x += shift;
         ctx.fillStyle = fill;
         ctx.fillRect(a.x, a.y, c.x - a.x, c.y - a.y);
         ctx.strokeStyle = stroke;

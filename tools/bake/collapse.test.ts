@@ -114,6 +114,53 @@ describe('coplanar vertex collapse', () => {
         assert.ok(worst <= 0.3 + 1e-6, `worst error ${worst}`);
     });
 
+    it('merges a level water sheet up to the shore, but keeps a shore facet inside the band', () => {
+        // Region 0 is water on the left half, region 1 land on the right.
+        // The water is level at 0 and the land a 100 m cliff, so a bilinear
+        // sample at a shore crossing blends the two and every cut facet on
+        // the water side reads as tilted. Told the water is flat, the pass
+        // merges the sheet right up to the shore vertices, which stay put;
+        // a shore facet the class function calls -1 (here: larger than a
+        // band's worth of cells) is never produced.
+        const heights = grid(SIZE, (x) => (x < 16 ? 0 : 100));
+        const regionNodes = new Uint16Array(SIZE * SIZE);
+        for (let y = 0; y < SIZE; y++) {
+            for (let x = 0; x < SIZE; x++) {
+                regionNodes[y * SIZE + x] = x < 16 ? 0 : 1;
+            }
+        }
+        const before = decimate({
+            size: SIZE, heights, regionNodes, maxErrorM: 0.5, isLandRegion: id => id === 1,
+        }).triangles;
+        const isLand = (t: GridTriangle) => t.regionId === 1;
+        const water = (ts: GridTriangle[]) => ts.filter(t => !isLand(t));
+        const shoreKeys = (ts: GridTriangle[]) =>
+            new Set(ts.flatMap(t => t.pts.filter(p => p.shore).map(p => `${p.x},${p.y}`)));
+        const BAND = 24;
+        const common = { size: SIZE, heights, cellM: 30, maxErrorM: 0.5, maxAngleDeg: 2 };
+        const plain = collapse({ ...common, triangles: before });
+        const r = collapse({
+            ...common,
+            triangles: before,
+            isLandTriangle: isLand,
+            waterClassOf: t => (area(t) > BAND && t.pts.some(p => p.shore) ? -1 : 0),
+            isFlatWater: () => true,
+            waterPasses: 3,
+        });
+        assert.ok(shoreKeys(before).size > 0, 'the cut tagged shore vertices');
+        assert.ok(
+            water(r.triangles).length < water(plain.triangles).length / 2,
+            `${water(r.triangles).length} water facets, ${water(plain.triangles).length} without the water rules`,
+        );
+        assert.ok(Math.abs(totalArea(r.triangles) - 32 * 32) < 1e-6, 'covers the tile exactly');
+        assert.deepEqual(shoreKeys(r.triangles), shoreKeys(before), 'every shore vertex kept');
+        for (const t of water(r.triangles)) {
+            if (t.pts.some(p => p.shore)) {
+                assert.ok(area(t) <= BAND, `shore facet of ${area(t)} cells² outgrew the band`);
+            }
+        }
+    });
+
     it('refuses to merge across a region or cover boundary', () => {
         const heights = grid(SIZE, () => 0);
         const regions = new Uint16Array(SIZE * SIZE);

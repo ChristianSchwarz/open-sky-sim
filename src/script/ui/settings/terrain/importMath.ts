@@ -39,6 +39,26 @@ export function worldToLon(x: number, z: number): number {
     return (x / (TILE_PX * (1 << z))) * 360 - 180;
 }
 
+/**
+ * A longitude brought back into [-180, 180). The map draws its tiles wrapped,
+ * so panning east past New Zealand keeps rendering, but the world-pixel
+ * arithmetic runs on regardless and would otherwise hand out 182 for the
+ * Chatham Islands where the bake wants -178.
+ */
+export function wrapLon(lon: number): number {
+    const w = ((lon + 180) % 360 + 360) % 360 - 180;
+    return Object.is(w, -0) ? 0 : w;
+}
+
+/**
+ * A box whose east edge lies past the antimeridian. The bake runs on one
+ * WGS84 sheet, so such a box cannot be imported; it is kept unwrapped
+ * (west in range, east above 180) so it still draws as one rectangle.
+ */
+export function crossesAntimeridian(b: Box): boolean {
+    return b.east > 180;
+}
+
 export function worldToLat(y: number, z: number): number {
     const n = Math.PI - 2 * Math.PI * y / (TILE_PX * (1 << z));
     return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
@@ -83,6 +103,9 @@ export function blockedReason(running: boolean, selection: Box | undefined, name
     const span = boxSpanDeg(selection);
     if (span > MAX_SPAN_DEG) {
         return `too big — ${span.toFixed(2)}° exceeds the ${MAX_SPAN_DEG}° limit`;
+    }
+    if (crossesAntimeridian(selection)) {
+        return 'crosses the antimeridian — keep the box on one side of 180°';
     }
     if (name.trim().length === 0) {
         return 'type a name for the area';

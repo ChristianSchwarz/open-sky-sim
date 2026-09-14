@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
     Step, deletePlan, formatDuration, isProgressLine, parseProgress, plan, snapBboxToTiles, splitStream,
+    stepOutcome,
 } from './areaImport';
 
 /**
@@ -196,5 +197,32 @@ describe('the bake plans end with meshes then textures over the same box', () =>
 
     it('holds for a delete', () => {
         assertMeshThenTextures(deletePlan('mad', [-17.53, 32.3, -16.17, 33.35]));
+    });
+});
+
+describe('stepOutcome', () => {
+    it('is done on zero, whatever the step declares', () => {
+        assert.equal(stepOutcome(0, {}), 'done');
+        assert.equal(stepOutcome(0, { partialCode: 2 }), 'done');
+    });
+
+    it('is partial only on the code the step declares', () => {
+        assert.equal(stepOutcome(2, { partialCode: 2 }), 'partial');
+        assert.equal(stepOutcome(1, { partialCode: 2 }), 'failed');
+        assert.equal(stepOutcome(2, {}), 'failed');
+        assert.equal(stepOutcome(null, { partialCode: 2 }), 'failed');
+    });
+
+    it('lets an airfield bake that skipped an Overpass-less area finish the import', () => {
+        // bake_osm_airports.py exits EXIT_PARTIAL (2) when it wrote the
+        // manifest but every mirror failed for an area; one such area used
+        // to abort the whole import after the DEM and coast stages.
+        const airfields = plan({ name: 'lhg', bbox: [166.9, -21.8, 168.4, -20.6] }, true)
+            .find(s => s.args.includes('tools/bake_osm_airports.py'));
+        assert.ok(airfields, 'no airfield bake in the plan');
+        assert.equal(airfields.partialCode, 2);
+        assert.ok(airfields.partialWarning, 'a partial step needs a warning to report');
+        assert.equal(stepOutcome(2, airfields), 'partial');
+        assert.equal(stepOutcome(1, airfields), 'failed');
     });
 });

@@ -217,6 +217,13 @@ DEFAULT_PER_AREA = None
 # finish starting, but an unlimited area can now hold dozens.
 DEFAULT_JOBS = max(1, (os.cpu_count() or 1) - 1)
 
+# Exit status when the manifest was written but at least one area was skipped
+# because every Overpass mirror failed for it. Distinct from 1 so the importer
+# can tell "the airfields for one area are stale, re-run to pick them up" from
+# "the bake broke": the manifest is intact and everything after the airfields
+# (cover, meshes, textures) is still worth baking.
+EXIT_PARTIAL = 2
+
 
 # --- local metric frame -----------------------------------------------------
 
@@ -1853,7 +1860,7 @@ def bake(args: argparse.Namespace) -> int:
         print(f'  {len(failed)} areas skipped after an Overpass failure: '
               f'{", ".join(failed)} - re-run to pick them up')
     print(f'done in {time.time() - started:.1f}s')
-    return 1 if failed else 0
+    return EXIT_PARTIAL if failed else 0
 
 
 def make_console_printable() -> None:

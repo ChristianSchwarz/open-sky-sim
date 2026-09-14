@@ -333,6 +333,14 @@ longer matches them — exit 1) from *notes* (OSM disagreeing with itself, which
 it does constantly on small fields — exit 0). Add `--verbose` for a line per
 airfield, or `--icao GCLP` for one.
 
+The bake itself exits 2 when it wrote the manifest but had to skip an area
+because every Overpass mirror failed for it (the area keeps whatever airfields
+an earlier run stored). The in-app importer treats that as a warning and
+carries on to the cover, mesh and texture stages, since the manifest is
+intact; re-run the same box once Overpass is back to refresh them. Note that
+overpass.osm.ch is a Europe-only extract and answers an empty list for any
+box outside it, so a non-European area has only two mirrors to fall back on.
+
 ### Height sources
 
 Stage 1 needs one axis-aligned EPSG:4326 GeoTIFF. `data/output_hh.tif` is the
