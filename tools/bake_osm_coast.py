@@ -69,7 +69,9 @@ from osm_common import (
     nodes_map as _nodes_map,
     overpass_fetch as _overpass_fetch,
     overpass_fetch_cells,
+    overpass_fetch_groups,
     OVERPASS_OUT,
+    sea_cell_skipper,
     parse_bbox,
     read_lwm,
     relation_rings as _relation_rings,
@@ -305,6 +307,7 @@ class StageProgress:
 
 def overpass_query(
     b: Bounds, refresh: bool = False, progress: Optional[StageProgress] = None,
+    skip_sea: Optional[Callable[[Bounds], bool]] = None,
 ) -> dict:
     """Fetch the coastline and the water features as two separate requests.
 
@@ -326,6 +329,13 @@ def overpass_query(
     inline on each way instead of as a node object per vertex, which is
     where most of the bytes went, and the shoreline nodes the two groups
     share are no longer downloaded twice.
+
+    The two go out as one batch (`overpass_fetch_groups`), so the mirror
+    slots run the water cells while the last coastline cells finish. The
+    progress bar shows the coastline phase carrying the bytes of both and
+    the water phase completing the moment it ends. `skip_sea`, when given,
+    spares the water query the cells the DEM says are open sea; the
+    coastline is always asked, since a shoreline can clip a cell's edge.
     """
     def coastline(c: Bounds) -> str:
         return f'''[out:json][timeout:240];
@@ -351,21 +361,24 @@ def overpass_query(
 );
 {OVERPASS_OUT}
 '''
-    answers: List[dict] = []
-    for key, label, query_for in (('coast', 'coastline', coastline),
-                                  ('water', 'water features', features)):
-        extra: Dict[str, object] = {}
-        if progress is not None:
-            progress.begin(key)
+    extra: Dict[str, object] = {}
+    if progress is not None:
+        progress.begin('coast', 'fetching OSM coastline and water features')
+        received = [0, 0]
 
-            def on_bytes(received: int) -> None:
-                progress.update(fetch_fraction(received), f'{format_mb(received)} received')
-            extra['on_progress'] = on_bytes
-        got = overpass_fetch_cells(query_for, b, label, refresh, **extra)
-        answers.append(got)
-        if progress is not None:
-            progress.end(f'{len(got.get("elements", []))} elements')
-    return merge_elements(answers)
+        def on_bytes(group: int, n: int) -> None:
+            received[group] = n
+            total = sum(received)
+            progress.update(fetch_fraction(total), f'{format_mb(total)} received')
+        extra['on_progress'] = on_bytes
+    answers = overpass_fetch_groups(
+        [(coastline, 'coastline', None), (features, 'water features', skip_sea)],
+        b, refresh, **extra)
+    if progress is not None:
+        progress.end(f'{len(answers[0].get("elements", []))} elements')
+        progress.begin('water')
+        progress.end(f'{len(answers[1].get("elements", []))} elements, fetched with the coastline')
+    return merge_elements([a for a in answers if a is not None])
 
 
 def _way_line(way: dict, nodes: Dict[int, Tuple[float, float]]) -> Optional[LineString]:
@@ -864,6 +877,7 @@ def resolve_body_heights(
 
 def assemble_land(
     bbox: Bounds, args: argparse.Namespace, progress: Optional[StageProgress] = None,
+    skip_sea: Optional[Callable[[Bounds], bool]] = None,
 ) -> Tuple[MultiPolygon, List[WaterBody], List[Watercourse]]:
     # osmcoastline emits the ocean shoreline and nothing else, so those two
     # paths carry no inland water and no watercourses. They still bake
@@ -897,7 +911,7 @@ def assemble_land(
                 return from_shapefile(shp)
             print('osmcoastline not available — falling back to Overpass', file=sys.stderr)
 
-    data = overpass_query(bbox, getattr(args, 'refresh_osm', False), progress)
+    data = overpass_query(bbox, getattr(args, 'refresh_osm', False), progress, skip_sea)
     print(f'  {len(data.get("elements", []))} OSM elements')
     if progress is not None:
         progress.begin('land')
@@ -1686,12 +1700,25 @@ def bake(args: argparse.Namespace) -> int:
         ('clip', 'writing coast and vector tiles', 30),
     ])
 
+    # The DEM stage ran before this one, so its pyramid says which fetch
+    # cells hold no land at all; the water and landuse queries skip those.
+    skip_sea = sea_cell_skipper(out_dir, manifest.get('seaLevel', 0.0))
+    if getattr(args, 'fetch_only', False):
+        # The importer runs this alongside the DEM fetch to warm the cache;
+        # the real bake later finds every cell cached. Nothing is written.
+        # Without the DEM in place yet, no cell can be called sea.
+        overpass_query(bbox, args.refresh_osm)
+        if args.osm_landuse and HAS_OSM_LANDUSE:
+            overpass_landuse_query((bbox.west, bbox.south, bbox.east, bbox.north), args.refresh_osm)
+        print(f'fetched in {time.time() - started:.0f}s; nothing baked (--fetch-only)')
+        return 0
+
     # Workers start now, so their spawn overlaps the fetches and the
     # single-threaded polygon assembly; they get their inputs later, see
     # TilePool.publish.
     pool = TilePool(args.jobs).start()
 
-    land, inland, courses = assemble_land(bbox, args, progress)
+    land, inland, courses = assemble_land(bbox, args, progress, skip_sea)
     if not inland and not courses:
         # A silently truncated Overpass answer looks exactly like a box with
         # no water in it, and one such answer was cached and baked for a
@@ -1719,7 +1746,7 @@ def bake(args: argparse.Namespace) -> int:
                             f'({label}) {format_mb(received)} received')
         landuse_data = overpass_landuse_query(
             (bbox.west, bbox.south, bbox.east, bbox.north), args.refresh_osm,
-            on_progress=on_landuse_bytes)
+            on_progress=on_landuse_bytes, skip_cell=skip_sea)
         progress.end(f'{len(landuse_data.get("elements", []))} elements')
         progress.begin('landuse')
         landuse_polys, landuse_classes = assemble_landuse_polygons(landuse_data, progress.update)
@@ -1939,6 +1966,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                         help='accept a bbox that really is almost all water')
     parser.add_argument('--refresh-osm', action='store_true',
                         help='ignore the cached Overpass response and re-fetch')
+    parser.add_argument('--fetch-only', action='store_true',
+                        help='only fetch the Overpass answers into the cache; bake nothing')
     parser.add_argument('--osm-landuse', action='store_true',
                         help='cut real landuse-polygon boundaries into the coast vector layer '
                              '(z%d+ only); requires shapely' % LANDUSE_REGION_MIN_ZOOM)

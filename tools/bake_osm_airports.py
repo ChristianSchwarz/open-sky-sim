@@ -65,6 +65,7 @@ from osm_common import (
     merge_elements,
     overpass_fetch_cells,
     nodes_map,
+    sea_cell_skipper,
     parse_bbox,
     read_lwm,
     relation_rings,
@@ -817,6 +818,7 @@ def _aeroway_query(clauses: Sequence[str]) -> str:
 def overpass_airports(
     b: Bounds, refresh: bool = False,
     progress: Optional[StageProgress] = None, phase_prefix: str = '',
+    skip_sea: Optional[Callable[[Bounds], bool]] = None,
 ) -> dict:
     """Aerodromes, runways and the rest of the surfaces, as separate requests.
 
@@ -844,8 +846,10 @@ def overpass_airports(
     endpoint would be the wrong trade.
 
     A cell that comes back empty is believed unless it came from a mirror
-    that has been caught truncating (`accept_empty_once`), which is what
-    used to be checked here against the aerodrome count.
+    that has been caught truncating (`refuse_untrusted_empty`), which is what
+    used to be checked here against the aerodrome count. `skip_sea` spares
+    the two bulk groups the cells the DEM says are open sea; aerodromes
+    and runways are always asked, so an offshore helipad still comes through.
     """
     def aerodromes(c: Bounds) -> str:
         return _aeroway_query(
@@ -867,14 +871,14 @@ def overpass_airports(
                for kind in ('apron', 'terminal')])
 
     groups = (
-        ('aerodromes', 'aerodromes', aerodromes, OVERPASS_LIGHT_CELL_ZOOM, False),
-        ('runways', 'runways', runways, OVERPASS_LIGHT_CELL_ZOOM, False),
-        ('taxiways', 'taxiways', taxiways, OVERPASS_CELL_ZOOM, True),
-        ('aprons', 'aprons and buildings', aprons, OVERPASS_CELL_ZOOM, True),
+        ('aerodromes', 'aerodromes', aerodromes, OVERPASS_LIGHT_CELL_ZOOM, False, None),
+        ('runways', 'runways', runways, OVERPASS_LIGHT_CELL_ZOOM, False, None),
+        ('taxiways', 'taxiways', taxiways, OVERPASS_CELL_ZOOM, True, skip_sea),
+        ('aprons', 'aprons and buildings', aprons, OVERPASS_CELL_ZOOM, True, skip_sea),
     )
 
     elements: List[dict] = []
-    for key, label, query_for, zoom, is_optional in groups:
+    for key, label, query_for, zoom, is_optional, skip in groups:
         extra: Dict[str, object] = {}
         if progress is not None:
             progress.begin(phase_prefix + key)
@@ -883,7 +887,7 @@ def overpass_airports(
                 progress.update(fetch_fraction(received), f'{format_mb(received)} received')
             extra['on_progress'] = on_bytes
         try:
-            got = overpass_fetch_cells(query_for, b, label, refresh, zoom=zoom, **extra)
+            got = overpass_fetch_cells(query_for, b, label, refresh, zoom=zoom, skip=skip, **extra)
         except Exception as err:
             if not is_optional:
                 raise
@@ -1696,6 +1700,17 @@ def bake(args: argparse.Namespace) -> int:
         targets = area_bounds(manifest)
     print(f'targets     {len(targets)}: ' + ', '.join(name for name, _ in targets))
 
+    skip_sea = sea_cell_skipper(out_dir, manifest.get('seaLevel', 0.0))
+    if args.fetch_only:
+        # The importer runs this alongside the DEM fetch to warm the cache;
+        # nothing is assembled or written. No sea skip: the pyramid this
+        # box needs is not there yet, so every cell is asked for.
+        for name, bounds in targets:
+            print(f'\narea {name}: fetching')
+            overpass_airports(bounds, args.refresh_osm)
+        print(f'fetched in {time.time() - started:.0f}s; nothing baked (--fetch-only)')
+        return 0
+
     dem = DemSampler(out_dir, max_zoom, tile_size)
     mask = None
     if manifest.get('coastMask', {}).get('enabled'):
@@ -1728,7 +1743,7 @@ def bake(args: argparse.Namespace) -> int:
         print(f'\narea {name}  lon [{bounds.west:.4f}, {bounds.east:.4f}] '
               f'lat [{bounds.south:.4f}, {bounds.north:.4f}]')
         try:
-            data = overpass_airports(bounds, args.refresh_osm, progress, prefix)
+            data = overpass_airports(bounds, args.refresh_osm, progress, prefix, skip_sea)
         except Exception as err:
             # One area's fetch failing must not cost the areas after it. The
             # merge is per-bbox, so a skipped area simply keeps whatever it had
@@ -1845,6 +1860,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument('--bbox', help='west,south,east,north degrees (default: every baked area)')
     parser.add_argument('--per-area', type=int, default=DEFAULT_PER_AREA,
                         help='airfields kept per area, best first (default: unlimited)')
+    parser.add_argument('--fetch-only', action='store_true',
+                        help='only fetch the Overpass answers into the cache; bake nothing')
     parser.add_argument('--refresh-osm', action='store_true',
                         help='ignore the cached Overpass response and re-fetch')
     parser.add_argument('--jobs', type=int, default=DEFAULT_JOBS,

@@ -6,7 +6,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from osm_common import (  # noqa: E402
-    OVERPASS_UNTRUSTED_EMPTY, accept_empty_once, expand_geometry, merge_elements, nodes_map,
+    OVERPASS_UNTRUSTED_EMPTY, expand_geometry, refuse_untrusted_empty, merge_elements, nodes_map,
     relation_rings, ways_map,
 )
 
@@ -87,21 +87,65 @@ class ExpandGeometryTest(unittest.TestCase):
         self.assertEqual(ways[1]['nodes'][-1], ways[2]['nodes'][0])
 
 
-class AcceptEmptyOnceTest(unittest.TestCase):
+class RefuseUntrustedEmptyTest(unittest.TestCase):
     def test_trusted_mirror_empty_is_believed(self):
-        accept_empty_once()({'elements': []}, mirror='https://overpass-api.de/api/interpreter')
+        refuse_untrusted_empty()({'elements': []}, mirror='https://overpass-api.de/api/interpreter')
 
     def test_cache_hit_empty_is_believed(self):
-        accept_empty_once()({'elements': []})
+        refuse_untrusted_empty()({'elements': []})
 
-    def test_untrusted_mirror_empty_is_refused_once(self):
-        validate = accept_empty_once()
-        with self.assertRaises(RuntimeError):
-            validate({'elements': []}, mirror=OVERPASS_UNTRUSTED_EMPTY[0])
-        validate({'elements': []}, mirror=OVERPASS_UNTRUSTED_EMPTY[0])
+    def test_untrusted_mirror_empty_is_refused_every_time(self):
+        validate = refuse_untrusted_empty()
+        for _ in range(3):
+            with self.assertRaises(RuntimeError):
+                validate({'elements': []}, mirror=OVERPASS_UNTRUSTED_EMPTY[0])
 
     def test_non_empty_is_fine_anywhere(self):
-        accept_empty_once()({'elements': [{'type': 'node'}]}, mirror=OVERPASS_UNTRUSTED_EMPTY[0])
+        refuse_untrusted_empty()({'elements': [{'type': 'node'}]}, mirror=OVERPASS_UNTRUSTED_EMPTY[0])
+
+
+class SeaCellSkipperTest(unittest.TestCase):
+    """The DEM merge writes a z7 tile only where there is land, so the
+    pyramid answers which fetch cells hold none."""
+
+    def _pdm(self, grid):
+        import struct, zlib
+        import numpy as np
+        from osm_common import PDM_MAGIC
+        n = grid.shape[0]
+        lo, hi = float(grid.min()), float(grid.max())
+        scale = (hi - lo) / 65000.0 if hi > lo else 1.0
+        q = np.round((grid - lo) / scale).astype('<u2')
+        header = struct.pack('<4sHBBffff', PDM_MAGIC, n, 0, 0, lo, hi, scale, 0.0)
+        return zlib.compress(header + q.tobytes())
+
+    def test_no_level_means_ask_everything(self):
+        import tempfile
+        from osm_common import Bounds, sea_cell_skipper
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(sea_cell_skipper(tmp)(Bounds(0, 0, 1, 1)))
+
+    def test_missing_tile_is_sea_and_a_tile_with_land_is_not(self):
+        import tempfile
+        import numpy as np
+        from osm_common import bounds_cells, Bounds, sea_cell_skipper, tile_range_for_bounds
+        with tempfile.TemporaryDirectory() as tmp:
+            cell = bounds_cells(Bounds(7.9, 54.1, 7.95, 54.2))[0]
+            x, y, _x1, _y1 = tile_range_for_bounds(7, Bounds(
+                (cell.west + cell.east) / 2, (cell.south + cell.north) / 2,
+                (cell.west + cell.east) / 2, (cell.south + cell.north) / 2))
+            os.makedirs(os.path.join(tmp, '7', str(x)))
+            skip = sea_cell_skipper(tmp)
+            self.assertTrue(skip(cell), 'no tile at all is a cell with no land')
+            path = os.path.join(tmp, '7', str(x), f'{y}.pdm')
+            flat = np.zeros((5, 5), dtype=np.float32)
+            with open(path, 'wb') as fh:
+                fh.write(self._pdm(flat))
+            self.assertTrue(skip(cell), 'a tile that never rises above sea level is sea')
+            flat[2, 2] = 12.0
+            with open(path, 'wb') as fh:
+                fh.write(self._pdm(flat))
+            self.assertFalse(skip(cell), 'one point of land keeps the cell')
 
 
 if __name__ == '__main__':

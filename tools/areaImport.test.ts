@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
     Step, deletePlan, formatDuration, isProgressLine, parseProgress, plan, snapBboxToTiles, splitStream,
     stepOutcome,
+    prefetchPlan,
 } from './areaImport';
 
 /**
@@ -197,6 +198,28 @@ describe('the bake plans end with meshes then textures over the same box', () =>
 
     it('holds for a delete', () => {
         assertMeshThenTextures(deletePlan('mad', [-17.53, 32.3, -16.17, 33.35]));
+    });
+});
+
+describe('prefetchPlan', () => {
+    it('warms the cache with the fetch-only modes of the two Overpass bakes, and the coast stage waits for it', () => {
+        const job = { name: 'Test Area', bbox: [7.6, 45.9, 7.8, 46.0] };
+        const side = prefetchPlan(job);
+        assert.deepEqual(side.map(s => s.args[0]),
+            ['tools/bake_osm_coast.py', 'tools/bake_osm_airports.py']);
+        for (const s of side) {
+            assert.ok(s.args.includes('--fetch-only'), `${s.label} would bake, not just fetch`);
+            assert.ok(s.args.includes(`--bbox=${job.bbox.join(',')}`), `${s.label} has no box`);
+        }
+        // The coast prefetch has to ask for the landuse groups too, or the
+        // coast stage fetches them itself after all.
+        assert.ok(side[0].args.includes('--osm-landuse'));
+        const steps = plan(job, true);
+        const waiting = steps.filter(s => s.afterPrefetch);
+        assert.equal(waiting.length, 1);
+        assert.equal(waiting[0].args[0], 'tools/bake_osm_coast.py');
+        // The DEM stages run under the prefetch, not after it.
+        assert.ok(steps.indexOf(waiting[0]) >= 2, 'nothing overlaps the prefetch');
     });
 });
 

@@ -254,14 +254,19 @@ function emit(job: Job, event: Record<string, unknown>): void {
     }
 }
 
-function line(job: Job, text: string): void {
-    const progress = parseProgress(text);
+/**
+ * One line of a step's output into the job log. `side` marks output from a
+ * background helper (the Overpass prefetch): it is logged but never read for
+ * progress, since the percentage belongs to the foreground step.
+ */
+function line(job: Job, text: string, side = false): void {
+    const progress = side ? undefined : parseProgress(text);
     if (progress !== undefined) {
         job.percent = progress;
     }
     // A progress line supersedes the previous one rather than stacking: the
     // mesh bake alone emits one every hundred tiles.
-    if (isProgressLine(text) && job.log.length > 0 && isProgressLine(job.log[job.log.length - 1])) {
+    if (!side && isProgressLine(text) && job.log.length > 0 && isProgressLine(job.log[job.log.length - 1])) {
         job.log[job.log.length - 1] = text;
         emit(job, { line: text, replace: true });
         return;
@@ -370,6 +375,46 @@ function runStep(
     });
 }
 
+/**
+ * A background helper: spawned like a step, but its output is logged with a
+ * `[label]` prefix and never read for progress, and its exit code is only
+ * logged. Used for the Overpass prefetch, whose failure costs nothing - the
+ * real stage simply fetches what the cache does not have.
+ */
+function runSide(job: Job, label: string, cmd: string, args: string[]): Promise<void> {
+    return new Promise(resolve => {
+        line(job, `[${label}] $ ${cmd} ${args.join(' ')}`, true);
+        const startedAt = Date.now();
+        const child = spawn(cmd, args, { cwd: PROJECT_ROOT });
+        let tail = '';
+        const feed = (d: Buffer) => {
+            const split = splitStream(tail, d.toString());
+            tail = split.tail;
+            for (const l of split.lines) {
+                // The progress lines that would have redrawn in place stack
+                // otherwise; drop them, the prefetch's own summary lines stay.
+                if (!isProgressLine(l)) {
+                    line(job, `[${label}] ${l}`, true);
+                }
+            }
+        };
+        child.stdout.on('data', feed);
+        child.stderr.on('data', feed);
+        child.on('error', err => {
+            line(job, `[${label}] could not start: ${err.message}`, true);
+            resolve();
+        });
+        child.on('close', code => {
+            const elapsed = formatDuration(Date.now() - startedAt);
+            line(job, code === 0
+                ? `[${label}] done in ${elapsed}`
+                : `[${label}] exited with code ${code} after ${elapsed}; the stage will fetch what is missing`,
+                true);
+            resolve();
+        });
+    });
+}
+
 export interface Step {
     label: string;
     cmd: string;
@@ -380,6 +425,31 @@ export interface Step {
      */
     partialCode?: number;
     partialWarning?: string;
+    /** This step waits for the Overpass prefetch (see prefetchPlan) to finish first. */
+    afterPrefetch?: boolean;
+}
+
+/**
+ * The Overpass fetches an import makes, run in the background from the
+ * moment the job starts, so they overlap the DEM fetch and merge instead of
+ * following them. Each is the bake tool's own `--fetch-only` mode, which
+ * fills the per-cell cache and writes nothing; the coast and airfield stages
+ * then find every cell cached. The two run one after the other so the
+ * mirrors see one batch at a time from this address, and the coast stage
+ * (the first that would fetch) waits for both.
+ */
+export function prefetchPlan(job: { bbox: readonly number[] }): Step[] {
+    const bbox = job.bbox.join(',');
+    return [
+        {
+            label: 'prefetching coastline, water and landuse', cmd: PYTHON,
+            args: ['tools/bake_osm_coast.py', `--bbox=${bbox}`, '--osm-landuse', '--fetch-only'],
+        },
+        {
+            label: 'prefetching airfields', cmd: PYTHON,
+            args: ['tools/bake_osm_airports.py', `--bbox=${bbox}`, '--fetch-only'],
+        },
+    ];
 }
 
 /**
@@ -408,6 +478,7 @@ export function plan(job: { name: string; bbox: readonly number[] }, withCover: 
             // mesh bake cuts facets along; the cover stage's flag of the same
             // name only paints .plc classes and cannot produce them.
             args: ['tools/bake_osm_coast.py', `--bbox=${bbox}`, '--osm-landuse'],
+            afterPrefetch: true,
         },
         // After the coast, because an airfield's platform is checked against
         // the land mask the coast bake just wrote — a runway the mask calls
@@ -455,8 +526,19 @@ async function runImport(job: Job, withCover: boolean): Promise<void> {
     // of rewriting everything already baked.
     const steps = plan(job, withCover);
     job.stepCount = steps.length;
+    // The Overpass prefetch starts now and runs under the DEM stages; the
+    // first stage that would fetch waits for it. It is never awaited for
+    // its result, only for its end: whatever it could not cache, the stage
+    // fetches itself.
+    let prefetch: Promise<void> = Promise.resolve();
+    for (const p of prefetchPlan(job)) {
+        prefetch = prefetch.then(() => runSide(job, p.label, p.cmd, p.args));
+    }
     for (let i = 0; i < steps.length; i++) {
         const s = steps[i];
+        if (s.afterPrefetch) {
+            await prefetch;
+        }
         const partial = s.partialCode !== undefined && s.partialWarning
             ? { code: s.partialCode, warning: s.partialWarning }
             : undefined;

@@ -44,7 +44,7 @@ except ImportError:
 
 from osm_common import (
     Bounds, OVERPASS_OUT, merge_elements, nodes_map, overpass_fetch, overpass_fetch_cells,
-    relation_rings, ways_map,
+    overpass_fetch_groups, relation_rings, ways_map,
 )
 
 # Compact TerrainClass ids this module may emit. Must match
@@ -148,11 +148,17 @@ LanduseFetchProgress = Callable[[int, int, str, int], None]
 def overpass_landuse_query(
     bbox: Tuple[float, float, float, float], refresh: bool = False,
     on_progress: Optional[LanduseFetchProgress] = None,
+    skip_cell: Optional[Callable[[Bounds], bool]] = None,
 ) -> dict:
     """Fetch OSM natural/landuse polygons as two grouped Overpass requests.
 
     `on_progress`, when given, hears every download's byte count as it grows,
-    tagged with which of the groups it belongs to.
+    tagged with which of the groups it belongs to. `skip_cell`, when given,
+    names the grid cells not worth asking about at all - the ones the DEM
+    says are open sea (see osm_common.sea_cell_skipper).
+
+    Both groups go out as one batch, one request per grid cell, so the
+    mirror slots stay busy across the two.
 
     `bbox` crosses the module boundary as a plain (west, south, east, north)
     tuple rather than an osm_common.Bounds - bake_planet_cover.py's own
@@ -167,29 +173,26 @@ def overpass_landuse_query(
     a desert with no natural= or landuse= tags at all) must still bake.
     """
     b = Bounds(*bbox)
-    answers: List[dict] = []
     groups = (('vegetation/agriculture', _VEGETATION_TAGS),
               ('built/bare/snow/wetland', _BUILT_TAGS))
-    for index, (label, tags) in enumerate(groups):
-        extra: Dict[str, object] = {}
-        if on_progress is not None:
-            def bytes_seen(received: int, index=index, label=label) -> None:
-                on_progress(index, len(groups), label, received)
-            extra['on_progress'] = bytes_seen
-        try:
-            # One request per grid cell, each cached on its own, with the
-            # empty-answer guard `_reject_if_empty` describes applied per
-            # cell in its one-retry form: a cell of open ocean really is
-            # empty, and must not burn the whole retry budget proving it.
-            data = overpass_fetch_cells(
-                lambda cell, tags=tags: _query_for(tags, cell), b, f'landuse ({label})', refresh,
-                **extra,
-            )
-        except Exception as err:
-            print(f'  landuse ({label}) unavailable ({err}) - baking without it', file=sys.stderr)
-            continue
-        answers.append(data)
-    return merge_elements(answers)
+    extra: Dict[str, object] = {}
+    if on_progress is not None:
+        def bytes_seen(index: int, received: int) -> None:
+            on_progress(index, len(groups), groups[index][0], received)
+        extra['on_progress'] = bytes_seen
+    # One request per grid cell, each cached on its own, with the
+    # empty-answer guard `_reject_if_empty` describes applied per cell in
+    # its one-retry form: a cell of open ocean really is empty, and must
+    # not burn the whole retry budget proving it. A group that fails after
+    # every retry is dropped - baked without - rather than failing the bake.
+    answers = overpass_fetch_groups(
+        [(lambda cell, tags=tags: _query_for(tags, cell), f'landuse ({label})', skip_cell)
+         for label, tags in groups],
+        b, refresh, tolerate=[True] * len(groups), **extra)
+    for (label, _tags), answer in zip(groups, answers):
+        if answer is None:
+            print(f'  landuse ({label}) - baking without it', file=sys.stderr)
+    return merge_elements([a for a in answers if a is not None])
 
 
 def _class_for_tags(tags: dict) -> Optional[int]:

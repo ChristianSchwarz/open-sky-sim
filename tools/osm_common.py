@@ -133,12 +133,11 @@ OVERPASS_CELL_ZOOM = 7
 # cells, so the two light airfield groups cost a sixteenth of the round trips.
 OVERPASS_LIGHT_CELL_ZOOM = 5
 
-# Mirrors whose empty answer is double-checked on another before it is
-# believed. overpass.osm.ch is the only one that has been caught answering
-# a heavy query with HTTP 200, no remark and a silently truncated
-# `elements: []`; an empty answer from any other mirror is taken at its
-# word, so the open-ocean cells of a coastal import cost one request each
-# instead of two.
+# Mirrors whose empty answer is never believed (see refuse_untrusted_empty).
+# overpass.osm.ch is the one that has been caught answering HTTP 200, no
+# remark and `elements: []` for boxes the others count thousands of ways
+# in; an empty answer from any other mirror is taken at its word, so the
+# open-ocean cells of a coastal import cost one request each instead of two.
 OVERPASS_UNTRUSTED_EMPTY = ('https://overpass.osm.ch/api/interpreter',)
 
 # Every query ends this way: matched elements with their tags, and the
@@ -505,15 +504,21 @@ def overpass_fetch_many(
     validates: Optional[Sequence[Optional[Callable[..., None]]]] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
     concurrency: int = OVERPASS_CONCURRENCY,
+    on_error: Optional[Callable[[int, Exception], None]] = None,
 ) -> List[dict]:
     """`overpass_fetch` over several (query, label) pairs, a few at a time.
 
     Results come back in the order asked. `validates`, when given, is one
     `validate` per request. `on_progress(index, received)` hears each
     request's byte count as it grows. Each request keeps its own cache
-    entry, so a mix of hits and misses only fetches the misses.
+    entry, so a mix of hits and misses only fetches the misses. A request
+    that fails after every mirror and round raises out of here once the
+    others have finished, unless `on_error(index, err)` is given, in which
+    case it hears the failure and that request's answer comes back empty.
     """
     results: List[Optional[dict]] = [None] * len(requests_)
+    failures: List[Tuple[int, Exception]] = []
+    failures_lock = threading.Lock()
 
     # Each worker slot owns one mirror, best first, so requests spread over
     # the mirrors instead of piling onto the least-failing one.
@@ -533,6 +538,11 @@ def overpass_fetch_many(
             results[index] = overpass_fetch(
                 query, label, refresh, validate=validate,
                 prefer=slots[slot] if slot is not None else None, **extra)
+        except Exception as err:
+            if on_error is None:
+                raise
+            with failures_lock:
+                failures.append((index, err))
         finally:
             if slot is not None:
                 with free_lock:
@@ -546,6 +556,9 @@ def overpass_fetch_many(
         with ThreadPoolExecutor(max_workers=min(concurrency, len(slots))) as pool:
             for future in [pool.submit(one, i) for i in range(len(requests_))]:
                 future.result()
+    if on_error is not None:
+        for index, err in sorted(failures, key=lambda f: f[0]):
+            on_error(index, err)
     return [r if r is not None else {'elements': []} for r in results]
 
 
@@ -555,29 +568,28 @@ def bounds_cells(b: Bounds, zoom: int = OVERPASS_CELL_ZOOM) -> List[Bounds]:
     return [tile_bounds(zoom, x, y) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
 
 
-def accept_empty_once() -> Callable[..., None]:
-    """A `validate` that refuses an untrusted mirror's empty answer, once.
+def refuse_untrusted_empty() -> Callable[..., None]:
+    """A `validate` that refuses an empty answer from an untrusted mirror.
 
-    overpass.osm.ch has answered a heavy query with HTTP 200, no remark and
-    a silently truncated `elements: []`, which no status code tells apart
-    from a bbox that really has nothing in it. Refusing every empty answer
-    made a genuinely empty box - open ocean, which most cells of a coastal
-    import are - burn the whole mirror and retry budget confirming it, and
-    refusing every mirror's first empty answer still doubled the cost of
-    every ocean cell. So only a mirror in `OVERPASS_UNTRUSTED_EMPTY` is
-    doubted, and only once: its refusal sends the query to the next mirror,
-    and if that one says empty too, empty it is. An empty answer from a
-    mirror that has never been seen truncating is believed outright, as is
-    one that came from the cache (`mirror` is None).
+    overpass.osm.ch answers a query with HTTP 200, no remark and an empty
+    `elements: []` for boxes the other mirrors count thousands of ways in -
+    on 2026-09-15 it did so for a North Sea coast cell overpass-api.de put
+    3401 water ways in, with a database timestamp of "34". No status code
+    tells that apart from a box that really has nothing in it, so an empty
+    answer from a mirror in `OVERPASS_UNTRUSTED_EMPTY` is never believed:
+    the query goes on to the next mirror, and if every trusted mirror fails
+    every round the fetch fails rather than caching a lie. An empty answer
+    from a trusted mirror is taken at its word, so the open-ocean cells of
+    a coastal import cost one request each, and one from the cache
+    (`mirror` is None) was a trusted mirror's to begin with.
+
+    Accepting the untrusted mirror's empty answer on its second try, which
+    this used to do, cached "no water" for that coast cell.
     """
-    seen = {'empty': 0}
-
     def validate(data: dict, mirror: Optional[str] = None) -> None:
-        if data.get('elements') or mirror not in OVERPASS_UNTRUSTED_EMPTY:
-            return
-        seen['empty'] += 1
-        if seen['empty'] == 1:
-            raise RuntimeError('came back with zero elements - checking another mirror')
+        if not data.get('elements') and mirror in OVERPASS_UNTRUSTED_EMPTY:
+            raise RuntimeError('came back with zero elements from a mirror that is not '
+                               'trusted with an empty answer - asking another')
     return validate
 
 
@@ -678,6 +690,7 @@ def overpass_fetch_cells(
     on_progress: Optional[Callable[[int], None]] = None,
     guard_empty: bool = True,
     zoom: int = OVERPASS_CELL_ZOOM,
+    skip: Optional[Callable[[Bounds], bool]] = None,
 ) -> dict:
     """One logical fetch over `b`, made as one request per grid cell.
 
@@ -687,22 +700,123 @@ def overpass_fetch_cells(
     The result covers the cells' union, a superset of `b`; callers clip.
     `on_progress` hears the total bytes received so far across all cells.
     `zoom` picks the cell size: `OVERPASS_LIGHT_CELL_ZOOM` for a query whose
-    answer stays small however wide the box.
+    answer stays small however wide the box. A cell `skip` says yes to is
+    taken as empty without a request (see `sea_cell_skipper`).
+    """
+    answers = overpass_fetch_groups(
+        [(query_for, label, skip)], b, refresh,
+        on_progress=(lambda _g, n: on_progress(n)) if on_progress is not None else None,
+        guard_empty=guard_empty, zoom=zoom)
+    return answers[0]
+
+
+def overpass_fetch_groups(
+    groups: Sequence[Tuple[Callable[[Bounds], str], str, Optional[Callable[[Bounds], bool]]]],
+    b: Bounds, refresh: bool,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+    guard_empty: bool = True,
+    zoom: int = OVERPASS_CELL_ZOOM,
+    tolerate: Optional[Sequence[bool]] = None,
+) -> List[Optional[dict]]:
+    """Several logical fetches over `b` in one batch, one answer per group.
+
+    Each group is `(query_for, label, skip)` as `overpass_fetch_cells` takes
+    them. Every cell of every group goes into a single batch, so the mirror
+    slots stay busy through the tail of one group with the cells of the
+    next, instead of idling between groups the way back-to-back batches
+    did. `on_progress(group_index, received)` hears each group's bytes.
+    `tolerate[i]`, when true, lets group `i` fail: its answer comes back as
+    None and the failure is printed, where any other group's failure raises
+    once the batch has finished.
     """
     cells = bounds_cells(b, zoom)
-    received = [0] * len(cells)
+    requests_: List[Tuple[str, str]] = []
+    validates: List[Optional[Callable[..., None]]] = []
+    owner: List[int] = []  # request index -> group index
+    skipped_answers: List[Optional[dict]] = [None] * len(groups)
+    for g, (query_for, label, skip) in enumerate(groups):
+        wanted = [cell for cell in cells if skip is None or not skip(cell)]
+        if len(wanted) < len(cells):
+            print(f'  {label}: {len(cells) - len(wanted)} of {len(cells)} cells are open sea '
+                  'by the DEM, not fetched', flush=True)
+        for i, cell in enumerate(wanted):
+            requests_.append((query_for(cell), f'{label} [{i + 1}/{len(wanted)}]'))
+            validates.append(refuse_untrusted_empty() if guard_empty else None)
+            owner.append(g)
+        skipped_answers[g] = {'elements': []}
+
+    received = [0] * len(requests_)
+    per_group = [0] * len(groups)
 
     def progress(index: int, n: int) -> None:
         received[index] = n
+        g = owner[index]
+        per_group[g] = sum(r for r, o in zip(received, owner) if o == g)
         if on_progress is not None:
-            on_progress(sum(received))
+            on_progress(g, per_group[g])
 
-    requests_ = [(query_for(cell), f'{label} [{i + 1}/{len(cells)}]') for i, cell in enumerate(cells)]
+    failed: Dict[int, Exception] = {}
+
+    def on_error(index: int, err: Exception) -> None:
+        failed.setdefault(owner[index], err)
+
     answers = overpass_fetch_many(
-        requests_, refresh,
-        validates=[accept_empty_once() if guard_empty else None for _ in cells],
-        on_progress=progress if on_progress is not None else None)
-    return merge_elements(answers)
+        requests_, refresh, validates=validates,
+        on_progress=progress if on_progress is not None else None,
+        on_error=on_error if tolerate is not None else None)
+
+    out: List[Optional[dict]] = []
+    for g, (_query_for, label, _skip) in enumerate(groups):
+        if g in failed:
+            if tolerate is not None and tolerate[g]:
+                print(f'  {label} unavailable ({failed[g]})', file=sys.stderr)
+                out.append(None)
+                continue
+            raise failed[g]
+        out.append(merge_elements([a for a, o in zip(answers, owner) if o == g]))
+    return out
+
+
+def sea_cell_skipper(
+    out_dir: str, sea_level: float = 0.0, zoom: int = OVERPASS_CELL_ZOOM,
+) -> Callable[[Bounds], bool]:
+    """A `skip` for `overpass_fetch_cells`: true for a cell the DEM says is all sea.
+
+    A fetch cell is a whole tile at `zoom` on the pyramid's own lattice, so
+    the question is answered by that tile: the DEM merge writes a tile only
+    where its source had land, so a missing tile after the merge of this
+    box is a cell with no land inside the box, and a tile that exists but
+    never rises above sea level is the same thing. A tile with voids is not
+    trusted either way. Only ever applied to the queries that need land to
+    have anything in them - water, landuse, taxiways - never to the
+    coastline, which can clip a cell's edge from a neighbour, and never to
+    aerodromes, so an offshore helipad still comes through.
+
+    The skip must not write a cache entry: the same cell can be land for a
+    neighbouring import whose box covers the cell's other side.
+    """
+    span = 180.0 / (1 << zoom)
+    level_dir = os.path.join(out_dir, str(zoom))
+    if not os.path.isdir(level_dir):
+        # No pyramid at this zoom at all: the DEM stage has not run, so a
+        # missing tile means nothing. Ask for every cell.
+        return lambda _cell: False
+
+    def skip(cell: Bounds) -> bool:
+        x = int(math.floor(((cell.west + cell.east) / 2 + 180.0) / span))
+        y = int(math.floor((90.0 - (cell.south + cell.north) / 2) / span))
+        path = os.path.join(out_dir, str(zoom), str(x), f'{y}.pdm')
+        if not os.path.isfile(path):
+            return True
+        try:
+            with open(path, 'rb') as fh:
+                grid = decode_pdm(fh.read())
+        except Exception:
+            return False
+        if np.isnan(grid).any():
+            return False
+        return bool(grid.max() <= sea_level)
+    return skip
 
 
 # --- OSM element helpers ----------------------------------------------

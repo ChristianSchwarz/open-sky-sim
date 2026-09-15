@@ -898,7 +898,12 @@ def main() -> None:
         # named), so union_bounds() over exactly those is correct there.
         fetch_bbox = parse_bbox(args.bbox) if args.bbox else union_bounds(tiles)
         print(f'fetching OSM landuse for {len(tiles)} tiles...')
-        data = overpass_landuse_query(fetch_bbox, args.refresh_osm)
+        # The same cells the coast bake fetched, and the same open-sea
+        # cells it skipped, so this is a cache hit end to end.
+        from osm_common import sea_cell_skipper
+        data = overpass_landuse_query(
+            fetch_bbox, args.refresh_osm,
+            skip_cell=sea_cell_skipper(args.src, manifest.get('seaLevel', 0.0)))
         osm_polys, osm_classes = assemble_landuse_polygons(data)
         print(f'  {len(osm_polys)} landuse polygons assembled')
         if osm_polys:
