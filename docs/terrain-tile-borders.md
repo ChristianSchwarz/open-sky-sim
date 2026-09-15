@@ -329,3 +329,33 @@ border sea nodes on nine tiles are phantom: the walls they hang are under
 silent. Small, and the component-size discriminator noted under step 2 is
 the fix if it is ever worth chasing.
 
+### Brandenburg's coarse-level slivers, same day
+
+Replaying `buildShoreline` over the nine tiles with the bake's own inputs:
+every patch was a strip 1-60 nodes along a tile edge, the land ring cut
+0.3-3 cells inside the tile at z10/z11 (150 m cells, so beyond the
+quarter-cell-or-simplify snap), at 30-40 m - too low for the 50 m
+inland-sea rule. `shoreline.ts` now has a second rule for unclaimed
+components: no node deeper than `EDGE_SLIVER_CELLS` (3) from the nearest
+edge and every node at least `EDGE_SLIVER_MIN_M` (10) above the datum is
+the ring's own land. A real sea sliver along an edge sits within a few
+metres of the datum and stays sea. Tests in `shoreline.test.ts` hold the
+three cases (land strip, sea strip, a patch four cells deep).
+
+| area | zoom | border sea nodes before | after |
+|---|---|---|---|
+| brb | z10 | 33 on 4 tiles | 0 |
+| brb | z11 | 17 on 5 tiles | 0 |
+| mad | z12 | 87 on 30 tiles | 78 on 29 tiles |
+| alps | all | 0 | 0 (unchanged: 6044/6247/23175 triangles per tile at z10/z11/z12) |
+
+Madeira's remainder is its coast meeting tile edges, which the counter
+cannot tell from phantom sea; a per-tile listing from the replay is the
+way to check it if it ever matters.
+
+One patch on `10/1099/213` is a different thing: half the tile lies
+outside the Brandenburg import box, where no coast was baked, so those
+nodes are open sea at the datum under 28-70 m of DEM. That is the
+whole-tile-at-the-box-edge behaviour `snapBboxToTiles` documents, not a
+classification bug.
+
