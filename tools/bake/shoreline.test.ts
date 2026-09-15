@@ -505,3 +505,35 @@ describe('unclaimed patches above the sea', () => {
         void cells;
     });
 });
+
+describe('edge slivers behind an inset land ring', () => {
+    const at = (row: number, col: number) => row * SIZE + col;
+    const heights = (h: number) => new Float32Array(SIZE * SIZE).fill(h);
+    // The land ring runs 2 cells inside the east edge for its whole height:
+    // further than the border snap reaches, so columns 31-32 come out
+    // unclaimed. Brandenburg's coarse tiles in miniature.
+    const inset = ringFromGrid([[0, 0], [30, 0], [30, 32], [0, 32]]);
+
+    it('claims a strip at land height as land', () => {
+        const sh = buildShoreline({ polygons: [inset], bounds: BOUNDS, size: SIZE, heights: heights(35), seaLevel: 0 });
+        assert.equal(sh.landNodes[at(16, 31)], 1);
+        assert.equal(sh.landNodes[at(16, 32)], 1);
+        assert.equal(sh.inlandNodes[at(16, 32)], 0);
+    });
+
+    it('leaves a strip at sea level as sea', () => {
+        const sh = buildShoreline({ polygons: [inset], bounds: BOUNDS, size: SIZE, heights: heights(2), seaLevel: 0 });
+        assert.equal(sh.landNodes[at(16, 32)], 0);
+        assert.equal(sh.inlandNodes[at(16, 32)], 0);
+    });
+
+    it('leaves a patch that reaches into the tile alone', () => {
+        // Four cells deep: not a sliver, and at 35 m not high enough to be
+        // called inland either, so it stays whatever the rings say.
+        const deep = ringFromGrid([[0, 0], [28, 0], [28, 32], [0, 32]]);
+        const sh = buildShoreline({ polygons: [deep], bounds: BOUNDS, size: SIZE, heights: heights(35), seaLevel: 0 });
+        assert.equal(sh.landNodes[at(16, 32)], 0);
+        assert.equal(sh.inlandNodes[at(16, 32)], 0);
+    });
+});
+

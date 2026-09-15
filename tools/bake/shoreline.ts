@@ -238,6 +238,18 @@ export function snapToBorder(v: number, cells: number, tolerance = BORDER_SNAP_C
  */
 export const INLAND_SEA_MIN_M = 50;
 
+/**
+ * An unclaimed strip hugging a tile edge, no deeper than this many cells and
+ * everywhere at least EDGE_SLIVER_MIN_M above the datum, is land: the land
+ * ring was cut a little inside the tile, further than the border snap
+ * reaches. Brandenburg's coarse tiles had a dozen such strips, 1-60 nodes
+ * each, at 30-40 m - too low for INLAND_SEA_MIN_M, and no sea for 200 km.
+ * A real sea sliver along an edge sits within a few metres of the datum and
+ * stays sea.
+ */
+export const EDGE_SLIVER_CELLS = 3;
+export const EDGE_SLIVER_MIN_M = 10;
+
 export function buildShoreline(input: ShorelineInput): Shoreline {
     const { polygons, bounds, size } = input;
     const cells = size - 1;
@@ -513,6 +525,7 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
             }
             const component: number[] = [];
             let lowest = Infinity;
+            let deepest = 0; // furthest any node sits from the nearest tile edge, in cells
             stack.push(start);
             seen[start] = 1;
             while (stack.length > 0) {
@@ -523,6 +536,8 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
                     lowest = h;
                 }
                 const col = i % size;
+                const row = (i - col) / size;
+                deepest = Math.max(deepest, Math.min(col, cells - col, row, cells - row));
                 if (col > 0 && !seen[i - 1] && !landNodes[i - 1] && !inlandNodes[i - 1]) { seen[i - 1] = 1; stack.push(i - 1); }
                 if (col < cells && !seen[i + 1] && !landNodes[i + 1] && !inlandNodes[i + 1]) { seen[i + 1] = 1; stack.push(i + 1); }
                 if (i >= size && !seen[i - size] && !landNodes[i - size] && !inlandNodes[i - size]) { seen[i - size] = 1; stack.push(i - size); }
@@ -534,6 +549,13 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
                 for (const i of component) {
                     inlandNodes[i] = 1;
                     inlandHeights[i] = NaN;
+                }
+            } else if (lowest !== Infinity && deepest < EDGE_SLIVER_CELLS
+                && lowest > seaLevel + EDGE_SLIVER_MIN_M) {
+                // See EDGE_SLIVER_CELLS: a strip along the edge behind an
+                // inset land ring is the ring's own land.
+                for (const i of component) {
+                    landNodes[i] = 1;
                 }
             }
         }

@@ -392,8 +392,15 @@ describe('buildTile', () => {
             // buys the finest coast that fits and then spends the remainder on
             // interior detail, so the result should sit near the ceiling.
             const budget = 1200;
+            // Rolling terrain with fine roughness on top, so the cost falls
+            // smoothly as the tolerance rises. The sawtooth this used to
+            // ride ((x * 37 + y * 53) % 200) had a cliff in its cost curve:
+            // 1298 triangles at 80 m, 366 at 100 m and nothing between, so
+            // no tolerance could land inside the budget window at all.
             const r = buildTile(base({
-                heights: heightsFrom((x, y) => (x * 37 + y * 53) % 200),
+                heights: heightsFrom((x, y) =>
+                    Math.sin(x / 2) * 30 + Math.sin(y / 3) * 40 + Math.sin(x / 7 + y / 5) * 80
+                    + ((x * 7 + y * 13) % 11) * 3),
                 polygons: [coastAt(16)],
                 triangleBudget: budget,
             }));
