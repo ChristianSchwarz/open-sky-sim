@@ -10,10 +10,10 @@
  *
  * A vertex goes when
  *
- *   1. it is interior: not on the tile border, not a shore vertex, and every
- *      triangle round it carries one region id (and one cover class, when a
- *      raster is given) - the boundaries the decimator refused to merge
- *      across are refused here the same way;
+ *   1. it is not a tile corner, not a shore vertex, and every triangle round
+ *      it carries one region id (and one cover class, when a raster is
+ *      given) - the boundaries the decimator refused to merge across are
+ *      refused here the same way;
  *   2. the normals of its triangles agree within `maxAngleDeg`; and
  *   3. after collapsing it into a neighbour, every grid node under the new
  *      triangles still lies within `maxErrorM` of the DEM (and within
@@ -24,6 +24,16 @@
  * dropping its crown shows in the silhouette; the height test is the same
  * bound `decimate` works to, so the tile's geometric error survives the
  * pass. The angle only says which vertices are worth trying.
+ *
+ * A vertex on the tile border may go too, into a neighbour on the same
+ * border side only, so the border stays a straight line and the skirt that
+ * seals it (one quad per border edge, see buildTile) simply spans a longer
+ * edge. The height test then covers the border nodes the longer edge now
+ * passes over, which is the 1D collinearity test along the edge. Neighbouring
+ * tiles already decimate their shared edge independently and rely on that
+ * skirt, whose depth is bounded by the coarser neighbour's error; a collapse
+ * within this tile's own error keeps the bound. Border edges used to number
+ * ~290 per z12 tile, one every 3.5 cells, and every one was locked.
  *
  * Everything is in grid coordinates, like `decimate`. Heights are metres and
  * `cellM` scales x and y to metres for the normals.
@@ -178,6 +188,12 @@ export function collapse(input: CollapseInput): CollapseResult {
 
     const onBorder = (p: Vec2): boolean =>
         p.x === 0 || p.y === 0 || p.x === cells || p.y === cells;
+    const isCorner = (p: Vec2): boolean =>
+        (p.x === 0 || p.x === cells) && (p.y === 0 || p.y === cells);
+    /** Both on the same border side, so a collapse along it keeps the border straight. */
+    const sameSide = (a: Vec2, b: Vec2): boolean =>
+        (a.x === 0 && b.x === 0) || (a.x === cells && b.x === cells)
+        || (a.y === 0 && b.y === 0) || (a.y === cells && b.y === cells);
 
     /** Class of the cover raster under a triangle's nodes, or -1 if mixed. */
     const coverOf = (t: GridTriangle): number => {
@@ -234,7 +250,7 @@ export function collapse(input: CollapseInput): CollapseResult {
     const mean: number[] = [0, 0, 0];
     const ringDeviation = (vi: number, waterOnly: boolean): number | undefined => {
         const v = verts[vi];
-        if (v.tris.length === 0 || onBorder(v.p) || shore[vi]) {
+        if (v.tris.length === 0 || isCorner(v.p) || shore[vi]) {
             return undefined;
         }
         const first = tris[v.tris[0]]!;
@@ -310,6 +326,12 @@ export function collapse(input: CollapseInput): CollapseResult {
                 // with a shore vertex at both ends that is not a shoreline chord,
                 // and downstream a wall hangs from every such edge.
                 if (shore[ui]) {
+                    continue;
+                }
+                // A border vertex only slides along its own side; landing
+                // anywhere else would bend the border and open a gap the
+                // skirt cannot close.
+                if (onBorder(v.p) && !sameSide(v.p, u.p)) {
                     continue;
                 }
                 // Triangles v and u share vanish; the rest have v moved onto u.

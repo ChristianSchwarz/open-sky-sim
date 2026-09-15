@@ -51,7 +51,7 @@ describe('coplanar vertex collapse', () => {
         assert.ok(r.triangles.some(t => t.pts.some(p => p.x === 16)), 'ridge vertices kept');
     });
 
-    it('never moves a border or shore vertex', () => {
+    it('never moves a corner or shore vertex, and keeps the border straight', () => {
         const heights = grid(SIZE, () => 0);
         const before = ridgeTile(grid(SIZE, (x) => (x === 16 ? 50 : 0))).triangles;
         // Tag one interior vertex as shore by hand.
@@ -60,10 +60,11 @@ describe('coplanar vertex collapse', () => {
             pts: t.pts.map(p => (p.x === 8 && p.y === 8 ? { ...p, shore: true } : p)) as GridTriangle['pts'],
         }));
         const r = collapse({ triangles: tagged, size: SIZE, heights, cellM: 30, maxErrorM: 1000, maxAngleDeg: 10 });
+        const onBorder = (p: { x: number; y: number }) => p.x === 0 || p.y === 0 || p.x === 32 || p.y === 32;
         const borderBefore = new Set<string>();
         for (const t of before) {
             for (const p of t.pts) {
-                if (p.x === 0 || p.y === 0 || p.x === 32 || p.y === 32) {
+                if (onBorder(p)) {
                     borderBefore.add(`${p.x},${p.y}`);
                 }
             }
@@ -72,16 +73,40 @@ describe('coplanar vertex collapse', () => {
         let shoreKept = false;
         for (const t of r.triangles) {
             for (const p of t.pts) {
-                if (p.x === 0 || p.y === 0 || p.x === 32 || p.y === 32) {
+                if (onBorder(p)) {
                     borderAfter.add(`${p.x},${p.y}`);
                 }
                 if (p.x === 8 && p.y === 8 && p.shore) {
                     shoreKept = true;
                 }
             }
+            for (const p of t.pts) {
+                assert.ok(p.x >= 0 && p.x <= 32 && p.y >= 0 && p.y <= 32, 'vertex inside the tile');
+            }
         }
-        assert.deepEqual([...borderAfter].sort(), [...borderBefore].sort());
         assert.ok(shoreKept, 'shore vertex kept');
+        // The flat plane lets the border go: fewer border vertices, all
+        // four corners still there, and the tile still exactly covered.
+        assert.ok(borderAfter.size < borderBefore.size, `${borderAfter.size} < ${borderBefore.size}`);
+        for (const c of ['0,0', '32,0', '0,32', '32,32']) {
+            assert.ok(borderAfter.has(c), `corner ${c} kept`);
+        }
+        assert.ok(Math.abs(totalArea(r.triangles) - 32 * 32) < 1e-6, 'covers the tile exactly');
+    });
+
+    it('keeps a border vertex the border profile needs', () => {
+        // A step in the DEM along the west edge: the border vertex at the
+        // step is the only thing keeping the edge within tolerance.
+        const heights = grid(SIZE, (_x, y) => (y >= 16 ? 40 : 0));
+        const before = ridgeTile(heights).triangles;
+        const r = collapse({ triangles: before, size: SIZE, heights, cellM: 30, maxErrorM: 0.5, maxAngleDeg: 10 });
+        const westBefore = new Set<number>();
+        for (const t of before) for (const p of t.pts) if (p.x === 0) westBefore.add(p.y);
+        const westAfter = new Set<number>();
+        for (const t of r.triangles) for (const p of t.pts) if (p.x === 0) westAfter.add(p.y);
+        assert.ok(westAfter.has(15) && westAfter.has(16), 'both sides of the step kept on the west edge');
+        assert.ok(westAfter.size < westBefore.size, 'the flat runs either side of the step still collapse');
+        assert.ok(Math.abs(totalArea(r.triangles) - 32 * 32) < 1e-6, 'covers the tile exactly');
     });
 
     it('keeps a smooth hill whose facets agree in angle but not in height', () => {

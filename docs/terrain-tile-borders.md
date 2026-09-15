@@ -278,3 +278,31 @@ the discriminator to add. Not yet re-baked across an area; the Alps box
 (`--bbox 5.80078125,45.3515625,8.4814453125,46.845703125`, 2170 z12
 tiles) is the natural first run, and `bake:tex` after it for the far
 textures of the re-meshed tiles.
+
+### Step 3, 2026-09-15: border vertices unlocked in the collapse pass
+
+`collapse.ts` now lets a border vertex go on the same terms as an interior
+one, with two extra rules: the four tile corners stay, and a border vertex
+may only collapse into a neighbour on its own border side, so the border
+stays a straight line and the skirt quad simply spans a longer edge. The
+existing height test over every grid node under the ring is the 1D
+collinearity test along the edge for free, since the border nodes lie on
+the edge of the new triangle. Tests: `collapse.test.ts` holds that a flat
+plane sheds border vertices but keeps all four corners and exact tile
+coverage, and that a step in the DEM along the west edge keeps the border
+vertices either side of the step.
+
+`--only` re-bake of `12/4285/991` and `12/3720/1405` (both coast-only,
+steep - the worst case for this pass):
+
+| | before | after |
+|---|---|---|
+| triangles per tile | 35795 | 35644 |
+| skirts | 321 | 286 |
+| vertices collapsed | 263 | 280 |
+
+Under half a percent on those two, as the plan expected. Quiet edges gain
+more; the per-zoom `skirts` counter from the full re-bake of the three
+areas (same day) is the number to compare against the 591-per-tile figure
+above.
+
