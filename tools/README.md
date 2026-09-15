@@ -722,10 +722,17 @@ something to trigger by omission. Add
 `--refresh-osm` to bypass the Overpass cache (`data/osm-cache`, shared with
 stages 2/3) the way `bake_osm_coast.py --refresh` does. Every Overpass fetch
 is made one grid cell at a time (whole zoom-7 tiles, 1.4 degrees a side,
-two in flight at once) and each cell's answer is cached on its own as a
+one in flight per mirror) and each cell's answer is cached on its own as a
 gzipped pickle, so an import that overlaps or grows an earlier one only
-fetches the cells it did not already have; entries from before the pickle
-cache (`.json.gz`) are still read and rewritten in the new form. Painted classes never
+fetches the cells it did not already have. Every query ends in `out geom;`
+so the coordinates come inline and no node objects are sent; cells the
+merged DEM shows as open sea are not asked for water, landuse, taxiways or
+aprons at all; and an empty answer from overpass.osm.ch is never believed
+(it has answered zero for boxes the other mirrors hold thousands of ways
+in). `bake_osm_coast.py --fetch-only` and `bake_osm_airports.py
+--fetch-only` fill that cache and bake nothing, which is what the in-app
+importer runs in the background under the DEM stages so the coast and
+airfield stages find every cell cached. Painted classes never
 include Sand (bake-assigned downstream by stage 5's shore-adjacency logic) or
 Water (stage 2 already owns the land/water split geometrically) — see
 `tools/osm_landuse.py`'s `LANDUSE_TAG_TO_CLASS` for the full tag table.
