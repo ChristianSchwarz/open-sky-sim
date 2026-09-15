@@ -306,3 +306,26 @@ more; the per-zoom `skirts` counter from the full re-bake of the three
 areas (same day) is the number to compare against the 591-per-tile figure
 above.
 
+Full re-bake of the three areas with steps 0-3, same day (skirts per tile;
+the 591 above was the pre-step-1 z12 average over a 308-tile sample):
+
+| area | zoom | tiles | triangles | skirts | walls > 150 m | border sea nodes |
+|---|---|---|---|---|---|---|
+| alps | z10 | 144 | 6044 | 260 | 20 | 0 |
+| alps | z11 | 527 | 6247 | 268 | 34 | 0 |
+| alps | z12 | 2074 | 23175 | 270 | 78 | 0 |
+| brb | z10 | 12 | 3426 | 106 | 0 | 33 on 4 tiles |
+| brb | z11 | 35 | 4905 | 116 | 0 | 17 on 5 tiles |
+| brb | z12 | 126 | 21357 | 80 | 0 | 0 |
+| mad | z10 | 14 | 3666 | 136 | 0 | 23 on 6 tiles |
+| mad | z11 | 26 | 5275 | 191 | 4 | 15 on 11 tiles |
+| mad | z12 | 75 | 21480 | 214 | 52 | 87 on 30 tiles |
+
+Alps is clean. Madeira's border sea nodes are an island's real coast
+meeting tile edges, which the counter cannot tell from phantom sea; its
+tall walls are cliffs. Brandenburg has no sea, so its 50 coarse-level
+border sea nodes on nine tiles are phantom: the walls they hang are under
+150 m because the ground there is ~35 m up, so the tall-wall counter is
+silent. Small, and the component-size discriminator noted under step 2 is
+the fix if it is ever worth chasing.
+
