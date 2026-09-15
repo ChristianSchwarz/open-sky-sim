@@ -59,10 +59,12 @@ from osm_common import (
     LAND,
     glue_negative_bbox,
     load_manifest,
-    accept_empty_once,
+    OVERPASS_CELL_ZOOM,
+    OVERPASS_LIGHT_CELL_ZOOM,
+    OVERPASS_OUT,
+    merge_elements,
+    overpass_fetch_cells,
     nodes_map,
-    OVERPASS_CONCURRENCY,
-    overpass_fetch,
     parse_bbox,
     read_lwm,
     relation_rings,
@@ -808,9 +810,7 @@ def _aeroway_query(clauses: Sequence[str]) -> str:
 (
 {body}
 );
-out body;
->;
-out skel qt;
+{OVERPASS_OUT}
 """
 
 
@@ -830,115 +830,72 @@ def overpass_airports(
     broad is a scan, and an area-sized box of it came back 500 from kumi and
     504 from overpass-api.de on every attempt.
 
-    The first two are required. The third - taxiways, aprons, buildings - is
-    bulk, an order of magnitude more elements than the runways, and is allowed
-    to fail: an airfield without its taxiways is still an airfield in the right
-    place pointing the right way, and losing that to a busy endpoint would be
-    the wrong trade.
+    Each group is fetched one grid cell at a time (`overpass_fetch_cells`),
+    so two overlapping areas share the cells they have in common and a
+    nudged box re-fetches only its new ring. The aerodromes and runways are
+    small answers however wide the box, so they use the coarse
+    `OVERPASS_LIGHT_CELL_ZOOM` grid; the taxiways and aprons are the bulk
+    and use the standard one.
+
+    The first two are required. The other two - taxiways, aprons, buildings
+    - are an order of magnitude more elements than the runways, and are
+    allowed to fail: an airfield without its taxiways is still an airfield
+    in the right place pointing the right way, and losing that to a busy
+    endpoint would be the wrong trade.
+
+    A cell that comes back empty is believed unless it came from a mirror
+    that has been caught truncating (`accept_empty_once`), which is what
+    used to be checked here against the aerodrome count.
     """
-    box = b.as_overpass()
-    aerodromes_query = _aeroway_query(
-        [f'{kind}["aeroway"="aerodrome"]({box})'
-         for kind in ('node', 'way', 'relation')])
-    runways_query = _aeroway_query(
-        [f'way["aeroway"="{kind}"]({box})' for kind in ('runway', 'helipad')])
-    optional = (
-        ('taxiways', 'taxiways', _aeroway_query([f'way["aeroway"="taxiway"]({box})'])),
-        ('aprons', 'aprons and buildings', _aeroway_query(
-            [f'way["aeroway"="{kind}"]({box})'
+    def aerodromes(c: Bounds) -> str:
+        return _aeroway_query(
+            [f'{kind}["aeroway"="aerodrome"]({c.as_overpass()})'
+             for kind in ('node', 'way', 'relation')])
+
+    def runways(c: Bounds) -> str:
+        return _aeroway_query(
+            [f'way["aeroway"="{kind}"]({c.as_overpass()})' for kind in ('runway', 'helipad')])
+
+    def taxiways(c: Bounds) -> str:
+        return _aeroway_query([f'way["aeroway"="taxiway"]({c.as_overpass()})'])
+
+    def aprons(c: Bounds) -> str:
+        return _aeroway_query(
+            [f'way["aeroway"="{kind}"]({c.as_overpass()})'
              for kind in ('apron', 'terminal', 'hangar', 'control_tower', 'tower')]
-            + [f'relation["aeroway"="{kind}"]({box})'
-               for kind in ('apron', 'terminal')])),
+            + [f'relation["aeroway"="{kind}"]({c.as_overpass()})'
+               for kind in ('apron', 'terminal')])
+
+    groups = (
+        ('aerodromes', 'aerodromes', aerodromes, OVERPASS_LIGHT_CELL_ZOOM, False),
+        ('runways', 'runways', runways, OVERPASS_LIGHT_CELL_ZOOM, False),
+        ('taxiways', 'taxiways', taxiways, OVERPASS_CELL_ZOOM, True),
+        ('aprons', 'aprons and buildings', aprons, OVERPASS_CELL_ZOOM, True),
     )
 
-    def fetch(key: str, label: str, query: str, **extra) -> List[dict]:
-        """One fetch as one progress phase, bytes streaming into the bar."""
+    elements: List[dict] = []
+    for key, label, query_for, zoom, is_optional in groups:
+        extra: Dict[str, object] = {}
         if progress is not None:
             progress.begin(phase_prefix + key)
 
             def on_bytes(received: int) -> None:
                 progress.update(fetch_fraction(received), f'{format_mb(received)} received')
             extra['on_progress'] = on_bytes
-        got = overpass_fetch(query, label, refresh, **extra).get('elements', [])
-        if progress is not None:
-            progress.end(f'{len(got)} elements')
-        return got
-
-    elements: List[dict] = []
-    # An empty aerodromes answer is checked on a second mirror before it is
-    # believed: a silently truncated HTTP 200 looks exactly like a box with
-    # no airfields, and one such answer was cached for Crimea and baked as
-    # "no airfields" - it also disarms the empty check on the three fetches
-    # below, which take the aerodrome count as their reference.
-    aerodrome_elements = fetch('aerodromes', 'aerodromes', aerodromes_query,
-                               validate=accept_empty_once())
-    elements.extend(aerodrome_elements)
-
-    def reject_if_suspiciously_empty(label: str, data: dict) -> None:
-        # A bbox with aerodromes and zero elements from another aeroway query
-        # over the same box is what overpass.osm.ch answers - HTTP 200, no
-        # remark - when it silently truncates the query instead of failing
-        # it, and a bbox with hundreds of aerodromes (this one has 2208
-        # elements' worth, including Berlin Brandenburg Airport) coming back
-        # with not one single taxiway or apron anywhere is that, not a
-        # genuinely bare region. A bbox that has no aerodromes at all never
-        # reaches here, since `aerodrome_elements` would itself be empty and
-        # there would be nothing left to validate.
-        if aerodrome_elements and not data.get('elements'):
-            raise RuntimeError(
-                f'{label} came back empty for a bbox with aerodromes - '
-                'likely a truncated answer, not a bbox with none')
-
-    # The runways and the two optional groups only need the aerodromes for
-    # their empty-answer check, so they go out together, a couple at a time
-    # (OVERPASS_CONCURRENCY), instead of one after another. The progress
-    # bar shows them as one phase: the runways one carries the streamed
-    # bytes of all three, and the other two complete the moment it ends.
-    remaining = (('runways', 'runways', runways_query, False),) + tuple(
-        (key, label, query, True) for key, label, query in optional)
-    received = [0] * len(remaining)
-    if progress is not None:
-        progress.begin(phase_prefix + 'runways', 'fetching OSM runways, taxiways and aprons')
-
-    def one(index: int) -> Tuple[Optional[List[dict]], Optional[Exception]]:
-        key, label, query, _optional = remaining[index]
-        extra: Dict[str, object] = {}
-        if progress is not None:
-            def on_bytes(n: int, index=index) -> None:
-                received[index] = n
-                total = sum(received)
-                progress.update(fetch_fraction(total), f'{format_mb(total)} received')
-            extra['on_progress'] = on_bytes
         try:
-            data = overpass_fetch(
-                query, label, refresh,
-                validate=lambda data, label=label: reject_if_suspiciously_empty(label, data),
-                **extra)
-            return data.get('elements', []), None
-        except Exception as err:  # reported below, per group
-            return None, err
-
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=OVERPASS_CONCURRENCY) as pool:
-        outcomes = list(pool.map(one, range(len(remaining))))
-
-    counts = []
-    for (key, label, _query, is_optional), (got, err) in zip(remaining, outcomes):
-        if err is not None:
+            got = overpass_fetch_cells(query_for, b, label, refresh, zoom=zoom, **extra)
+        except Exception as err:
             if not is_optional:
-                raise err
+                raise
             print(f'  {label} unavailable ({err}) - baking without them', file=sys.stderr)
             if progress is not None:
                 progress.skip(phase_prefix + key, 'unavailable, baking without them')
             continue
-        elements.extend(got)
-        counts.append(f'{len(got)} {label}')
-        if progress is not None and key != 'runways':
-            progress.begin(phase_prefix + key)
-            progress.end(f'{len(got)} elements, fetched with the runways')
-    if progress is not None:
-        progress.end(', '.join(counts))
-    return {'elements': elements}
+        got_elements = got.get('elements', [])
+        elements.extend(got_elements)
+        if progress is not None:
+            progress.end(f'{len(got_elements)} elements')
+    return merge_elements([{'elements': elements}])
 
 
 # --- assembling airfields ---------------------------------------------------

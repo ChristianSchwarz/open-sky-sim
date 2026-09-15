@@ -127,6 +127,29 @@ OVERPASS_CONCURRENCY = len(OVERPASS_URLS)
 # that the mirrors do not 504 on it.
 OVERPASS_CELL_ZOOM = 7
 
+# The grid for a query whose answer is small no matter how wide the box -
+# aerodromes and runways, a few hundred elements per region. Cutting those
+# at z7 multiplied the requests without saving a byte: a z5 cell is 16 z7
+# cells, so the two light airfield groups cost a sixteenth of the round trips.
+OVERPASS_LIGHT_CELL_ZOOM = 5
+
+# Mirrors whose empty answer is double-checked on another before it is
+# believed. overpass.osm.ch is the only one that has been caught answering
+# a heavy query with HTTP 200, no remark and a silently truncated
+# `elements: []`; an empty answer from any other mirror is taken at its
+# word, so the open-ocean cells of a coastal import cost one request each
+# instead of two.
+OVERPASS_UNTRUSTED_EMPTY = ('https://overpass.osm.ch/api/interpreter',)
+
+# Every query ends this way: matched elements with their tags, and the
+# coordinates of every way and relation member inline. The `out body; >;
+# out skel qt;` form it replaced printed a separate node object for every
+# vertex - 94% of all elements on a regional answer, none of them tagged -
+# and re-sent every shoreline node once per group that touched it.
+# `expand_geometry` turns the answer back into the node-indexed shape the
+# assembly code reads.
+OVERPASS_OUT = 'out geom;'
+
 
 def remark_is_failure(remark: str) -> bool:
     """Whether an Overpass ``remark`` means the answer is incomplete.
@@ -347,11 +370,15 @@ def _read_json_streamed(resp, on_progress: Callable[[int], None]) -> dict:
 
 def overpass_fetch(
     query: str, label: str, refresh: bool,
-    validate: Optional[Callable[[dict], None]] = None,
+    validate: Optional[Callable[..., None]] = None,
     on_progress: Optional[Callable[[int], None]] = None,
     prefer: Optional[str] = None,
 ) -> dict:
     """One Overpass request, cached by query hash.
+
+    The answer comes back with `expand_geometry` applied, so a query that
+    ends in `out geom;` reads like the old node-recursing form. The cache
+    holds the compact answer as the mirror sent it.
 
     `on_progress`, when given, is called with the number of body bytes
     received so far while the answer streams in, and a "still waiting" line
@@ -371,8 +398,8 @@ def overpass_fetch(
     the whole fetch at once.
 
     `validate`, when given, is a last check before the answer is trusted: it
-    raises on a response that parsed fine and carried no `remark` but is
-    still wrong. overpass.osm.ch has been seen returning HTTP 200 with a
+    is called as `validate(data, mirror=url)` and raises on a response that
+    parsed fine and carried no `remark` but is still wrong. overpass.osm.ch has been seen returning HTTP 200 with a
     clean, remark-free body and zero elements for a runways query over a bbox
     its own aerodromes query just answered with thousands - a truncated
     answer that looks exactly like "this bbox has none", not a fetch that
@@ -386,7 +413,7 @@ def overpass_fetch(
         if hit is not None:
             data, cache = hit
             print(f'using cached OSM {label} ({cache})')
-            return data
+            return expand_geometry(data)
 
     headers = {
         'User-Agent': 'retroflightsim-coast-bake/1.0',
@@ -451,7 +478,7 @@ def overpass_fetch(
 
             if validate is not None:
                 try:
-                    validate(data)
+                    validate(data, mirror=url)
                 except Exception as err:
                     last_err = str(err)
                     print(f'  overpass answer rejected: {last_err}', file=sys.stderr)
@@ -463,7 +490,7 @@ def overpass_fetch(
                 print(f'  cached to {_write_cache(query, data)}')
             except Exception as err:
                 print(f'  could not cache the response: {err}', file=sys.stderr)
-            return data
+            return expand_geometry(data)
 
         if round_idx < OVERPASS_ROUNDS - 1:
             delay = OVERPASS_BACKOFF_S[round_idx]
@@ -475,7 +502,7 @@ def overpass_fetch(
 
 def overpass_fetch_many(
     requests_: Sequence[Tuple[str, str]], refresh: bool,
-    validates: Optional[Sequence[Optional[Callable[[dict], None]]]] = None,
+    validates: Optional[Sequence[Optional[Callable[..., None]]]] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
     concurrency: int = OVERPASS_CONCURRENCY,
 ) -> List[dict]:
@@ -528,25 +555,108 @@ def bounds_cells(b: Bounds, zoom: int = OVERPASS_CELL_ZOOM) -> List[Bounds]:
     return [tile_bounds(zoom, x, y) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
 
 
-def accept_empty_once() -> Callable[[dict], None]:
-    """A `validate` that refuses an empty answer the first time only.
+def accept_empty_once() -> Callable[..., None]:
+    """A `validate` that refuses an untrusted mirror's empty answer, once.
 
     overpass.osm.ch has answered a heavy query with HTTP 200, no remark and
     a silently truncated `elements: []`, which no status code tells apart
     from a bbox that really has nothing in it. Refusing every empty answer
     made a genuinely empty box - open ocean, which most cells of a coastal
-    import are - burn the whole mirror and retry budget confirming it. One
-    refusal sends the query to the next mirror; if that one says empty too,
-    empty it is.
+    import are - burn the whole mirror and retry budget confirming it, and
+    refusing every mirror's first empty answer still doubled the cost of
+    every ocean cell. So only a mirror in `OVERPASS_UNTRUSTED_EMPTY` is
+    doubted, and only once: its refusal sends the query to the next mirror,
+    and if that one says empty too, empty it is. An empty answer from a
+    mirror that has never been seen truncating is believed outright, as is
+    one that came from the cache (`mirror` is None).
     """
     seen = {'empty': 0}
 
-    def validate(data: dict) -> None:
-        if not data.get('elements'):
-            seen['empty'] += 1
-            if seen['empty'] == 1:
-                raise RuntimeError('came back with zero elements - checking another mirror')
+    def validate(data: dict, mirror: Optional[str] = None) -> None:
+        if data.get('elements') or mirror not in OVERPASS_UNTRUSTED_EMPTY:
+            return
+        seen['empty'] += 1
+        if seen['empty'] == 1:
+            raise RuntimeError('came back with zero elements - checking another mirror')
     return validate
+
+
+def _synthetic_node_id(lon: float, lat: float) -> int:
+    """A negative id for a vertex known only by its coordinates.
+
+    Deterministic in the coordinates, so the same vertex reached from two
+    ways, two cells or two groups gets the same id and chains across them;
+    negative, so it can never collide with a real OSM node id.
+    """
+    return -(hash((lon, lat)) & ((1 << 62) - 1)) - 1
+
+
+def expand_geometry(data: dict) -> dict:
+    """An `out geom;` answer in the shape of an `out body; >; out skel qt;` one.
+
+    Every way's inline `geometry` becomes a `nodes` list of ids, every
+    relation member's inline geometry becomes a way element of its own
+    (unless the same way was matched outright, in which case that tagged
+    copy stands), and one node element is emitted per distinct vertex.
+    Vertex ids are synthesised from the coordinates (see
+    `_synthetic_node_id`) rather than taken from the way's own `nodes`
+    list, because a relation member carries no node ids at all, and a
+    shoreline shared by a matched way and a member way must chain.
+
+    An answer with no inline geometry - the old form, or a test fixture -
+    passes through untouched.
+    """
+    elements = data.get('elements', [])
+    if not any('geometry' in el or any('geometry' in m for m in el.get('members', ()))
+               for el in elements):
+        return data
+    nodes: Dict[int, dict] = {}
+    out: List[dict] = []
+    matched_ways: Set[int] = set()
+
+    def ids_for(geometry: Sequence[Optional[dict]]) -> List[int]:
+        ids: List[int] = []
+        for pt in geometry:
+            if not pt:
+                continue  # Overpass prints null for a vertex it could not resolve
+            lon, lat = pt['lon'], pt['lat']
+            nid = _synthetic_node_id(lon, lat)
+            if nid not in nodes:
+                nodes[nid] = {'type': 'node', 'id': nid, 'lon': lon, 'lat': lat}
+            ids.append(nid)
+        return ids
+
+    for el in elements:
+        kind = el.get('type')
+        if kind == 'way' and 'geometry' in el:
+            way = {k: v for k, v in el.items() if k != 'geometry'}
+            way['nodes'] = ids_for(el['geometry'])
+            out.append(way)
+            matched_ways.add(el['id'])
+        elif kind == 'way':
+            out.append(el)
+            matched_ways.add(el['id'])
+        elif kind == 'relation':
+            out.append(dict(el))
+        else:
+            out.append(el)
+
+    for el in out:
+        if el.get('type') != 'relation':
+            continue
+        members: List[dict] = []
+        for m in el.get('members', []):
+            geometry = m.get('geometry')
+            if m.get('type') == 'way' and geometry:
+                if m['ref'] not in matched_ways:
+                    out.append({'type': 'way', 'id': m['ref'], 'nodes': ids_for(geometry)})
+                    matched_ways.add(m['ref'])
+                m = {k: v for k, v in m.items() if k != 'geometry'}
+            members.append(m)
+        el['members'] = members
+
+    out.extend(nodes.values())
+    return {**data, 'elements': out}
 
 
 def merge_elements(answers: Sequence[dict]) -> dict:
@@ -567,6 +677,7 @@ def overpass_fetch_cells(
     query_for: Callable[[Bounds], str], b: Bounds, label: str, refresh: bool,
     on_progress: Optional[Callable[[int], None]] = None,
     guard_empty: bool = True,
+    zoom: int = OVERPASS_CELL_ZOOM,
 ) -> dict:
     """One logical fetch over `b`, made as one request per grid cell.
 
@@ -575,8 +686,10 @@ def overpass_fetch_cells(
     have in common, and one that grows a box fetches only the new ring.
     The result covers the cells' union, a superset of `b`; callers clip.
     `on_progress` hears the total bytes received so far across all cells.
+    `zoom` picks the cell size: `OVERPASS_LIGHT_CELL_ZOOM` for a query whose
+    answer stays small however wide the box.
     """
-    cells = bounds_cells(b)
+    cells = bounds_cells(b, zoom)
     received = [0] * len(cells)
 
     def progress(index: int, n: int) -> None:

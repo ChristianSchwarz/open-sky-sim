@@ -43,7 +43,8 @@ except ImportError:
     raise
 
 from osm_common import (
-    Bounds, merge_elements, nodes_map, overpass_fetch, overpass_fetch_cells, relation_rings, ways_map,
+    Bounds, OVERPASS_OUT, merge_elements, nodes_map, overpass_fetch, overpass_fetch_cells,
+    relation_rings, ways_map,
 )
 
 # Compact TerrainClass ids this module may emit. Must match
@@ -108,7 +109,7 @@ def _query_for(tags: Sequence[Tuple[str, str, int]], b: Bounds) -> str:
         clauses.append(f'  way["{key}"="{value}"]({b.as_overpass()});')
         clauses.append(f'  relation["{key}"="{value}"]({b.as_overpass()});')
     body = '\n'.join(clauses)
-    return f'[out:json][timeout:240];\n(\n{body}\n);\nout body;\n>;\nout skel qt;\n'
+    return f'[out:json][timeout:240];\n(\n{body}\n);\n{OVERPASS_OUT}\n'
 
 
 def _reject_if_empty(label: str, data: dict) -> None:

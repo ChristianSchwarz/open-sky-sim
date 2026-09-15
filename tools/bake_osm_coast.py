@@ -69,6 +69,7 @@ from osm_common import (
     nodes_map as _nodes_map,
     overpass_fetch as _overpass_fetch,
     overpass_fetch_cells,
+    OVERPASS_OUT,
     parse_bbox,
     read_lwm,
     relation_rings as _relation_rings,
@@ -320,6 +321,11 @@ def overpass_query(
     Each is fetched one grid cell at a time (see `overpass_fetch_cells`), a
     couple of cells in flight at once, so the answer covers the cells' union
     - a superset of `b` that the caller clips.
+
+    Both end in `out geom;` (see `OVERPASS_OUT`): the coordinates come
+    inline on each way instead of as a node object per vertex, which is
+    where most of the bytes went, and the shoreline nodes the two groups
+    share are no longer downloaded twice.
     """
     def coastline(c: Bounds) -> str:
         return f'''[out:json][timeout:240];
@@ -328,9 +334,7 @@ def overpass_query(
   relation["natural"="coastline"]({c.as_overpass()});
   relation["place"="island"]({c.as_overpass()});
 );
-out body;
->;
-out skel qt;
+{OVERPASS_OUT}
 '''
 
     def features(c: Bounds) -> str:
@@ -345,9 +349,7 @@ out skel qt;
   way["landuse"="reservoir"]({c.as_overpass()});
   relation["landuse"="reservoir"]({c.as_overpass()});
 );
-out body;
->;
-out skel qt;
+{OVERPASS_OUT}
 '''
     answers: List[dict] = []
     for key, label, query_for in (('coast', 'coastline', coastline),
