@@ -84,6 +84,21 @@ describe('marching-squares cell cutting', () => {
         assert.ok(Math.abs(total(r.water) - 0.875) < 1e-12);
     });
 
+    it('keeps a defaulted crossing on the outline when the other snaps to the corner', () => {
+        // c3 water only, its edge-2 crossing on the corner itself (t = 1) and
+        // no geometry for edge 3, so that one defaults to the midpoint. The
+        // water piece has no area; the land ring is the whole cell plus the
+        // midpoint (0, 0.5), and the neighbour across x = 0 has that vertex
+        // too. Fanned from c0 the triangle c0, c3, midpoint is collinear and
+        // used to be dropped, which dropped the midpoint from this cell's
+        // outline: a T-junction (2026-09-15).
+        const r = cutCell({ corners: cornersOf(1 | 2 | 4), edgeCrossings: [undefined, undefined, 1, undefined] });
+        assert.ok(Math.abs(total(r.land) - 1) < 1e-12, `land ${total(r.land)}`);
+        assert.equal(r.water.length, 0);
+        const onOutline = r.land.some(t => t.some(p => Math.abs(p.x) < 1e-12 && Math.abs(p.y - 0.5) < 1e-12));
+        assert.ok(onOutline, 'the midpoint on edge 3 is a vertex of the land outline');
+    });
+
     it('splits an edge-adjacent land pair down the middle', () => {
         // c0 + c1 land: the shoreline runs across the cell, halving it.
         const r = cutCell({ corners: cornersOf(1 | 2), edgeCrossings: MIDPOINTS });

@@ -55,6 +55,35 @@ function totalArea(tris: GridTriangle[]): number {
     return tris.reduce((s, t) => s + area(t), 0);
 }
 
+/**
+ * Edges not shared as a conforming mesh shares them: an interior edge on
+ * one triangle, or a border edge on two. Zero means no T-junctions.
+ */
+function openEdges(tris: GridTriangle[], size: number): number {
+    const cells = size - 1;
+    const counts = new Map<string, number>();
+    const ends = new Map<string, [{ x: number; y: number }, { x: number; y: number }]>();
+    for (const t of tris) {
+        for (let e = 0; e < 3; e++) {
+            const a = t.pts[e], b = t.pts[(e + 1) % 3];
+            const ka = `${a.x},${a.y}`, kb = `${b.x},${b.y}`;
+            const k = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+            counts.set(k, (counts.get(k) ?? 0) + 1);
+            ends.set(k, [a, b]);
+        }
+    }
+    let open = 0;
+    for (const [k, n] of counts) {
+        const [a, b] = ends.get(k)!;
+        const border = (a.x === 0 && b.x === 0) || (a.x === cells && b.x === cells)
+            || (a.y === 0 && b.y === 0) || (a.y === cells && b.y === cells);
+        if (n !== (border ? 1 : 2)) {
+            open++;
+        }
+    }
+    return open;
+}
+
 const allLand = (size: number) => regions(size, () => true);
 
 /** `regionId === 1` stands in for "land" throughout, matching `regions()` above. */
@@ -255,6 +284,62 @@ describe('restricted-quadtree decimation', () => {
         assert.ok(present.has(0) && present.has(1) && present.has(2), `regions present: ${[...present]}`);
         const cells = SIZE - 1;
         assert.ok(Math.abs(totalArea(r.triangles) - cells * cells) < 1e-6, 'still watertight');
+    });
+
+    it('leaves no T-junction where a chord crossing shares an edge with a midpoint', () => {
+        // A shallow boundary makes two- and four-cell chord leaves; bumps on
+        // a one-cell lattice beside it make their neighbours finer, so the
+        // chord leaf owes a midpoint on the edge its crossing sits on. Fanned
+        // from that crossing, the triangle through midpoint and corner has no
+        // area; skipping it dropped the midpoint on this side only, and the
+        // collapse pass later opened a hole from every such edge (2026-09-15).
+        const r = decimate({
+            size: SIZE,
+            heights: grid(SIZE, (x, y) => ((x % 4 === 1 && y % 4 === 2) ? 50 : 0)),
+            regionNodes: regions(SIZE, (x, y) => y < 5 + x / 3),
+            maxErrorM: 1,
+            minLeafSize: 1,
+        });
+        assert.equal(openEdges(r.triangles, SIZE), 0);
+        assert.ok(Math.abs(totalArea(r.triangles) - 32 * 32) < 1e-6, 'covers the tile exactly');
+    });
+
+    it('refuses a chord whose two crossings sit on one edge', () => {
+        // Two water nodes on a block edge: the region changes twice along
+        // that edge and nowhere else, so the "chord" runs along the edge
+        // with a zero-area polygon between the crossings, while the finer
+        // neighbour beyond the edge cuts round the nodes. It is cut cells.
+        const r = decimate({
+            size: SIZE,
+            heights: grid(SIZE, () => 0),
+            regionNodes: regions(SIZE, (x, y) => !(x === 8 && (y === 9 || y === 10))),
+            maxErrorM: 1000,
+            minLeafSize: 1,
+        });
+        assert.equal(openEdges(r.triangles, SIZE), 0);
+        assert.ok(Math.abs(totalArea(r.triangles) - 32 * 32) < 1e-6, 'covers the tile exactly');
+    });
+
+    it("solves a chord crossing over the cut leaf's own sub-edge at minLeafSize 2", () => {
+        // A shallow boundary on flat ground with cut leaves two cells wide,
+        // so four-cell chord leaves sit beside two-cell cut leaves. The
+        // field can hold a crossing on both one-cell halves of a two-cell
+        // edge (a ring cutting the edge twice); a cut leaf asks the whole
+        // edge and gets the one nearest its middle, and a chord leaf that
+        // asked its own one-cell sub-edge got the other, so the shared
+        // edge had two different crossing points (2026-09-15). The
+        // callback answers 0.3 on a two-cell span and 0.8 on a one-cell one,
+        // measured from the lower end like the real field.
+        const r = decimate({
+            size: SIZE,
+            heights: grid(SIZE, () => 0),
+            regionNodes: regions(SIZE, (x, y) => y < 3 + x / 2.3),
+            maxErrorM: 1000,
+            minLeafSize: 2,
+            edgeCrossing: (ax, ay, bx, by) => { const t = Math.abs(bx - ax) + Math.abs(by - ay) === 2 ? 0.3 : 0.8; return ax <= bx && ay <= by ? t : 1 - t; },
+        });
+        assert.equal(openEdges(r.triangles, SIZE), 0);
+        assert.ok(Math.abs(totalArea(r.triangles) - 32 * 32) < 1e-6, 'covers the tile exactly');
     });
 
     it('keeps neighbouring leaves within one level of each other', () => {

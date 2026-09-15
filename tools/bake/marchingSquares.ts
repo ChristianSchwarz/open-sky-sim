@@ -95,16 +95,44 @@ function signedArea(p: Vec2[]): number {
     return s / 2;
 }
 
-/** Fan-triangulate a convex ring, dropping degenerate output. */
+/**
+ * Fan-triangulate a convex ring from a vertex no fan triangle is degenerate
+ * at. A ring here runs along the cell's edges, so three of its consecutive
+ * vertices can be collinear: a crossing snapped onto a corner leaves the
+ * corner beside a crossing on the next edge (the midpoint default when no
+ * geometry was supplied), and fanned from the corner before them, the
+ * triangle through all three has no area. Dropping it dropped the crossing
+ * from this cell's outline while the neighbour across the edge kept it - a
+ * T-junction that the collapse pass later opens into a hole. Any convex
+ * ring with area has an apex that fans cleanly; a ring without area is
+ * nothing to draw.
+ */
 function fan(poly: Vec2[], out: Vec2[][]): void {
-    if (poly.length < 3) {
+    if (poly.length < 3 || Math.abs(signedArea(poly)) <= MIN_AREA) {
         return;
     }
     const ccw = signedArea(poly) >= 0;
-    for (let i = 1; i + 1 < poly.length; i++) {
-        const tri = ccw
-            ? [poly[0], poly[i], poly[i + 1]]
-            : [poly[0], poly[i + 1], poly[i]];
+    const n = poly.length;
+    for (let k = 0; k < n; k++) {
+        const tris: Vec2[][] = [];
+        let ok = true;
+        for (let i = 1; i + 1 < n; i++) {
+            const a = poly[(k + i) % n], b = poly[(k + i + 1) % n];
+            const tri = ccw ? [poly[k], a, b] : [poly[k], b, a];
+            if (Math.abs(signedArea(tri)) <= MIN_AREA) {
+                ok = false;
+                break;
+            }
+            tris.push(tri);
+        }
+        if (ok) {
+            out.push(...tris);
+            return;
+        }
+    }
+    // Not reachable for a convex ring with area; keep the cell tiled anyway.
+    for (let i = 1; i + 1 < n; i++) {
+        const tri = ccw ? [poly[0], poly[i], poly[i + 1]] : [poly[0], poly[i + 1], poly[i]];
         if (Math.abs(signedArea(tri)) > MIN_AREA) {
             out.push(tri);
         }

@@ -32,6 +32,7 @@ import {
     PTM_MAX_RIVER_VERTS, PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmTileId, encodePtm,
 } from '../../src/script/terrain/ptm';
 import { GridTriangle, decimate } from './decimate';
+import { Vec2 } from './marchingSquares';
 import { collapse } from './collapse';
 import {
     CoastPolygon, InlandPolygon, LonLat, LonLatBounds, Shoreline, buildShoreline, simplifyRing,
@@ -201,6 +202,8 @@ export interface TileCover {
 
 export interface BuildTileInput {
     id: PtmTileId;
+    /** Return the surface grid triangles too (diagnostics only). */
+    keepGridTriangles?: boolean;
     bounds: LonLatBounds;
     /** Row-major heights, `size * size`. */
     heights: Float32Array;
@@ -294,6 +297,14 @@ export interface BuildTileResult {
     borderWaterNodes: number;
     /** The water surface itself, before its skirts. */
     waterSheetTriangles: number;
+    /**
+     * Surface edges (after the collapse pass) that do not close: an interior
+     * edge owned by one triangle, or a border edge owned by two. Zero on a
+     * conforming mesh. A T-junction the decimator leaves shows up here as
+     * three such edges, and once the collapse pass moves either vertex the
+     * sheet has a hole in it. See docs/terrain-triangle-merge.md.
+     */
+    openEdges: number;
     /** Tolerance actually used after any budget coarsening. */
     maxErrorM: number;
     /** Error bound written to the header; see PtmEncodeInput.geometricErrorM. */
@@ -318,6 +329,10 @@ export interface BuildTileResult {
     centerHeightM: number;
     /** Three sRGB bytes per land triangle, for the bake's swatch histogram. */
     landColors: Uint8Array;
+    /** The surface in grid coordinates after decimation and collapse; only with `keepGridTriangles`. */
+    gridTriangles?: GridTriangle[];
+    /** Same, before the collapse pass. */
+    gridTrianglesPreCollapse?: GridTriangle[];
 }
 
 const _ecef: Ecef = { x: 0, y: 0, z: 0 };
@@ -561,6 +576,42 @@ function shorePositionsOf(tris: GridTriangle[]): Set<string> {
 }
 
 /** See BuildTileResult.borderWaterNodes. */
+/**
+ * Edges of the surface that are not shared exactly as a conforming mesh
+ * shares them: see BuildTileResult.openEdges. Positions are welded by
+ * coordinate, as the collapse pass welds them.
+ */
+export function countOpenEdges(tris: GridTriangle[], size: number): number {
+    const cells = size - 1;
+    const counts = new Map<string, number>();
+    const sameBorder = (a: Vec2, b: Vec2): boolean =>
+        (a.x === 0 && b.x === 0) || (a.x === cells && b.x === cells)
+        || (a.y === 0 && b.y === 0) || (a.y === cells && b.y === cells);
+    const edgeKey = (a: Vec2, b: Vec2): string => {
+        const ka = gridKey(a.x, a.y), kb = gridKey(b.x, b.y);
+        return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+    };
+    const edges: Array<[Vec2, Vec2]> = [];
+    for (const t of tris) {
+        for (let e = 0; e < 3; e++) {
+            const a = t.pts[e], b = t.pts[(e + 1) % 3];
+            const k = edgeKey(a, b);
+            const n = counts.get(k) ?? 0;
+            counts.set(k, n + 1);
+            if (n === 0) {
+                edges.push([a, b]);
+            }
+        }
+    }
+    let open = 0;
+    for (const [a, b] of edges) {
+        if (counts.get(edgeKey(a, b)) !== (sameBorder(a, b) ? 1 : 2)) {
+            open++;
+        }
+    }
+    return open;
+}
+
 function countBorderWaterNodes(shoreline: Shoreline, size: number): number {
     const last = size - 1;
     const classified = (row: number, col: number) => {
@@ -1024,6 +1075,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // remove triangles, so the budget still holds; the one thing it can add
     // is a wall on a new grid-aligned edge between two shore positions,
     // which is rare and a quad.
+    const preCollapse = input.keepGridTriangles ? tris.slice() : undefined;
     const collapsed = collapse({
         triangles: tris,
         size,
@@ -1042,6 +1094,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     tris = collapsed.triangles;
     collapsedVertices = collapsed.collapsed;
     const meshTriangles = tris.length;
+    const openEdges = countOpenEdges(tris, size);
 
     // --- 4/5. projection, pad, depth bias ---------------------------------
 
@@ -1405,9 +1458,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
      * the raster either way, since the region layer carries no colour of its
      * own.
      */
-    const pushLandTriangle = (
-        a: Enu, b: Enu, c: Enu, facet: readonly [number, number, number, number], t: GridTriangle,
-    ) => {
+    /** Unit normal of a, b, c in tile space, turned to face the local up. */
+    const upNormal = (a: Enu, b: Enu, c: Enu): [number, number, number] => {
         const ax = a.e - centre.e, ay = a.u - centre.u, az = centre.n - a.n;
         const bx = b.e - centre.e, by = b.u - centre.u, bz = centre.n - b.n;
         const cx = c.e - centre.e, cy = c.u - centre.u, cz = centre.n - c.n;
@@ -1426,6 +1478,16 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         if (nx * localUpX + ny * localUpY + nz * localUpZ < 0) {
             nx = -nx; ny = -ny; nz = -nz;
         }
+        return [nx, ny, nz];
+    };
+    const pushLandTriangle = (
+        a: Enu, b: Enu, c: Enu, facet: readonly [number, number, number, number], t: GridTriangle,
+        normal?: readonly [number, number, number],
+    ) => {
+        const ax = a.e - centre.e, ay = a.u - centre.u, az = centre.n - a.n;
+        const bx = b.e - centre.e, by = b.u - centre.u, bz = centre.n - b.n;
+        const cx = c.e - centre.e, cy = c.u - centre.u, cz = centre.n - c.n;
+        const [nx, ny, nz] = normal ?? upNormal(a, b, c);
         landPos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
         landNrm.push(nx, ny, nz);
         // With regions, the mesh is untagged ground: the polygons are laid over
@@ -1695,8 +1757,19 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
                 const botA = project(a.x, a.y, true, false, skirt);
                 const botB = project(b.x, b.y, true, false, skirt);
                 const facet = coverOf(t);
-                pushLandTriangle(topA, topB, botB, facet, t);
-                pushLandTriangle(topA, botB, botA, facet, t);
+                // A skirt is only ever seen through the crack between two
+                // tiles that decimated their shared edge differently. Lit
+                // as the vertical face it is, it draws that crack as a
+                // bright or dark line the length of the border; shaded as
+                // the facet it hangs from, it reads as that ground.
+                const [p0, p1, p2] = t.pts;
+                const normal = upNormal(
+                    project(p0.x, p0.y, true, p0.shore),
+                    project(p1.x, p1.y, true, p1.shore),
+                    project(p2.x, p2.y, true, p2.shore),
+                );
+                pushLandTriangle(topA, topB, botB, facet, t, normal);
+                pushLandTriangle(topA, botB, botA, facet, t, normal);
             } else {
                 const ia = waterVertex(a.x, a.y);
                 const ib = waterVertex(b.x, b.y);
@@ -2146,6 +2219,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         tallWallTriangles,
         borderWaterNodes: countBorderWaterNodes(shoreline, size),
         waterSheetTriangles,
+        openEdges,
         maxErrorM,
         geometricErrorM,
         minLeafSize,
@@ -2155,5 +2229,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         meshTriangles,
         centerHeightM,
         landColors: new Uint8Array(landColor),
+        gridTriangles: input.keepGridTriangles ? tris : undefined,
+        gridTrianglesPreCollapse: preCollapse,
     };
 }

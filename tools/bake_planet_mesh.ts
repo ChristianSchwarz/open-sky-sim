@@ -626,6 +626,7 @@ async function main(): Promise<void> {
     const zoomStats = new Map<number, {
         n: number; tris: number; mesh: number; fill: number; walls: number; skirts: number; water: number; strokes: number;
         tallWalls: number; borderWater: number; borderWaterTiles: number;
+        openEdges: number; openEdgeTiles: number;
         errs: number[]; collapsed: number;
     }>();
     const t0 = Date.now();
@@ -694,7 +695,8 @@ async function main(): Promise<void> {
         const zs = zoomStats.get(z)
             ?? {
                 n: 0, tris: 0, mesh: 0, fill: 0, walls: 0, skirts: 0, water: 0, strokes: 0,
-                tallWalls: 0, borderWater: 0, borderWaterTiles: 0, errs: [], collapsed: 0,
+                tallWalls: 0, borderWater: 0, borderWaterTiles: 0, openEdges: 0, openEdgeTiles: 0,
+                errs: [], collapsed: 0,
             };
         zs.n++;
         zs.tris += r.triangleCount;
@@ -706,6 +708,10 @@ async function main(): Promise<void> {
         zs.borderWater += r.borderWaterNodes;
         if (r.borderWaterNodes > 0) {
             zs.borderWaterTiles++;
+        }
+        zs.openEdges += r.openEdges;
+        if (r.openEdges > 0) {
+            zs.openEdgeTiles++;
         }
         zs.water += r.waterSheetTriangles;
         zs.strokes += r.strokeTriangles;
@@ -934,7 +940,8 @@ async function main(): Promise<void> {
                 + (coastOnly > 0 ? ` (${coastOnly} coast-only)` : '')
                 + `, ${Math.round(zs.collapsed / zs.n)} vertices collapsed per tile`
                 + `, ${zs.tallWalls} wall triangles over 150 m`
-                + `, ${zs.borderWater} border sea nodes on ${zs.borderWaterTiles} tiles`);
+                + `, ${zs.borderWater} border sea nodes on ${zs.borderWaterTiles} tiles`
+                + `, ${zs.openEdges} open edges on ${zs.openEdgeTiles} tiles`);
         }
     }
 }

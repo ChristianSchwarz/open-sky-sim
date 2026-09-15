@@ -439,3 +439,89 @@ So: not fewer triangles at the leaf level, but coast-only tiles are
 now the exception and the same triangles draw finer terrain. To take
 it as fewer triangles instead, lower the budget or raise
 MIN_ERROR_CELLS.
+
+## Holes beside the shore, and the seam line (2026-09-15)
+
+Two screenshots: white triangles along a river and inside a lake, and a
+straight line the length of a tile border across a hillside.
+
+### The holes: a chord leaf that drops its midpoint
+
+An edge-count check over the surface (`countOpenEdges` in buildTile.ts:
+an interior edge must belong to two triangles, a border edge to one)
+found every checked tile non-conforming *before* the collapse pass, with
+the area still exact, and short of area after it. Replaying the leaves
+round one such edge on `12/4261/1000`:
+
+    LEAF 1,4 s1 cut
+    LEAF 1,5 s1 cut
+    LEAF 2,4 s2 chord  b = (2, 5.638) on the west edge
+
+The chord leaf owes a midpoint at (2,5) to its finer neighbours and
+`chordPolygons` puts it in the ring, but each half was fanned from the
+crossing it starts at, and the fan triangle through crossing (2,5.638),
+midpoint (2,5) and corner (2,4) is collinear. It was skipped as
+degenerate, which is right for the triangle and wrong for the ring: the
+chord side's edge then runs (2,4)-(2,5.638) in one piece while the cut
+cells beside it split at (2,5). That is a T-junction, watertight in 2D,
+hairline in 3D. The collapse pass then sees (2,5) with a ring of cut
+cells only, judges it flat and moves it, and the sliver becomes a real
+hole: `12/4240/990` lost 105 cells² of its 65536, `12/4285/991` 233.
+
+`fanConvexRing` now picks the first ring vertex from which no fan
+triangle is degenerate; one always exists, since the vertices on any one
+square edge are at most a corner, a midpoint and a crossing, and the
+middle one of those is safe. A second, rarer shape surfaced once the fan
+refused to skip: both crossings on one edge, the boundary running along
+it with a zero-area polygon between them, while the neighbour beyond the
+edge cuts round the nodes. `simpleChord` refuses that block, a crossing sitting on a corner, and a
+chord shaving a corner so closely that its polygon has no area (one such
+ring, 5e-5 cells across, stopped the first full re-bake at 36 %); all
+fall to the cutter as before.
+
+The cutter had the same fan in miniature. Where a coast ring passes
+through a grid node, one crossing snaps onto the corner and the other
+edge has no geometry and defaults to its midpoint; the land ring is then
+the whole cell plus that midpoint, and fanned from the first corner the
+triangle through corner, snapped corner and midpoint is collinear and
+was dropped, so the midpoint left this cell's outline while the
+neighbour kept it. After the first full re-bake with the chord fix the
+new counter still read 631 open edges on 130 z12 tiles, all this shape
+(`4/17/3` at node (46,83), for one); `fan` in marchingSquares.ts now
+picks its apex the same way.
+
+A third shape survived that re-bake too (112-865 open edges per zoom,
+z9 up). On a tile whose budget search settled at `minLeafSize` 2, a cut
+leaf asks `edgeCrossing` over its whole two-cell edge and takes the
+crossing nearest the middle, while the chord leaf across that edge
+solved each one-cell sub-edge on its own and could take the other
+crossing when the ring cut the edge twice (`9/529/123`, edge x 192-194 at
+y 20: 192.62 against 193.9998). The cutter also snaps a crossing within
+`SNAP_EPS` of a corner onto it and the chord leaf did not (`9/531/122`,
+a crossing 4e-4 cells from the node). `simpleChord` now solves each
+crossing over the `minLeafSize`-aligned sub-edge holding the change and
+snaps it the same way, so the two sides ask the same question.
+
+`decimate.test.ts` holds both chord shapes with an `openEdges` assertion,
+`marchingSquares.test.ts` the snapped-corner cell;
+each read 24 and 4 open edges on the old code. The bake summary now
+prints `open edges on N tiles` per zoom beside the wall and border-sea
+counters, and it should read 0.
+
+Full re-bake with all three fixes (alps, mad and the new Berlin box,
+5859 tiles): 0 open edges at every zoom. Surface triangles per z12 tile
+2704 -> 2950 against the bake before the chord solve changed: a chord
+whose crossing moves to the cut leaf's answer fails the side test more
+often and falls to cut cells (the synthetic circle case goes 152 -> 290
+triangles), which is the price of the two sides agreeing.
+
+### The seam: skirts lit as walls
+
+The line along the border is the skirt showing through the crack that
+two independently decimated tiles always leave between their shared
+edges, wider since the collapse pass may move border vertices within the
+tolerance. The skirt is a vertical quad, and it was shaded from its own
+face normal, so the crack came out as a strip lit differently from the
+ground on either side. A land skirt now carries the normal of the surface
+facet it hangs from, so whatever shows of it reads as that ground. Water
+skirts have no normal.

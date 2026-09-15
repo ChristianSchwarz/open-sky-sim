@@ -36,7 +36,7 @@
  * row-major DEM layout with v=0 at the north edge.
  */
 
-import { MIN_AREA, Vec2, cutCell, cutCellRegions } from './marchingSquares';
+import { MIN_AREA, SNAP_EPS, Vec2, cutCell, cutCellRegions } from './marchingSquares';
 
 export interface DecimateInput {
     /** Node count per side; cells per side is `size - 1`. */
@@ -176,6 +176,42 @@ interface Leaf {
  */
 const CHORD_MAX_LEAF_SIZE = 4;
 
+/**
+ * Fans a convex ring from a vertex no fan triangle is degenerate at.
+ *
+ * The ring of a chord polygon runs along the square's edges, so two of its
+ * consecutive vertices can be collinear with a third on the same edge: a
+ * shore crossing, the midpoint a finer neighbour asks for, and the corner
+ * beyond it. Fanned from that crossing, the triangle through the midpoint
+ * has no area; skipping it drops the midpoint from this side of the edge
+ * while the neighbour keeps it, and the T-junction that leaves is a gap
+ * once the collapse pass moves either vertex. A vertex is a safe apex when
+ * none of the ring's other consecutive pairs lies on its own edge, and one
+ * always exists: a run of vertices on one edge is at most a corner, a
+ * midpoint and a crossing, whose middle vertex is safe.
+ */
+function fanConvexRing(ring: Vec2[]): Array<[Vec2, Vec2, Vec2]> {
+    const n = ring.length;
+    for (let k = 0; k < n; k++) {
+        const apex = ring[k];
+        const out: Array<[Vec2, Vec2, Vec2]> = [];
+        let ok = true;
+        for (let i = 1; i + 1 < n; i++) {
+            const a = ring[(k + i) % n], b = ring[(k + i + 1) % n];
+            const area = (a.x - apex.x) * (b.y - apex.y) - (a.y - apex.y) * (b.x - apex.x);
+            if (Math.abs(area) / 2 < MIN_AREA) {
+                ok = false;
+                break;
+            }
+            out.push([apex, a, b]);
+        }
+        if (ok) {
+            return out;
+        }
+    }
+    throw new Error(`decimate: no apex fans the ring ${JSON.stringify(ring)} without a degenerate triangle`);
+}
+
 function isPow2(n: number): boolean {
     return n > 0 && (n & (n - 1)) === 0;
 }
@@ -274,12 +310,18 @@ export function decimate(input: DecimateInput): DecimateResult {
      * The block's boundary nodes in ring order, clockwise from its top-left
      * corner, as (x, y, edge, t) where t runs along the edge.
      */
-    const ringNodes = (bx: number, by: number, s: number): Array<{ x: number; y: number; edge: number; t: number }> => {
+    /**
+     * The block's boundary nodes at `step` cells, in ring order. The step is
+     * the cut leaf's size: a cut leaf beside this block asks the crossing
+     * of its whole edge, and the two must ask the same question or they
+     * answer with different points on the shared edge.
+     */
+    const ringNodes = (bx: number, by: number, s: number, step: number): Array<{ x: number; y: number; edge: number; t: number }> => {
         const out: Array<{ x: number; y: number; edge: number; t: number }> = [];
-        for (let k = 0; k < s; k++) out.push({ x: bx + k, y: by, edge: 0, t: k / s });
-        for (let k = 0; k < s; k++) out.push({ x: bx + s, y: by + k, edge: 1, t: k / s });
-        for (let k = 0; k < s; k++) out.push({ x: bx + s - k, y: by + s, edge: 2, t: k / s });
-        for (let k = 0; k < s; k++) out.push({ x: bx, y: by + s - k, edge: 3, t: k / s });
+        for (let k = 0; k < s; k += step) out.push({ x: bx + k, y: by, edge: 0, t: k / s });
+        for (let k = 0; k < s; k += step) out.push({ x: bx + s, y: by + k, edge: 1, t: k / s });
+        for (let k = 0; k < s; k += step) out.push({ x: bx + s - k, y: by + s, edge: 2, t: k / s });
+        for (let k = 0; k < s; k += step) out.push({ x: bx, y: by + s - k, edge: 3, t: k / s });
         return out;
     };
 
@@ -299,7 +341,7 @@ export function decimate(input: DecimateInput): DecimateResult {
         if (s > maxLeafSize || s > CHORD_MAX_LEAF_SIZE || !coverUniform(bx, by, s)) {
             return undefined;
         }
-        const ring = ringNodes(bx, by, s);
+        const ring = ringNodes(bx, by, s, 1);
         const changes: ChordCrossing[] = [];
         const idA = regionIdAt(ring[0].x, ring[0].y);
         let idB = -1;
@@ -318,20 +360,38 @@ export function decimate(input: DecimateInput): DecimateResult {
             if (changes.length === 2) {
                 return undefined;
             }
-            const t = edgeCrossing(n0.x, n0.y, n1.x, n1.y) ?? 0.5;
+            // Solved over the minLeafSize-aligned sub-edge holding this
+            // node pair, and snapped, exactly as cutCell does for the cut
+            // leaf that may sit across it: the two must ask the same
+            // question or they answer with different points on the edge.
+            const m = minLeafSize;
+            const k0 = Math.floor(i % s / m) * m;
+            const e0 = ring[i - (i % s) + k0];
+            const ex = n0.x + (n1.x - n0.x) * (k0 + m - i % s), ey = n0.y + (n1.y - n0.y) * (k0 + m - i % s);
+            let t = edgeCrossing(e0.x, e0.y, ex, ey) ?? 0.5;
+            t = t < SNAP_EPS ? 0 : t > 1 - SNAP_EPS ? 1 : t;
             changes.push({
-                x: n0.x + (n1.x - n0.x) * t,
-                y: n0.y + (n1.y - n0.y) * t,
+                x: e0.x + (ex - e0.x) * t,
+                y: e0.y + (ey - e0.y) * t,
                 edge: n0.edge,
-                t: n0.t + t / s,
+                t: e0.t + (t * m) / s,
             });
         }
         if (changes.length !== 2 || idB === -1) {
             return undefined;
         }
+        const [a, b] = changes;
+        // Both crossings on one edge is a boundary running along that edge,
+        // not a chord across the block: the polygon between them has no
+        // area, and the finer neighbour beyond the edge cuts round the nodes
+        // this side would then skip. A crossing sitting on a corner is a
+        // zero-length ring edge. The cutter handles both.
+        const cornerEps = 1e-9;
+        if (a.edge === b.edge || a.t < cornerEps || a.t > 1 - cornerEps || b.t < cornerEps || b.t > 1 - cornerEps) {
+            return undefined;
+        }
         // Every node of the block, interior included, on the side of the
         // chord its region says.
-        const [a, b] = changes;
         const cx = b.x - a.x, cy = b.y - a.y;
         let signA = 0;
         for (let y = by; y <= by + s; y++) {
@@ -359,6 +419,16 @@ export function decimate(input: DecimateInput): DecimateResult {
         const polys = chordPolygons(bx, by, s, chord, [false, false, false, false]);
         for (const poly of polys) {
             const region = poly.regionId;
+            // A chord shaving a corner by a hair leaves a polygon of no area
+            // on that side, which no apex can fan; the cutter draws it.
+            let polyArea = 0;
+            for (let j = 1; j + 1 < poly.ring.length; j++) {
+                const t0 = poly.ring[0], t1 = poly.ring[j], t2 = poly.ring[j + 1];
+                polyArea += (t1.x - t0.x) * (t2.y - t0.y) - (t1.y - t0.y) * (t2.x - t0.x);
+            }
+            if (Math.abs(polyArea) / 2 < MIN_AREA) {
+                return undefined;
+            }
             for (let j = 1; j + 1 < poly.ring.length; j++) {
                 const t0 = poly.ring[0], t1 = poly.ring[j], t2 = poly.ring[j + 1];
                 const det = (t1.y - t2.y) * (t0.x - t2.x) + (t2.x - t1.x) * (t0.y - t2.y);
@@ -593,14 +663,8 @@ export function decimate(input: DecimateInput): DecimateResult {
                 neighbourSizeAt(l.x - 1, l.y) < s || neighbourSizeAt(l.x - 1, l.y + s - 1) < s,
             ];
             for (const poly of chordPolygons(l.x, l.y, s, l.chord, needMid)) {
-                const apex = poly.ring[0];
-                for (let j = 1; j + 1 < poly.ring.length; j++) {
-                    const a = poly.ring[j], b = poly.ring[j + 1];
-                    const area = (a.x - apex.x) * (b.y - apex.y) - (a.y - apex.y) * (b.x - apex.x);
-                    if (Math.abs(area) / 2 < MIN_AREA) {
-                        continue;
-                    }
-                    triangles.push({ pts: [apex, a, b], regionId: poly.regionId, cut: true });
+                for (const t of fanConvexRing(poly.ring)) {
+                    triangles.push({ pts: t, regionId: poly.regionId, cut: true });
                 }
             }
             continue;
