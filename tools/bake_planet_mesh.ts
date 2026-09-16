@@ -47,6 +47,9 @@ import {
 import { FlattenPadRecord, padFromRecord } from '../src/script/terrain/flattenPad';
 import { AIRBASE_FLATTEN_PAD, PLAY_ORIGIN } from '../src/script/state/worldLayout';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
+import {
+    TileMeta, foldPtmErrors, INDEX_META_FILE, loadIndexMeta, newErrorFoldStats, saveIndexMeta,
+} from './bake/errorFold';
 import { LonLatBounds } from './bake/shoreline';
 import {
     MeshTileConfig, TileProcessResult, TileTask, tileBounds,
@@ -427,50 +430,8 @@ async function runTilesInParallel(
  */
 const AIRFIELDS_FILE = 'airfields.json';
 
-/**
- * The per-tile numbers the manifest's per-level maxima are folded from,
- * keyed `z/x/y`, kept beside the index.
- *
- * A scoped bake has to fold every tile it did not write into those maxima,
- * and the only other place the numbers live is each tile's own header -
- * behind a gunzip and a decode, for hundreds of tiles per run. Reading them
- * from here instead costs one JSON parse; a tile the sidecar does not know
- * (an older tree, or one written by hand) is still decoded.
- */
-const INDEX_META_FILE = 'index_meta.json';
-
-interface TileMeta {
-    geometricErrorM: number;
-    skirtDepthM: number;
-}
-
-interface IndexMeta {
-    version: 1;
-    tiles: Record<string, TileMeta>;
-}
-
-function loadIndexMeta(dir: string): Record<string, TileMeta> {
-    const p = path.join(dir, INDEX_META_FILE);
-    if (!fs.existsSync(p)) {
-        return {};
-    }
-    try {
-        const parsed = JSON.parse(fs.readFileSync(p, 'utf8')) as IndexMeta;
-        if (parsed.version !== 1 || typeof parsed.tiles !== 'object' || parsed.tiles === null) {
-            console.warn(`  ignoring ${INDEX_META_FILE}: unknown layout`);
-            return {};
-        }
-        return parsed.tiles;
-    } catch (err) {
-        console.warn(`  ignoring ${INDEX_META_FILE}: ${(err as Error).message}`);
-        return {};
-    }
-}
-
-function saveIndexMeta(dir: string, tiles: Record<string, TileMeta>): void {
-    const meta: IndexMeta = { version: 1, tiles };
-    fs.writeFileSync(path.join(dir, INDEX_META_FILE), `${JSON.stringify(meta)}\n`);
-}
+// The per-tile header sidecar (index_meta.json) and the error fold that
+// reads it live in tools/bake/errorFold.ts.
 
 /** One airfield as `tools/bake_osm_airports.py` writes it into the DEM manifest. */
 interface AirfieldRecord {
@@ -664,7 +625,6 @@ async function main(): Promise<void> {
         if (r.imagery && r.landColors) {
             accumulateColors(colorHistogram, r.landColors);
         }
-        foldLevel(z, r.geometricErrorM, r.skirtDepthM);
         if (r.covered) {
             coveredTiles++;
         }
@@ -786,6 +746,7 @@ async function main(): Promise<void> {
             const { z, x, y } = tiles[i];
             tileMeta[`${z}/${x}/${y}`] = {
                 geometricErrorM: r.geometricErrorM, skirtDepthM: r.skirtDepthM,
+                headerErrorM: r.geometricErrorM,
             };
         }
     }
@@ -812,18 +773,33 @@ async function main(): Promise<void> {
                 console.error('Run a full `npm run bake:mesh` to rebuild the tree.');
                 process.exit(1);
             }
+            // The header is all that is known here; it is at least the own
+            // figure, which is all the fold below needs.
             tileMeta[key] = {
                 geometricErrorM: tile.geometricErrorM, skirtDepthM: tile.skirtDepthM,
+                headerErrorM: tile.geometricErrorM,
             };
             carriedDecoded++;
         }
-        foldLevel(k.z, tileMeta[key].geometricErrorM, tileMeta[key].skirtDepthM);
     }
     if (carried > 0) {
         console.log(`  carried tile headers: ${carriedFromMeta} from ${INDEX_META_FILE}, `
             + `${carriedDecoded} decoded`);
     }
+    // Every tile's figure is known now, so fold them: a parent's header is
+    // brought up to the worst tile beneath it, and the per-level maxima are
+    // taken over the folded figures. See tools/bake/errorFold.ts.
+    const tFold = Date.now();
+    const foldStats = newErrorFoldStats();
+    const drawnError = foldPtmErrors(args.out, tileMeta, foldStats);
+    for (const [key, meta] of Object.entries(tileMeta)) {
+        foldLevel(Number(key.split('/')[0]), drawnError.get(key) ?? meta.geometricErrorM, meta.skirtDepthM);
+    }
     saveIndexMeta(args.out, tileMeta);
+    console.log(`  errors folded in ${((Date.now() - tFold) / 1000).toFixed(1)}s: `
+        + `${foldStats.raised} tiles carry a figure from beneath them `
+        + `(largest rise ${foldStats.maxRaiseM.toFixed(0)} m), `
+        + `${foldStats.rewritten} headers rewritten`);
 
     const outManifestPath = path.join(args.out, 'manifest.json');
     const carriedTexture = fs.existsSync(outManifestPath)

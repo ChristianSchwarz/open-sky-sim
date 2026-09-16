@@ -4,7 +4,7 @@ import { Palette, PaletteCategory, PaletteColor } from "../../../config/palettes
 import { COCKPIT_FOV, PITCH_STICK_AFT_UNITS, PITCH_STICK_FWD_UNITS } from '../../../defs';
 import { CanvasPainter } from "../../../render/screen/canvasPainter";
 import { Font, TextAlignment } from "../../../render/screen/text";
-import { HUDFocusMode, UnitSystems } from '../../../state/gameDefs';
+import { FlightModels, HUDFocusMode, UnitSystems } from '../../../state/gameDefs';
 import { calculatePitchRoll, clamp, FORWARD, toDegrees, toRadians, UP, vectorHeading } from '../../../utils/math';
 import { computeMachNumber } from '../../../physics/aeroUtils';
 import { FcsPitchLimiter } from '../../../physics/fm2/fcs';
@@ -76,7 +76,7 @@ export class HUDEntity implements Entity {
         this.displayUnits.setSystem(system);
     };
 
-    constructor(private actor: PlayerEntity, config: ConfigService) {
+    constructor(private actor: PlayerEntity, private readonly config: ConfigService) {
         this.displayUnits = new DisplayUnits(config.unitSystem.getActive());
         config.unitSystem.addChangeListener(this.onUnitSystemChange);
     }
@@ -649,8 +649,10 @@ export class HUDEntity implements Entity {
         painter.hLine(throttleX - 1, throttleX + 1, throttleY);
 
         const limitersOn = this.actor.fcsLimitersEnabled;
+        // FM3 has one control law; the 1/2/3 limiter strategies are FM2's.
+        const fm3 = this.config.flightModels.getActiveKey() === FlightModels.FM3;
         const label = limitersOn
-            ? (FCS_MODE_LABELS[this.actor.fcsPitchLimiterMode] ?? '')
+            ? (fm3 ? 'FCS FM3' : (FCS_MODE_LABELS[this.actor.fcsPitchLimiterMode] ?? ''))
             : 'FCS OFF';
         const labelColor = limitersOn ? hudColor : hudLimitColor;
         const labelY = rudderY + gap + 2;

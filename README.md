@@ -42,6 +42,12 @@ GLO-30 with forest and building height bias removed) and writes the GeoTIFF
 the first command above takes as `--input`. See
 [`tools/README.md`](tools/README.md#height-sources).
 
+The mesh stage ends by folding every tile's geometric error upward, so a
+parent tile is always marked at least as far off as any tile beneath it and
+the level-of-detail cut refines an island as one piece rather than half of
+it. A tree baked before that fold existed can be brought up to date without
+re-meshing: `npm run bake:errors`.
+
 The cover stage is what gives terrain its colour: every facet is baked with
 both a landcover class and a satellite colour, and the *Terrain colour*
 setting picks which one paints it. Skip those two commands and the terrain
@@ -96,6 +102,7 @@ fidelity (control surfaces + custom flight physics), include a
 
 The flight model selects the physics driving the simulation:
 * FM2 (Rigid body): The game's own 6-DOF aerodynamic model (lift, drag, and speed-dependent control authority), configured per-aircraft.
+* FM3 (Physical, post-stall): A 6-DOF rigid body whose forces come from the airframe's geometry: wing and tail strips with section aerodynamics over ±180°, a lifting line with tail downwash and wake, strake vortex lift and a slender-body fuselage. Stall, departures, deep stall, flat spins and tail slides are computed rather than scripted. Every aircraft flies the F-16's aerodynamics, checked against NASA TP-1538, through FM3's own flight control system; `L` removes the AoA and g limiters but keeps stability augmentation. Player aircraft only (AI stays on FM2). Design and validation: [docs/fm3-physical-flight-model.md](docs/fm3-physical-flight-model.md).
 * Debug (Free-fly): A no-aerodynamics "free-fly" mode of the same rigid-body model, intended for debugging/inspecting scenery and models — the stick rotates the airframe directly and the plane can be stopped midair.
 
 #### Keyboard layout

@@ -74,6 +74,8 @@ import { CLASS_COUNT, TerrainTone } from './tones';
 export const PTM_MAGIC = 0x314d5450; // 'PTM1' little-endian
 export const PTM_VERSION = 6;
 export const PTM_HEADER_BYTES = 72;
+/** Byte offset of the header's `geometricErrorM` float; see {@link writePtmGeometricError}. */
+export const PTM_GEOMETRIC_ERROR_OFFSET = 68;
 
 export const PTM_FLAG_HAS_LAND = 1 << 0;
 export const PTM_FLAG_HAS_WATER = 1 << 1;
@@ -505,9 +507,42 @@ export function encodePtm(input: PtmEncodeInput): Uint8Array {
     view.setUint32(56, waterOrder[TerrainTone.Water].length * 3, true);
     view.setUint32(60, waterOrder[TerrainTone.ShallowWater].length * 3, true);
     view.setFloat32(64, input.skirtDepthM, true);
-    view.setFloat32(68, input.geometricErrorM, true);
+    view.setFloat32(PTM_GEOMETRIC_ERROR_OFFSET, input.geometricErrorM, true);
 
     return out;
+}
+
+/**
+ * The header's geometric error, without decoding the tile. The bake folds
+ * every tile's own figure into a monotone one - a parent is at least as far
+ * off as any tile beneath it - after the pyramid is written, and patches the
+ * headers in place rather than re-encoding; see tools/bake/errorFold.ts.
+ */
+export function readPtmGeometricError(bytes: Uint8Array): number {
+    checkPtmHeader(bytes);
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+        .getFloat32(PTM_GEOMETRIC_ERROR_OFFSET, true);
+}
+
+/** Overwrite the header's geometric error in place. */
+export function writePtmGeometricError(bytes: Uint8Array, geometricErrorM: number): void {
+    checkPtmHeader(bytes);
+    if (!Number.isFinite(geometricErrorM) || geometricErrorM < 0) {
+        throw new Error(`PTM1: geometric error ${geometricErrorM} is not a finite non-negative metre figure`);
+    }
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+        .setFloat32(PTM_GEOMETRIC_ERROR_OFFSET, geometricErrorM, true);
+}
+
+function checkPtmHeader(bytes: Uint8Array): void {
+    if (bytes.byteLength < PTM_HEADER_BYTES) {
+        throw new Error(`PTM1 too short: ${bytes.byteLength}`);
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const magic = view.getUint32(0, true);
+    if (magic !== PTM_MAGIC) {
+        throw new Error(`Bad PTM1 magic: 0x${magic.toString(16)}`);
+    }
 }
 
 /**
@@ -550,7 +585,7 @@ export function decodePtm(bytes: ArrayBuffer | Uint8Array): PtmTile {
     const waterDeep = view.getUint32(56, true);
     const waterShallow = view.getUint32(60, true);
     const skirtDepthM = view.getFloat32(64, true);
-    const geometricErrorM = view.getFloat32(68, true);
+    const geometricErrorM = view.getFloat32(PTM_GEOMETRIC_ERROR_OFFSET, true);
 
     if (landVertCount % 3 !== 0) {
         throw new Error(`PTM1: landVertCount ${landVertCount} is not a multiple of 3`);

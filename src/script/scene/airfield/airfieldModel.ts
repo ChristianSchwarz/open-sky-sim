@@ -77,9 +77,11 @@ const TAXIWAY_STEP_M = 20;
 const SURFACE_CATEGORY: Record<RunwaySurface, PaletteCategory> = {
     asphalt: PaletteCategory.SCENERY_ROAD_SECONDARY,
     concrete: PaletteCategory.SCENERY_BASE_CONCRETE,
-    // A mown strip reads lighter than the scrub around it, not grey.
-    grass: PaletteCategory.SCENERY_FIELD_GREEN_LIGHT,
-    gravel: PaletteCategory.TERRAIN_BARE,
+    // Both are the terrain's own tone shifted, not a field or road colour: a
+    // mown strip a little lighter and greener than the grass round it, a
+    // gravel one lighter and sandier than bare earth.
+    grass: PaletteCategory.SCENERY_BASE_GRASS,
+    gravel: PaletteCategory.SCENERY_BASE_DIRT,
 };
 
 /**

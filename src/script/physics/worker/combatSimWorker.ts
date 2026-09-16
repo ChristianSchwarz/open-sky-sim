@@ -97,10 +97,10 @@ function handleMessage(data: SimToWorkerMessage): void {
                 v.fromArray(data.position),
                 q.fromArray(data.quaternion),
                 v2.fromArray(data.velocity),
-                data.landed, data.throttle, data.kinematic);
+                data.landed, data.throttle, data.model);
             break;
         case 'setAircraftConfig':
-            sim.setAircraftConfig(data.id, data.aircraftConfig, data.kinematic, data.collision);
+            sim.setAircraftConfig(data.id, data.aircraftConfig, data.model, data.collision);
             break;
         case 'setCollision':
             sim.setCollision(data.id, data.collision);

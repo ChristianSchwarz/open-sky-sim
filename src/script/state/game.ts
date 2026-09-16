@@ -97,7 +97,7 @@ import { CombatSimClient } from '../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../physics/model/simProxyFlightModel';
 import { serializeWorld, defaultArrestorCableField } from '../physics/sim/serializedWorld';
 import { HeightFieldSender, MirrorFocus } from '../terrain/heightMirror';
-import { SimAircraftDesc, SimAircraftSpawn, SimGunConfig } from '../physics/sim/simTypes';
+import { SimAircraftDesc, SimAircraftSpawn, SimFlightModelKind, SimGunConfig } from '../physics/sim/simTypes';
 import { PLAYER_SIM_ID, WINGMAN_SIM_ID, aiSimId } from '../physics/sim/simIds';
 import { AiPilotModels } from './gameDefs';
 import {
@@ -617,7 +617,10 @@ export class Game {
             flightModel.activate();
             this.player.setFlightModel(flightModel);
             flightModel.setAircraft(flightConfigWithArrestorHook(this.currentDef));
-            // FM2/DEBUG are simulated in the combat worker. A model that is not
+            // The worker rebuilds the model from the aircraft config alone, which
+            // drops the collision mesh; send it again.
+            this.pushAircraftMeshes(PLAYER_SIM_ID, this.currentDef);
+            // FM2, FM3 and DEBUG are simulated in the combat worker. A model that is not
             // sim-owned has the sim's player aircraft disabled and its state
             // injected as an external combatant (see update) for AI targeting.
             const simOwned = flightModel instanceof SimProxyFlightModel;
@@ -831,6 +834,12 @@ export class Game {
     /** Hand the sim both the hitbox and the drawn shape for a given airframe. */
     private pushAircraftMeshes(simId: string, def: FlyableAircraftDef): void {
         this.combatSim.setCollision(simId, def.collisionMesh);
+    }
+
+    /** The physics the combat sim should run for the player: the active sim-owned model's. */
+    private playerSimModelKind(): SimFlightModelKind {
+        const active = this.configService.flightModels.getActive();
+        return active instanceof SimProxyFlightModel ? active.modelKind : 'fm2';
     }
 
     /** Swap the player (and AI opponents) to the aircraft chosen in the spawn menu. */
@@ -2671,7 +2680,7 @@ export class Game {
             id: PLAYER_SIM_ID,
             faction: Faction.PLAYER,
             control: 'external',
-            kinematic: false,
+            model: this.playerSimModelKind(),
             aircraftConfig: flightConfigWithArrestorHook(this.currentDef),
             pilotOptions: { cruiseAltitude: 3000, cruiseSpeed: 220, hardDeck: 150 },
             hitRadius: PLAYER_HIT_RADIUS_M,

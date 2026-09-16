@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Fm2FlightModel } from '../model/fm2FlightModel';
+import { createSimFlightModel, modelKindFromDesc, SimFlightModel, SimFlightModelKind } from './simFlightModel';
 import { AiFlightPhase, AiPilotOptions } from '../../ai/aiPilot';
 import { AiPilotController } from '../../ai/aiPilotController';
 import { createAiPilot } from '../../ai/createAiPilot';
@@ -115,7 +115,7 @@ interface ProjectileSlot {
 }
 
 /**
- * One simulated aircraft: an {@link Fm2FlightModel} plus its command buffer, an
+ * One simulated aircraft: a {@link SimFlightModel} (FM2 or FM3) plus its command buffer, an
  * optional in-worker {@link AiPilotController} and gun. Implements {@link PilotableAircraft}
  * (so a pilot can fly it) and {@link Combatant} (so it can be targeted/hit).
  */
@@ -125,9 +125,9 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     readonly faction: Faction;
     control: SimControlMode;
     enabled: boolean;
-    kinematic: boolean;
+    modelKind: SimFlightModelKind;
 
-    model: Fm2FlightModel;
+    model: SimFlightModel;
     pilot: AiPilotController | undefined;
     gun: Gun | undefined;
 
@@ -202,7 +202,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.faction = desc.faction as Faction;
         this.control = desc.control;
         this.enabled = desc.enabled;
-        this.kinematic = desc.kinematic;
+        this.modelKind = modelKindFromDesc(desc);
         this.hitRadius = desc.hitRadius;
         this.collision = desc.collision;
         this.maxHealth = desc.maxHealth;
@@ -210,7 +210,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.afterburner = fm2UsesAfterburner(desc.aircraftConfig);
         const hook = desc.aircraftConfig?.hook ?? DEFAULT_ARRESTOR_HOOK_BODY;
         this.hookBody.set(hook[0], hook[1], hook[2]);
-        this.model = new Fm2FlightModel(desc.aircraftConfig, { kinematic: desc.kinematic });
+        this.model = createSimFlightModel(this.modelKind, desc.aircraftConfig);
         this.bindWorld(world);
         if (desc.gun) {
             const cfg: GunConfig = {
@@ -767,10 +767,10 @@ export class CombatSim implements ProjectileSink {
         this.aircraft.get(id)?.respawn(spawn);
     }
 
-    resetAircraft(id: string, position: THREE.Vector3, quaternion: THREE.Quaternion, velocity: THREE.Vector3, landed: boolean, throttle: number, kinematic: boolean): void {
+    resetAircraft(id: string, position: THREE.Vector3, quaternion: THREE.Quaternion, velocity: THREE.Vector3, landed: boolean, throttle: number, model: SimFlightModelKind): void {
         const a = this.aircraft.get(id);
         if (!a) return;
-        this.rebuildIfKinematicChanged(a, kinematic);
+        this.rebuildIfModelChanged(a, model);
         a.arrestorLatch = -1;
         a.arrestorFieldIndex = -1;
         a.arrestorSnagAlong = 0;
@@ -797,13 +797,13 @@ export class CombatSim implements ProjectileSink {
     setAircraftConfig(
         id: string,
         config: Fm2AircraftConfig,
-        kinematic: boolean,
+        model: SimFlightModelKind,
         collision?: AircraftCollisionMesh,
     ): void {
         const a = this.aircraft.get(id);
         if (!a) return;
         // Carry over the live rigid-body state across the model swap.
-        const next = new Fm2FlightModel(config, { kinematic });
+        const next = createSimFlightModel(model, config);
         next.setAltitudeAt(this.altitudeAt);
         next.reset();
         next.setCrashed(a.model.isCrashed());
@@ -812,7 +812,7 @@ export class CombatSim implements ProjectileSink {
         next.quaternion = a.model.quaternion;
         next.velocityVector = a.model.velocityVector;
         a.model = next;
-        a.kinematic = kinematic;
+        a.modelKind = model;
         a.collision = collision;
         a.setAfterburnerFromConfig(config);
         const hook = config.hook ?? DEFAULT_ARRESTOR_HOOK_BODY;
@@ -833,9 +833,9 @@ export class CombatSim implements ProjectileSink {
         if (a) a.collision = collision;
     }
 
-    private rebuildIfKinematicChanged(a: SimAircraft, kinematic: boolean): void {
-        if (a.kinematic === kinematic) return;
-        const next = new Fm2FlightModel(undefined, { kinematic });
+    private rebuildIfModelChanged(a: SimAircraft, model: SimFlightModelKind): void {
+        if (a.modelKind === model) return;
+        const next = createSimFlightModel(model);
         next.setAltitudeAt(this.altitudeAt);
         next.setCrashed(a.model.isCrashed());
         next.setLanded(a.model.isLanded());
@@ -843,7 +843,7 @@ export class CombatSim implements ProjectileSink {
         next.quaternion = a.model.quaternion;
         next.velocityVector = a.model.velocityVector;
         a.model = next;
-        a.kinematic = kinematic;
+        a.modelKind = model;
         a.bindWorld(this.world);
     }
 

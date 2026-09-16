@@ -169,6 +169,11 @@ export class Quadtree {
         return this.nodes.size;
     }
 
+    /** The node for a tile the walk has visited, if any; see TerrainEntity.coarsenToBudget. */
+    node(key: string): QuadNode | undefined {
+        return this.nodes.get(key);
+    }
+
     /**
      * Walk the tree for one camera and produce the draw list plus the want set.
      * Pure: it mutates only bookkeeping, never geometry.

@@ -114,7 +114,7 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
         this.faction = faction;
         this.simId = simId;
         this.combatSim = combatSim;
-        this.flightModel = new SimProxyFlightModel(combatSim, simId, false);
+        this.flightModel = new SimProxyFlightModel(combatSim, simId, 'fm2');
         this.fx = new AircraftFx(materials);
 
         this.buildFromDef(def);

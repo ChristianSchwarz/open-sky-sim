@@ -899,6 +899,21 @@ already oversamples it 1.6x.
 | `--min-zoom N` | coarsest level that gets a texture (default 4); below it the tangent-plane mapping drifts past a texel |
 | `--bbox W,S,E,N` | re-rasterise only the leaves in this box, refold their ancestors, merge `index_tex.bin` |
 
+`bake_planet_errors.ts` (`npm run bake:errors [-- --out DIR]`): re-fold the
+geometric errors of a tree that is already baked. Every tile's own
+`geometricErrorM` (PTM v6) bounds only what its *immediate* children would
+gain, and it is not monotone - a z10 tile whose children average out its
+relief can say 47 m over a z11 tile that says 500 m. The runtime refines a
+node on its own figure alone, so such a tile stayed coarse next to a
+neighbour that went on to the leaves at the same distance, and Porto Santo
+drew half at z10 and half at z12 with the seam through the island. The mesh
+bake now ends by raising each header to the largest figure beneath it (the
+maximum, not the sum, so a coarse tile is not treated as its own mountain)
+and records what each header holds in `index_meta.json`; this command does
+the same fold on its own, without re-meshing, and patches only the headers
+whose figure moves. Expect more far-field triangles where a coarse tile used
+to hide a mountain; the 600k triangle cap still bounds the scene.
+
 **`--bbox` is what makes a run additive.** Two whole-pyramid artefacts —
 `index_mesh.bin` and `swatch_histogram.bin` — are carried forward from disk only
 when it is present. Without it they are rebuilt from the tiles this run baked

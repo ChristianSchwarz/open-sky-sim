@@ -63,7 +63,7 @@ const SYSTEMS_HELP: HelpEntry[] = [
     { keys: ['G'], action: 'Landing gear' },
     { keys: ['F'], action: 'Flaps' },
     { keys: ['L'], action: 'FCS limiters (AoA/g) on/off' },
-    { keys: ['1', '2', '3'], action: 'FCS limiter strategy (soft / predictive / smooth)' },
+    { keys: ['1', '2', '3'], action: 'FCS limiter strategy (soft / predictive / smooth; FM2 only)' },
     { keys: ['T'], action: 'Select target' },
     { keys: ['I'], action: 'Target night view' },
     { keys: ['H'], action: 'Cycle HUD focus' },
@@ -135,6 +135,7 @@ const TERRAIN_SHADING_OPTIONS: Option<TerrainShading>[] = [
 
 const FLIGHT_MODEL_OPTIONS: Option<string>[] = [
     { value: FlightModels.FM2, label: 'FM2 (Rigid body)' },
+    { value: FlightModels.FM3, label: 'FM3 (Physical, post-stall)' },
     { value: FlightModels.DEBUG, label: 'Debug (Free-fly)' },
 ];
 
@@ -273,10 +274,11 @@ function sliderValue(event: Event): number {
                         <section>
                             <h3 class="m-0 mb-1 text-base font-medium">Terrain triangle cap</h3>
                             <p class="m-0 mb-2 text-sm opacity-70">
-                                Hard ceiling on terrain triangles drawn per frame. When it is reached
-                                the farthest tiles are dropped, so a low cap shows as missing distant
-                                ground rather than coarser ground nearby. Raise it if the far field
-                                cuts off; lower it if the frame rate is short.
+                                Ceiling on terrain triangles drawn per frame. When the view asks for
+                                more, the farthest tiles are folded into coarser ones until it fits,
+                                so a low cap shows as a coarser far field rather than coarser ground
+                                nearby. Raise it if the distance looks blocky; lower it if the frame
+                                rate is short.
                             </p>
                             <div class="flex items-center gap-4">
                                 <mat-slider class="flex-1" [min]="triangleMinK" [max]="triangleMaxK" [step]="100">

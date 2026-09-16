@@ -7,7 +7,7 @@ import {
 } from '../f16Engine';
 import { FcsPitchLimiter } from '../fm2/fcs';
 import { CombatSimClient, SimAircraftProxy } from '../sim/combatSimClient';
-import { SimControlInputs } from '../sim/simTypes';
+import { SimControlInputs, SimFlightModelKind } from '../sim/simTypes';
 import { AC } from '../sim/simSnapshotCodec';
 import { ForceVectorSample } from './flightModel';
 
@@ -42,7 +42,8 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
     constructor(
         private readonly client: CombatSimClient,
         readonly simId: string,
-        private readonly kinematicMode: boolean,
+        /** The physics the combat sim runs for this aircraft. */
+        readonly modelKind: SimFlightModelKind,
     ) {
         super();
         this.client.registerProxy(this);
@@ -215,7 +216,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
         super.reset();
         this.client.resetAircraft(
             this.simId, this.obj.position, this.obj.quaternion, this.velocity,
-            this.landed, this.throttle, this.kinematicMode);
+            this.landed, this.throttle, this.modelKind);
     }
 
     syncEffectiveThrottle(): void {
@@ -257,7 +258,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
 
     setAircraft(config: Fm2AircraftConfig): void {
         this.fm2Afterburner = config.engine.afterburner;
-        this.client.setAircraftConfig(this.simId, config, this.kinematicMode);
+        this.client.setAircraftConfig(this.simId, config, this.modelKind);
     }
 
     private isAfterburner(): boolean {

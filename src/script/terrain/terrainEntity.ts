@@ -51,7 +51,7 @@ import { TileMeshes, buildSmoothLandGeometryFromFaceted, buildTileMeshes, dispos
 import { TileStore } from './tileStore';
 import { PRIORITY_IN_FRUSTUM, TileStreamer, TileWant, predictViewTarget } from './tileStreamer';
 import { TileHeightIndex } from './tileHeightIndex';
-import { TileKey, approxTileEdgeMetres, tileAtLonLat, tileKeyString } from './tiling';
+import { TileKey, approxTileEdgeMetres, parentOf, tileAtLonLat, tileKeyString } from './tiling';
 import { enuToGeodeticApprox } from './geodesy';
 import {
     CLASS_TO_TONE, LAND_TONE_BASE, LAND_TONE_COUNT, TONE_COUNT, TerrainTone,
@@ -197,6 +197,8 @@ export interface TerrainStats {
     pendingUploads: number;
     /** TERRAIN_TRIANGLE_BUDGET cut this frame's draw list short (see syncGroup). */
     triangleBudgetHit: boolean;
+    /** Sibling groups folded into their parent to fit the triangle budget; see TerrainEntity.coarsenToBudget. */
+    coarsenedTiles: number;
     /** Resident tiles drawing their far cover texture; see CoverTextures. */
     textured: number;
     texturesInflight: number;
@@ -298,6 +300,8 @@ export class TerrainEntity implements Entity {
     private drawnTriangles = 0;
     /** Set for a frame where TERRAIN_TRIANGLE_BUDGET cut the draw list short. */
     private triangleBudgetHit = false;
+    /** Sibling groups folded into their parent to fit the budget this reconcile; see coarsenToBudget. */
+    private coarsenedTiles = 0;
     /**
      * Plan-view triangle indices for the drawn tiles something has asked the
      * surface height of. Built on demand and dropped as soon as the tile stops
@@ -832,8 +836,11 @@ export class TerrainEntity implements Entity {
             now,
         );
 
+        const fit = this.coarsenToBudget(r.draw, camera.position);
+        this.coarsenedTiles = fit.merged;
+        r.wants.push(...fit.wants);
         this.streamer.setWants(r.wants, this.speculativeWants(camera, r.wants));
-        this.drawList = r.draw;
+        this.drawList = fit.draw;
         // Land-use regions by size, see LANDUSE_REVEAL_MIN_PX: the pixel
         // threshold in metres of distance per metre of width, for this view.
         const sizeScale = this.landMaterial.uniforms.uSizeRevealScale;
@@ -908,6 +915,133 @@ export class TerrainEntity implements Entity {
     /** Viewport height in px, taken from the render target each pass. */
     private viewportHeightPx = 200;
 
+    /**
+     * Fit the cut to the triangle budget by coarsening it, farthest first.
+     *
+     * The SSE governor bounds error, not cost, and over a flat land-use area
+     * the leaves it asks for - twelve thousand triangles each, dozens in
+     * view from a couple of thousand metres up - run past the budget on an
+     * ordinary flight. The cap in syncGroup then dropped the farthest tiles
+     * outright, and the far field past the cut read as a pale band of
+     * nothing with a straight edge (2026-09-16). So the cut is reshaped
+     * here instead: the farthest set of siblings whose parent is resident
+     * is folded back into that parent, and again, until the total fits.
+     * The result is still a quadtree cut - no holes, no overlap - just a
+     * coarser one where the eye is least likely to notice.
+     *
+     * A parent stays out of reach while any grandchild is in the cut, so
+     * a subtree coarsens from its leaves up. A parent that is not resident
+     * cannot take over and is asked for, so the next reconcile can fold
+     * into it; until then the cap below still applies.
+     */
+    private coarsenToBudget(
+        draw: QuadNode[], camPos: THREE.Vector3,
+    ): { draw: QuadNode[]; merged: number; wants: TileWant[] } {
+        const cost = (node: QuadNode): number => {
+            const meshes = this.streamer.get(node.id);
+            return meshes ? countTriangles(meshes) : OCEAN_PATCH_TRIANGLES;
+        };
+        let total = 0;
+        const cut = new Map<string, QuadNode>();
+        // Dissolving leaf parents ride under their leaves; they are not part
+        // of the cut but do cost triangles, and folding leaves into one
+        // simply promotes it.
+        const under = new Map<string, QuadNode>();
+        for (const node of draw) {
+            (node.under ? under : cut).set(node.key, node);
+            total += cost(node);
+        }
+        if (total <= this.triangleBudget) {
+            return { draw, merged: 0, wants: [] };
+        }
+
+        let merged = 0;
+        const wants: TileWant[] = [];
+        const asked = new Set<string>();
+        while (total > this.triangleBudget) {
+            // Parents with a grandchild or deeper in the cut cannot take over.
+            const deep = new Set<string>();
+            const parents = new Map<string, TileKey>();
+            for (const node of cut.values()) {
+                let id = parentOf(node.id);
+                if (id === undefined) {
+                    continue;
+                }
+                parents.set(tileKeyString(id), id);
+                for (id = parentOf(id); id !== undefined; id = parentOf(id)) {
+                    const key = tileKeyString(id);
+                    if (deep.has(key)) {
+                        break;
+                    }
+                    deep.add(key);
+                }
+            }
+            // Every candidate of this round can fold independently - two
+            // candidates are distinct parents, and neither is under the
+            // other, or the one above would have a grandchild in the cut -
+            // so the round folds them farthest first until the cut fits,
+            // and the next round sees whatever parents that freed.
+            const candidates: Array<{ key: string; node: QuadNode; distance: number }> = [];
+            for (const [key, id] of parents) {
+                if (deep.has(key)) {
+                    continue;
+                }
+                const node = this.quadtree.node(key);
+                if (!node) {
+                    continue;
+                }
+                if (!this.streamer.get(id) && !node.ocean) {
+                    if (!asked.has(key)) {
+                        asked.add(key);
+                        wants.push({
+                            id, ssePx: node.geometricErrorM,
+                            distanceM: Math.max(1, camPos.distanceTo(node.center) - node.radius),
+                            inFrustum: true, pinned: false,
+                        });
+                    }
+                    continue;
+                }
+                candidates.push({ key, node, distance: camPos.distanceTo(node.center) - node.radius });
+            }
+            if (candidates.length === 0) {
+                break;
+            }
+            candidates.sort((a, b) => b.distance - a.distance);
+            for (const { key, node } of candidates) {
+                if (total <= this.triangleBudget) {
+                    break;
+                }
+                for (const child of node.children ?? []) {
+                    const c = cut.get(child.key);
+                    if (c) {
+                        cut.delete(child.key);
+                        total -= cost(c);
+                    }
+                }
+                if (under.has(key)) {
+                    under.delete(key);
+                } else {
+                    total += cost(node);
+                }
+                node.under = false;
+                cut.set(key, node);
+                merged++;
+            }
+        }
+        if (merged === 0) {
+            return { draw, merged: 0, wants };
+        }
+        // A dissolving parent whose leaves are all gone has nothing to sit
+        // under; one still holding some leaves keeps riding beneath them.
+        const out: QuadNode[] = [...cut.values()];
+        for (const node of under.values()) {
+            if (node.children?.some(c => cut.has(c.key))) {
+                out.push(node);
+            }
+        }
+        return { draw: out, merged, wants };
+    }
+
     private syncGroup(camPos: THREE.Vector3): void {
         this.group.clear();
         this.drawnTriangles = 0;
@@ -930,6 +1064,9 @@ export class TerrainEntity implements Entity {
                     // Everything from here on is farther than everything
                     // already added, so stopping rather than skipping keeps
                     // the gap this creates confined to the view's far edge.
+                    // coarsenToBudget has normally folded the far field
+                    // into coarser tiles before this is reached; it engages
+                    // only when the parents it needed were not resident.
                     this.triangleBudgetHit = true;
                     break;
                 }
@@ -1014,11 +1151,15 @@ export class TerrainEntity implements Entity {
             uploadMs: this.streamer.stats.uploadMs,
             pendingUploads: this.streamer.pendingUploads,
             triangleBudgetHit: this.triangleBudgetHit,
+            coarsenedTiles: this.coarsenedTiles,
             textured: this.cover.stats.attached,
             texturesInflight: this.cover.stats.inflight,
         };
     }
 }
+
+/** What a sea stand-in costs the budget; see buildOceanPatch. */
+const OCEAN_PATCH_TRIANGLES = 10;
 
 function countTriangles(m: TileMeshes): number {
     let n = 0;

@@ -40,8 +40,9 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
     const config = new ConfigService(
         { [TechProfiles.HD]: HDProfile },
         {
-            [FlightModels.FM2]: new SimProxyFlightModel(combatSim, PLAYER_SIM_ID, false),
-            [FlightModels.DEBUG]: new SimProxyFlightModel(combatSim, PLAYER_SIM_ID, true),
+            [FlightModels.FM2]: new SimProxyFlightModel(combatSim, PLAYER_SIM_ID, 'fm2'),
+            [FlightModels.FM3]: new SimProxyFlightModel(combatSim, PLAYER_SIM_ID, 'fm3'),
+            [FlightModels.DEBUG]: new SimProxyFlightModel(combatSim, PLAYER_SIM_ID, 'debug'),
         },
         settings.techProfile,
         settings.flightModel,

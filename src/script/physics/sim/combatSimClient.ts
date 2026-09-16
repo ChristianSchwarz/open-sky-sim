@@ -16,7 +16,7 @@ import {
 import { AiPilotOptions } from '../../ai/aiPilot';
 import {
     SimAircraftDesc, SimAircraftSpawn, SimControlInputs,
-    SimControlMode, SimHitEvent, SimToWorkerMessage, WorkerToSimMessage,
+    SimControlMode, SimFlightModelKind, SimHitEvent, SimToWorkerMessage, WorkerToSimMessage,
     AircraftCollisionMesh,
 } from './simTypes';
 
@@ -197,18 +197,18 @@ export class CombatSimClient {
         return this.maneuverLabels[id];
     }
 
-    resetAircraft(id: string, position: THREE.Vector3, quaternion: THREE.Quaternion, velocity: THREE.Vector3, landed: boolean, throttle: number, kinematic: boolean): void {
+    resetAircraft(id: string, position: THREE.Vector3, quaternion: THREE.Quaternion, velocity: THREE.Vector3, landed: boolean, throttle: number, model: SimFlightModelKind): void {
         this.post({
             type: 'reset', id,
             position: position.toArray() as [number, number, number],
             quaternion: quaternion.toArray() as [number, number, number, number],
             velocity: velocity.toArray() as [number, number, number],
-            landed, throttle, kinematic,
+            landed, throttle, model,
         });
     }
 
-    setAircraftConfig(id: string, aircraftConfig: Fm2AircraftConfig, kinematic: boolean): void {
-        this.post({ type: 'setAircraftConfig', id, aircraftConfig, kinematic });
+    setAircraftConfig(id: string, aircraftConfig: Fm2AircraftConfig, model: SimFlightModelKind): void {
+        this.post({ type: 'setAircraftConfig', id, aircraftConfig, model });
     }
 
     setCollision(id: string, collision: AircraftCollisionMesh | undefined): void {

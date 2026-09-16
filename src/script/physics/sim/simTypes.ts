@@ -16,6 +16,9 @@ import { HeightTileUpdate, SerializedHeightField } from '../../terrain/heightMir
 
 export type SimControlMode = 'external' | 'ai';
 
+/** Which physics flies a sim-owned aircraft: FM2, FM2's free-fly mode, or FM3. */
+export type SimFlightModelKind = 'fm2' | 'debug' | 'fm3';
+
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
 
@@ -63,7 +66,9 @@ export interface SimAircraftDesc {
     /** Faction (see weapons/combatant.Faction). */
     faction: number;
     control: SimControlMode;
-    kinematic: boolean;
+    /** Flight model; when absent, `kinematic` picks between 'debug' and 'fm2'. */
+    model?: SimFlightModelKind;
+    kinematic?: boolean;
     aircraftConfig?: Fm2AircraftConfig;
     /** Present when this aircraft can be flown by an in-worker AI pilot. */
     pilotOptions?: AiPilotOptions;
@@ -154,8 +159,8 @@ export type SimToWorkerMessage =
     | { type: 'setPhase'; id: string; phase: number }
     | { type: 'setPilotOptions'; id: string; options: AiPilotOptions }
     | { type: 'respawn'; id: string; spawn: SimAircraftSpawn }
-    | { type: 'reset'; id: string; position: Vec3; quaternion: Quat; velocity: Vec3; landed: boolean; throttle: number; kinematic: boolean }
-    | { type: 'setAircraftConfig'; id: string; aircraftConfig: Fm2AircraftConfig; kinematic: boolean; collision?: AircraftCollisionMesh }
+    | { type: 'reset'; id: string; position: Vec3; quaternion: Quat; velocity: Vec3; landed: boolean; throttle: number; model: SimFlightModelKind }
+    | { type: 'setAircraftConfig'; id: string; aircraftConfig: Fm2AircraftConfig; model: SimFlightModelKind; collision?: AircraftCollisionMesh }
     | { type: 'setCollision'; id: string; collision?: AircraftCollisionMesh }
     | { type: 'setBarricadeDrape'; id: string; drape?: AircraftCollisionMesh }
     | { type: 'setPosition'; id: string; position: Vec3 }

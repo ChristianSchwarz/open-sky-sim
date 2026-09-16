@@ -531,6 +531,16 @@ describe('airfield model', () => {
                 'the taxiways stayed asphalt on a concrete field');
         });
 
+        it('lays a grass strip and a gravel one in their own ground tones', () => {
+            // Neither is a field or a road: each is the terrain's tone under
+            // it, shifted just enough to read as a strip.
+            const of = (surface: 'grass' | 'gravel') => categories(buildAirfieldModel(gclp({
+                runways: [{ ...gclp().runways[0], surface }],
+            }), BASIS, MATERIALS)!.model.lod[0].flats);
+            assert.ok(of('grass').has('SCENERY_BASE_GRASS'), 'grass strip not in grass tone');
+            assert.ok(of('gravel').has('SCENERY_BASE_DIRT'), 'gravel strip not in dirt tone');
+        });
+
         it('keeps the markings the same on either', () => {
             const concrete = buildAirfieldModel(gclp({
                 runways: [{ ...gclp().runways[0], surface: 'concrete' }],

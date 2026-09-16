@@ -16,6 +16,7 @@ import {
     SurfaceGeometry,
 } from './fm2Constants';
 import { Fm2ForebodyAsymmetryConfig } from './forebodyAsymmetry';
+import type { Fm3Airframe } from '../fm3/fm3Airframe';
 import { F16_PROFILE } from '../f16Profile';
 import { PLANE_DISTANCE_TO_GROUND } from '../../defs';
 
@@ -403,6 +404,12 @@ export interface Fm2AircraftConfig {
     forebodyAsymmetry?: Fm2ForebodyAsymmetryConfig;
     /** Optional transonic pitch-damping augmentation (see the interface). Absent ⇒ off. */
     transonicPitchDamp?: Fm2TransonicPitchDampConfig;
+    /**
+     * Geometry for the FM3 physical model. FM2 ignores it; FM3 flies the default
+     * F-16 airframe when it is absent, taking only gear, engine quadrant,
+     * envelope and hook from the fields above.
+     */
+    fm3?: Fm3Airframe;
 }
 
 /**

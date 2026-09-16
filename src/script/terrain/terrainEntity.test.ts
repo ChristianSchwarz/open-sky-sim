@@ -8,6 +8,7 @@ import { TERRAIN_TRIANGLE_BUDGET } from './lod';
 import { TerrainManifest } from './manifest';
 import { TerrainEntity } from './terrainEntity';
 import { TileMeshes } from './tileMesh';
+import { QuadNode } from './quadtree';
 
 /** Enough of the material manager to construct the entity. */
 const materials = {
@@ -269,7 +270,7 @@ describe('terrain triangle budget (safety valve)', () => {
         const land = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
         const group = new THREE.Group();
         group.name = name;
-        return { group, land };
+        return { group, land, geometricErrorM: 0, bytes: 0 };
     }
 
     /** Stages `count` synthetic resident tiles at increasing distance, each with `trianglesEach`. */
@@ -327,5 +328,55 @@ describe('terrain triangle budget (safety valve)', () => {
         // Nearest-first: with a 600k budget and 200k/tile, exactly the 3
         // nearest (x = 1000, 2000, 3000) fit; the two farthest are dropped.
         assert.deepEqual(kept, ['5/0/0', '5/1/0', '5/2/0']);
+    });
+
+
+    it('coarsens the farthest siblings into their resident parent until the cut fits', () => {
+        const entity = makeEntity();
+        const each = 200_000;
+        stage(entity, 6, each); // 1,200,000 over a 600k budget: two sibling pairs must fold
+        const streamer = (entity as unknown as {
+            streamer: { get: (id: unknown) => TileMeshes | undefined };
+        }).streamer;
+        const inner = streamer.get;
+        // 5/0/0,5/1/0 sit under 4/0/0 (not resident); 5/2/0,5/3/0 under
+        // 4/1/0 and 5/4/0,5/5/0 under 4/2/0, both resident and cheap.
+        const parentMeshes = new Map<string, TileMeshes>([
+            ['4/1/0', fakeMeshes(300, '4/1/0')],
+            ['4/2/0', fakeMeshes(300, '4/2/0')],
+        ]);
+        streamer.get = (wantedId: unknown) => {
+            const { z, x, y } = wantedId as { z: number; x: number; y: number };
+            return parentMeshes.get(`${z}/${x}/${y}`) ?? inner(wantedId);
+        };
+        const leaves = (entity as unknown as { drawList: QuadNode[] }).drawList;
+        const parents = new Map<string, QuadNode>();
+        for (let x = 0; x < 3; x++) {
+            const children = leaves.filter(n => (n.id.x >> 1) === x);
+            parents.set(`4/${x}/0`, {
+                id: { z: 4, x, y: 0 }, key: `4/${x}/0`, children,
+                center: new THREE.Vector3((2 * x + 1.5) * 1000, 0, 0), radius: 1,
+                geometricErrorM: 10, errorFromTile: true, lastSeen: 0,
+                resident: false, ocean: false, under: false, fadeM: 0, fadeFromMs: 0,
+            });
+        }
+        (entity as unknown as { quadtree: { node: (k: string) => QuadNode | undefined } }).quadtree = {
+            node: (k: string) => parents.get(k),
+        };
+        const fit = (entity as unknown as {
+            coarsenToBudget: (d: QuadNode[], p: THREE.Vector3) => { draw: QuadNode[]; merged: number; wants: Array<{ id: { z: number; x: number; y: number } }> };
+        }).coarsenToBudget(leaves, new THREE.Vector3());
+
+        assert.equal(fit.merged, 2, 'the two farthest pairs fold; the nearest pair still fits');
+        assert.deepEqual(fit.draw.map(n => n.key).sort(), ['4/1/0', '4/2/0', '5/0/0', '5/1/0']);
+        assert.deepEqual(
+            fit.wants.map(w => `${w.id.z}/${w.id.x}/${w.id.y}`), ['4/0/0'],
+            'the parent that could not take over because it is not resident is asked for',
+        );
+
+        (entity as unknown as { drawList: QuadNode[] }).drawList = fit.draw;
+        syncGroup(entity, new THREE.Vector3());
+        assert.equal(entity.stats.triangles, 2 * each + 600);
+        assert.equal(entity.stats.triangleBudgetHit, false, 'the cap never had to engage');
     });
 });

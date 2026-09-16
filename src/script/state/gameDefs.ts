@@ -5,14 +5,16 @@ export enum TechProfiles {
 }
 
 /**
- * Every aircraft flies the single FM2 rigid-body "parts" model; handling
- * differences (fly-by-wire vs mechanical, etc.) are expressed purely as
- * per-aircraft config. FM2 is the full 6-DOF aerodynamic model; DEBUG selects the
- * same model's no-aerodynamics "free-fly" mode (stick rotates the airframe
- * directly) for inspecting scenery and models.
+ * The player's flight model. FM2 is the rigid-body "parts" model with handling
+ * expressed as per-aircraft config; FM3 is the physical model whose loads come
+ * from the airframe's geometry, flying the post-stall regime (see
+ * docs/fm3-physical-flight-model.md); DEBUG is FM2's no-aerodynamics
+ * "free-fly" mode (stick rotates the airframe directly) for inspecting scenery
+ * and models. All three run in the combat-sim worker.
  */
 export enum FlightModels {
     FM2 = 'FM2',
+    FM3 = 'FM3',
     DEBUG = 'DEBUG',
 }
 

@@ -15,6 +15,7 @@
         "fetch:dem": "node tools/run-python.mjs tools/fetch_planet_dem.py",
         "merge:dem": "node tools/run-python.mjs tools/merge_planet_dem.py",
         "bake:mesh": "node --import tsx tools/bake_planet_mesh.ts",
+        "bake:errors": "node --import tsx tools/bake_planet_errors.ts",
         "bake:tex": "node --import tsx tools/bake_planet_tex.ts",
         "verify:planet": "node --import tsx tools/verify_planet.ts",
         "preserve": "npm run build",
