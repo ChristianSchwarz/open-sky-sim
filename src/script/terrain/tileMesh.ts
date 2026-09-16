@@ -95,11 +95,12 @@ export function hasLanduseGround(landAttrs: Uint8Array): boolean {
  * square root of the region's area on this tile. 0 for ground, and for every
  * vertex of a raster-only tile. See LANDUSE_REVEAL_MIN_PX for what it gates.
  *
- * A region is told by the vertex's whole cover word - its colour and class -
- * since a fill carries its region's own colour at every vertex and a vote
- * paints the whole facet with it. Two regions of one class and the same
- * sampled colour would merge, which only makes both show a little earlier.
- * Non-indexed input: three vertices per triangle, all carrying the same word.
+ * A region is a connected patch of one class: triangles of the same class
+ * that share a corner (by exact quantised position) are one region. The
+ * colour cannot tell regions apart, as it once did, because a fill's colour
+ * is the regional lattice blended per vertex and so varies across the
+ * polygon. Two touching regions of one class merge, which only makes both
+ * show a little earlier. Non-indexed input: three vertices per triangle.
  */
 export function regionSizes(
     positions: Int16Array, attrs: Uint8Array, quantScale: number,
@@ -109,11 +110,33 @@ export function regionSizes(
     if (!hasLanduseGround(attrs)) {
         return out;
     }
-    const area = new Map<number, number>();
-    const wordOf = (v: number) =>
-        attrs[v * 4] | (attrs[v * 4 + 1] << 8) | (attrs[v * 4 + 2] << 16) | (attrs[v * 4 + 3] << 24);
-    for (let v = 0; v + 2 < vertexCount; v += 3) {
-        if (attrs[v * 4 + 3] === GROUND_CLASS) {
+    const triCount = Math.floor(vertexCount / 3);
+    // Union-find over triangles.
+    const parent = new Int32Array(triCount);
+    for (let t = 0; t < triCount; t++) {
+        parent[t] = t;
+    }
+    const find = (t: number): number => {
+        while (parent[t] !== t) {
+            parent[t] = parent[parent[t]];
+            t = parent[t];
+        }
+        return t;
+    };
+    const union = (a: number, b: number) => {
+        const ra = find(a);
+        const rb = find(b);
+        if (ra !== rb) {
+            parent[ra] = rb;
+        }
+    };
+    const triArea = new Float64Array(triCount);
+    // First triangle seen at each (position, class) corner.
+    const cornerToTri = new Map<string, number>();
+    for (let t = 0; t < triCount; t++) {
+        const v = t * 3;
+        const cls = attrs[v * 4 + 3];
+        if (cls === GROUND_CLASS) {
             continue;
         }
         const ax = positions[v * 3], ay = positions[v * 3 + 1], az = positions[v * 3 + 2];
@@ -122,18 +145,32 @@ export function regionSizes(
         const nx = by * cz - bz * cy;
         const ny = bz * cx - bx * cz;
         const nz = bx * cy - by * cx;
-        const tri = 0.5 * Math.hypot(nx, ny, nz) * quantScale * quantScale;
-        const key = wordOf(v);
-        area.set(key, (area.get(key) ?? 0) + tri);
+        triArea[t] = 0.5 * Math.hypot(nx, ny, nz) * quantScale * quantScale;
+        for (let k = 0; k < 3; k++) {
+            const i = v + k;
+            const key = `${positions[i * 3]},${positions[i * 3 + 1]},${positions[i * 3 + 2]},${cls}`;
+            const other = cornerToTri.get(key);
+            if (other === undefined) {
+                cornerToTri.set(key, t);
+            } else {
+                union(t, other);
+            }
+        }
     }
-    for (let v = 0; v < vertexCount; v++) {
-        if (attrs[v * 4 + 3] === GROUND_CLASS) {
+    const area = new Float64Array(triCount);
+    for (let t = 0; t < triCount; t++) {
+        if (attrs[t * 3 * 4 + 3] !== GROUND_CLASS) {
+            area[find(t)] += triArea[t];
+        }
+    }
+    for (let t = 0; t < triCount; t++) {
+        if (attrs[t * 3 * 4 + 3] === GROUND_CLASS) {
             continue;
         }
-        const a = area.get(wordOf(v));
-        if (a !== undefined) {
-            out[v] = Math.min(65535, Math.round(Math.sqrt(a)));
-        }
+        const size = Math.min(65535, Math.round(Math.sqrt(area[find(t)])));
+        out[t * 3] = size;
+        out[t * 3 + 1] = size;
+        out[t * 3 + 2] = size;
     }
     return out;
 }

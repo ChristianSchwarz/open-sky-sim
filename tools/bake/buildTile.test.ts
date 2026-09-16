@@ -924,31 +924,35 @@ describe('buildTile regions', () => {
             `fill reaches ${(maxE - edgeE).toFixed(2)} m past the polygon edge (a cell is ${cellM.toFixed(0)} m)`);
     });
 
-    it('colours unmapped ground per vertex from the regional sampler, and polygons evenly', () => {
-        // A sampler that ramps red from west to east: untagged ground must pick
-        // it up per vertex (and so vary across the tile), while the Crop
-        // polygon keeps one colour of its own.
+    it('colours unmapped ground and polygons per vertex from the regional sampler, each by its class', () => {
+        // A sampler that ramps red from west to east for ground and blue
+        // for Crop: untagged ground and the polygon must each pick up their
+        // own ramp per vertex (and so vary across the tile), so a polygon
+        // meets its continuation on the next tile at the same colour.
         const crop = regionAt(-1, -1, CELLS / 2, CELLS + 1, true, TerrainClass.Crop);
         const r = buildTile(base({
             polygons: [coastAt(CELLS + 2)],
             heights: heightsFrom(() => 50),
             cover: uniformCover(TerrainClass.Grass, [90, 110, 70]),
             regions: [crop],
-            groundColorAt: (lon) => {
+            groundColorAt: (lon, _lat, cls) => {
                 const t = (lon - BOUNDS.west) / (BOUNDS.east - BOUNDS.west);
-                return [Math.round(40 + 160 * Math.min(1, Math.max(0, t))), 100, 60];
+                const ramp = Math.round(40 + 160 * Math.min(1, Math.max(0, t)));
+                return cls === TerrainClass.Crop ? [20, 30, ramp] : cls === undefined ? [ramp, 100, 60] : undefined;
             },
         }));
         assert.deepEqual(classesIn(r.bytes), new Set([TerrainClass.Ground, TerrainClass.Crop]));
         const tile = decodePtm(r.bytes);
         const groundReds = new Set<number>();
-        const cropColours = new Set<string>();
+        const cropBlues = new Set<number>();
+        const cropRedGreen = new Set<string>();
         for (let v = 0; v * 4 < tile.landAttrs.length; v++) {
             const a = tile.landAttrs;
             if (a[v * 4 + 3] === TerrainClass.Ground) {
                 groundReds.add(a[v * 4]);
             } else if (a[v * 4 + 3] === TerrainClass.Crop) {
-                cropColours.add(`${a[v * 4]},${a[v * 4 + 1]},${a[v * 4 + 2]}`);
+                cropBlues.add(a[v * 4 + 2]);
+                cropRedGreen.add(`${a[v * 4]},${a[v * 4 + 1]}`);
             }
         }
         // Flat ground decimates to a few large facets, so there may be only a
@@ -957,7 +961,34 @@ describe('buildTile regions', () => {
         const reds = [...groundReds];
         assert.ok(Math.min(...reds) <= 60 && Math.max(...reds) >= 180,
             `ground reds ${reds.join(',')} did not follow the west-to-east ramp`);
-        assert.equal(cropColours.size, 1, `polygon filled with ${cropColours.size} colours`);
+        // The polygon covers the west half: dark at its west end, mid-ramp at
+        // its east edge, and never the ground's ramp.
+        const blues = [...cropBlues];
+        assert.ok(Math.min(...blues) <= 60 && Math.max(...blues) >= 100,
+            `crop blues ${blues.join(',')} did not follow the polygon's own ramp`);
+        assert.deepEqual([...cropRedGreen], ['20,30'], 'the polygon took its class colour, not the ground one');
+    });
+
+    it('falls back to the polygon\'s own tile mean when the lattice has none of its class', () => {
+        const crop = regionAt(-1, -1, CELLS / 2, CELLS + 1, true, TerrainClass.Crop);
+        const r = buildTile(base({
+            polygons: [coastAt(CELLS + 2)],
+            heights: heightsFrom(() => 50),
+            cover: uniformCover(TerrainClass.Grass, [90, 110, 70]),
+            regions: [crop],
+            groundColorAt: (_lon, _lat, cls) => (cls === undefined ? [1, 2, 3] : undefined),
+        }));
+        const tile = decodePtm(r.bytes);
+        const cropColours = new Set<string>();
+        for (let v = 0; v * 4 < tile.landAttrs.length; v++) {
+            const a = tile.landAttrs;
+            if (a[v * 4 + 3] === TerrainClass.Crop) {
+                cropColours.add(`${a[v * 4]},${a[v * 4 + 1]},${a[v * 4 + 2]}`);
+            }
+        }
+        // No Crop in the lattice: the all-dry blend, which is what a polygon
+        // whose class the imagery never showed nearby should look like.
+        assert.deepEqual([...cropColours], ['1,2,3']);
     });
 
     it('does not drop a landuse-only boundary down to sea level', () => {

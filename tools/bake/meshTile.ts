@@ -246,7 +246,7 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         watercourses,
         regions,
         groundColorAt: cfg.groundMeans
-            ? (lon, lat) => groundColorAt(cfg.groundMeans!, lon, lat)
+            ? (lon, lat, cls) => groundColorAt(cfg.groundMeans!, lon, lat, cls)
             : undefined,
     });
 

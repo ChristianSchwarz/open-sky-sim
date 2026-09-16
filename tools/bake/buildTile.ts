@@ -263,12 +263,17 @@ export interface BuildTileInput {
      */
     regions?: RegionPolygon[];
     /**
-     * Regional ground colour at a point (see groundColor.ts), for land no
-     * landuse polygon claims on a tile that has `regions`. Given, that land is
-     * baked as TerrainClass.Ground with this colour per vertex, so it blends
-     * smoothly into neighbouring tiles. Omit to keep the facet's own sample.
+     * Regional colour at a point (see groundColor.ts). Without `cls`, the
+     * colour of land no landuse polygon claims on a tile that has `regions`:
+     * given, that land is baked as TerrainClass.Ground with this colour per
+     * vertex, so it blends smoothly into neighbouring tiles. With `cls`, the
+     * regional colour of that cover class, which a landuse polygon of the
+     * class is painted with per vertex for the same reason - its own per-tile
+     * mean stepped at every tile edge the polygon crossed. Undefined for a
+     * class the lattice has nothing of nearby, and the caller falls back.
+     * Omit to keep the facet's own sample.
      */
-    groundColorAt?: (lon: number, lat: number) => readonly [number, number, number] | undefined;
+    groundColorAt?: (lon: number, lat: number, cls?: number) => readonly [number, number, number] | undefined;
 }
 
 export interface BuildTileResult {
@@ -746,7 +751,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // nodes it covers, so a polygon fills evenly instead of varying facet by
     // facet with the raster underneath. Untagged ground gets one tile-wide mean
     // the same way, for the land between polygons. A polygon too small to own
-    // a node falls back to the facet's own sample.
+    // a node falls back to the facet's own sample. With a regional sampler
+    // these are only the fallback: see regionColorAt below.
     let regionColors: Array<readonly [number, number, number] | undefined> | undefined;
     let baseColor: readonly [number, number, number] | undefined;
     if (landuseField && input.cover) {
@@ -770,6 +776,34 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         regionColors = sums.map(mean);
         baseColor = mean(untagged);
     }
+
+    /**
+     * A landuse polygon's colour at one of its vertices: the regional lattice
+     * mean of the polygon's class, blended at the vertex; failing that the
+     * lattice's all-dry mean; failing that the polygon's own per-tile mean;
+     * failing that the facet's sample. The lattice is global, so the same
+     * polygon on the next tile, or on the parent, paints the same at the
+     * shared edge - a mean over this tile's piece alone does not.
+     */
+    const regionColorAt = (
+        p: Enu, index: number, cls: number, facetSample: readonly [number, number, number],
+    ): readonly [number, number, number] => {
+        if (input.groundColorAt !== undefined) {
+            const ecef = enuToEcef(basis, p);
+            const geo = ecefToGeodetic(ecef.x, ecef.y, ecef.z);
+            const c = input.groundColorAt(geo.lon, geo.lat, cls) ?? input.groundColorAt(geo.lon, geo.lat);
+            if (c !== undefined) {
+                return c;
+            }
+        }
+        return regionColors?.[index] ?? facetSample;
+    };
+    /** The facet colour for three vertex colours: their mean. */
+    const meanOf = (
+        a: readonly [number, number, number], b: readonly [number, number, number], c: readonly [number, number, number],
+    ): [number, number, number] => [
+        Math.round((a[0] + b[0] + c[0]) / 3), Math.round((a[1] + b[1] + c[1]) / 3), Math.round((a[2] + b[2] + c[2]) / 3),
+    ];
 
     // Water is not drawn at the DEM height, so it must not be decimated
     // against it. Open sea is a flat sheet at the datum, but the DEM out there
@@ -1566,22 +1600,24 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         const [p0, p1, p2] = t.pts;
         if (isLandTriangle(t)) {
             const cover = coverOf(t);
-            pushLandTriangle(
-                project(p0.x, p0.y, true, p0.shore),
-                project(p1.x, p1.y, true, p1.shore),
-                project(p2.x, p2.y, true, p2.shore),
-                cover,
-                t,
-            );
+            const e0 = project(p0.x, p0.y, true, p0.shore);
+            const e1 = project(p1.x, p1.y, true, p1.shore);
+            const e2 = project(p2.x, p2.y, true, p2.shore);
+            pushLandTriangle(e0, e1, e2, cover, t);
             const voted = landuseVote(t);
             if (voted !== undefined) {
                 // Coarse tile: the polygon colours the whole facet, as the
                 // fill would have at a finer zoom.
-                landClass[landClass.length - 1] = landuseField!.regionTable[voted].landuseClass!;
-                const rgb = regionColors?.[voted] ?? [cover[1], cover[2], cover[3]];
+                const cls = landuseField!.regionTable[voted].landuseClass!;
+                landClass[landClass.length - 1] = cls;
+                const sample: readonly [number, number, number] = [cover[1], cover[2], cover[3]];
+                const c0 = regionColorAt(e0, voted, cls, sample);
+                const c1 = regionColorAt(e1, voted, cls, sample);
+                const c2 = regionColorAt(e2, voted, cls, sample);
+                const rgb = meanOf(c0, c1, c2);
                 landColor.splice(landColor.length - 3, 3, rgb[0], rgb[1], rgb[2]);
                 landVertColor.splice(landVertColor.length - 9, 9,
-                    rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2]);
+                    c0[0], c0[1], c0[2], c1[0], c1[1], c1[2], c2[0], c2[1], c2[2]);
             }
         } else {
             waterIdx.push(
@@ -1665,15 +1701,25 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             };
             const { region, index } = tagged[piece.region];
             const cover = coverOf(facet);
-            pushLandTriangle(onFacet(piece.pts[0]), onFacet(piece.pts[1]), onFacet(piece.pts[2]), cover, facet);
+            const v0 = onFacet(piece.pts[0]);
+            const v1 = onFacet(piece.pts[1]);
+            const v2 = onFacet(piece.pts[2]);
+            pushLandTriangle(v0, v1, v2, cover, facet);
             // pushLandTriangle painted it as untagged ground; this is the polygon.
-            landClass[landClass.length - 1] = region.landuseClass!;
-            const rgb = regionColors?.[index] ?? [cover[1], cover[2], cover[3]];
+            const cls = region.landuseClass!;
+            landClass[landClass.length - 1] = cls;
+            // The polygon's own colour at every vertex - its class's regional
+            // blend, not the all-dry ground blend pushLandTriangle sampled -
+            // so it reads as its cover, and meets its continuation on the
+            // next tile without a step.
+            const sample: readonly [number, number, number] = [cover[1], cover[2], cover[3]];
+            const c0 = regionColorAt(v0, index, cls, sample);
+            const c1 = regionColorAt(v1, index, cls, sample);
+            const c2 = regionColorAt(v2, index, cls, sample);
+            const rgb = meanOf(c0, c1, c2);
             landColor.splice(landColor.length - 3, 3, rgb[0], rgb[1], rgb[2]);
-            // A polygon fills evenly: its own colour at every vertex, not the
-            // regional ground blend pushLandTriangle sampled for it.
             landVertColor.splice(landVertColor.length - 9, 9,
-                rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2]);
+                c0[0], c0[1], c0[2], c1[0], c1[1], c1[2], c2[0], c2[1], c2[2]);
         }
     }
 

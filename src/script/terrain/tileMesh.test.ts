@@ -69,7 +69,8 @@ describe('regionSizes', () => {
     it('is the square root of a region summed area, in metres', () => {
         const t = tile([
             { pts: right(0), cls: CROP },
-            { pts: right(200), cls: CROP },
+            // Shares the corner (100, 0, 0): one region of two facets.
+            { pts: [100, 0, 0, 200, 0, 0, 100, 0, 100], cls: CROP },
             { pts: right(400), cls: GROUND },
         ]);
         const sizes = regionSizes(t.positions, t.attrs, 2);
@@ -78,10 +79,33 @@ describe('regionSizes', () => {
         for (let v = 6; v < 9; v++) assert.equal(sizes[v], 0, 'ground carries no size');
     });
 
-    it('keeps regions of different colour apart', () => {
+    it('keeps regions that do not touch apart', () => {
         const t = tile([
             { pts: right(0), cls: CROP, rgb: [1, 2, 3] },
             { pts: right(200), cls: CROP, rgb: [4, 5, 6] },
+            { pts: right(400), cls: GROUND },
+        ]);
+        const sizes = regionSizes(t.positions, t.attrs, 1);
+        assert.equal(sizes[0], Math.round(Math.sqrt(5000)));
+        assert.equal(sizes[3], Math.round(Math.sqrt(5000)));
+    });
+
+    it('joins facets of one class that share a corner, whatever their colour', () => {
+        // A fill's colour is a lattice blend, so it varies across the polygon:
+        // the corner, not the colour, says these are one region.
+        const t = tile([
+            { pts: right(0), cls: CROP, rgb: [1, 2, 3] },
+            { pts: [100, 0, 0, 200, 0, 0, 100, 0, 100], cls: CROP, rgb: [4, 5, 6] },
+            { pts: right(400), cls: GROUND },
+        ]);
+        const sizes = regionSizes(t.positions, t.attrs, 1);
+        for (let v = 0; v < 6; v++) assert.equal(sizes[v], Math.round(Math.sqrt(10000)));
+    });
+
+    it('keeps two classes apart at a shared corner', () => {
+        const t = tile([
+            { pts: right(0), cls: CROP },
+            { pts: [100, 0, 0, 200, 0, 0, 100, 0, 100], cls: 1 },
             { pts: right(400), cls: GROUND },
         ]);
         const sizes = regionSizes(t.positions, t.attrs, 1);
@@ -95,10 +119,10 @@ describe('regionSizes', () => {
         assert.ok(sizes.every(v => v === 0), 'a class there is the ground, not a region');
     });
 
-    it('is not welded across two regions sharing a corner', () => {
+    it('survives the smooth weld, which splits by colour word but not by region', () => {
         const t = tile([
             { pts: right(0), cls: CROP, rgb: [1, 2, 3] },
-            // Shares the corner (100, 0, 0) with the first, and is smaller.
+            // Shares the corner (100, 0, 0) with the first: one region, two colours.
             { pts: [100, 0, 0, 150, 0, 0, 100, 0, 50], cls: CROP, rgb: [4, 5, 6] },
             { pts: right(400), cls: GROUND },
         ]);
@@ -106,9 +130,8 @@ describe('regionSizes', () => {
         const g = buildSmoothLandGeometry(t.positions, flatNormals(t.positions), t.attrs, sizes)!;
         const out = g.getAttribute('regionSize').array as Uint16Array;
         const shared = verticesAt(g, 100, 0);
-        assert.equal(shared.length, 2, 'one vertex per region at the corner');
-        assert.deepEqual(shared.map(v => out[v]).sort((a, b) => a - b),
-            [Math.round(Math.sqrt(1250)), Math.round(Math.sqrt(5000))], 'each keeps its own size');
+        assert.equal(shared.length, 2, 'the weld keeps the two colour words apart');
+        for (const v of shared) assert.equal(out[v], Math.round(Math.sqrt(6250)), 'both carry the one region size');
     });
 });
 

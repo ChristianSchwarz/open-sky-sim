@@ -1,5 +1,6 @@
 /**
- * Regional ground colour for land no landuse polygon claims.
+ * Regional colour lattice: for land no landuse polygon claims, and for the
+ * polygons themselves.
  *
  * Painting untagged ground with its own facet's raster sample brings back
  * exactly the WorldCover blobs the landuse fill was meant to replace, and a
@@ -8,18 +9,49 @@
  * vertex blends between the four nearest tile centres. The lattice is global,
  * so neighbouring tiles and every zoom level sample the same values: no seam
  * at a tile edge, and no colour pop when LOD swaps a tile for its parent.
+ *
+ * A landuse polygon has the same problem one level up: the partition is
+ * assembled per tile, so a forest crossing a tile edge is two pieces, and a
+ * mean over each piece's own nodes steps at the edge by whatever the two
+ * footprints differ by - 40 sRGB levels between two Chamonix leaves. So each
+ * cell also keeps one mean per TerrainClass, and a polygon's vertex blends
+ * the four nearest cells' means *of its class*: forest-looking pixels for a
+ * forest, so the fill still reads as its cover, but continuous across every
+ * edge and zoom.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { TerrainClass } from '../../src/script/terrain/tones';
+import { CLASS_COUNT } from '../../src/script/terrain/tones';
+
+// TerrainClass.Water spelled out: it is a `const enum`, and the tsx test
+// runner leaves an imported const-enum binding undefined (see tileMesh.ts).
+const WATER_CLASS = 8;
 import { decodePlc } from './plc';
 
 /** The zoom whose tiles are the averaging cells. */
 export const GROUND_SAMPLE_ZOOM = 12;
 
-/** Mean sRGB per sampling cell, keyed `${x}/${y}` at GROUND_SAMPLE_ZOOM. */
-export type GroundMeans = Record<string, readonly [number, number, number]>;
+export type Rgb = readonly [number, number, number];
+
+/**
+ * One sampling cell: the mean over every dry node, and the mean over the dry
+ * nodes of each TerrainClass that has at least MIN_CLASS_NODES of them there.
+ */
+export interface CellMeans {
+    all: Rgb;
+    byClass: Record<number, Rgb>;
+}
+
+/** Means per sampling cell, keyed `${x}/${y}` at GROUND_SAMPLE_ZOOM. */
+export type GroundMeans = Record<string, CellMeans>;
+
+/**
+ * Nodes of a class a cell needs before its mean counts. A z12 cover tile is
+ * 256² nodes; a class with fewer than this is a stray pixel or two, and a
+ * mean of those would colour every polygon of that class nearby after them.
+ */
+export const MIN_CLASS_NODES = 16;
 
 /**
  * Sidecar holding the per-cell means beside the tiles they colour.
@@ -33,15 +65,16 @@ export type GroundMeans = Record<string, readonly [number, number, number]>;
  */
 export const GROUND_MEANS_FILE = 'ground_means.json';
 
-/** `mean` is empty for a cell with no dry node, so it is not re-decoded every run. */
+/** `mean` is null for a cell with no dry node, so it is not re-decoded every run. */
 interface CachedCell {
     size: number;
     mtimeMs: number;
-    mean: readonly [number, number, number] | readonly [];
+    mean: CellMeans | null;
 }
 
+/** Version 2 added the per-class means; a v1 sidecar is simply rebuilt. */
 interface GroundMeansCache {
-    version: 1;
+    version: 2;
     zoom: number;
     cells: Record<string, CachedCell>;
 }
@@ -52,7 +85,7 @@ function loadCache(cachePath: string | undefined): GroundMeansCache['cells'] {
     }
     try {
         const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as GroundMeansCache;
-        if (parsed.version !== 1 || parsed.zoom !== GROUND_SAMPLE_ZOOM
+        if (parsed.version !== 2 || parsed.zoom !== GROUND_SAMPLE_ZOOM
             || typeof parsed.cells !== 'object' || parsed.cells === null) {
             return {};
         }
@@ -62,23 +95,47 @@ function loadCache(cachePath: string | undefined): GroundMeansCache['cells'] {
     }
 }
 
-/** Mean dry-ground colour of one cover tile, or undefined if it has no dry node. */
-function cellMean(plcPath: string): readonly [number, number, number] | undefined {
+/** Mean dry-ground colours of one cover tile, or undefined if it has no dry node. */
+function cellMean(plcPath: string): CellMeans | undefined {
     const cover = decodePlc(fs.readFileSync(plcPath));
+    return cellMeansOf(cover.classes, cover.colors);
+}
+
+/** The means behind {@link cellMean}, over raw class and colour arrays. */
+export function cellMeansOf(classes: Uint8Array, colors: Uint8Array): CellMeans | undefined {
+    const sums = new Float64Array(CLASS_COUNT * 4);
     let r = 0;
     let g = 0;
     let b = 0;
     let n = 0;
-    for (let i = 0; i < cover.classes.length; i++) {
-        if (cover.classes[i] === TerrainClass.Water) {
+    for (let i = 0; i < classes.length; i++) {
+        const cls = classes[i];
+        if (cls === WATER_CLASS) {
             continue;
         }
-        r += cover.colors[i * 3];
-        g += cover.colors[i * 3 + 1];
-        b += cover.colors[i * 3 + 2];
+        const cr = colors[i * 3];
+        const cg = colors[i * 3 + 1];
+        const cb = colors[i * 3 + 2];
+        r += cr;
+        g += cg;
+        b += cb;
         n++;
+        sums[cls * 4] += cr;
+        sums[cls * 4 + 1] += cg;
+        sums[cls * 4 + 2] += cb;
+        sums[cls * 4 + 3]++;
     }
-    return n > 0 ? [r / n, g / n, b / n] : undefined;
+    if (n === 0) {
+        return undefined;
+    }
+    const byClass: Record<number, Rgb> = {};
+    for (let cls = 0; cls < CLASS_COUNT; cls++) {
+        const k = sums[cls * 4 + 3];
+        if (k >= MIN_CLASS_NODES) {
+            byClass[cls] = [sums[cls * 4] / k, sums[cls * 4 + 1] / k, sums[cls * 4 + 2] / k];
+        }
+    }
+    return { all: [r / n, g / n, b / n], byClass };
 }
 
 /**
@@ -114,10 +171,10 @@ export function regionalGroundMeans(src: string, cachePath?: string): GroundMean
             const plcPath = path.join(xDir, file);
             const st = fs.statSync(plcPath);
             const hit = cached[key];
-            let mean: readonly [number, number, number] | undefined;
+            let mean: CellMeans | undefined;
             if (hit !== undefined && hit.size === st.size && hit.mtimeMs === st.mtimeMs
-                && Array.isArray(hit.mean) && (hit.mean.length === 0 || hit.mean.length === 3)) {
-                mean = hit.mean.length === 3 ? hit.mean : undefined;
+                && (hit.mean === null || (typeof hit.mean === 'object' && Array.isArray(hit.mean.all)))) {
+                mean = hit.mean ?? undefined;
                 reused++;
             } else {
                 mean = cellMean(plcPath);
@@ -126,11 +183,11 @@ export function regionalGroundMeans(src: string, cachePath?: string): GroundMean
             if (mean !== undefined) {
                 means[key] = mean;
             }
-            fresh[key] = { size: st.size, mtimeMs: st.mtimeMs, mean: mean ?? [] };
+            fresh[key] = { size: st.size, mtimeMs: st.mtimeMs, mean: mean ?? null };
         }
     }
     if (cachePath !== undefined) {
-        const out: GroundMeansCache = { version: 1, zoom: GROUND_SAMPLE_ZOOM, cells: fresh };
+        const out: GroundMeansCache = { version: 2, zoom: GROUND_SAMPLE_ZOOM, cells: fresh };
         fs.mkdirSync(path.dirname(cachePath), { recursive: true });
         fs.writeFileSync(cachePath, `${JSON.stringify(out)}
 `);
@@ -140,14 +197,17 @@ export function regionalGroundMeans(src: string, cachePath?: string): GroundMean
 }
 
 /**
- * Bilinear blend of the four sampling-cell centres around a point.
+ * Bilinear blend of the four sampling-cell centres around a point: of their
+ * all-dry means, or with `cls`, of their means of that class.
  *
  * Cells with no value drop out and the rest are renormalised, so a vertex by
- * the sea takes the land colour beside it. Undefined only when all four are
- * missing.
+ * the sea takes the land colour beside it, and a forest vertex beside a cell
+ * with no forest takes the forest colour of the cells that have some.
+ * Undefined only when all four are missing - a caller asking for a class
+ * then falls back to the all-dry blend, then to whatever it has of its own.
  */
 export function groundColorAt(
-    means: GroundMeans, lon: number, lat: number,
+    means: GroundMeans, lon: number, lat: number, cls?: number,
 ): [number, number, number] | undefined {
     const span = 180 / (1 << GROUND_SAMPLE_ZOOM);
     // Continuous cell coordinates, shifted so integers land on cell centres.
@@ -167,7 +227,8 @@ export function groundColorAt(
         [0, 1, (1 - tx) * ty],
         [1, 1, tx * ty],
     ] as const) {
-        const c = means[`${x0 + dx}/${y0 + dy}`];
+        const cell = means[`${x0 + dx}/${y0 + dy}`];
+        const c = cell === undefined ? undefined : cls === undefined ? cell.all : cell.byClass[cls];
         if (!c || weight <= 0) {
             continue;
         }
