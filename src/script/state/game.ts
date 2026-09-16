@@ -77,7 +77,7 @@ import { StaticModelCameraUpdater } from './cameraUpdaters/staticModelCameraUpda
 import { ShowcaseCameraUpdater } from './cameraUpdaters/showcaseCameraUpdater';
 import { FixedCameraUpdater } from './cameraUpdaters/fixedCameraUpdater';
 import {
-    FixedCameraRates, easeFixedCameraRates, wantedFixedCameraRates, zeroFixedCameraRates,
+    FixedCameraRates, FixedCameraTuning, fixedCameraInput, stepFixedCameraRates, zeroFixedCameraRates,
 } from './cameraUpdaters/fixedCameraControl';
 import { CameraRoute, cameraRouteFromLocation, writeCameraRouteToLocation } from './cameraRoute';
 import { restoreMainCameraParameters } from './stateUtils';
@@ -326,16 +326,21 @@ enum PlayerViewState {
     FIXED,
 }
 
-/** Fixed-camera walk speed on the arrow / page keys; Shift is ten times this. */
-const FIXED_CAMERA_SPEED_MPS = 100;
-/** Fixed-camera turn rate on numpad 4/6 (heading) and 8/2 (pitch). */
-const FIXED_CAMERA_TURN_DEG_PER_S = 45;
-/** Seconds for a fixed-camera move or turn to reach ~63% of its target rate. */
-const FIXED_CAMERA_EASE_S = 0.3;
+/**
+ * Fixed-camera handling: a held arrow / page key starts slow and doubles its
+ * speed every second up to the cap; numpad turns ease to a fixed rate.
+ */
+const FIXED_CAMERA_TUNING: FixedCameraTuning = {
+    startMps: 20,
+    maxMps: 3000,
+    growthPerS: 2,
+    turnDegPerS: 45,
+    easeS: 0.3,
+};
 /** How often the page URL follows a moving fixed camera. */
 const FIXED_CAMERA_URL_INTERVAL_S = 0.5;
 const FIXED_CAMERA_MOVE_KEYS = new Set([
-    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'ShiftLeft', 'ShiftRight',
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown',
     'Numpad4', 'Numpad6', 'Numpad8', 'Numpad2',
 ]);
 
@@ -2548,14 +2553,13 @@ export class Game {
 
     /**
      * Arrow keys slide the fixed camera along and across its heading, Page
-     * Up/Down raise and lower it, numpad 4/6 turn it and 8/2 pitch it; Shift
-     * makes every move ten times faster.
+     * Up/Down raise and lower it, numpad 4/6 turn it and 8/2 pitch it. Moves
+     * accelerate for as long as the key is held, see FIXED_CAMERA_TUNING.
      */
     private moveFixedCamera(delta: number): void {
         const r = this.fixedCameraRates;
-        const want = wantedFixedCameraRates(
-            this.heldFixedCameraKeys, FIXED_CAMERA_SPEED_MPS, FIXED_CAMERA_TURN_DEG_PER_S);
-        if (!easeFixedCameraRates(r, want, delta, FIXED_CAMERA_EASE_S)) {
+        const input = fixedCameraInput(this.heldFixedCameraKeys);
+        if (!stepFixedCameraRates(r, input, delta, FIXED_CAMERA_TUNING)) {
             if (!Number.isNaN(this.fixedCameraUrlAge)) {
                 // Came to rest: the URL gets the exact final pose.
                 this.syncFixedCameraUrl();
