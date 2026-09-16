@@ -219,17 +219,3 @@ export function airfieldChoices(
     }
     return out;
 }
-
-/** Find a runway by its airfield key (ICAO or name). */
-export function findRunwayByKey(
-    runways: readonly SceneRunway[],
-    key: string,
-): SceneRunway | undefined {
-    for (const runway of runways) {
-        const runwayKey = runway.icao || runway.name;
-        if (runwayKey === key) {
-            return runway;
-        }
-    }
-    return undefined;
-}

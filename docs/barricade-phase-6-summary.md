@@ -264,6 +264,5 @@ As of 2026-09-03:
 ## Questions?
 
 See the barricade implementation docs:
-- `docs/ai-waypoints.md` - Earlier planning notes
 - `docs/barricade-rewrite-project.md` - Project scope
 - Test suite comments in `barricadeRigidBodySolver.test.ts`

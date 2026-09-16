@@ -25,8 +25,6 @@ export enum AiFlightPhase {
     APPROACH,
     FLARE,
     ROLLOUT,
-    /** Fly a route defined by {@link AiPilot.setRoute}. */
-    WAYPOINT,
     /**
      * Fly formation on the lead set by {@link AiPilot.setFormationLead} — the
      * wingman phase. Rejoins from any separation, holds a wing slot once
