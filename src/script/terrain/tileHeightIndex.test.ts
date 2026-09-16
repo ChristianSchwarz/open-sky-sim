@@ -51,6 +51,34 @@ describe('TileHeightIndex', () => {
         assert.ok(Math.abs(index.heightAtWorld(20, 20)! - 2) < 1e-6);
     });
 
+    it('reads the landcover class of the facet under a point', () => {
+        // Two triangles of one quad, each its own class: the bake stamps the
+        // class on every vertex of a facet, so a per-vertex read is per-facet.
+        const { mesh, group } = tile([
+            [0, 0, 0, 100, 0, 0, 0, 0, 100],
+            [100, 0, 0, 100, 0, 100, 0, 0, 100],
+        ]);
+        // Laid out the way buildTileMeshes does: rgb + class in one
+        // interleaved byte buffer, the colour view normalised, the class not.
+        const attrs = new THREE.InterleavedBuffer(new Uint8Array([
+            0x80, 0x70, 0x50, 6, 0x80, 0x70, 0x50, 6, 0x80, 0x70, 0x50, 6,
+            0x20, 0x90, 0x30, 3, 0x20, 0x90, 0x30, 3, 0x20, 0x90, 0x30, 3,
+        ]), 4);
+        mesh.geometry.setAttribute('coverColor', new THREE.InterleavedBufferAttribute(attrs, 3, 0, true));
+        mesh.geometry.setAttribute('coverClass', new THREE.InterleavedBufferAttribute(attrs, 1, 3, false));
+        const index = new TileHeightIndex(mesh, group, 11);
+        assert.deepEqual(index.coverAtWorld(20, 20), { cls: 6, rgb: 0x807050, zoom: 11 });
+        assert.deepEqual(index.coverAtWorld(80, 80), { cls: 3, rgb: 0x209030, zoom: 11 });
+        assert.equal(index.coverAtWorld(-10, 0), undefined, 'off the tile');
+    });
+
+    it('has no cover to give on a mesh without any', () => {
+        const { mesh, group } = tile([[0, 0, 0, 100, 10, 0, 0, 0, 100]]);
+        const index = new TileHeightIndex(mesh, group);
+        assert.equal(index.coverAtWorld(20, 20), undefined);
+        assert.equal(index.heightAtWorld(20, 20), 2, 'height still reads');
+    });
+
     it('returns undefined outside the tile', () => {
         const { mesh, group } = tile([[0, 0, 0, 100, 10, 0, 0, 0, 100]]);
         const index = new TileHeightIndex(mesh, group);

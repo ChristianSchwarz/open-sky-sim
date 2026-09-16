@@ -7,7 +7,7 @@ import {
 } from '../../terrain/geodesy';
 import { SceneMaterialManager } from '../materials/materials';
 import {
-    AIRFIELD_SURFACE_EPS_M, buildAirfieldModel, buildingHeightM, smoothCentreline,
+    AIRFIELD_SURFACE_EPS_M, GROUND_STRIP_LIGHTEN, buildAirfieldModel, buildingHeightM, repaintGroundStrip, smoothCentreline,
 } from './airfieldModel';
 
 /**
@@ -15,13 +15,21 @@ import {
  * and building the real one drags in shader sources and a palette. Everything
  * this file checks is in the vertices.
  */
+type BuiltProps = { category: string; overbright?: number; rawColor?: string };
+
 const MATERIALS = {
-    build: (p: { category: string }) => {
+    build: (p: BuiltProps) => {
         const m = new THREE.MeshBasicMaterial();
         m.userData.category = p.category;
+        m.userData.overbright = p.overbright;
+        m.userData.rawColor = p.rawColor;
         return m;
     },
 } as unknown as SceneMaterialManager;
+
+function materialOf(o: THREE.Object3D): BuiltProps {
+    return ((o as THREE.Mesh).material as THREE.Material).userData as BuiltProps;
+}
 
 /** Palette categories the built geometry actually uses, per LOD level. */
 function categories(objects: THREE.Object3D[]): Set<string> {
@@ -531,14 +539,58 @@ describe('airfield model', () => {
                 'the taxiways stayed asphalt on a concrete field');
         });
 
-        it('lays a grass strip and a gravel one in their own ground tones', () => {
-            // Neither is a field or a road: each is the terrain's tone under
-            // it, shifted just enough to read as a strip.
-            const of = (surface: 'grass' | 'gravel') => categories(buildAirfieldModel(gclp({
-                runways: [{ ...gclp().runways[0], surface }],
-            }), BASIS, MATERIALS)!.model.lod[0].flats);
-            assert.ok(of('grass').has('SCENERY_BASE_GRASS'), 'grass strip not in grass tone');
-            assert.ok(of('gravel').has('SCENERY_BASE_DIRT'), 'gravel strip not in dirt tone');
+        it('lays an unpaved strip in the tone of the ground under it, lifted', () => {
+            // Neither a field nor a road: the strip is the terrain it is cut
+            // into, a shade lighter, whatever that terrain turns out to be.
+            const bare = { cls: 6 /* TerrainClass.Bare */, rgb: 0x807050, zoom: 12 };
+            const built = buildAirfieldModel(gclp({
+                runways: [{ ...gclp().runways[0], surface: 'grass' }],
+            }), BASIS, MATERIALS, undefined, () => bare)!;
+            const flats = built.model.lod[0].flats;
+            assert.ok(categories(flats).has('TERRAIN_BARE'), 'strip is not the ground tone');
+            const strip = materialOf(flats.find(o => materialOf(o).category === 'TERRAIN_BARE')!);
+            assert.equal(strip.overbright, GROUND_STRIP_LIGHTEN,
+                'the strip is not lifted above the ground');
+            assert.equal(strip.rawColor, undefined, 'a classed facet is its palette tone');
+            assert.equal(built.groundStrips.length, 1, 'the strip is not handed back');
+            assert.equal(built.groundStrips[0].paintedZoom, 12,
+                'the strip does not remember which tile painted it');
+        });
+
+        it('paints a strip on unmapped ground in that ground\'s own baked colour', () => {
+            // The terrain shader paints TerrainClass.Ground as its blended
+            // regional colour, not a tone, so the strip has to as well or it
+            // is one flat green on a brown field.
+            const ground = { cls: 13 /* TerrainClass.Ground */, rgb: 0x8a7a40, zoom: 12 };
+            const built = buildAirfieldModel(gclp({
+                runways: [{ ...gclp().runways[0], surface: 'gravel' }],
+            }), BASIS, MATERIALS, undefined, () => ground)!;
+            const strip = built.model.lod[0].flats.map(materialOf)
+                .find(m => m.rawColor !== undefined);
+            assert.ok(strip !== undefined, 'no part took the baked colour');
+            assert.equal(strip.rawColor, '#8a7a40');
+            assert.equal(strip.overbright, GROUND_STRIP_LIGHTEN);
+        });
+
+        it('paints a strip whose ground is not drawn yet once it is', () => {
+            // At boot no tile is on screen: the strip goes out in a stand-in
+            // tone and is repainted when the ground under it arrives.
+            const built = buildAirfieldModel(gclp({
+                runways: [{ ...gclp().runways[0], surface: 'gravel' }],
+            }), BASIS, MATERIALS, undefined, () => undefined)!;
+            assert.ok(categories(built.model.lod[0].flats).has('TERRAIN_BARE'),
+                'gravel stand-in is not bare ground');
+            assert.equal(built.groundStrips.length, 1);
+            const strip = built.groundStrips[0];
+            assert.equal(strip.paintedZoom, -1, 'a stand-in claims a tile painted it');
+            assert.equal(strip.meshes.length, built.model.lod.length,
+                'one pavement mesh per LOD level');
+            repaintGroundStrip(strip, { cls: 3 /* TerrainClass.Grass */, rgb: 0, zoom: 9 }, MATERIALS);
+            for (const mesh of strip.meshes) {
+                assert.equal(materialOf(mesh).category, 'TERRAIN_GRASS');
+                assert.equal(materialOf(mesh).overbright, GROUND_STRIP_LIGHTEN);
+            }
+            assert.equal(strip.paintedZoom, 9);
         });
 
         it('keeps the markings the same on either', () => {

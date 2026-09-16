@@ -23,15 +23,15 @@ import { SceneCamera } from '../scene/cameras/camera';
 import { DebrisField } from '../scene/entities/debrisField';
 import { DamageSmokeField } from '../scene/entities/damageSmokeField';
 import { GroundTargetEntity } from '../scene/entities/groundTarget';
-import { ActivePlayArea, resolvePlayArea } from '../terrain/playArea';
+import { ActivePlayArea, homeArea, resolvePlayArea, terrainAreas } from '../terrain/playArea';
 import { Airfield, AirfieldBuilding, airfieldsInArea } from '../terrain/airfields';
 import {
     SceneRunway, airfieldChoices, headingForward, pickStartRunway, sceneRunwaysOf,
 } from './activeAirfield';
 import {
-    AIRFIELD_SURFACE_EPS_M, buildAirfieldModel, buildingHeightM,
+    AIRFIELD_SURFACE_EPS_M, GroundStrip, buildAirfieldModel, buildingHeightM, repaintGroundStrip,
 } from '../scene/airfield/airfieldModel';
-import { ecefToEnu, geodeticToEcef, sceneFromEnu } from '../terrain/geodesy';
+import { ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, worldToGeodetic } from '../terrain/geodesy';
 import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
@@ -78,6 +78,11 @@ import { TargetFromCameraUpdater } from './cameraUpdaters/targetFromCameraUpdate
 import { TargetToCameraUpdater } from './cameraUpdaters/targetToCameraUpdater';
 import { StaticModelCameraUpdater } from './cameraUpdaters/staticModelCameraUpdater';
 import { ShowcaseCameraUpdater } from './cameraUpdaters/showcaseCameraUpdater';
+import { FixedCameraUpdater } from './cameraUpdaters/fixedCameraUpdater';
+import {
+    FixedCameraRates, easeFixedCameraRates, wantedFixedCameraRates, zeroFixedCameraRates,
+} from './cameraUpdaters/fixedCameraControl';
+import { CameraRoute, cameraRouteFromLocation, writeCameraRouteToLocation } from './cameraRoute';
 import { restoreMainCameraParameters } from './stateUtils';
 import {
     StaticModelView, buildStaticModelViews, forEachStaticAircraftSlot,
@@ -320,11 +325,28 @@ enum PlayerViewState {
     AI_CHASE,
     CARRIER_OVER_STERN,
     SHOWCASE,
+    /** Nailed to a place from the URL, see cameraRoute.ts. */
+    FIXED,
 }
+
+/** Fixed-camera walk speed on the arrow / page keys; Shift is ten times this. */
+const FIXED_CAMERA_SPEED_MPS = 100;
+/** Fixed-camera turn rate on numpad 4/6 (heading) and 8/2 (pitch). */
+const FIXED_CAMERA_TURN_DEG_PER_S = 45;
+/** Seconds for a fixed-camera move or turn to reach ~63% of its target rate. */
+const FIXED_CAMERA_EASE_S = 0.3;
+/** How often the page URL follows a moving fixed camera. */
+const FIXED_CAMERA_URL_INTERVAL_S = 0.5;
+const FIXED_CAMERA_MOVE_KEYS = new Set([
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'ShiftLeft', 'ShiftRight',
+    'Numpad4', 'Numpad6', 'Numpad8', 'Numpad2',
+]);
 
 enum GameState {
     SPAWN_MENU,
     PLAYER,
+    /** Looking from the URL's fixed camera; sim paused, Escape for the menu. */
+    FIXED_CAMERA,
 }
 
 interface ShowcaseHighlightState {
@@ -393,6 +415,12 @@ export class Game {
     private readonly surfacePads: SurfacePadCollider[] = [];
     /** Every runway of this play area, longest first. Empty on an old pyramid. */
     private sceneRunways: SceneRunway[] = [];
+    /**
+     * Unpaved runways whose colour is not final: the finest terrain tile
+     * under them has not been drawn yet, so they carry a stand-in or a coarse
+     * tile's idea of the ground.
+     */
+    private pendingGroundStrips: GroundStrip[] = [];
     /**
      * The parked ramp slots, rebuilt once the session's runway is known. Empty
      * until then, which is before anything can ask to look at one.
@@ -511,6 +539,16 @@ export class Game {
     private viewBeforeShowcase: PlayerViewState | null = null;
     private staticModelIndex = 0;
     private staticModelCameraUpdater: StaticModelCameraUpdater;
+    private fixedCameraUpdater: FixedCameraUpdater;
+    /** The fixed camera asked for in the page URL, if any. */
+    private cameraRoute: CameraRoute | undefined = cameraRouteFromLocation();
+    /** Arrow / page keys held while looking from the fixed camera. */
+    private heldFixedCameraKeys: Set<string> = new Set();
+    /** Eased fixed-camera rates: forward/right/up in m/s, yaw/pitch in deg/s. */
+    private fixedCameraRates: FixedCameraRates = zeroFixedCameraRates();
+    /** Seconds since the URL last followed the fixed camera; NaN when it is current. */
+    private fixedCameraUrlAge = NaN;
+    private _fixedCameraPos = new THREE.Vector3();
 
     // Numpad orbit: how far the camera is currently orbited around the aircraft,
     // relative to the active view's default position (yaw about world UP, pitch
@@ -595,6 +633,8 @@ export class Game {
         this.cameraUpdaters.set(PlayerViewState.STATIC_MODEL, this.staticModelCameraUpdater);
         this.cameraUpdaters.set(PlayerViewState.CARRIER_OVER_STERN, new CarrierOverSternCameraUpdater(this.player, this.playerCamera.main));
         this.cameraUpdaters.set(PlayerViewState.SHOWCASE, new ShowcaseCameraUpdater(this.player, this.playerCamera.main));
+        this.fixedCameraUpdater = new FixedCameraUpdater(this.player, this.playerCamera.main);
+        this.cameraUpdaters.set(PlayerViewState.FIXED, this.fixedCameraUpdater);
         this.cameraUpdater = this.getCameraUpdater(this.view);
         this.configService.techProfiles.addChangeListener(profile => {
             this.updateHdResolution();
@@ -719,6 +759,9 @@ export class Game {
         this.selectAircraftById(settings.aircraftId, 'f22');
         setBootProgress(90, 'Loading aircraft...');
         await this.beginFlight(settings.spawnMode);
+        if (this.cameraRoute) {
+            this.enterFixedCamera(this.cameraRoute);
+        }
         await this.waitForRequiredTerrain(90, 99);
         setBootProgress(100, 'Ready');
         window.addEventListener('resize', () => this.onViewportResize());
@@ -1613,7 +1656,32 @@ export class Game {
         ));
     }
 
+    /**
+     * Give an unpaved strip the colour of the ground under it, as that
+     * ground is drawn: once per tile level, since a coarse tile's facet says
+     * "crop" over a district that is grass at the strip itself, and the
+     * finest tile has the last word. Cheap: a few triangle tests per strip
+     * still waiting, and none once every strip is final.
+     */
+    private paintGroundStrips(): void {
+        if (this.pendingGroundStrips.length === 0) {
+            return;
+        }
+        const finest = this.planetTerrain.maxZoom;
+        this.pendingGroundStrips = this.pendingGroundStrips.filter(strip => {
+            const cover = this.planetTerrain.drawnCoverAtWorld(strip.x, strip.z);
+            if (cover === undefined) {
+                return true;
+            }
+            if (cover.zoom > strip.paintedZoom) {
+                repaintGroundStrip(strip, cover, this.materials);
+            }
+            return cover.zoom < finest;
+        });
+    }
+
     update(delta: number) {
+        this.paintGroundStrips();
         if (this.state === GameState.PLAYER) {
             if ((this.view === PlayerViewState.TARGET_TO || this.view === PlayerViewState.TARGET_FROM) && !this.player.weaponsTarget) {
                 this.setCockpitFrontView();
@@ -1637,7 +1705,10 @@ export class Game {
             if (this.player.isCrashed) {
                 this.transitionFromPlayerToCrashed();
             }
-        } else if (this.state === GameState.SPAWN_MENU) {
+        } else if (this.state === GameState.SPAWN_MENU || this.state === GameState.FIXED_CAMERA) {
+            if (this.state === GameState.FIXED_CAMERA) {
+                this.moveFixedCamera(delta);
+            }
             this.advanceCarrier(delta);
             this.syncCarrierSystems();
             this.scene.update(delta);
@@ -1785,7 +1856,8 @@ export class Game {
     render() {
         this.player.updateDisplayTransform();
 
-        if (this.state === GameState.PLAYER || this.state === GameState.SPAWN_MENU) {
+        if (this.state === GameState.PLAYER || this.state === GameState.SPAWN_MENU
+            || this.state === GameState.FIXED_CAMERA) {
             this.cameraUpdater.update(0);
             if (!this.cockpitPadlock
                 && (this.view !== PlayerViewState.AI_CHASE
@@ -2102,6 +2174,18 @@ export class Game {
             if (this.state === GameState.SPAWN_MENU) {
                 return;
             }
+            if (this.state === GameState.FIXED_CAMERA) {
+                if (event.code === 'Escape') {
+                    event.preventDefault();
+                    this.heldFixedCameraKeys.clear();
+                    this.fixedCameraRates = zeroFixedCameraRates();
+                    this.enterSpawnMenu();
+                } else if (FIXED_CAMERA_MOVE_KEYS.has(event.code)) {
+                    event.preventDefault();
+                    this.heldFixedCameraKeys.add(event.code);
+                }
+                return;
+            }
             if (this.state !== GameState.PLAYER) {
                 return;
             }
@@ -2194,10 +2278,12 @@ export class Game {
 
         document.addEventListener('keyup', (event: KeyboardEvent) => {
             this.heldOrbitKeys.delete(event.code);
+            this.heldFixedCameraKeys.delete(event.code);
         });
 
         window.addEventListener('blur', () => {
             this.heldOrbitKeys.clear();
+            this.heldFixedCameraKeys.clear();
             this.clearShowcasePickingState();
         });
 
@@ -2504,6 +2590,81 @@ export class Game {
         this.player.reset(this.runwaySpawnPosition(), this.baseHeading, PLAYER_LAND_SPAWN);
         this.damageSmoke?.reset();
         this.setCockpitFrontView();
+    }
+
+    /**
+     * Arrow keys slide the fixed camera along and across its heading, Page
+     * Up/Down raise and lower it, numpad 4/6 turn it and 8/2 pitch it; Shift
+     * makes every move ten times faster.
+     */
+    private moveFixedCamera(delta: number): void {
+        const r = this.fixedCameraRates;
+        const want = wantedFixedCameraRates(
+            this.heldFixedCameraKeys, FIXED_CAMERA_SPEED_MPS, FIXED_CAMERA_TURN_DEG_PER_S);
+        if (!easeFixedCameraRates(r, want, delta, FIXED_CAMERA_EASE_S)) {
+            if (!Number.isNaN(this.fixedCameraUrlAge)) {
+                // Came to rest: the URL gets the exact final pose.
+                this.syncFixedCameraUrl();
+            }
+            return;
+        }
+        this.fixedCameraUpdater.move(r.forward * delta, r.right * delta, r.up * delta);
+        this.fixedCameraUpdater.turn(r.yaw * delta, r.pitch * delta);
+        this.fixedCameraUrlAge = (Number.isNaN(this.fixedCameraUrlAge) ? 0 : this.fixedCameraUrlAge) + delta;
+        if (this.fixedCameraUrlAge >= FIXED_CAMERA_URL_INTERVAL_S) {
+            this.syncFixedCameraUrl();
+            this.fixedCameraUrlAge = 0;
+        }
+    }
+
+    /** The fixed camera's pose as a route: geodetic position, heading, pitch. */
+    private fixedCameraRoute(): CameraRoute {
+        const p = this.fixedCameraUpdater.getPosition(this._fixedCameraPos);
+        const g = worldToGeodetic(this.planetTerrain.basis, p.x, p.y, p.z);
+        return {
+            lat: g.lat, lon: g.lon, altM: g.height,
+            headingDeg: this.fixedCameraUpdater.heading, pitchDeg: this.fixedCameraUpdater.pitch,
+        };
+    }
+
+    /** Write the camera's pose back to the page URL so it can be copied or reloaded. */
+    private syncFixedCameraUrl(): void {
+        this.cameraRoute = this.fixedCameraRoute();
+        writeCameraRouteToLocation(this.cameraRoute);
+        this.fixedCameraUrlAge = NaN;
+    }
+
+    /** Scene position of a URL camera: its altitude is metres above the ellipsoid. */
+    private cameraRouteWorld(route: CameraRoute): THREE.Vector3 {
+        return geodeticToWorld(this.planetTerrain.basis, route.lat, route.lon, route.altM);
+    }
+
+    /**
+     * Look from the URL's camera with the sim held. The aircraft stays where
+     * the boot put it; the HUD and cockpit are off since nobody is in them.
+     */
+    private enterFixedCamera(route: CameraRoute) {
+        this.state = GameState.FIXED_CAMERA;
+        this.flightRecorder.stop();
+        this.player.setSimulationPaused(true);
+        this.spawnMenu.enabled = false;
+        this.spawnPanel.hide();
+        this.leaveShowcaseIfActive();
+        this.resetOrbit();
+        this.setCockpitPadlock(false);
+        restoreMainCameraParameters(this.playerCamera.main);
+        this.fixedCameraUpdater.setPose(this.cameraRouteWorld(route), route.headingDeg, route.pitchDeg);
+        this.view = PlayerViewState.FIXED;
+        this.player.exteriorView = true;
+        this.cameraUpdater = this.getCameraUpdater(this.view);
+        for (let i = 0; i < this.cockpitEntities.length; i++) {
+            this.cockpitEntities[i].enabled = false;
+        }
+        for (let i = 0; i < this.exteriorEntities.length; i++) {
+            this.exteriorEntities[i].enabled = false;
+        }
+        console.log(`fixed camera at (${route.lat}, ${route.lon}) ${route.altM} m, `
+            + `heading ${route.headingDeg}, pitch ${route.pitchDeg}`);
     }
 
     /** Begin a flight using the aircraft + livery chosen in the spawn menu. */
@@ -2959,8 +3120,17 @@ export class Game {
         // origin sits. Home keeps PLAY_ORIGIN exactly and gets the authored
         // scenery; anywhere else is terrain only, rebased onto its own centre
         // so vertices stay near the origin instead of a continent away from it.
+        // A URL camera flies in whichever area holds it, not the saved one:
+        // the terrain is only meshed near its area's origin.
+        const routeArea = this.cameraRoute
+            ? homeArea(terrainAreas(manifest), { ...this.cameraRoute, height: 0 })
+            : undefined;
+        if (this.cameraRoute && !routeArea) {
+            console.warn(`camera route (${this.cameraRoute.lat}, ${this.cameraRoute.lon}) `
+                + 'is outside every baked area');
+        }
         this.playArea = resolvePlayArea(
-            manifest, PLAY_ORIGIN, loadSettings().terrainArea,
+            manifest, PLAY_ORIGIN, routeArea?.name ?? loadSettings().terrainArea,
         );
         if (!this.playArea.isHome) {
             console.log(`flying in imported area "${this.playArea.area.name}" `
@@ -3065,6 +3235,10 @@ export class Game {
         // field, so there is no pad to lock here any more — that DEM sample and
         // the re-mesh it forced were the slowest step in the old boot.
         await this.preloadTerrainAroundPlane(center.x, center.z, spawn);
+        if (this.cameraRoute) {
+            const at = this.cameraRouteWorld(this.cameraRoute);
+            await this.preloadTerrainAroundPlane(at.x, at.z, 'highAlt');
+        }
         setBootProgress(50, 'Building terrain meshes...');
         // The airbase furniture goes around whichever runway this session is
         // based at, turned to its heading — see airbaseAt.
@@ -3176,13 +3350,18 @@ export class Game {
         // airfield's own plane and outside it is whatever is there.
         const groundElevationAt = (e: number, n: number) =>
             this.planetTerrain.heights.geodeticHeightAtWorld(e, -n);
+        // What the ground is made of, for a strip that is drawn as ground.
+        const groundCoverAt = (e: number, n: number) =>
+            this.planetTerrain.drawnCoverAtWorld(e, -n);
 
         for (const airfield of here) {
             const built = buildAirfieldModel(
-                airfield, this.planetTerrain.basis, this.materials, groundElevationAt);
+                airfield, this.planetTerrain.basis, this.materials,
+                groundElevationAt, groundCoverAt);
             if (built === undefined) {
                 continue;
             }
+            this.pendingGroundStrips.push(...built.groundStrips);
             // A weapons target rather than plain scenery: an airfield is what
             // the ILS needles guide to, and picking one as a target is how the
             // player asks for them.
@@ -3657,5 +3836,9 @@ export class Game {
             (at?: { x: number; z: number }) => this.groundProbe(at);
         (globalThis as Record<string, unknown>).__skyDome = this.skyDome;
         (globalThis as Record<string, unknown>).__sunModel = this.sunModel;
+        // Unpaved strips still in their stand-in tone: empty once every one
+        // has been drawn over ground that is on screen.
+        (globalThis as Record<string, unknown>).__groundStripsPending =
+            () => this.pendingGroundStrips;
     }
 }

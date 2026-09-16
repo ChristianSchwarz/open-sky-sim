@@ -37,6 +37,33 @@ const EDGE_TOLERANCE = 1e-6;
 const MIN_GRID = 1;
 const MAX_GRID = 64;
 
+/** The baked cover of one land facet. */
+export interface TileCover {
+    /** A {@link import('./tones').TerrainClass}. */
+    cls: number;
+    /** The observed colour, packed 0xRRGGBB in sRGB. */
+    rgb: number;
+    /**
+     * Quadtree level of the tile it was read from. A coarse tile's facet
+     * spans a whole district, so what it says about one point is provisional
+     * until a deeper tile is drawn there.
+     */
+    zoom: number;
+}
+
+/**
+ * Component `k` of vertex `v` as the byte the bake wrote, whether the
+ * attribute normalises it for the shader or not.
+ */
+function rawByte(
+    attr: THREE.BufferAttribute | THREE.InterleavedBufferAttribute, v: number, k: number,
+): number {
+    if (attr instanceof THREE.InterleavedBufferAttribute) {
+        return attr.data.array[v * attr.data.stride + attr.offset + k];
+    }
+    return attr.array[v * attr.itemSize + k];
+}
+
 /**
  * Plan-view bucket grid over one tile's land triangles.
  *
@@ -48,6 +75,9 @@ const MAX_GRID = 64;
 export class TileHeightIndex {
 
     private readonly positions: THREE.TypedArray;
+    /** Per-vertex landcover class and observed colour, when the mesh carries them. */
+    private readonly coverClass: THREE.BufferAttribute | THREE.InterleavedBufferAttribute | undefined;
+    private readonly coverColor: THREE.BufferAttribute | THREE.InterleavedBufferAttribute | undefined;
     private readonly triangleCount: number;
     private readonly minX: number;
     private readonly minZ: number;
@@ -65,9 +95,14 @@ export class TileHeightIndex {
 
     private readonly _local = new THREE.Vector3();
 
-    constructor(mesh: THREE.Mesh, group: THREE.Object3D) {
+    /**
+     * @param zoom The quadtree level of the tile, reported with its cover.
+     */
+    constructor(mesh: THREE.Mesh, group: THREE.Object3D, readonly zoom = 0) {
         const attr = mesh.geometry.getAttribute('position');
         this.positions = attr.array;
+        this.coverClass = mesh.geometry.getAttribute('coverClass');
+        this.coverColor = mesh.geometry.getAttribute('coverColor');
         // Land geometry is non-indexed: triangles are consecutive triples.
         this.triangleCount = Math.floor(attr.count / 3);
 
@@ -123,6 +158,52 @@ export class TileHeightIndex {
      * hole cut for water.
      */
     heightAtWorld(x: number, z: number): number | undefined {
+        if (this.surfaceTriangleAt(x, z) < 0) {
+            return undefined;
+        }
+        this._local.set(this._lx, this._surfaceY, this._lz)
+            .multiplyScalar(this.scale)
+            .applyQuaternion(this.rotation);
+        return this._local.y + this.origin.y;
+    }
+
+    /**
+     * What the drawn facet under a scene point is made of, or undefined off
+     * the tile or on a mesh with no cover baked into it.
+     *
+     * Both are per-vertex attributes, but the bake gives every vertex of a
+     * facet the same values — land is flat-shaded per facet — so the first
+     * corner speaks for the triangle.
+     */
+    coverAtWorld(x: number, z: number): TileCover | undefined {
+        if (this.coverClass === undefined) {
+            return undefined;
+        }
+        const tri = this.surfaceTriangleAt(x, z);
+        if (tri < 0) {
+            return undefined;
+        }
+        const v = tri * 3;
+        const c = this.coverColor;
+        return {
+            cls: rawByte(this.coverClass, v, 0),
+            rgb: c === undefined ? 0
+                : (rawByte(c, v, 0) << 16) | (rawByte(c, v, 1) << 8) | rawByte(c, v, 2),
+            zoom: this.zoom,
+        };
+    }
+
+    /** Local-space scratch written by {@link surfaceTriangleAt}. */
+    private _lx = 0;
+    private _lz = 0;
+    private _surfaceY = 0;
+
+    /**
+     * The top-surface triangle under a scene point, or -1 when none holds it.
+     * Leaves the local query point and the local height of the hit in the
+     * scratch fields.
+     */
+    private surfaceTriangleAt(x: number, z: number): number {
         // World -> local. The rotation is identity whenever the session flies
         // in the area the bake was centred on, and a fraction of a degree
         // otherwise, so treating local XZ containment as plan-view containment
@@ -132,6 +213,8 @@ export class TileHeightIndex {
             .divideScalar(this.scale);
         const lx = this._local.x;
         const lz = this._local.z;
+        this._lx = lx;
+        this._lz = lz;
 
         // One cell of slack, then clamp. A point on the tile's far edge maps
         // to cell `grid` and float noise puts a point on the near edge at -1;
@@ -141,28 +224,25 @@ export class TileHeightIndex {
         const fx = (lx - this.minX) * this.invCellX;
         const fz = (lz - this.minZ) * this.invCellZ;
         if (fx < -1 || fz < -1 || fx > this.grid + 1 || fz > this.grid + 1) {
-            return undefined;
+            return -1;
         }
 
         const cell = this.clampCell(fz) * this.grid + this.clampCell(fx);
         const end = this.cellStart[cell + 1];
-        let bestY: number | undefined;
+        let best = -1;
+        let bestY = -Infinity;
         for (let i = this.cellStart[cell]; i < end; i++) {
-            const y = this.triangleHeightAt(this.cellTriangles[i], lx, lz);
+            const tri = this.cellTriangles[i];
+            const y = this.triangleHeightAt(tri, lx, lz);
             // Skirts hang below the tile rim and overlap it in plan view; the
             // highest hit is the top surface.
-            if (y !== undefined && (bestY === undefined || y > bestY)) {
+            if (y !== undefined && y > bestY) {
                 bestY = y;
+                best = tri;
             }
         }
-        if (bestY === undefined) {
-            return undefined;
-        }
-
-        this._local.set(lx, bestY, lz)
-            .multiplyScalar(this.scale)
-            .applyQuaternion(this.rotation);
-        return this._local.y + this.origin.y;
+        this._surfaceY = bestY;
+        return best;
     }
 
     /** Local height of triangle `tri` at (lx, lz), or undefined if outside it. */

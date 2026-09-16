@@ -22,6 +22,9 @@ import { bearingAxisAt } from '../../terrain/flattenPad';
 import {
     Ecef, Enu, EnuBasis, ecefToEnu, enuToGeodeticApprox, geodeticToEcef, sceneFromEnu,
 } from '../../terrain/geodesy';
+import { toneCategoryOfClass } from '../../terrain/terrainEntity';
+import { TileCover } from '../../terrain/tileHeightIndex';
+import { TerrainClass } from '../../terrain/tones';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../materials/materials';
 import { Model } from '../models/models';
 import { updateUniforms } from '../utils';
@@ -67,22 +70,79 @@ const DEGENERATE_SEGMENT_M = 0.01;
 const TAXIWAY_STEP_M = 20;
 
 /**
- * What each surface is made of.
+ * What each paved surface is made of.
  *
  * Concrete is its own tone rather than sharing asphalt's. A military field
  * laid in slabs — every Soviet-era one in the Crimea area — is markedly paler
  * than an asphalt civil field, and from the air that is most of what tells
  * them apart. OSM records which it is, so there is no reason to guess.
+ *
+ * Grass and gravel are not here: an unpaved strip is the ground it is cut
+ * into, so it takes the tone of the terrain under it — see {@link GroundStrip}.
  */
-const SURFACE_CATEGORY: Record<RunwaySurface, PaletteCategory> = {
+const PAVED_CATEGORY: Partial<Record<RunwaySurface, PaletteCategory>> = {
     asphalt: PaletteCategory.SCENERY_ROAD_SECONDARY,
     concrete: PaletteCategory.SCENERY_BASE_CONCRETE,
-    // Both are the terrain's own tone shifted, not a field or road colour: a
-    // mown strip a little lighter and greener than the grass round it, a
-    // gravel one lighter and sandier than bare earth.
-    grass: PaletteCategory.SCENERY_BASE_GRASS,
-    gravel: PaletteCategory.SCENERY_BASE_DIRT,
 };
+
+/**
+ * How much brighter an unpaved strip is drawn than the terrain tone under it.
+ *
+ * A mown or rolled strip reads a shade paler than the field or scrub round
+ * it, and that lift is all that marks it out: the hue is the ground's own.
+ */
+export const GROUND_STRIP_LIGHTEN = 1.18;
+
+/**
+ * The tone an unpaved strip is drawn in until the terrain under it is on
+ * screen and can say what it actually is.
+ */
+const GROUND_STRIP_FALLBACK: Partial<Record<RunwaySurface, PaletteCategory>> = {
+    grass: PaletteCategory.TERRAIN_GRASS,
+    gravel: PaletteCategory.TERRAIN_BARE,
+};
+
+/**
+ * A colour to draw a part in: a palette tone, optionally lifted, and
+ * optionally a literal colour in place of the tone (the tone still says how
+ * it fogs).
+ */
+type Paint = PaletteCategory | { category: PaletteCategory; lighten: number; rawColor?: string };
+
+function paintKey(paint: Paint): string {
+    return typeof paint === 'string'
+        ? paint
+        : paint.category + '*' + paint.lighten + (paint.rawColor ?? '');
+}
+
+/** The material for a flat, unlit part in one paint. */
+function flatMaterial(materials: SceneMaterialManager, paint: Paint): THREE.Material {
+    return materials.build({
+        type: SceneMaterialPrimitiveType.MESH,
+        category: typeof paint === 'string' ? paint : paint.category,
+        depthWrite: false,
+        shaded: false,
+        overbright: typeof paint === 'string' ? 1 : paint.lighten,
+        rawColor: typeof paint === 'string' ? undefined : paint.rawColor,
+    });
+}
+
+/**
+ * The paint of an unpaved strip on ground of a given cover.
+ *
+ * The same rule the terrain shader applies to the facet: a landcover class
+ * picks a palette tone, except unmapped ground on a land-use tile, whose
+ * baked colour is already the blended regional mean and is painted as it
+ * is. The strip follows either, a shade lighter.
+ */
+function groundPaint(cover: TileCover): Paint {
+    const ground = cover.cls === TerrainClass.Ground;
+    return {
+        category: toneCategoryOfClass(cover.cls),
+        lighten: GROUND_STRIP_LIGHTEN,
+        rawColor: ground ? '#' + cover.rgb.toString(16).padStart(6, '0') : undefined,
+    };
+}
 
 /**
  * What the taxiways and aprons of an airfield are paved with.
@@ -177,31 +237,34 @@ const _enu: Enu = { e: 0, n: 0, u: 0 };
  * on the ground and must not write depth, a building is a lit box that must.
  */
 class MeshParts {
-    private readonly parts = new Map<PaletteCategory, number[]>();
+    private readonly parts = new Map<string, { paint: Paint; positions: number[] }>();
+    /** The mesh each paint became, filled by {@link build}. */
+    readonly meshes = new Map<string, THREE.Mesh>();
 
     constructor(private readonly shaded = false) { }
 
-    add(category: PaletteCategory, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3): void {
-        let out = this.parts.get(category);
-        if (out === undefined) {
-            out = [];
-            this.parts.set(category, out);
+    add(paint: Paint, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3): void {
+        const key = paintKey(paint);
+        let part = this.parts.get(key);
+        if (part === undefined) {
+            part = { paint, positions: [] };
+            this.parts.set(key, part);
         }
-        out.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+        part.positions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
     }
 
     /** Two triangles from four corners wound a, b, c, d. */
     addQuad(
-        category: PaletteCategory,
+        paint: Paint,
         a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, d: THREE.Vector3,
     ): void {
-        this.add(category, a, b, c);
-        this.add(category, a, c, d);
+        this.add(paint, a, b, c);
+        this.add(paint, a, c, d);
     }
 
     build(materials: SceneMaterialManager): THREE.Object3D[] {
         const out: THREE.Object3D[] = [];
-        for (const [category, positions] of this.parts) {
+        for (const [key, { paint, positions }] of this.parts) {
             const geometry = new THREE.BufferGeometry();
             geometry.setAttribute(
                 'position', new THREE.BufferAttribute(new Float32Array(positions), 3));
@@ -210,24 +273,61 @@ class MeshParts {
                 // Volumes are lit, so they need normals; flats never are.
                 geometry.computeVertexNormals();
             }
-            const material = materials.build({
-                type: SceneMaterialPrimitiveType.MESH,
-                category,
-                depthWrite: this.shaded,
-                shaded: this.shaded,
-            });
+            const material = this.shaded
+                ? materials.build({
+                    type: SceneMaterialPrimitiveType.MESH,
+                    category: typeof paint === 'string' ? paint : paint.category,
+                    depthWrite: true,
+                    shaded: true,
+                })
+                : flatMaterial(materials, paint);
             const mesh = new THREE.Mesh(geometry, material);
             mesh.onBeforeRender = updateUniforms;
+            this.meshes.set(key, mesh);
             out.push(mesh);
         }
         return out;
     }
 }
 
+/**
+ * An unpaved runway whose colour is not final yet, because the finest tile
+ * of the terrain under it has not been drawn.
+ *
+ * Airfields are built at boot, before the first frame has put a single tile
+ * on screen, so for most of them the ground's own tone cannot be read then;
+ * and the first tile drawn there is a coarse one, whose facet under the strip
+ * spans a district and may say "crop" over a field that is grass up close.
+ * The strip is drawn in a stand-in tone meanwhile and repainted, with
+ * {@link repaintGroundStrip}, each time a deeper tile is drawn under it.
+ */
+export interface GroundStrip {
+    /** Scene position of the strip's centre, where the cover is read. */
+    x: number;
+    z: number;
+    /** Its pavement, one mesh per LOD level. */
+    meshes: THREE.Mesh[];
+    /** Zoom of the tile it was last painted from; -1 for the stand-in. */
+    paintedZoom: number;
+}
+
+/** Repaint an unpaved strip in the colour of the ground under it. */
+export function repaintGroundStrip(
+    strip: GroundStrip, cover: TileCover, materials: SceneMaterialManager,
+): void {
+    const material = flatMaterial(materials, groundPaint(cover));
+    for (const mesh of strip.meshes) {
+        mesh.material = material;
+    }
+    strip.paintedZoom = cover.zoom;
+}
+
 export interface AirfieldModel {
     model: Model;
     /** Scene position the geometry is built around. */
     origin: THREE.Vector3;
+    /** Every unpaved runway, to be repainted as the ground under it is drawn. */
+    groundStrips: GroundStrip[];
 }
 
 /**
@@ -247,9 +347,15 @@ export interface AirfieldModel {
  */
 export type GroundElevation = (e: number, n: number) => number;
 
+/**
+ * Cover of the drawn terrain at an ENU point, or undefined where none is on
+ * screen yet.
+ */
+export type GroundCover = (e: number, n: number) => TileCover | undefined;
+
 export function buildAirfieldModel(
     airfield: Airfield, basis: EnuBasis, materials: SceneMaterialManager,
-    groundElevationAt?: GroundElevation,
+    groundElevationAt?: GroundElevation, groundCoverAt?: GroundCover,
 ): AirfieldModel | undefined {
     const primary = primaryRunway(airfield);
     if (primary === undefined) {
@@ -284,12 +390,35 @@ export function buildAirfieldModel(
         sceneAt(basis, e, n, (groundElevationAt?.(e, n) ?? elevationAt(e, n)) + lift)
             .sub(originScene);
 
+    // An unpaved strip is the ground it is cut into, a shade lighter. Read
+    // once per runway here from whatever is drawn, and handed back to be
+    // repainted as deeper tiles come in; until anything is drawn it is a
+    // stand-in tone for its surface.
+    const unpaved: { runway: AirfieldRunway; paint: Paint; zoom: number }[] = [];
+    const surfacePaint = (runway: AirfieldRunway): Paint => {
+        const paved = PAVED_CATEGORY[runway.surface];
+        if (paved !== undefined) {
+            return paved;
+        }
+        const centre = toEnu(runway.lat, runway.lon);
+        const cover = groundCoverAt?.(centre.e, centre.n);
+        const paint = cover !== undefined ? groundPaint(cover) : {
+            category: GROUND_STRIP_FALLBACK[runway.surface] ?? PaletteCategory.TERRAIN_GRASS,
+            lighten: GROUND_STRIP_LIGHTEN,
+        };
+        unpaved.push({ runway, paint, zoom: cover?.zoom ?? -1 });
+        return paint;
+    };
+    const paints = new Map(airfield.runways.map(r => [r, surfacePaint(r)]));
+
     const levels: Model['lod'] = [];
+    const flatsPerLevel: MeshParts[] = [];
     let maxSize = 0;
     for (let level = 0; level < LOD_KINDS.length; level++) {
         const kinds = new Set(LOD_KINDS[level]);
         const parts = new MeshParts();
         const solids = new MeshParts(true);
+        flatsPerLevel.push(parts);
 
         if (level <= LOD_WITH_SURROUNDS) {
             // Drawn under the runways, so a taxiway crossing one loses.
@@ -300,10 +429,24 @@ export function buildAirfieldModel(
         }
         for (const runway of airfield.runways) {
             maxSize = Math.max(maxSize, runway.lengthM);
-            addRunway(parts, runway, kinds, toEnu, place);
+            addRunway(parts, runway, paints.get(runway)!, kinds, toEnu, place);
         }
         levels.push({ flats: parts.build(materials), volumes: solids.build(materials) });
     }
+    const groundStrips: GroundStrip[] = unpaved.map(({ runway, paint, zoom }) => {
+        const centre = toEnu(runway.lat, runway.lon);
+        const at = sceneAt(basis, centre.e, centre.n, elevationAt(centre.e, centre.n));
+        const key = paintKey(paint);
+        return {
+            x: at.x,
+            z: at.z,
+            meshes: flatsPerLevel.flatMap(parts => {
+                const mesh = parts.meshes.get(key);
+                return mesh === undefined ? [] : [mesh];
+            }),
+            paintedZoom: zoom,
+        };
+    });
     return {
         model: {
             lod: levels,
@@ -312,6 +455,7 @@ export function buildAirfieldModel(
             center: new THREE.Vector3(),
         },
         origin: originScene,
+        groundStrips,
     };
 }
 
@@ -337,7 +481,7 @@ type Place = (e: number, n: number, lift: number) => THREE.Vector3;
 type ToEnu = (lat: number, lon: number) => { e: number; n: number };
 
 function addRunway(
-    parts: MeshParts, runway: AirfieldRunway, kinds: Set<MarkingKind>,
+    parts: MeshParts, runway: AirfieldRunway, pavement: Paint, kinds: Set<MarkingKind>,
     toEnu: ToEnu, place: Place,
 ): void {
     const centre = toEnu(runway.lat, runway.lon);
@@ -355,11 +499,9 @@ function addRunway(
         if (!kinds.has(rect.kind)) {
             continue;
         }
-        const category = rect.kind === 'pavement'
-            ? SURFACE_CATEGORY[runway.surface] ?? PaletteCategory.SCENERY_ROAD_SECONDARY
-            : MARKING_CATEGORY[rect.kind];
+        const paint = rect.kind === 'pavement' ? pavement : MARKING_CATEGORY[rect.kind];
         const lift = AIRFIELD_SURFACE_EPS_M + (rect.kind === 'pavement' ? 0 : PAINT_LIFT_M);
-        parts.addQuad(category, ...quadCorners(rect, at, lift));
+        parts.addQuad(paint, ...quadCorners(rect, at, lift));
     }
 }
 

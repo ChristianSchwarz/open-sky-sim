@@ -50,7 +50,7 @@ import { TileIndex } from './tileIndex';
 import { TileMeshes, buildSmoothLandGeometryFromFaceted, buildTileMeshes, disposeTileMeshes, tileOriginWorld } from './tileMesh';
 import { TileStore } from './tileStore';
 import { PRIORITY_IN_FRUSTUM, TileStreamer, TileWant, predictViewTarget } from './tileStreamer';
-import { TileHeightIndex } from './tileHeightIndex';
+import { TileCover, TileHeightIndex } from './tileHeightIndex';
 import { TileKey, approxTileEdgeMetres, parentOf, tileAtLonLat, tileKeyString } from './tiling';
 import { enuToGeodeticApprox } from './geodesy';
 import {
@@ -62,6 +62,17 @@ import {
     TerrainDetailSetting, TerrainShadingSetting, TriangleBudgetSetting,
 } from '../config/configService';
 import { publishTerrainStats, trackTerrainMaterial } from './debug';
+
+/**
+ * The palette tone a landcover class is painted in.
+ *
+ * What the terrain shader does per facet in Landcover mode, for anything
+ * built on the CPU that wants to match the ground it stands on.
+ */
+export function toneCategoryOfClass(cls: number): PaletteCategory {
+    return TONE_CATEGORIES[CLASS_TO_TONE[cls] ?? TerrainTone.Grass]
+        ?? PaletteCategory.TERRAIN_DEFAULT;
+}
 
 const TONE_CATEGORIES: Record<number, PaletteCategory> = {
     [TerrainTone.Water]: PaletteCategory.TERRAIN_WATER,
@@ -675,14 +686,29 @@ export class TerrainEntity implements Entity {
      * the DEM does not agree with; see {@link TileHeightIndex}.
      */
     drawnHeightAtWorld(x: number, z: number): number | undefined {
+        return this.drawnIndexAt(x, z)?.heightAtWorld(x, z);
+    }
+
+    /**
+     * Cover of the drawn facet under a scene point, or undefined where
+     * nothing is drawn yet. Same caveats as {@link drawnHeightAtWorld}: this
+     * is whatever tile is on screen, at whatever level it is drawn — the
+     * cover says which, and {@link maxZoom} is the level that has the last
+     * word.
+     */
+    drawnCoverAtWorld(x: number, z: number): TileCover | undefined {
+        return this.drawnIndexAt(x, z)?.coverAtWorld(x, z);
+    }
+
+    /** The index of the drawn land tile holding a scene point, if any. */
+    private drawnIndexAt(x: number, z: number): TileHeightIndex | undefined {
         // Indices are pruned to the draw list, so at most one of them can hold
         // the point and checking the cache first makes the common case — an
         // aircraft sitting over the same tile for hundreds of frames — a
         // couple of triangle tests with no lookup at all.
         for (const index of this.drawnHeightIndices.values()) {
-            const y = index.heightAtWorld(x, z);
-            if (y !== undefined) {
-                return y;
+            if (index.heightAtWorld(x, z) !== undefined) {
+                return index;
             }
         }
         const node = this.drawnNodeAt(x, z);
@@ -693,9 +719,9 @@ export class TerrainEntity implements Entity {
         if (meshes?.land === undefined) {
             return undefined;   // ocean stand-in, or water-only tile
         }
-        const index = new TileHeightIndex(meshes.land, meshes.group);
+        const index = new TileHeightIndex(meshes.land, meshes.group, node.id.z);
         this.drawnHeightIndices.set(node.key, index);
-        return index.heightAtWorld(x, z);
+        return index.heightAtWorld(x, z) === undefined ? undefined : index;
     }
 
     /** The drawn quadtree node covering a scene point, deepest level first. */

@@ -96,17 +96,6 @@ export enum PaletteCategory {
      * tells the two apart. OSM records which it is, so the sim can too.
      */
     SCENERY_BASE_CONCRETE = 'SCENERY_BASE_CONCRETE',
-    /**
-     * A grass strip: the terrain's own grass tone, a little lighter and
-     * greener, since a mown, rolled strip reads paler than the scrub round it
-     * but is still the same ground.
-     */
-    SCENERY_BASE_GRASS = 'SCENERY_BASE_GRASS',
-    /**
-     * A dirt or gravel strip: bare-ground brown, lighter and pulled towards
-     * sand, since packed, dusty gravel reads beige rather than earth-dark.
-     */
-    SCENERY_BASE_DIRT = 'SCENERY_BASE_DIRT',
 
     FX_FIRE = 'FX_FIRE',
     FX_FIRE__B = 'FX_FIRE__B',
