@@ -11,6 +11,14 @@ import { updateTargetCamera } from '../../utils';
 import { WeaponsTarget } from '../weaponsTarget';
 import { AircraftDeviceState, PlayerEntity } from "../player";
 import { formatHeading, getAircraftDeviceStatusPosition, getOverlayLayout, renderAircraftDeviceStatus } from './overlayUtils';
+import { EnuBasis, worldToGeodetic } from '../../../terrain/geodesy';
+import { MapTileSource, MovingMapRenderer } from './movingMap';
+
+/** Where the moving map reads its chart from: the terrain's frame and its cover rasters. */
+export interface MovingMapSource {
+    basis: EnuBasis;
+    coverTextures: MapTileSource;
+}
 
 
 
@@ -119,7 +127,32 @@ export class CockpitEntity implements Entity {
 
     constructor(private actor: PlayerEntity,
         private camera: THREE.PerspectiveCamera,
-        private targetCamera: THREE.PerspectiveCamera) { }
+        private targetCamera: THREE.PerspectiveCamera,
+        private readonly mapSource?: MovingMapSource) {
+        this.movingMap = mapSource === undefined ? undefined : new MovingMapRenderer(mapSource.coverTextures);
+    }
+
+    private readonly movingMap: MovingMapRenderer | undefined;
+    /** The tactical display draws the moving map under its scope. */
+    private movingMapShown: boolean = false;
+
+    /** Whether the aircraft carries a chart to show at all. */
+    get movingMapAvailable(): boolean {
+        if (this.movingMap === undefined || this.mapSource === undefined) {
+            return false;
+        }
+        const range = this.mapSource.coverTextures.zoomRange;
+        return range.max >= range.min;
+    }
+
+    get movingMapEnabled(): boolean {
+        return this.movingMapShown && this.movingMapAvailable;
+    }
+
+    /** The MFD's map option; a no-op without a chart to show. */
+    setMovingMapEnabled(on: boolean): void {
+        this.movingMapShown = on && this.movingMapAvailable;
+    }
 
     private aiPitch: number = 0;
     private aiRoll: number = 0;
@@ -365,6 +398,10 @@ export class CockpitEntity implements Entity {
         const rangeKm = tacticalScopeRange(
             this.weaponsTarget !== undefined ? this.weaponsTargetRange : undefined);
 
+        if (this.movingMapEnabled) {
+            this.renderMovingMap(x, y, size, centerX, centerY, radius, rangeKm, painter, palette);
+            painter.text(font, x + size - pad, y + pad, 'MAP', secondary, TextAlignment.RIGHT);
+        }
         this.renderTacticalScope(centerX, centerY, radius, painter, font, hudColor, secondary);
         this.renderTacticalContacts(centerX, centerY, radius, rangeKm, size, painter, hudColor, secondary);
         this.renderTacticalOwnship(centerX, centerY, size, painter, hudColor);
@@ -373,6 +410,33 @@ export class CockpitEntity implements Entity {
         painter.text(font, x + pad, textY, `${rangeKm} KM`, hudColor);
         painter.text(font, x + size - pad, textY,
             `${this.contacts.length} TGT`, secondary, TextAlignment.RIGHT);
+    }
+
+    /**
+     * The chart under the scope: heading-up, the ownship at the scope centre,
+     * the outer ring at the scope range. Clipped to the MFD face so the
+     * rotated tiles never spill past its bezel.
+     */
+    private renderMovingMap(x: number, y: number, size: number, centerX: number, centerY: number,
+        radius: number, rangeKm: number, painter: CanvasPainter, palette: Palette) {
+
+        if (this.movingMap === undefined || this.mapSource === undefined) {
+            return;
+        }
+        const p = this.actor.getDisplayPosition();
+        const here = worldToGeodetic(this.mapSource.basis, p.x, p.y, p.z);
+        const clip = painter.clip().rectangle(x, y, size + 1, size + 1).clip();
+        this.movingMap.render(painter, {
+            centerX,
+            centerY,
+            pixelsPerMetre: radius / (rangeKm * 1000),
+            halfExtentPx: Math.max(centerX - x, centerY - y, x + size - centerX, y + size - centerY),
+            latDeg: here.lat,
+            lonDeg: here.lon,
+            headingDeg: this.ownHeading,
+            waterColor: PaletteColor(palette, PaletteCategory.TERRAIN_WATER),
+        });
+        clip.clear();
     }
 
     /** Range rings, boresight cross, and the north index. */

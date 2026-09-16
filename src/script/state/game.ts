@@ -561,6 +561,8 @@ export class Game {
     /** F2 exterior view: numpad * toggles the camera to track the AI opponent. */
     private exteriorEnemyLock = false;
     private cockpitPadlock = false;
+    /** The left/right MFD overlay, for the keys that flip its pages. */
+    private cockpit: CockpitEntity | undefined;
     private aiChaseHeading = ExteriorViewHeading.BACK;
     private heldOrbitKeys = new Set<string>();
     private _orbitPivot = new THREE.Vector3();
@@ -2213,6 +2215,10 @@ export class Game {
             if (event.code === 'KeyV') {
                 event.preventDefault();
                 this.player.setForceVectorsEnabled(!this.player.forceVectorsEnabled);
+            } else if (event.code === 'KeyM') {
+                // The tactical MFD's map page: the cover rasters under the scope.
+                event.preventDefault();
+                this.cockpit?.setMovingMapEnabled(!this.cockpit.movingMapEnabled);
             } else if (event.code === 'Tab') {
                 if (event.repeat) {
                     return;
@@ -3250,7 +3256,9 @@ export class Game {
 
         const cockpit = new CockpitEntity(
             this.player, this.playerCamera.main, this.targetCamera.main,
+            { basis: this.planetTerrain.basis, coverTextures: this.planetTerrain.coverTextures },
         );
+        this.cockpit = cockpit;
         this.cockpitEntities.push(cockpit);
         this.scene.add(cockpit);
 

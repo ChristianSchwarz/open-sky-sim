@@ -597,6 +597,11 @@ export class TerrainEntity implements Entity {
         return loadAirfields(`${baseUrlOf(this.manifestUrl)}/${pointer.path}`);
     }
 
+    /** The far cover textures, for readers beside the land shader (the moving map). */
+    get coverTextures(): CoverTextures {
+        return this.cover;
+    }
+
     /** Deepest zoom the baked pyramid provides. */
     get maxZoom(): number {
         return this.manifest.mesh.maxZoom;

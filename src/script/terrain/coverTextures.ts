@@ -25,7 +25,7 @@
 
 import * as THREE from 'three';
 import { EnuBasis, ecefToEnu, geodeticToEcef } from './geodesy';
-import { TerrainManifest, textureTileUrl } from './manifest';
+import { TerrainManifest, TextureStreamManifest, textureTileUrl } from './manifest';
 import { PTX_NO_DATA, PtxTile, decodePtx } from './ptx';
 import { TileIndex } from './tileIndex';
 import { TileMeshes } from './tileMesh';
@@ -199,6 +199,7 @@ export class CoverTextures {
     private readonly bakeBasis: EnuBasis;
     private readonly minZoom: number;
     private readonly maxZoom: number;
+    private readonly spec: TextureStreamManifest | undefined;
     private index: TileIndex | undefined;
     private attached = 0;
     private wanted = true;
@@ -206,6 +207,7 @@ export class CoverTextures {
     constructor(opts: CoverTexturesOptions) {
         this.bakeBasis = opts.bakeBasis;
         const spec = opts.manifest.texture;
+        this.spec = spec;
         this.minZoom = spec?.minZoom ?? 0;
         this.maxZoom = spec?.maxZoom ?? -1;
         this.store = spec === undefined ? undefined : new TileStore<PtxTile>({
@@ -289,6 +291,42 @@ export class CoverTextures {
         meshes.cover = texture;
         meshes.bytes += coverTextureBytes(tile.size);
         this.attached++;
+    }
+
+    /** Zoom range the bake wrote sidecars for; `max < min` when it wrote none. */
+    get zoomRange(): { min: number; max: number } {
+        return { min: this.minZoom, max: this.maxZoom };
+    }
+
+    /** Texels across a sidecar at zoom `z`, as the manifest declares it. */
+    texelsAt(z: number): number {
+        const spec = this.spec;
+        if (!spec) {
+            return 1;
+        }
+        if (spec.nearSize !== undefined && spec.nearZoom !== undefined && z >= spec.nearZoom) {
+            return spec.nearSize;
+        }
+        return spec.size;
+    }
+
+    /**
+     * The decoded sidecar of a tile for a reader other than the land shader -
+     * the cockpit's moving map. Cached tiles come back at once and count as
+     * used this generation; a missing one is queued at `priority` and
+     * `undefined` returned, so the caller draws what it has and asks again
+     * next frame. Nothing is returned for a tile the bake never wrote.
+     */
+    sidecar(id: TileKey, priority: number): PtxTile | undefined {
+        if (!this.store || !this.has(id) || this.store.isAbsent(id)) {
+            return undefined;
+        }
+        const cached = this.store.get(id);
+        if (cached) {
+            return cached;
+        }
+        void this.store.request(id, priority);
+        return undefined;
     }
 
     /** A tile is being released; forget its texture. */

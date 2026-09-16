@@ -241,6 +241,32 @@ export class CanvasPainter {
         this.textRenderer.text(font,x, y, text, color, alignment, this.textEffect, this.textEffectColor);
     }
 
+    /**
+     * Draw a raster with its top-left at (x, y), stretched to `width` by
+     * `height`, in whatever frame {@link pushTransform} has set. Sampling is
+     * nearest: a texel is a texel, like a facet.
+     */
+    image(image: CanvasImageSource, x: number, y: number, width: number, height: number) {
+        this.ctx.imageSmoothingEnabled = false;
+        this.ctx.drawImage(image, x, y, width, height);
+    }
+
+    /**
+     * Enter a frame whose origin is the pixel (originX, originY), rotated by
+     * `rotation` radians (clockwise on screen) and scaled by `scale`. Every
+     * draw until {@link popTransform} is in that frame's units.
+     */
+    pushTransform(originX: number, originY: number, rotation: number, scale: number) {
+        this.ctx.save();
+        this.ctx.translate(originX, originY);
+        this.ctx.rotate(rotation);
+        this.ctx.scale(scale, scale);
+    }
+
+    popTransform() {
+        this.ctx.restore();
+    }
+
     batch(): BatchCanvasPainter {
         this.ctx.beginPath();
         return this.batchPainter;
