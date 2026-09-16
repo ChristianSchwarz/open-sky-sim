@@ -76,7 +76,7 @@ module.exports = (_env, argv) => ({
         extensions: ['.ts', '.js'],
     },
     // tsconfig includes all of src/, so the Angular compiler notices every
-    // module nothing imports yet (the mission editor, debug helpers).
+    // module nothing imports yet (debug helpers).
     ignoreWarnings: [/is part of the TypeScript compilation but it's unused/],
     plugins: [
         new AngularWebpackPlugin({

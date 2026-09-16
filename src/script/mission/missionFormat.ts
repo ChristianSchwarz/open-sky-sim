@@ -2,8 +2,7 @@
  * The mission document: what an authored mission *is*, on disk and in memory.
  *
  * Pure types and constants. No three.js, no DOM, no `fs` — this module is
- * imported by the browser editor, by the dev server (tools/missions.ts), and by
- * tests, and it must stay importable from all three.
+ * imported by the browser and by tests, and it must stay importable from both.
  *
  * A mission is stored GEODETICALLY. Scene metres are anchored at
  * `resolvePlayArea(...).origin`, which moves when the play area changes, so a

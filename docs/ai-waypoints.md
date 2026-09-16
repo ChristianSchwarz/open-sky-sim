@@ -4,7 +4,6 @@
 > in [src/script/ai/aiPilot.ts](../src/script/ai/aiPilot.ts) and
 > [src/script/mission/route.ts](../src/script/mission/route.ts), with the wire
 > message in [src/script/physics/sim/combatSim.ts](../src/script/physics/sim/combatSim.ts).
-> The authoring side is [the mission editor](mission-editor.md).
 
 An AI aircraft can be given a **route** — an ordered list of fixes, each with an
 altitude, a speed, a capture radius and an action — and will fly it, resuming

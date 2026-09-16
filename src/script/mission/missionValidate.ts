@@ -1,9 +1,9 @@
 /**
- * The one mission validator, shared by the editor and by the dev server.
+ * The one mission validator.
  *
- * `tools/missions.ts` imports this module directly (tools/ → src/ is a normal
+ * Written so a tools/ script could import it directly (tools/ → src/ is a normal
  * direction here; the reverse is blocked by `rootDir: "./src"`), so a mission
- * that the browser calls valid and one the server accepts are the same set by
+ * that the browser calls valid and one a server accepts stay the same set by
  * construction. The alternative — a second copy of the shape server-side, as
  * `Area` is duplicated today between areaImport.ts and importMath.ts — cannot
  * hold for a format a person is expected to hand-edit.
@@ -69,8 +69,7 @@ export interface MissionValidation {
 }
 
 /**
- * Filename and id sanitiser, shared with `tools/missions.ts` so both sides
- * agree byte for byte.
+ * Filename and id sanitiser, one definition so every side agrees byte for byte.
  *
  * Copied from `slug()` in tools/areaImport.ts (hyphens, 40-char cap) rather
  * than `slugify()` in modserver.ts (underscores), with two changes the original

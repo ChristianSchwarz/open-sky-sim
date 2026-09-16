@@ -70,7 +70,7 @@ export interface TileMeshes {
 export type ToneMaterials = readonly THREE.Material[];
 
 // TerrainClass.Ground spelled out: it is a `const enum`, and the tsx test
-// runner leaves an imported const-enum binding undefined (see facetColour.ts).
+// runner leaves an imported const-enum binding undefined.
 const GROUND_CLASS = 13;
 
 /**
