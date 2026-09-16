@@ -5,7 +5,6 @@ import { Palette } from "../../config/palettes/palette";
 import { AIRBASE_RUNWAY, PITCH_STICK_AFT_UNITS, PITCH_STICK_FWD_UNITS, PLANE_DISTANCE_TO_GROUND, RUNWAY_HALF_LENGTH_M } from '../../defs';
 import { FlightModel } from '../../physics/model/flightModel';
 import { FcsPitchLimiter } from '../../physics/fm2/fcs';
-import { FlightSample } from '../../physics/flightRecorder';
 import { LODHelper, getLodLevel } from '../../render/helpers';
 import { CanvasPainter } from "../../render/screen/canvasPainter";
 import { HUDFocusMode } from '../../state/gameDefs';
@@ -1341,17 +1340,6 @@ export class PlayerEntity implements Entity {
             : this.pitch;
     }
 
-    get pitchStickUnitsValue(): number {
-        if (this.flightModel instanceof SimProxyFlightModel) {
-            return this.flightModel.getSimPitchStickUnits();
-        }
-        return this.pitchStickUnits;
-    }
-
-    get commandedElevator(): number {
-        return this.flightModel.getCommandedElevator();
-    }
-
     /** Max nose-up / nose-down elevator-command clamp bounds (same +nose-up
      *  polarity as the pitch input), ±1 with the FBW limiters OFF. */
     get elevatorLimitHigh(): number {
@@ -1406,38 +1394,8 @@ export class PlayerEntity implements Entity {
         return this.flightModel.getLoadFactorG();
     }
 
-    getAccelerationWorld(target: THREE.Vector3): THREE.Vector3 {
-        return this.flightModel.getAccelerationWorld(target);
-    }
-
     get engineThrustKn(): number {
         return this.flightModel.getEngineThrustKn();
-    }
-
-    /** Snapshot of pilot commands and rigid-body state for the flight recorder. */
-    captureFlightSample(): FlightSample {
-        return {
-            pitchCmd: this.pitchInput,
-            rollCmd: this.rollInput,
-            yawCmd: this.yawInput,
-            thrLever: this.throttleUnit,
-            gear: this.landingGearState === AircraftDeviceState.EXTENDED,
-            flaps: this.flapsState === AircraftDeviceState.EXTENDED,
-            brake: this.wheelBrakesApplied,
-            stabilizer: this.flightModel.getCommandedElevator(),
-            aileron: this.flightModel.getCommandedAileron(),
-            rudder: this.flightModel.getCommandedRudder(),
-            effThr: this.flightModel.getEffectiveThrottle(),
-            thrustKn: this.flightModel.getEngineThrustKn(),
-            position: this.flightModel.position,
-            velocity: this.flightModel.velocityVector,
-            quaternion: this.flightModel.quaternion,
-            aoaRad: this.flightModel.getAngleOfAttack(),
-            loadG: this.flightModel.getLoadFactorG(),
-            stall: this.flightModel.getStallStatus(),
-            landed: this.flightModel.isLanded(),
-            crashed: this.flightModel.isCrashed(),
-        };
     }
 
     get throttleHudText(): string {

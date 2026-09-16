@@ -32,7 +32,6 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
     private simHealth = 100;
     private simAmmo = 0;
     private simAutopilot = false;
-    private simPitchStickUnits = 0;
     private simWheelBrakes = false;
     private simLimitersEnabled = true;
     private simPitchLimiterMode = 0;
@@ -105,7 +104,6 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
         this.roll = buf[base + AC.inRoll];
         this.yaw = buf[base + AC.inYaw];
         this.throttle = buf[base + AC.inThrottle];
-        this.simPitchStickUnits = buf[base + AC.pitchStickUnits];
         this.simWheelBrakes = buf[base + AC.wheelBrakes] !== 0;
         this.simLimitersEnabled = buf[base + AC.limitersEnabled] !== 0;
         this.simPitchLimiterMode = buf[base + AC.pitchLimiterMode];
@@ -178,10 +176,6 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
 
     getSimAutopilot(): boolean {
         return this.simAutopilot;
-    }
-
-    getSimPitchStickUnits(): number {
-        return this.simPitchStickUnits;
     }
 
     getSimWheelBrakes(): boolean {

@@ -3,7 +3,7 @@
  *
  * The game binds its shortcuts on `document`, and nothing in `src/` looks at
  * `document.activeElement` — so typing a name into the F9 area picker's field
- * today toggles the flight recorder on `r`, force vectors on `v` and the
+ * today toggles force vectors on `v` and the
  * barricade on `k`, and switches cameras on F1/F2/F3. That was survivable while
  * the only text field in the app was one you used for a moment; an editor with
  * a properties panel makes it constant.

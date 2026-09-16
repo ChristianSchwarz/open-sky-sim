@@ -67,8 +67,6 @@ const SYSTEMS_HELP: HelpEntry[] = [
     { keys: ['T'], action: 'Select target' },
     { keys: ['I'], action: 'Target night view' },
     { keys: ['H'], action: 'Cycle HUD focus' },
-    { keys: ['R'], action: 'Flight recorder (toggle, downloads JSON)' },
-    { keys: ['Num Lock'], action: 'Telemetry graph' },
     { keys: ['F9'], action: 'Import or delete terrain areas (opens the World tab)' },
     { keys: ['F10'], action: 'Import aircraft mod (.zip)' },
 ];

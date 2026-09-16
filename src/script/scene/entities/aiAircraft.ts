@@ -5,7 +5,6 @@ import { LODHelper, getLodLevel } from '../../render/helpers';
 import { SimProxyFlightModel } from '../../physics/model/simProxyFlightModel';
 import { CombatSimClient } from '../../physics/sim/combatSimClient';
 import { SimAircraftSpawn, SimGunConfig } from '../../physics/sim/simTypes';
-import { FlightSample } from '../../physics/flightRecorder';
 import { clamp, UP } from '../../utils/math';
 import { AiPilotOptions } from '../../ai/aiPilot';
 import { Combatant, Faction } from '../../weapons/combatant';
@@ -353,32 +352,6 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
                 return sign * (pitch + ROLL_VIS_TAILERON * roll);
             default: return 0;
         }
-    }
-
-    /** Telemetry snapshot in the same shape the flight recorder consumes for the player. */
-    captureFlightSample(): FlightSample {
-        return {
-            pitchCmd: this.flightModel.getCommandedElevator(),
-            rollCmd: this.flightModel.getCommandedAileron(),
-            yawCmd: this.flightModel.getCommandedRudder(),
-            thrLever: this.flightModel.getEffectiveThrottle(),
-            gear: this.gearDeployed,
-            flaps: this.flapsExtended,
-            brake: false,
-            stabilizer: this.flightModel.getCommandedElevator(),
-            aileron: this.flightModel.getCommandedAileron(),
-            rudder: this.flightModel.getCommandedRudder(),
-            effThr: this.flightModel.getEffectiveThrottle(),
-            thrustKn: this.flightModel.getEngineThrustKn(),
-            position: this.flightModel.position,
-            velocity: this.flightModel.velocityVector,
-            quaternion: this.flightModel.quaternion,
-            aoaRad: this.flightModel.getAngleOfAttack(),
-            loadG: this.flightModel.getLoadFactorG(),
-            stall: this.flightModel.getStallStatus(),
-            landed: this.flightModel.isLanded(),
-            crashed: this.flightModel.isCrashed(),
-        };
     }
 
     // --- WeaponsTarget: designation from the player's target MFD --------------

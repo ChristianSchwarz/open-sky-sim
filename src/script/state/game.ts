@@ -9,9 +9,8 @@ import { HDMidnightPalette } from '../config/palettes/hd-midnight';
 import { HDNoonPalette } from '../config/palettes/hd-noon';
 import { loadSettings, SpawnMode, updateSettings } from '../config/settingsStorage';
 import { KernelRenderTask, KernelUpdateTask } from '../core/kernel';
-import { FlightRecorder } from '../physics/flightRecorder';
 import { fm2GroundRestHeight } from '../physics/fm2/fm2AircraftConfig';
-import { AIRBASE_RUNWAY as AIRBASE_RUNWAY_RAW, APPROACH_ALTITUDE_M, APPROACH_FINAL_DISTANCE_M, APPROACH_SPEED_MPS, COCKPIT_FAR, COCKPIT_FOV, HIGH_ALTITUDE_M, H_RES, isTelemetryGraphKey, PLANE_DISTANCE_TO_GROUND, RUNWAY_HALF_LENGTH_M, SPACE_ALTITUDE_M, V_RES } from '../defs';
+import { AIRBASE_RUNWAY as AIRBASE_RUNWAY_RAW, APPROACH_ALTITUDE_M, APPROACH_FINAL_DISTANCE_M, APPROACH_SPEED_MPS, COCKPIT_FAR, COCKPIT_FOV, HIGH_ALTITUDE_M, H_RES, PLANE_DISTANCE_TO_GROUND, RUNWAY_HALF_LENGTH_M, SPACE_ALTITUDE_M, V_RES } from '../defs';
 import { DEFAULT_SUN_HOURS, setSunTime, SUN_DIRECTION, SUN_STATE } from '../scene/materials/shaders/sun';
 import { placeSun, SUN_SET_ELEVATION_DEG } from '../scene/models/lib/sunModelBuilder';
 import { paintSkyDome, SkyDome, skyDomeOf } from '../scene/models/lib/skyDomeModelBuilder';
@@ -43,8 +42,6 @@ import { ILS_GLIDESLOPE_TAN } from '../scene/entities/overlay/approachAids';
 import { ExteriorDataEntity } from '../scene/entities/overlay/exteriorData';
 import { HUDEntity } from '../scene/entities/overlay/hud';
 import { PerfHudEntity } from '../scene/entities/overlay/perfHud';
-import { TelemetryGraph } from '../scene/entities/overlay/telemetryGraph';
-import { TelemetryGraphWindow } from '../scene/entities/overlay/telemetryGraphWindow';
 import { PlayerEntity, PlayerSpawnState } from '../scene/entities/player';
 import { AircraftCollisionMesh } from '../scene/entities/aircraftDef';
 import {
@@ -66,7 +63,7 @@ import { ModelManager } from "../scene/models/models";
 import { Scene, SceneLayers } from '../scene/scene';
 import { updateTargetCamera } from '../scene/utils';
 import { assertIsDefined } from '../utils/asserts';
-import { clamp, FORWARD, RIGHT, UP, toDegrees } from '../utils/math';
+import { clamp, FORWARD, RIGHT, UP } from '../utils/math';
 import { CameraUpdater } from './cameraUpdaters/cameraUpdater';
 import { CockpitFrontCameraUpdater } from './cameraUpdaters/cockpitFrontCameraUpdater';
 import { CrashedCameraUpdater } from './cameraUpdaters/crashedCameraUpdater';
@@ -569,9 +566,6 @@ export class Game {
     private _damageSmokeVel = new THREE.Vector3();
 
     private cockpitEntities: Entity[] = [];
-    private readonly telemetryGraph = new TelemetryGraph();
-    private readonly telemetryGraphWindow = new TelemetryGraphWindow();
-    private readonly telemetryAccel = new THREE.Vector3();
     private exteriorEntities: Entity[] = [];
 
     private spawnMenu: SpawnMenuEntity;
@@ -588,8 +582,6 @@ export class Game {
     private showcasePointerInside = false;
     private showcasePointerDown = false;
     private showcaseHighlight: ShowcaseHighlightState | undefined;
-
-    private flightRecorder = new FlightRecorder();
 
     constructor(private configService: ConfigService, private models: ModelManager, private materials: SceneMaterialManager, private renderer: Renderer,
         private audio: AudioSystem, private combatSim: CombatSimClient) {
@@ -1691,16 +1683,11 @@ export class Game {
             }
             this.updateOrbitFromKeys(delta);
             this.captureCrashProbe();
-            this.recordTelemetry(delta);
             this.advanceCarrier(delta);
             this.syncCarrierSystems();
             this.scene.update(delta);
             this.pumpCombatSim(delta);
             this.updateAiStraightTimer(delta);
-
-            if (this.flightRecorder.isRecording()) {
-                this.flightRecorder.record(this.getShownAircraft().captureFlightSample(), delta);
-            }
 
             if (this.player.isCrashed) {
                 this.transitionFromPlayerToCrashed();
@@ -2127,38 +2114,9 @@ export class Game {
         };
     }
 
-    private openTelemetryGraphWindow(): void {
-        const borderColor = PaletteColor(this.getPalette(), PaletteCategory.HUD_TEXT_SECONDARY);
-        this.telemetryGraphWindow.open(this.telemetryGraph, borderColor);
-    }
-
-    /** The aircraft currently on screen: the AI opponent in the F6 chase view, otherwise the player. */
-    private getShownAircraft(): PlayerEntity | AiAircraftEntity {
-        if (this.view === PlayerViewState.AI_CHASE && this.aiOpponent && this.aiOpponent.enabled) {
-            return this.aiOpponent;
-        }
-        return this.player;
-    }
-
-    private recordTelemetry(delta: number): void {
-        this.player.getAccelerationWorld(this.telemetryAccel);
-        this.telemetryGraph.record(delta, {
-            g: this.player.loadFactorG,
-            aoaDeg: toDegrees(this.player.angleOfAttack),
-            accelG: this.telemetryAccel.length() / 9.80665,
-            stick: this.player.pitchStickUnitsValue,
-            elevator: this.player.commandedElevator,
-        });
-    }
-
     private setupControls() {
         document.addEventListener('keydown', (event: KeyboardEvent) => {
             if (isOverlayKeyEvent(event)) {
-                return;
-            }
-            if (isTelemetryGraphKey(event)) {
-                event.preventDefault();
-                this.openTelemetryGraphWindow();
                 return;
             }
             if (event.code === 'F9') {
@@ -2247,10 +2205,7 @@ export class Game {
                 }
             }
 
-            if (event.code === 'KeyR') {
-                event.preventDefault();
-                this.flightRecorder.toggle(this.configService.flightModels.getActiveKey());
-            } else if (event.code === 'KeyV') {
+            if (event.code === 'KeyV') {
                 event.preventDefault();
                 this.player.setForceVectorsEnabled(!this.player.forceVectorsEnabled);
             } else if (event.code === 'Tab') {
@@ -2579,7 +2534,6 @@ export class Game {
 
     private enterSpawnMenu() {
         this.state = GameState.SPAWN_MENU;
-        this.flightRecorder.stop();
         this.player.setSimulationPaused(true);
         this.spawnMenu.afterCrash = false;
         this.spawnMenu.enabled = true;
@@ -2645,7 +2599,6 @@ export class Game {
      */
     private enterFixedCamera(route: CameraRoute) {
         this.state = GameState.FIXED_CAMERA;
-        this.flightRecorder.stop();
         this.player.setSimulationPaused(true);
         this.spawnMenu.enabled = false;
         this.spawnPanel.hide();

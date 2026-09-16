@@ -36,14 +36,6 @@ export const DEBRIS_PARTICLE_COUNT = 48;
 /** Hit fire/smoke puff pool (shared across aircraft leaks). */
 export const DAMAGE_SMOKE_PARTICLE_COUNT = 480;
 
-/** KeyboardEvent.code that opens the telemetry graph popup. */
-export const TELEMETRY_GRAPH_KEY_CODE = 'NumLock';
-
-export function isTelemetryGraphKey(event: KeyboardEvent): boolean {
-    return event.code === TELEMETRY_GRAPH_KEY_CODE
-        || event.code === 'Clear'
-        || event.key === 'NumLock';
-}
 
 export const AIRBASE_RUNWAY = { x: 0, y: 0, z: 0 };
 export const RUNWAY_HALF_LENGTH_M = 1500;
