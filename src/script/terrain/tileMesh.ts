@@ -46,9 +46,11 @@ export interface TileMeshes {
      * A tile's two possible land geometries, so a shading switch is a
      * geometry swap on `land` rather than a re-stream or re-mesh. FACETED
      * keeps the baked per-triangle replication (flat facets) and is always
-     * built. SMOOTH is the same bytes welded into shared vertices with
-     * averaged colour and normal, so the unchanged shader interpolates
-     * instead of resolving one colour per facet — it is only worth the
+     * built. SMOOTH is the same bytes welded into shared vertices, colour
+     * within one land-use region only and normal across the whole corner,
+     * so the unchanged shader interpolates colour inside a region, keeps a
+     * hard colour edge between two, and lights the slope continuously
+     * across it — it is only worth the
      * weld-and-average pass for a tile actually shown in SMOOTH mode, so it
      * is built at upload time when SMOOTH is already active, or lazily on the
      * first switch to SMOOTH otherwise (see TerrainEntity.setTerrainShading).
@@ -174,14 +176,37 @@ function landGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
 }
 
 /**
- * The FACETED land geometry welded into shared vertices, with `coverColor`,
- * `coverClass` and `normal` averaged (colour: mean; class: the plurality
- * among the triangles sharing the vertex, since it is a category, not a
- * quantity; normal: mean, renormalized) over every triangle that touches the
- * vertex.
+ * Which region a land vertex belongs to, for the smooth weld. On a tile with
+ * land-use a non-ground vertex is its whole cover word, colour and class,
+ * the same notion of a region as `regionSizes`; Ground keys on class alone,
+ * since its colour is the blended regional field and is meant to
+ * interpolate. On a raster-only tile the classes are the ground and every
+ * facet carries its own sample, so keying on colour there would split the
+ * weld back into facets: class alone tells the region.
+ */
+function regionKeyOf(attrs: Uint8Array, v: number, landuse: boolean): number {
+    const cls = attrs[v * 4 + 3];
+    if (!landuse || cls === GROUND_CLASS) {
+        return cls;
+    }
+    return attrs[v * 4] | (attrs[v * 4 + 1] << 8) | (attrs[v * 4 + 2] << 16) | (cls << 24);
+}
+
+/**
+ * The FACETED land geometry welded into shared vertices, with `coverColor`
+ * averaged (mean) over the triangles of the *same region* that touch the
+ * vertex and `normal` averaged (mean, renormalized) over every triangle
+ * that touches the position, whatever its region.
  *
- * Welding is by exact match of the quantised int16 position, which is exact
- * for two triangles that share a corner in the bake — nothing here does
+ * Welding is by exact match of the quantised int16 position plus the region
+ * the vertex belongs to (see `regionKeyOf`), so a corner where a field meets
+ * a forest is two vertices, one per region, each keeping its own colour:
+ * colour smoothing happens inside a land-use region, never across the edge
+ * between two. Lighting is the ground's, not the region's, so both vertices
+ * share the one normal averaged over the whole corner and a slope shades
+ * continuously across the edge. The class is the same for every contributor
+ * to a colour and needs no vote. The position match is exact for two
+ * triangles that share a corner in the bake — nothing here does
  * distance-based merging, so a genuine crack in the bake stays a crack. Only
  * within one tile: a seam at the tile boundary is not welded and stays
  * faceted, which is an accepted seam rather than a bug.
@@ -203,27 +228,40 @@ export function buildSmoothLandGeometry(
         return undefined;
     }
 
-    const posKeyToIndex = new Map<string, number>();
+    // Two welds over one pass: colour (and class, size) by position+region,
+    // normal by position alone. `normalOf` maps each output vertex to its
+    // position's normal slot.
+    const keyToIndex = new Map<string, number>();
+    const posKeyToNormal = new Map<string, number>();
     const uniquePositions: number[] = [];
+    const normalOf: number[] = [];
     const normalSum: number[] = [];
     const colorSum: number[] = [];
-    const classVotes: Map<number, number>[] = [];
+    const vertexClass: number[] = [];
     const sizeMax: number[] = [];
     const remap = new Uint32Array(vertexCount);
+    const landuse = hasLanduseGround(attrs);
 
     for (let i = 0; i < vertexCount; i++) {
         const px = positions[i * 3];
         const py = positions[i * 3 + 1];
         const pz = positions[i * 3 + 2];
-        const key = `${px},${py},${pz}`;
-        let idx = posKeyToIndex.get(key);
+        const posKey = `${px},${py},${pz}`;
+        let n = posKeyToNormal.get(posKey);
+        if (n === undefined) {
+            n = normalSum.length / 3;
+            posKeyToNormal.set(posKey, n);
+            normalSum.push(0, 0, 0);
+        }
+        const key = `${posKey},${regionKeyOf(attrs, i, landuse)}`;
+        let idx = keyToIndex.get(key);
         if (idx === undefined) {
             idx = uniquePositions.length / 3;
-            posKeyToIndex.set(key, idx);
+            keyToIndex.set(key, idx);
             uniquePositions.push(px, py, pz);
-            normalSum.push(0, 0, 0);
+            normalOf.push(n);
             colorSum.push(0, 0, 0, 0);
-            classVotes.push(new Map());
+            vertexClass.push(attrs[i * 4 + 3]);
             sizeMax.push(0);
         }
         remap[i] = idx;
@@ -232,19 +270,15 @@ export function buildSmoothLandGeometry(
         }
 
         const ni = i * 4;
-        normalSum[idx * 3] += normals[ni];
-        normalSum[idx * 3 + 1] += normals[ni + 1];
-        normalSum[idx * 3 + 2] += normals[ni + 2];
+        normalSum[n * 3] += normals[ni];
+        normalSum[n * 3 + 1] += normals[ni + 1];
+        normalSum[n * 3 + 2] += normals[ni + 2];
 
         const ai = i * 4;
         colorSum[idx * 4] += attrs[ai];
         colorSum[idx * 4 + 1] += attrs[ai + 1];
         colorSum[idx * 4 + 2] += attrs[ai + 2];
         colorSum[idx * 4 + 3] += 1;
-
-        const cls = attrs[ai + 3];
-        const votes = classVotes[idx];
-        votes.set(cls, (votes.get(cls) ?? 0) + 1);
     }
 
     const uniqueCount = uniquePositions.length / 3;
@@ -253,9 +287,10 @@ export function buildSmoothLandGeometry(
     const outAttrs = new Uint8Array(uniqueCount * 4);
     const outSizes = new Uint16Array(sizeMax);
     for (let v = 0; v < uniqueCount; v++) {
-        const nx = normalSum[v * 3];
-        const ny = normalSum[v * 3 + 1];
-        const nz = normalSum[v * 3 + 2];
+        const n = normalOf[v];
+        const nx = normalSum[n * 3];
+        const ny = normalSum[n * 3 + 1];
+        const nz = normalSum[n * 3 + 2];
         const len = Math.hypot(nx, ny, nz) || 1;
         outNormals[v * 4] = Math.round((nx / len) * 127);
         outNormals[v * 4 + 1] = Math.round((ny / len) * 127);
@@ -267,15 +302,7 @@ export function buildSmoothLandGeometry(
         outAttrs[v * 4 + 1] = Math.round(colorSum[v * 4 + 1] / count);
         outAttrs[v * 4 + 2] = Math.round(colorSum[v * 4 + 2] / count);
 
-        let bestClass = 0;
-        let bestVotes = -1;
-        for (const [cls, votes] of classVotes[v]) {
-            if (votes > bestVotes) {
-                bestVotes = votes;
-                bestClass = cls;
-            }
-        }
-        outAttrs[v * 4 + 3] = bestClass;
+        outAttrs[v * 4 + 3] = vertexClass[v];
     }
 
     const IndexArray = uniqueCount > 65535 ? Uint32Array : Uint16Array;

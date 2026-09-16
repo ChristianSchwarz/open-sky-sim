@@ -8,6 +8,23 @@ const HOME = { lat: 28.0015, lon: -15.3937 };
 const BASIS = makeEnuBasis(HOME.lat, HOME.lon, 0);
 const Z = 9;
 
+/** Indices of every welded vertex at (x, ?, z). */
+function verticesAt(g: { getAttribute(name: string): { array: ArrayLike<number> } }, x: number, z: number): number[] {
+    const pos = g.getAttribute('position').array;
+    const out: number[] = [];
+    for (let v = 0; v < pos.length / 3; v++) {
+        if (pos[v * 3] === x && pos[v * 3 + 2] === z) out.push(v);
+    }
+    return out;
+}
+
+/** Straight-up normals for every vertex. */
+function flatNormals(positions: Int16Array): Int8Array {
+    const n = new Int8Array((positions.length / 3) * 4);
+    for (let v = 0; v < n.length / 4; v++) n[v * 4 + 1] = 127;
+    return n;
+}
+
 /** Where a tile holding a point `dLat`/`dLon` from home is placed. */
 function originNear(dLat: number, dLon: number) {
     return tileOriginWorld(tileAtLonLat(Z, HOME.lon + dLon, HOME.lat + dLat), 0, BASIS);
@@ -78,32 +95,111 @@ describe('regionSizes', () => {
         assert.ok(sizes.every(v => v === 0), 'a class there is the ground, not a region');
     });
 
-    it('survives the smooth weld, keeping the larger region at a shared corner', () => {
+    it('is not welded across two regions sharing a corner', () => {
         const t = tile([
             { pts: right(0), cls: CROP, rgb: [1, 2, 3] },
             // Shares the corner (100, 0, 0) with the first, and is smaller.
             { pts: [100, 0, 0, 150, 0, 0, 100, 0, 50], cls: CROP, rgb: [4, 5, 6] },
-        ]);
-        const attrs = new Uint8Array(t.attrs.length);
-        attrs.set(t.attrs);
-        // The tile needs Ground somewhere for the sizes to exist at all.
-        const withGround = tile([
-            { pts: right(0), cls: CROP, rgb: [1, 2, 3] },
-            { pts: [100, 0, 0, 150, 0, 0, 100, 0, 50], cls: CROP, rgb: [4, 5, 6] },
             { pts: right(400), cls: GROUND },
         ]);
-        const sizes = regionSizes(withGround.positions, withGround.attrs, 1);
-        const normals = new Int8Array((withGround.positions.length / 3) * 4).fill(0);
-        for (let v = 0; v < normals.length / 4; v++) normals[v * 4 + 1] = 127;
-        const g = buildSmoothLandGeometry(withGround.positions, normals, withGround.attrs, sizes)!;
+        const sizes = regionSizes(t.positions, t.attrs, 1);
+        const g = buildSmoothLandGeometry(t.positions, flatNormals(t.positions), t.attrs, sizes)!;
         const out = g.getAttribute('regionSize').array as Uint16Array;
-        const pos = g.getAttribute('position').array as Int16Array;
-        let shared = -1;
-        for (let v = 0; v < pos.length / 3; v++) {
-            if (pos[v * 3] === 100 && pos[v * 3 + 2] === 0) shared = v;
+        const shared = verticesAt(g, 100, 0);
+        assert.equal(shared.length, 2, 'one vertex per region at the corner');
+        assert.deepEqual(shared.map(v => out[v]).sort((a, b) => a - b),
+            [Math.round(Math.sqrt(1250)), Math.round(Math.sqrt(5000))], 'each keeps its own size');
+    });
+});
+
+describe('buildSmoothLandGeometry', () => {
+    const GROUND = 13;
+    const CROP = 4;
+    const FOREST = 2;
+    function tile(tris: { pts: number[]; cls: number; rgb?: number[] }[]) {
+        const positions = new Int16Array(tris.flatMap(t => t.pts));
+        const attrs = new Uint8Array(tris.flatMap(t => {
+            const [r, g, b] = t.rgb ?? [10, 20, 30];
+            return [r, g, b, t.cls, r, g, b, t.cls, r, g, b, t.cls];
+        }));
+        return { positions, attrs };
+    }
+    /** Two triangles sharing the edge (0,0,0)-(100,0,0), one tilted so the normals differ. */
+    const left = [0, 0, 0, 100, 0, 0, 0, 0, 100];
+    const rightSide = [0, 0, 0, 100, 50, -100, 100, 0, 0];
+    function normalsOf(positions: Int16Array): Int8Array {
+        const n = new Int8Array((positions.length / 3) * 4);
+        for (let t = 0; t + 8 < positions.length; t += 9) {
+            const ax = positions[t], ay = positions[t + 1], az = positions[t + 2];
+            const bx = positions[t + 3] - ax, by = positions[t + 4] - ay, bz = positions[t + 5] - az;
+            const cx = positions[t + 6] - ax, cy = positions[t + 7] - ay, cz = positions[t + 8] - az;
+            let nx = by * cz - bz * cy, ny = bz * cx - bx * cz, nz = bx * cy - by * cx;
+            const len = Math.hypot(nx, ny, nz) || 1;
+            nx = Math.round(nx / len * 127); ny = Math.round(ny / len * 127); nz = Math.round(nz / len * 127);
+            for (let v = 0; v < 3; v++) {
+                const o = ((t / 3) + v) * 4;
+                n[o] = nx; n[o + 1] = ny; n[o + 2] = nz;
+            }
         }
-        assert.ok(shared >= 0, 'the shared corner was welded');
-        assert.equal(out[shared], Math.round(Math.sqrt(5000)), 'the larger region wins the corner');
-        void attrs;
+        return n;
+    }
+    function colourAt(g: ReturnType<typeof buildSmoothLandGeometry> & object, v: number) {
+        const a = (g.getAttribute('coverColor') as { data: { array: Uint8Array } }).data.array;
+        return [a[v * 4], a[v * 4 + 1], a[v * 4 + 2], a[v * 4 + 3]];
+    }
+
+    it('keeps colour apart, and the normal shared, where two regions share an edge', () => {
+        const t = tile([
+            { pts: left, cls: CROP, rgb: [200, 0, 0] },
+            { pts: rightSide, cls: FOREST, rgb: [0, 200, 0] },
+            { pts: [400, 0, 0, 500, 0, 0, 400, 0, 100], cls: GROUND },
+        ]);
+        const g = buildSmoothLandGeometry(t.positions, normalsOf(t.positions), t.attrs)!;
+        const at = verticesAt(g, 100, 0);
+        assert.equal(at.length, 2, 'the shared corner is one vertex per region');
+        const cols = at.map(v => colourAt(g, v)).sort((a, b) => a[0] - b[0]);
+        assert.deepEqual(cols, [[0, 200, 0, FOREST], [200, 0, 0, CROP]], 'no colour bleeds across');
+        const n = (g.getAttribute('normal') as { data: { array: Int8Array } }).data.array;
+        const normalAt = (v: number) => [n[v * 4], n[v * 4 + 1], n[v * 4 + 2]];
+        assert.deepEqual(normalAt(at[0]), normalAt(at[1]), 'both sides light with the one averaged normal');
+        const facets = normalsOf(t.positions);
+        assert.notDeepEqual(normalAt(at[0]), [facets[0], facets[1], facets[2]], 'and it is neither facet alone');
+    });
+
+    it('welds two facets of one region and averages across the edge', () => {
+        const t = tile([
+            { pts: left, cls: CROP, rgb: [200, 0, 0] },
+            { pts: rightSide, cls: CROP, rgb: [200, 0, 0] },
+            { pts: [400, 0, 0, 500, 0, 0, 400, 0, 100], cls: GROUND },
+        ]);
+        const g = buildSmoothLandGeometry(t.positions, normalsOf(t.positions), t.attrs)!;
+        assert.equal(verticesAt(g, 100, 0).length, 1, 'the shared corner is welded');
+    });
+
+    it('welds ground of different colours: its colour is meant to blend', () => {
+        const t = tile([
+            { pts: left, cls: GROUND, rgb: [10, 10, 10] },
+            { pts: rightSide, cls: GROUND, rgb: [30, 30, 30] },
+            { pts: [400, 0, 0, 500, 0, 0, 400, 0, 100], cls: CROP },
+        ]);
+        const g = buildSmoothLandGeometry(t.positions, normalsOf(t.positions), t.attrs)!;
+        const at = verticesAt(g, 100, 0);
+        assert.equal(at.length, 1);
+        assert.deepEqual(colourAt(g, at[0]), [20, 20, 20, GROUND]);
+    });
+
+    it('on a raster-only tile welds across colour but not across class', () => {
+        const t = tile([
+            { pts: left, cls: CROP, rgb: [10, 10, 10] },
+            { pts: rightSide, cls: CROP, rgb: [30, 30, 30] },
+        ]);
+        const g = buildSmoothLandGeometry(t.positions, normalsOf(t.positions), t.attrs)!;
+        assert.equal(verticesAt(g, 100, 0).length, 1, 'a facet colour is a sample, not a region');
+        const u = tile([
+            { pts: left, cls: CROP },
+            { pts: rightSide, cls: FOREST },
+        ]);
+        const h = buildSmoothLandGeometry(u.positions, normalsOf(u.positions), u.attrs)!;
+        assert.equal(verticesAt(h, 100, 0).length, 2, 'a class edge is a hard edge');
     });
 });
