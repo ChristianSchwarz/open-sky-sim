@@ -150,3 +150,62 @@ class SeaCellSkipperTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RelationPolygonsTest(unittest.TestCase):
+    """A water relation's `inner` rings are islands and must come out as holes."""
+
+    def _lake_with_island(self):
+        from osm_common import relation_polygons
+        outer = [pt(0, 0), pt(10, 0), pt(10, 10), pt(0, 10), pt(0, 0)]
+        island = [pt(4, 4), pt(6, 4), pt(6, 6), pt(4, 6), pt(4, 4)]
+        data = {'elements': [{
+            'type': 'relation', 'id': 5, 'tags': {'natural': 'water'},
+            'members': [
+                {'type': 'way', 'ref': 21, 'role': 'outer', 'geometry': outer[:3]},
+                {'type': 'way', 'ref': 22, 'role': 'outer', 'geometry': outer[2:]},
+                {'type': 'way', 'ref': 31, 'role': 'inner', 'geometry': island[:3]},
+                {'type': 'way', 'ref': 32, 'role': 'inner', 'geometry': island[2:]},
+            ]}]}
+        out = expand_geometry(data)['elements']
+        rel = next(e for e in out if e['type'] == 'relation')
+        return relation_polygons(rel, ways_map(out), nodes_map(out))
+
+    def test_island_is_a_hole(self):
+        from shapely.geometry import Point
+        polys = self._lake_with_island()
+        self.assertEqual(len(polys), 1)
+        lake = polys[0]
+        self.assertEqual(len(lake.interiors), 1)
+        self.assertAlmostEqual(lake.area, 100 - 4)
+        self.assertFalse(lake.contains(Point(5, 5)))
+        self.assertTrue(lake.contains(Point(1, 1)))
+
+    def test_outer_rings_alone_still_ignore_holes(self):
+        rings = None
+        outer = [pt(0, 0), pt(10, 0), pt(10, 10), pt(0, 10), pt(0, 0)]
+        island = [pt(4, 4), pt(6, 4), pt(6, 6), pt(4, 6), pt(4, 4)]
+        data = {'elements': [{
+            'type': 'relation', 'id': 5, 'members': [
+                {'type': 'way', 'ref': 21, 'role': 'outer', 'geometry': outer},
+                {'type': 'way', 'ref': 31, 'role': 'inner', 'geometry': island},
+            ]}]}
+        out = expand_geometry(data)['elements']
+        rel = next(e for e in out if e['type'] == 'relation')
+        rings = relation_rings(rel, ways_map(out), nodes_map(out))
+        self.assertEqual(len(rings), 1)
+
+    def test_inner_in_no_outer_is_dropped(self):
+        from osm_common import relation_polygons
+        outer = [pt(0, 0), pt(10, 0), pt(10, 10), pt(0, 10), pt(0, 0)]
+        stray = [pt(20, 20), pt(21, 20), pt(21, 21), pt(20, 20)]
+        data = {'elements': [{
+            'type': 'relation', 'id': 5, 'members': [
+                {'type': 'way', 'ref': 21, 'role': 'outer', 'geometry': outer},
+                {'type': 'way', 'ref': 31, 'role': 'inner', 'geometry': stray},
+            ]}]}
+        out = expand_geometry(data)['elements']
+        rel = next(e for e in out if e['type'] == 'relation')
+        polys = relation_polygons(rel, ways_map(out), nodes_map(out))
+        self.assertEqual(len(polys), 1)
+        self.assertEqual(len(polys[0].interiors), 0)

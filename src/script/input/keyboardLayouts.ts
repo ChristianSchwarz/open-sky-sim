@@ -87,3 +87,11 @@ export const KeyboardControlLayouts = new Map<KeyboardControlLayoutId, KeyboardC
 export function getKeyboardLayout(layoutId: KeyboardControlLayoutId): KeyboardControlLayout {
     return KeyboardControlLayouts.get(layoutId) ?? QwertyKeyboardControlLayout;
 }
+
+/** How pitch keys map to stick deflection. */
+export enum KeyboardPitchStickMode {
+    /** Arrows layout: latched stepped stick; letter layouts: full deflection while held. */
+    LAYOUT_DEFAULT,
+    /** Full deflection while a pitch key is held, neutral on release, whatever the layout. */
+    HOLD,
+}

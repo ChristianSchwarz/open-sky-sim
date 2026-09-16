@@ -4,7 +4,7 @@
 A separate module from ``bake_planet_cover.py`` because that file is
 documented (see its ``_metres_per_degree`` docstring) to depend on rasterio
 and numpy only, not shapely. Assembling OSM polygons needs shapely -
-``nodes_map``/``ways_map``/``relation_rings`` from ``osm_common.py``, and an
+``nodes_map``/``ways_map``/``relation_polygons`` from ``osm_common.py``, and an
 ``STRtree`` to find which of many separately-classified polygons owns a given
 tile. ``bake_planet_cover.py`` imports this module lazily behind a
 ``try/except`` (the same shape as ``HAS_RASTERIO`` in ``bake_osm_coast.py``),
@@ -44,7 +44,7 @@ except ImportError:
 
 from osm_common import (
     Bounds, OVERPASS_OUT, merge_elements, nodes_map, overpass_fetch, overpass_fetch_cells,
-    overpass_fetch_groups, relation_rings, ways_map,
+    overpass_fetch_groups, relation_polygons, ways_map,
 )
 
 # Compact TerrainClass ids this module may emit. Must match
@@ -262,15 +262,9 @@ def assemble_landuse_polygons(
         cls = _class_for_tags(rel.get('tags') or {})
         if cls is None:
             continue
-        for ring in relation_rings(rel, ways, nodes):
-            if len(ring) < 4:
-                continue
-            try:
-                poly = Polygon(ring)
-            except Exception:
-                continue
-            if not poly.is_valid:
-                poly = poly.buffer(0)
+        # Holes included: a forest relation's `inner` rings are the clearings
+        # and villages inside it, and stamping them as forest was wrong.
+        for poly in relation_polygons(rel, ways, nodes):
             if isinstance(poly, Polygon) and not poly.is_empty:
                 polys.append(poly)
                 classes.append(cls)

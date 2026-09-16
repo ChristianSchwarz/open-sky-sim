@@ -16,6 +16,7 @@ import {
     KeyboardControlLayout,
     KeyboardControlLayoutId,
     KeyboardControlLayouts,
+    KeyboardPitchStickMode,
     getKeyboardLayout,
 } from "../keyboardLayouts";
 
@@ -23,6 +24,7 @@ export {
     KeyboardControlAction,
     KeyboardControlLayoutId,
     KeyboardControlLayouts,
+    KeyboardPitchStickMode,
 } from "../keyboardLayouts";
 export type { KeyboardControlLayout } from "../keyboardLayouts";
 
@@ -50,6 +52,7 @@ export class KeyboardControlDevice implements KernelTask {
 
     private layout: KeyboardControlLayout = getKeyboardLayout(KeyboardControlLayoutId.ARROWS);
     private layoutId: KeyboardControlLayoutId = KeyboardControlLayoutId.ARROWS;
+    private pitchStickMode = KeyboardPitchStickMode.LAYOUT_DEFAULT;
     private pitchHoldSeconds = 0;
     private pitchUnitAccum = 0;
     private keysDown = new Set<string>();
@@ -66,7 +69,8 @@ export class KeyboardControlDevice implements KernelTask {
     }
 
     private usesSteppedPitchStick(): boolean {
-        return this.layoutId === KeyboardControlLayoutId.ARROWS;
+        return this.layoutId === KeyboardControlLayoutId.ARROWS
+            && this.pitchStickMode !== KeyboardPitchStickMode.HOLD;
     }
 
     update(delta: number) {
@@ -84,6 +88,19 @@ export class KeyboardControlDevice implements KernelTask {
 
     getKeyboardLayoutId(): KeyboardControlLayoutId {
         return this.layoutId;
+    }
+
+    setKeyboardPitchStickMode(mode: KeyboardPitchStickMode) {
+        this.pitchStickMode = mode;
+        this.pitchState = Stick.IDLE;
+        if (!this.isWorkerControlled()) {
+            this.player.setPitch(0);
+        }
+        this.combatSim.setKeyboardPitchStickMode(mode);
+    }
+
+    getKeyboardPitchStickMode(): KeyboardPitchStickMode {
+        return this.pitchStickMode;
     }
 
     private setupInput() {

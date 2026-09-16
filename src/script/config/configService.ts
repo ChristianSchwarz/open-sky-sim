@@ -22,6 +22,17 @@ export type LanduseReachChangeListener = (scale: number) => void;
 export type LanduseRevealChangeListener = (px: number) => void;
 export type TriangleBudgetChangeListener = (triangles: number) => void;
 export type FarTileTexturesChangeListener = (enabled: boolean) => void;
+export type RenderScaleChangeListener = (scale: number) => void;
+export type SupersamplingChangeListener = (enabled: boolean) => void;
+
+/**
+ * Selectable 3D render scales, as fractions of the screen. 1 is off: the
+ * scene is drawn at native size (with its supersample where the resolution
+ * affords one). Anything below draws the 3D view that much smaller and
+ * stretches it to the screen, with the HUD and displays drawn on top at
+ * full size.
+ */
+export const RENDER_SCALES: readonly number[] = [1, 0.9, 0.8, 0.7, 0.6, 0.5];
 
 export class ConfigService {
 
@@ -37,6 +48,8 @@ export class ConfigService {
     readonly landuseReveal: LanduseRevealSetting;
     readonly triangleBudget: TriangleBudgetSetting;
     readonly farTileTextures: FarTileTexturesSetting;
+    readonly renderScale: RenderScaleSetting;
+    readonly supersampling: SupersamplingSetting;
     readonly daytime: DaytimeSetting;
 
     constructor(
@@ -54,6 +67,8 @@ export class ConfigService {
         initialTriangleBudget?: number,
         initialLanduseRevealPx?: number,
         initialFarTileTextures?: boolean,
+        initialRenderScale?: number,
+        initialSupersampling?: boolean,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -67,6 +82,8 @@ export class ConfigService {
         this.landuseReveal = new LanduseRevealSetting(initialLanduseRevealPx);
         this.triangleBudget = new TriangleBudgetSetting(initialTriangleBudget);
         this.farTileTextures = new FarTileTexturesSetting(initialFarTileTextures);
+        this.renderScale = new RenderScaleSetting(initialRenderScale);
+        this.supersampling = new SupersamplingSetting(initialSupersampling);
         this.daytime = new DaytimeSetting(initialDaytime);
     }
 }
@@ -268,6 +285,83 @@ export class FarTileTexturesSetting {
     }
 
     removeChangeListener(listener: FarTileTexturesChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * Fraction of the screen the 3D view is rendered at before being stretched
+ * to full size; one of {@link RENDER_SCALES}. 1 is off. A fill-rate trade
+ * only: geometry, LOD and the HUD are unaffected.
+ */
+export class RenderScaleSetting {
+    private active: number;
+    private listeners: Set<RenderScaleChangeListener> = new Set();
+
+    constructor(initialScale: number = 1) {
+        this.active = RENDER_SCALES.includes(initialScale) ? initialScale : 1;
+    }
+
+    getActive(): number {
+        return this.active;
+    }
+
+    setActive(scale: number) {
+        if (!RENDER_SCALES.includes(scale) || scale === this.active) return;
+        this.active = scale;
+        this.notifyActive();
+    }
+
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: RenderScaleChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: RenderScaleChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * Whether the 3D targets are supersampled (SSAA) where the screen resolution
+ * affords it - see hdSupersampleScale in game.ts. Off draws them at native
+ * size with no anti-aliasing, for the fill rate. Moot while the render scale
+ * is below 1, which already replaces the supersample.
+ */
+export class SupersamplingSetting {
+    private active: boolean;
+    private listeners: Set<SupersamplingChangeListener> = new Set();
+
+    constructor(initialActive: boolean = true) {
+        this.active = initialActive;
+    }
+
+    getActive(): boolean {
+        return this.active;
+    }
+
+    setActive(enabled: boolean) {
+        if (enabled === this.active) return;
+        this.active = enabled;
+        this.notifyActive();
+    }
+
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: SupersamplingChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: SupersamplingChangeListener) {
         this.listeners.delete(listener);
     }
 }

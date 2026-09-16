@@ -1,7 +1,7 @@
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { AiPilotOptions } from '../../ai/aiPilot';
 import { ForceVectorSample } from '../model/flightModel';
-import { KeyboardControlLayoutId } from '../../input/keyboardLayouts';
+import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
 import { AircraftCollisionMesh } from '../../scene/entities/aircraftDef';
 import { SerializedArrestorCables, SerializedBarricade, SerializedWorld } from './serializedWorld';
 import { HeightTileUpdate, SerializedHeightField } from '../../terrain/heightMirror';
@@ -175,6 +175,7 @@ export type SimToWorkerMessage =
     | { type: 'keyDown'; id: string; key: string; repeat: boolean }
     | { type: 'keyUp'; id: string; key: string }
     | { type: 'setKeyboardLayout'; layoutId: KeyboardControlLayoutId }
+    | { type: 'setKeyboardPitchStickMode'; mode: KeyboardPitchStickMode }
     | { type: 'gamepadAxes'; id: string; pitch: number; roll: number; yaw: number; throttle: number; connected: boolean }
     | { type: 'inputBlur'; id: string }
     | { type: 'setInputEnabled'; id: string; enabled: boolean }

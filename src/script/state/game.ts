@@ -536,6 +536,9 @@ export class Game {
 
     private hdResolutionWidth = 0;
     private hdResolutionHeight = 0;
+    /** Render scale the HD targets were last sized with (see updateHdResolution). */
+    private hdRenderScale = 0;
+    private hdSupersampling = true;
 
     private view: PlayerViewState = PlayerViewState.COCKPIT_FRONT;
     private viewBeforeShowcase: PlayerViewState | null = null;
@@ -645,6 +648,8 @@ export class Game {
             this.refreshDaytimePalette();
             this.renderer.setTextEffect(profile.textEffect);
         });
+        this.configService.renderScale.addChangeListener(() => this.updateHdResolution());
+        this.configService.supersampling.addChangeListener(() => this.updateHdResolution());
         this.configService.daytime.addChangeListener(hours => {
             // Moves the sun for the shaded ramp and the planform silhouettes, then
             // rebuilds the sky/terrain palette that goes with it.
@@ -1607,26 +1612,38 @@ export class Game {
 
     private updateHdResolution() {
         const [width, height] = this.renderer.getMaxViewportResolution();
-        if (width === this.hdResolutionWidth && height === this.hdResolutionHeight) {
+        const renderScale = this.configService.renderScale.getActive();
+        const supersampling = this.configService.supersampling.getActive();
+        if (width === this.hdResolutionWidth && height === this.hdResolutionHeight
+            && renderScale === this.hdRenderScale && supersampling === this.hdSupersampling) {
             return;
         }
 
         this.hdResolutionWidth = width;
         this.hdResolutionHeight = height;
+        this.hdRenderScale = renderScale;
+        this.hdSupersampling = supersampling;
         // Resolved from the *main* viewport, not each target's own size: the
         // MFD sub-target is a fraction of the screen, but it should still
         // taper with it rather than staying at full supersample cost just
         // because it individually looks small-resolution.
-        const supersampleScale = hdSupersampleScale(width, height);
+        const supersampleScale = supersampling ? hdSupersampleScale(width, height) : 1;
+        // The render-scale option replaces the supersample rather than
+        // multiplying it: it exists to cut fill rate, and a 2x supersample
+        // at 50% would cost exactly what native does. The compose pass's
+        // linear magnification stretches the smaller texture to the screen;
+        // the HUD canvas and the weapons display keep their full size and
+        // composite on top of it.
+        const mainScale = renderScale < 1 ? renderScale : supersampleScale;
 
         if (!this.renderer.hasRenderTarget(MAIN_RENDER_TARGET_HD)) {
             const textColors = this.getTextColors();
-            this.renderer.createRenderTarget(MAIN_RENDER_TARGET_HD, RenderTargetType.WEBGL, 0, 0, width, height, { textureScale: supersampleScale });
+            this.renderer.createRenderTarget(MAIN_RENDER_TARGET_HD, RenderTargetType.WEBGL, 0, 0, width, height, { textureScale: mainScale });
             this.renderer.createRenderTarget(CANVAS_RENDER_TARGET_HD, RenderTargetType.CANVAS, 0, 0, width, height, { textColors });
             const mfdSize = CockpitMFDSize(height, width);
             this.renderer.createRenderTarget(WEAPONSTARGET_RENDER_TARGET_HD, RenderTargetType.WEBGL, CockpitMFD2X(width, height, mfdSize), CockpitMFD2Y(width, height, mfdSize), mfdSize, mfdSize, { textureScale: supersampleScale });
         } else {
-            this.renderer.resizeRenderTarget(MAIN_RENDER_TARGET_HD, 0, 0, width, height, supersampleScale);
+            this.renderer.resizeRenderTarget(MAIN_RENDER_TARGET_HD, 0, 0, width, height, mainScale);
             this.renderer.resizeRenderTarget(CANVAS_RENDER_TARGET_HD, 0, 0, width, height);
             const mfdSize = CockpitMFDSize(height, width);
             this.renderer.resizeRenderTarget(WEAPONSTARGET_RENDER_TARGET_HD, CockpitMFD2X(width, height, mfdSize), CockpitMFD2Y(width, height, mfdSize), mfdSize, mfdSize, supersampleScale);
@@ -3800,6 +3817,7 @@ export class Game {
         (globalThis as Record<string, unknown>).__probe =
             (at?: { x: number; z: number }) => this.groundProbe(at);
         (globalThis as Record<string, unknown>).__skyDome = this.skyDome;
+        (globalThis as Record<string, unknown>).__player = this.player;
         (globalThis as Record<string, unknown>).__sunModel = this.sunModel;
         // Unpaved strips still in their stand-in tone: empty once every one
         // has been drawn over ground that is on screen.

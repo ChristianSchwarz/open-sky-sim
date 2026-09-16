@@ -12,11 +12,12 @@ import { MatSliderModule } from '@angular/material/slider';
 import { MatTabsModule } from '@angular/material/tabs';
 import { map } from 'rxjs';
 import { AudioSystem } from '../../audio/audioSystem';
-import { ConfigService } from '../../config/configService';
+import { ConfigService, RENDER_SCALES } from '../../config/configService';
 import { loadSettings, updateSettings } from '../../config/settingsStorage';
 import { JoystickControlDevice } from '../../input/devices/joystickControlDevice';
 import {
     KeyboardControlAction, KeyboardControlDevice, KeyboardControlLayoutId, KeyboardControlLayouts,
+    KeyboardPitchStickMode,
 } from '../../input/devices/keyboardControlDevice';
 import { formatSunTime } from '../../scene/materials/shaders/sun';
 import { AiPilotModels, FlightModels, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
@@ -157,6 +158,11 @@ const KEYBOARD_LAYOUT_OPTIONS: Option<KeyboardControlLayoutId>[] = [
     { value: KeyboardControlLayoutId.ARROWS, label: 'Arrows' },
 ];
 
+const PITCH_STICK_MODE_OPTIONS: Option<KeyboardPitchStickMode>[] = [
+    { value: KeyboardPitchStickMode.LAYOUT_DEFAULT, label: 'Layout default' },
+    { value: KeyboardPitchStickMode.HOLD, label: 'Hold: full while pressed' },
+];
+
 /**
  * The terrain detail slider is in kilometres and the setting is in metres,
  * because kilometres are what the label has to read and metres are what every
@@ -221,6 +227,31 @@ function sliderValue(event: Event): number {
             @switch (tab()) {
                 @case ('Graphics') {
                     <div class="flex flex-col gap-6">
+                        <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Render scale</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">
+                                Draws the 3D view at this fraction of the screen and stretches it to
+                                full size; the HUD and cockpit displays stay sharp on top. Lower it
+                                if the frame rate is short on a large screen. 100% is off and draws
+                                at native size, supersampled for anti-aliasing where the resolution
+                                affords it unless that is switched off here.
+                            </p>
+                            <div class="flex flex-wrap items-center gap-6">
+                                <mat-form-field class="w-48" subscriptSizing="dynamic">
+                                    <mat-label>3D resolution</mat-label>
+                                    <mat-select [value]="renderScale()" (selectionChange)="setRenderScale($event.value)">
+                                        @for (option of renderScales; track option.value) {
+                                            <mat-option [value]="option.value">{{ option.label }}</mat-option>
+                                        }
+                                    </mat-select>
+                                </mat-form-field>
+                                <mat-slide-toggle [checked]="supersampling()" [disabled]="renderScale() < 1"
+                                    (change)="setSupersampling($event)">
+                                    Supersampling (SSAA) at 100%
+                                </mat-slide-toggle>
+                            </div>
+                        </section>
+
                         <section>
                             <h3 class="m-0 mb-1 text-base font-medium">Terrain detail distance</h3>
                             <p class="m-0 mb-2 text-sm opacity-70">
@@ -460,6 +491,16 @@ function sliderValue(event: Event): number {
                                 }
                             </mat-radio-group>
                         </section>
+
+                        <section>
+                            <h3 class="m-0 mb-2 text-base font-medium">Pitch stick</h3>
+                            <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
+                                [value]="pitchStickMode()" (change)="setPitchStickMode($event.value)">
+                                @for (option of pitchStickModes; track option.value) {
+                                    <mat-radio-button [value]="option.value">{{ option.label }}</mat-radio-button>
+                                }
+                            </mat-radio-group>
+                        </section>
                     </div>
                 }
 
@@ -536,6 +577,7 @@ export class SettingsDialog {
     readonly aiPilotModels = AI_PILOT_MODEL_OPTIONS;
     readonly unitSystems = UNIT_SYSTEM_OPTIONS;
     readonly keyboardLayouts = KEYBOARD_LAYOUT_OPTIONS;
+    readonly pitchStickModes = PITCH_STICK_MODE_OPTIONS;
 
     readonly detailMinKm = TERRAIN_DETAIL_DISTANCE_MIN_M / 1000;
     readonly detailMaxKm = DETAIL_OFF_KM + 2;
@@ -550,6 +592,7 @@ export class SettingsDialog {
     readonly aiPilotModel = signal(this.config.aiPilotModels.getActive());
     readonly unitSystem = signal(this.config.unitSystem.getActive());
     readonly keyboardLayout = signal(this.data.keyboardInput.getKeyboardLayoutId());
+    readonly pitchStickMode = signal(this.data.keyboardInput.getKeyboardPitchStickMode());
     readonly volume = signal(Math.round(loadSettings().volume * 100));
 
     readonly daytime = signal(this.config.daytime.getActive());
@@ -579,6 +622,12 @@ export class SettingsDialog {
     readonly triangleBudget = signal(this.config.triangleBudget.getActive());
 
     readonly farTileTextures = signal(this.config.farTileTextures.getActive());
+    readonly renderScales: Option<number>[] = RENDER_SCALES.map(scale => ({
+        value: scale,
+        label: scale >= 1 ? '100% (off)' : `${Math.round(scale * 100)}%`,
+    }));
+    readonly renderScale = signal(this.config.renderScale.getActive());
+    readonly supersampling = signal(this.config.supersampling.getActive());
     readonly triangleBudgetK = computed(() => this.triangleBudget() / 1000);
     readonly triangleBudgetLabel = computed(() => {
         const n = this.triangleBudget();
@@ -664,6 +713,18 @@ export class SettingsDialog {
         this.farTileTextures.set(event.checked);
     }
 
+    setRenderScale(scale: number) {
+        this.config.renderScale.setActive(scale);
+        updateSettings({ renderScale: scale });
+        this.renderScale.set(scale);
+    }
+
+    setSupersampling(event: MatSlideToggleChange) {
+        this.config.supersampling.setActive(event.checked);
+        updateSettings({ supersampling: event.checked });
+        this.supersampling.set(event.checked);
+    }
+
     setTriangleBudget(event: Event) {
         this.config.triangleBudget.setActive(sliderValue(event) * 1000);
         const n = this.config.triangleBudget.getActive();
@@ -711,6 +772,12 @@ export class SettingsDialog {
         this.data.keyboardInput.setKeyboardLayout(layout);
         updateSettings({ keyboardLayout: layout });
         this.keyboardLayout.set(layout);
+    }
+
+    setPitchStickMode(mode: KeyboardPitchStickMode) {
+        this.data.keyboardInput.setKeyboardPitchStickMode(mode);
+        updateSettings({ keyboardPitchStickMode: mode });
+        this.pitchStickMode.set(mode);
     }
 
     /**

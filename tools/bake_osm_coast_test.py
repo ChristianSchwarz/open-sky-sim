@@ -331,3 +331,55 @@ class ClipWorkerLanduseTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def _tagged_answer(*ways):
+    """An Overpass answer with one closed way per (tags, coordinate list)."""
+    elements = []
+    nid = 1
+    for wid, (tags, coords) in enumerate(ways, start=1):
+        refs = []
+        for lon, lat in coords:
+            elements.append({'type': 'node', 'id': nid, 'lon': lon, 'lat': lat})
+            refs.append(nid)
+            nid += 1
+        if coords[0] == coords[-1]:
+            elements.pop()
+            nid -= 1
+            refs[-1] = refs[0]
+        elements.append({'type': 'way', 'id': wid, 'nodes': refs, 'tags': tags})
+    return {'elements': elements}
+
+
+def _square(x0, y0, x1, y1):
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+
+
+class IslandsInInlandWaterTest(unittest.TestCase):
+    """A `place=island` way drawn inside a lake way is land, not lake."""
+
+    LAKE = ({'natural': 'water', 'water': 'lake'}, _square(0.2, 0.2, 0.8, 0.8))
+    ISLAND = ({'place': 'island'}, _square(0.4, 0.4, 0.6, 0.6))
+
+    def test_the_island_is_cut_out_of_the_lake(self):
+        land, inland, _ = _polygons_from_osm(_tagged_answer(self.LAKE, self.ISLAND), TILE)
+        from shapely.geometry import Point
+        self.assertTrue(land.contains(Point(0.5, 0.5)))
+        self.assertTrue(land.contains(Point(0.1, 0.1)))
+        self.assertFalse(land.contains(Point(0.3, 0.3)))
+        self.assertEqual(len(inland), 1)
+        self.assertEqual(len(inland[0].geom.interiors), 1)
+        self.assertFalse(inland[0].geom.contains(Point(0.5, 0.5)))
+
+    def test_a_pond_on_the_island_stays_water(self):
+        pond = ({'natural': 'water', 'water': 'pond'}, _square(0.48, 0.48, 0.52, 0.52))
+        land, inland, _ = _polygons_from_osm(_tagged_answer(self.LAKE, self.ISLAND, pond), TILE)
+        from shapely.geometry import Point
+        self.assertFalse(land.contains(Point(0.5, 0.5)))
+        self.assertTrue(land.contains(Point(0.45, 0.45)))
+        self.assertTrue(any(b.geom.contains(Point(0.5, 0.5)) for b in inland))
+
+    def test_an_island_in_no_water_changes_nothing(self):
+        land, inland, _ = _polygons_from_osm(_tagged_answer(self.ISLAND), TILE)
+        self.assertAlmostEqual(land.area, TILE.as_box().area, places=9)
+        self.assertEqual(inland, [])

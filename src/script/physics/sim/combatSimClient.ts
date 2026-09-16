@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { Faction } from '../../weapons/combatant';
 import { ForceVectorSample } from '../model/flightModel';
-import { KeyboardControlLayoutId } from '../../input/keyboardLayouts';
+import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
 import { SerializedArrestorCables, SerializedWorld } from './serializedWorld';
 import { HeightTileUpdate, SerializedHeightField } from '../../terrain/heightMirror';
 import { AC_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
@@ -264,6 +264,10 @@ export class CombatSimClient {
 
     setKeyboardLayout(layoutId: KeyboardControlLayoutId): void {
         this.post({ type: 'setKeyboardLayout', layoutId });
+    }
+
+    setKeyboardPitchStickMode(mode: KeyboardPitchStickMode): void {
+        this.post({ type: 'setKeyboardPitchStickMode', mode });
     }
 
     postGamepadAxes(id: string, pitch: number, roll: number, yaw: number, throttle: number, connected: boolean): void {

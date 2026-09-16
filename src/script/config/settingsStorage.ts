@@ -1,4 +1,5 @@
 import { KeyboardControlLayoutId } from "../input/devices/keyboardControlDevice";
+import { KeyboardPitchStickMode } from "../input/keyboardLayouts";
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
 import { AiPilotModels, FlightModels, TechProfiles, TerrainColours, TerrainShading } from "../state/gameDefs";
 import {
@@ -8,6 +9,7 @@ import {
     TERRAIN_TRIANGLE_BUDGET_MIN,
 } from "../terrain/lod";
 import { LANDUSE_BLEND_DEFAULT } from "../terrain/tones";
+import { RENDER_SCALES } from "./configService";
 
 const STORAGE_KEY = 'retroflightsim.settings';
 
@@ -18,6 +20,7 @@ export interface AppSettings {
     techProfile: string;
     flightModel: string;
     keyboardLayout: KeyboardControlLayoutId;
+    keyboardPitchStickMode: KeyboardPitchStickMode;
     aiPilotModel: AiPilotModels;
     /** How baked terrain cover turns into colour on screen. */
     terrainColour: TerrainColours;
@@ -64,6 +67,10 @@ export interface AppSettings {
     terrainTriangleBudget: number;
     /** Paint far tiles with the leaf-level cover texture the bake shipped, where it did. */
     farTileTextures: boolean;
+    /** Fraction of the screen the 3D view is rendered at (see RENDER_SCALES); 1 is off. */
+    renderScale: number;
+    /** Supersample (SSAA) the 3D view where the resolution affords it. */
+    supersampling: boolean;
     /** Master audio volume level (0.0 to 1.0). */
     volume: number;
 }
@@ -72,6 +79,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     techProfile: TechProfiles.HD,
     flightModel: FlightModels.FM2,
     keyboardLayout: KeyboardControlLayoutId.ARROWS,
+    keyboardPitchStickMode: KeyboardPitchStickMode.LAYOUT_DEFAULT,
     aiPilotModel: AiPilotModels.CLASSIC,
     terrainColour: TerrainColours.HYBRID,
     terrainShading: TerrainShading.FACETED,
@@ -85,12 +93,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
     landuseRevealPx: LANDUSE_REVEAL_MIN_PX,
     terrainTriangleBudget: TERRAIN_TRIANGLE_BUDGET,
     farTileTextures: true,
+    renderScale: 1,
+    supersampling: true,
     volume: 0.7,
 };
 
 const TECH_PROFILES = new Set<string>(Object.values(TechProfiles));
 const FLIGHT_MODELS = new Set<string>(Object.values(FlightModels));
 const KEYBOARD_LAYOUTS = new Set<number>(Object.values(KeyboardControlLayoutId).filter(v => typeof v === 'number') as number[]);
+const PITCH_STICK_MODES = new Set<number>(Object.values(KeyboardPitchStickMode).filter(v => typeof v === 'number') as number[]);
 const AI_PILOT_MODELS = new Set<string>(Object.values(AiPilotModels));
 const TERRAIN_COLOURS = new Set<string>(Object.values(TerrainColours));
 const TERRAIN_SHADING_VALUES = new Set<string>(Object.values(TerrainShading));
@@ -110,6 +121,7 @@ export function loadSettings(): AppSettings {
             techProfile: isValidTechProfile(parsed.techProfile) ? parsed.techProfile : DEFAULT_SETTINGS.techProfile,
             flightModel: isValidFlightModel(parsed.flightModel) ? parsed.flightModel : DEFAULT_SETTINGS.flightModel,
             keyboardLayout: isValidKeyboardLayout(parsed.keyboardLayout) ? parsed.keyboardLayout : DEFAULT_SETTINGS.keyboardLayout,
+            keyboardPitchStickMode: isValidPitchStickMode(parsed.keyboardPitchStickMode) ? parsed.keyboardPitchStickMode : DEFAULT_SETTINGS.keyboardPitchStickMode,
             aiPilotModel: isValidAiPilotModel(parsed.aiPilotModel) ? parsed.aiPilotModel : DEFAULT_SETTINGS.aiPilotModel,
             terrainColour: isValidTerrainColour(parsed.terrainColour) ? parsed.terrainColour : DEFAULT_SETTINGS.terrainColour,
             terrainShading: isValidTerrainShading(parsed.terrainShading) ? parsed.terrainShading : DEFAULT_SETTINGS.terrainShading,
@@ -132,6 +144,9 @@ export function loadSettings(): AppSettings {
                 ? parsed.terrainTriangleBudget : DEFAULT_SETTINGS.terrainTriangleBudget,
             farTileTextures: typeof parsed.farTileTextures === 'boolean'
                 ? parsed.farTileTextures : DEFAULT_SETTINGS.farTileTextures,
+            renderScale: isValidRenderScale(parsed.renderScale) ? parsed.renderScale : DEFAULT_SETTINGS.renderScale,
+            supersampling: typeof parsed.supersampling === 'boolean'
+                ? parsed.supersampling : DEFAULT_SETTINGS.supersampling,
             volume: isValidVolume(parsed.volume) ? parsed.volume : DEFAULT_SETTINGS.volume,
         };
     } catch {
@@ -163,6 +178,10 @@ function isValidFlightModel(value: unknown): value is string {
 
 function isValidKeyboardLayout(value: unknown): value is KeyboardControlLayoutId {
     return typeof value === 'number' && KEYBOARD_LAYOUTS.has(value);
+}
+
+function isValidPitchStickMode(value: unknown): value is KeyboardPitchStickMode {
+    return typeof value === 'number' && PITCH_STICK_MODES.has(value);
 }
 
 function isValidAiPilotModel(value: unknown): value is AiPilotModels {
@@ -206,6 +225,10 @@ function isValidSpawnMode(value: unknown): value is SpawnMode {
 
 function isValidDaytime(value: unknown): value is number {
     return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 24;
+}
+
+function isValidRenderScale(value: unknown): value is number {
+    return typeof value === 'number' && RENDER_SCALES.includes(value);
 }
 
 function isValidVolume(value: unknown): value is number {

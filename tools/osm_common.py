@@ -51,9 +51,16 @@ WATER = 0
 # fetch, and a bake that fails at a later stage re-downloads everything.
 OSM_CACHE_DIR = os.path.join('data', 'osm-cache')
 
+# Planet mirrors only. overpass.osm.ch was in this list until 2026-09-16: it
+# serves a Switzerland extract, not the planet, so every cell it answered
+# came back cut at the Swiss border (an alps import baked the whole Italian
+# side, Aosta included, with no land-use, no rivers and no lakes, while the
+# Valais half of the same cell was complete). Nothing in the answer says so -
+# HTTP 200, no remark, thousands of elements - so it cannot be guarded
+# against per answer; it has to stay out of the rotation.
 OVERPASS_URLS = (
     'https://overpass-api.de/api/interpreter',
-    'https://overpass.osm.ch/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter',
     'https://overpass.kumi.systems/api/interpreter',
 )
 
@@ -134,11 +141,12 @@ OVERPASS_CELL_ZOOM = 7
 OVERPASS_LIGHT_CELL_ZOOM = 5
 
 # Mirrors whose empty answer is never believed (see refuse_untrusted_empty).
-# overpass.osm.ch is the one that has been caught answering HTTP 200, no
-# remark and `elements: []` for boxes the others count thousands of ways
-# in; an empty answer from any other mirror is taken at its word, so the
-# open-ocean cells of a coastal import cost one request each instead of two.
-OVERPASS_UNTRUSTED_EMPTY = ('https://overpass.osm.ch/api/interpreter',)
+# overpass.osm.ch was the one that answered HTTP 200, no remark and
+# `elements: []` for boxes the others count thousands of ways in - its
+# extract simply ends outside Switzerland - and it is no longer queried at
+# all (see OVERPASS_URLS). Empty for now; the guard stays wired so a mirror
+# caught doing the same can be listed without touching the fetch path.
+OVERPASS_UNTRUSTED_EMPTY: Tuple[str, ...] = ()
 
 # Every query ends this way: matched elements with their tags, and the
 # coordinates of every way and relation member inline. The `out body; >;
@@ -828,21 +836,11 @@ def nodes_map(elements: Sequence[dict]) -> Dict[int, Tuple[float, float]]:
             out[el['id']] = (el['lon'], el['lat'])
     return out
 
-def relation_rings(relation: dict, ways: Dict[int, dict], nodes: Dict[int, Tuple[float, float]]) -> List[List[Tuple[float, float]]]:
-    """Assemble outer rings from a multipolygon relation."""
-    outer_ways: List[List[int]] = []
-    for m in relation.get('members', []):
-        if m.get('type') != 'way' or m.get('role') not in ('outer', ''):
-            continue
-        wid = m.get('ref')
-        if wid in ways:
-            outer_ways.append(ways[wid].get('nodes', []))
-    if not outer_ways:
-        return []
-    # Chain way segments into closed rings.
+def _chain_rings(segments: Sequence[Sequence[int]], nodes: Dict[int, Tuple[float, float]]) -> List[List[Tuple[float, float]]]:
+    """Chain way node lists end to end into closed rings of coordinates."""
     rings: List[List[Tuple[float, float]]] = []
     used: Set[int] = set()
-    for start_idx, start_nodes in enumerate(outer_ways):
+    for start_idx, start_nodes in enumerate(segments):
         if start_idx in used:
             continue
         chain = list(start_nodes)
@@ -850,8 +848,8 @@ def relation_rings(relation: dict, ways: Dict[int, dict], nodes: Dict[int, Tuple
         changed = True
         while changed:
             changed = False
-            for j, seg in enumerate(outer_ways):
-                if j in used:
+            for j, seg in enumerate(segments):
+                if j in used or not seg:
                     continue
                 if chain[-1] == seg[0]:
                     chain.extend(seg[1:])
@@ -862,7 +860,7 @@ def relation_rings(relation: dict, ways: Dict[int, dict], nodes: Dict[int, Tuple
                     used.add(j)
                     changed = True
                 elif chain[0] == seg[-1]:
-                    chain = seg[:-1] + chain
+                    chain = list(seg[:-1]) + chain
                     used.add(j)
                     changed = True
                 elif chain[0] == seg[0]:
@@ -872,6 +870,87 @@ def relation_rings(relation: dict, ways: Dict[int, dict], nodes: Dict[int, Tuple
         if len(chain) >= 4 and chain[0] == chain[-1]:
             rings.append([nodes[n] for n in chain if n in nodes])
     return rings
+
+
+def _member_ways(relation: dict, ways: Dict[int, dict], roles: Tuple[str, ...]) -> List[List[int]]:
+    out: List[List[int]] = []
+    for m in relation.get('members', []):
+        if m.get('type') != 'way' or m.get('role') not in roles:
+            continue
+        wid = m.get('ref')
+        if wid in ways:
+            out.append(ways[wid].get('nodes', []))
+    return out
+
+
+def relation_rings(relation: dict, ways: Dict[int, dict], nodes: Dict[int, Tuple[float, float]]) -> List[List[Tuple[float, float]]]:
+    """Assemble the *outer* rings of a multipolygon relation, holes ignored.
+
+    Enough for a centroid or a footprint area (the airport bake). Anything
+    that turns the relation into a surface wants `relation_polygons`, or the
+    inner rings - every island in a lake or a river mapped as a relation -
+    come out as part of the water.
+    """
+    outer_ways = _member_ways(relation, ways, ('outer', ''))
+    if not outer_ways:
+        return []
+    return _chain_rings(outer_ways, nodes)
+
+
+def relation_polygons(relation: dict, ways: Dict[int, dict], nodes: Dict[int, Tuple[float, float]]) -> List[Polygon]:
+    """Assemble a multipolygon relation into polygons with their holes.
+
+    Every `inner` ring is punched out of the smallest outer ring that
+    contains it. Until 2026-09-16 the coast bake only ever chained the outer
+    members, so a lake or riverbank relation flooded its islands whole:
+    Berlin's Spreeinsel, every Rhine island, anything mapped as
+    `natural=water` + `inner`. A ring that fails to close is dropped, as it
+    always was; an inner ring that sits in no outer is dropped too.
+    """
+    outers = _chain_rings(_member_ways(relation, ways, ('outer', '')), nodes)
+    inners = _chain_rings(_member_ways(relation, ways, ('inner',)), nodes)
+    shells: List[Tuple[Polygon, List[List[Tuple[float, float]]]]] = []
+    for ring in outers:
+        if len(ring) < 4:
+            continue
+        try:
+            shell = Polygon(ring)
+        except Exception:
+            continue
+        if shell.is_empty or shell.area <= 0:
+            continue
+        shells.append((shell, []))
+    shells.sort(key=lambda s: s[0].area)
+    for ring in inners:
+        if len(ring) < 4:
+            continue
+        try:
+            hole = Polygon(ring)
+        except Exception:
+            continue
+        if hole.is_empty:
+            continue
+        probe = hole.representative_point()
+        for shell, holes in shells:
+            if shell.contains(probe):
+                holes.append(ring)
+                break
+    out: List[Polygon] = []
+    for shell, holes in shells:
+        try:
+            poly = Polygon(shell.exterior.coords, holes) if holes else shell
+        except Exception:
+            poly = shell
+        if not poly.is_valid:
+            fixed = poly.buffer(0)
+            if isinstance(fixed, Polygon):
+                poly = fixed
+            elif not fixed.is_empty:
+                out.extend(g for g in getattr(fixed, 'geoms', []) if isinstance(g, Polygon) and not g.is_empty)
+                continue
+        if not poly.is_empty:
+            out.append(poly)
+    return out
 
 
 def ways_map(elements: Sequence[dict]) -> Dict[int, dict]:

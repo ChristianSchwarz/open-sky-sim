@@ -56,6 +56,8 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
         settings.terrainTriangleBudget,
         settings.landuseRevealPx,
         settings.farTileTextures,
+        settings.renderScale,
+        settings.supersampling,
     );
     config.flightModels.getActive().activate();
     // Place the sun before the first material is built, so the shaded ramp and
@@ -96,6 +98,7 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
         () => config.flightModels.getActive() instanceof SimProxyFlightModel,
     );
     keyboardInput.setKeyboardLayout(settings.keyboardLayout);
+    keyboardInput.setKeyboardPitchStickMode(settings.keyboardPitchStickMode);
     const joystickInput = new JoystickControlDevice(
         combatSim,
         game.getPlayer(),

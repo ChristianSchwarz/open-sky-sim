@@ -137,6 +137,9 @@ function handleMessage(data: SimToWorkerMessage): void {
         case 'setKeyboardLayout':
             sim.setKeyboardLayout(data.layoutId);
             break;
+        case 'setKeyboardPitchStickMode':
+            sim.setKeyboardPitchStickMode(data.mode);
+            break;
         case 'gamepadAxes':
             sim.gamepadAxes(data.id, data.pitch, data.roll, data.yaw, data.throttle, data.connected);
             break;

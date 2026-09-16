@@ -9,7 +9,7 @@ import { Combatant, Faction } from '../../weapons/combatant';
 import { Gun, GunConfig, ProjectileSink } from '../../weapons/gun';
 import { clamp, FORWARD } from '../../utils/math';
 import { PLANE_DISTANCE_TO_GROUND } from '../../defs';
-import { KeyboardControlLayoutId } from '../../input/keyboardLayouts';
+import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
 import { FcsPitchLimiter } from '../fm2/fcs';
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { ForceVectorSample } from '../model/flightModel';
@@ -551,6 +551,8 @@ export class CombatSim implements ProjectileSink {
     private readonly external = new Map<string, ExternalCombatant>();
     /** Worker-side keyboard/gamepad handlers for externally-controlled aircraft. */
     private readonly playerInputs = new Map<string, SimPlayerInput>();
+    private keyboardLayoutId = KeyboardControlLayoutId.ARROWS;
+    private keyboardPitchStickMode = KeyboardPitchStickMode.LAYOUT_DEFAULT;
 
     private readonly projectiles: ProjectileSlot[] = [];
     private readonly hits: SimHitEvent[] = [];
@@ -654,8 +656,11 @@ export class CombatSim implements ProjectileSink {
         added.model.setAltitudeAt(this.altitudeAt);
         this.aircraft.set(desc.id, added);
         if (desc.control === 'external') {
-            this.playerInputs.set(desc.id, new SimPlayerInput());
-            this.playerInputs.get(desc.id)!.syncThrottle(desc.spawn.throttle);
+            const input = new SimPlayerInput();
+            input.setKeyboardLayout(this.keyboardLayoutId);
+            input.setKeyboardPitchStickMode(this.keyboardPitchStickMode);
+            input.syncThrottle(desc.spawn.throttle);
+            this.playerInputs.set(desc.id, input);
         }
     }
 
@@ -694,8 +699,16 @@ export class CombatSim implements ProjectileSink {
     }
 
     setKeyboardLayout(layoutId: KeyboardControlLayoutId): void {
+        this.keyboardLayoutId = layoutId;
         for (const input of this.playerInputs.values()) {
             input.setKeyboardLayout(layoutId);
+        }
+    }
+
+    setKeyboardPitchStickMode(mode: KeyboardPitchStickMode): void {
+        this.keyboardPitchStickMode = mode;
+        for (const input of this.playerInputs.values()) {
+            input.setKeyboardPitchStickMode(mode);
         }
     }
 

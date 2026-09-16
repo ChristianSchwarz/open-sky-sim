@@ -74,7 +74,7 @@ from osm_common import (
     sea_cell_skipper,
     parse_bbox,
     read_lwm,
-    relation_rings as _relation_rings,
+    relation_polygons as _relation_polygons,
     snap_bounds_to_tiles,
     tagged_width_m as _tagged_width_m,
     tile_bounds,
@@ -361,10 +361,30 @@ def overpass_query(
 );
 {OVERPASS_OUT}
 '''
+    def islands(c: Bounds) -> str:
+        # Islands that are not inner rings of the water they sit in. Most
+        # small ones are a closed `place=island` way drawn inside a lake
+        # way, and a lake way cannot carry a hole; without this group they
+        # were flooded (Schwanenwerder and Lindwerder in the Havel).
+        # `relation["place"="island"]` is asked again here on purpose: the
+        # coastline query has it, but changing that query would throw away
+        # every cached coastline answer, and `merge_elements` keeps one copy.
+        # Four exact clauses, not one `~"^(island|islet)$"`: a regex on the
+        # value skips the tag index, and that form timed out (504) on every
+        # mirror for a single z7 cell of Brandenburg.
+        return f'''[out:json][timeout:240];
+(
+  way["place"="island"]({c.as_overpass()});
+  way["place"="islet"]({c.as_overpass()});
+  relation["place"="island"]({c.as_overpass()});
+  relation["place"="islet"]({c.as_overpass()});
+);
+{OVERPASS_OUT}
+'''
     extra: Dict[str, object] = {}
     if progress is not None:
         progress.begin('coast', 'fetching OSM coastline and water features')
-        received = [0, 0]
+        received = [0, 0, 0]
 
         def on_bytes(group: int, n: int) -> None:
             received[group] = n
@@ -372,12 +392,15 @@ def overpass_query(
             progress.update(fetch_fraction(total), f'{format_mb(total)} received')
         extra['on_progress'] = on_bytes
     answers = overpass_fetch_groups(
-        [(coastline, 'coastline', None), (features, 'water features', skip_sea)],
-        b, refresh, **extra)
+        [(coastline, 'coastline', None), (features, 'water features', skip_sea),
+         (islands, 'islands', skip_sea)],
+        b, refresh, tolerate=(False, False, True), **extra)
     if progress is not None:
         progress.end(f'{len(answers[0].get("elements", []))} elements')
         progress.begin('water')
-        progress.end(f'{len(answers[1].get("elements", []))} elements, fetched with the coastline')
+        n_islands = len((answers[2] or {}).get('elements', []))
+        progress.end(f'{len((answers[1] or {}).get("elements", []))} elements and {n_islands} '
+                     'island elements, fetched with the coastline')
     return merge_elements([a for a in answers if a is not None])
 
 
@@ -473,6 +496,42 @@ def _water_kind(tags: dict) -> Optional[str]:
     return None
 
 
+def _islands_in_water(
+    island_polys: Sequence[Polygon], water_polys: Sequence[Polygon], water_union,
+):
+    """The union of the islands that sit in mapped water, minus the water on them.
+
+    An island counts when a point of it lies in `water_union`; that leaves a
+    sea island, which sits in no OSM water polygon, alone. Each counted
+    island loses every water polygon it wholly contains, so a lake on the
+    island survives the cut. Returns an empty Polygon when nothing counts.
+    """
+    if not island_polys or water_union.is_empty:
+        return Polygon()
+    keep: List[Polygon] = []
+    tree = STRtree(list(water_polys)) if water_polys else None
+    for island in island_polys:
+        if island.is_empty or island.area <= 0:
+            continue
+        if not island.is_valid:
+            island = island.buffer(0)
+            if island.is_empty:
+                continue
+        if not water_union.intersects(island.representative_point()):
+            continue
+        if tree is not None:
+            inside = tree.query(island, predicate='contains')
+            if len(inside):
+                island = island.difference(unary_union([water_polys[i] for i in inside]))
+                if island.is_empty:
+                    continue
+        keep.append(island)
+    if not keep:
+        return Polygon()
+    merged = unary_union(keep)
+    return merged if not merged.is_empty else Polygon()
+
+
 def _polygons_from_osm(
     data: dict, bbox: Bounds, progress: Optional[PhaseProgress] = None,
 ) -> Tuple[MultiPolygon, List[WaterBody], List[Watercourse]]:
@@ -502,6 +561,7 @@ def _polygons_from_osm(
     coastline_lines: List[LineString] = []
     water_polys: List[Polygon] = []
     land_polys: List[Polygon] = []
+    island_polys: List[Polygon] = []
     inland_parts: List[Tuple[Polygon, bool]] = []
     courses: List[Watercourse] = []
     widened_lines = 0
@@ -523,6 +583,13 @@ def _polygons_from_osm(
         kind = _water_kind(tags)
         if natural == 'coastline':
             coastline_lines.append(line)
+        elif tags.get('place', '') in ('island', 'islet'):
+            coords = list(line.coords)
+            if len(coords) >= 4 and coords[0] == coords[-1]:
+                try:
+                    island_polys.append(Polygon(coords))
+                except Exception:
+                    pass
         elif kind is not None:
             coords = list(line.coords)
             if len(coords) >= 4 and coords[0] == coords[-1]:
@@ -564,22 +631,17 @@ def _polygons_from_osm(
         natural = tags.get('natural', '')
         place = tags.get('place', '')
         kind = _water_kind(tags)
-        rings = _relation_rings(rel, ways, nodes)
-        for ring in rings:
-            if len(ring) < 4:
-                continue
-            try:
-                poly = Polygon(ring)
-            except Exception:
-                continue
-            if not poly.is_valid:
-                poly = poly.buffer(0)
+        # Holes included: an `inner` ring of a water relation is an island,
+        # and one of a `place=island` relation is a lake on the island.
+        for poly in _relation_polygons(rel, ways, nodes):
             if kind is not None:
                 water_polys.append(poly)
                 if kind != 'ocean':
                     inland_parts.append((poly, kind == 'flat'))
-            elif natural == 'coastline' or place == 'island':
+            elif natural == 'coastline' or place in ('island', 'islet'):
                 land_polys.append(poly)
+                if place:
+                    island_polys.append(poly)
 
     clip = bbox.as_box()
     land_from_coast: List[Polygon] = []
@@ -692,6 +754,16 @@ def _polygons_from_osm(
 
     tell(0.8, f'merging {len(water_polys)} water polygons')
     water_union = unary_union(water_polys) if water_polys else Polygon()
+    # Islands mapped as their own `place=island` polygon inside a water
+    # feature, rather than as an inner ring of it, are cut out of the water
+    # here. Only islands that actually sit in mapped water count - a sea
+    # island like Rugen sits in no OSM water polygon and is left to the
+    # coastline - and a pond mapped on the island stays water: every water
+    # polygon contained by the island is cut back out of it first.
+    islands_in_water = _islands_in_water(island_polys, water_polys, water_union)
+    if not islands_in_water.is_empty:
+        tell(0.82, 'cutting islands out of the water')
+        water_union = water_union.difference(islands_in_water)
     tell(0.85, f'merging {len(land_from_coast)} land pieces')
     land_union = unary_union(land_from_coast) if land_from_coast else Polygon()
     tell(0.9, 'subtracting water from land')
@@ -715,7 +787,10 @@ def _polygons_from_osm(
     def bodies_of(parts: List[Polygon], flat: bool) -> List[WaterBody]:
         if not parts:
             return []
-        merged = unary_union(parts).intersection(clip)
+        merged = unary_union(parts)
+        if not islands_in_water.is_empty:
+            merged = merged.difference(islands_in_water)
+        merged = merged.intersection(clip)
         if merged.is_empty:
             return []
         if isinstance(merged, Polygon):
