@@ -705,7 +705,10 @@ export class TerrainEntity implements Entity {
             if (outstanding.length === 0) {
                 return;
             }
-            this.streamer.pumpUploads();
+            // The per-frame upload budget exists to avoid hitching a rendered
+            // frame; nothing is being rendered in this boot wait, so pump
+            // uploads far harder than that budget allows.
+            this.streamer.pumpUploads(50);
             await new Promise(r => setTimeout(r, 16));
         }
         console.warn(

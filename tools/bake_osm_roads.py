@@ -99,6 +99,14 @@ DEFAULT_MIN_ZOOM = min(CLASS_CUT_BY_ZOOM)
 LINE_SIMPLIFY_CELLS = 0.5
 GRID_CELLS = 256
 
+# The leaf level's tolerance in metres, instead of half a cell (see
+# line_tolerance_deg). One and a half: well inside the narrowest road's
+# half-width, and the spline through the kept nodes covers the rest.
+LEAF_SIMPLIFY_M = 1.5
+# Metres per degree of latitude. Used on longitude too, which only makes the
+# tolerance tighter east-west, never looser.
+METRES_PER_DEGREE = 111320.0
+
 # Fetch cell zoom. Roads are the heaviest thing asked of Overpass here -
 # residential streets alone outnumber every water feature several times
 # over - so the cells are a quarter the area of the coast bake's z7 ones,
@@ -312,8 +320,20 @@ def write_rvr(out_dir: str, z: int, x: int, y: int, blob: bytes) -> int:
     return len(blob)
 
 
-def line_tolerance_deg(z: int) -> float:
-    return ((180.0 / (1 << z)) / GRID_CELLS) * LINE_SIMPLIFY_CELLS
+def line_tolerance_deg(z: int, max_zoom: int) -> float:
+    """Douglas-Peucker tolerance for zoom `z`, in degrees.
+
+    Half a grid cell everywhere but the leaf. At the leaf a cell is ~19 m, so
+    half of one let a node stray ~10 m: on a road 5-25 m wide that put a
+    visible corner at every dropped curve node, and the stroke bake smooths
+    the line into a spline through what survives, which can only bring back
+    the shape the nodes still carry. The leaf is drawn from close enough for
+    that shape to show, so it keeps its nodes to LEAF_SIMPLIFY_M.
+    """
+    cells = ((180.0 / (1 << z)) / GRID_CELLS) * LINE_SIMPLIFY_CELLS
+    if z >= max_zoom:
+        return min(cells, LEAF_SIMPLIFY_M / METRES_PER_DEGREE)
+    return cells
 
 
 def bake(args: argparse.Namespace) -> int:
@@ -375,7 +395,7 @@ def bake(args: argparse.Namespace) -> int:
             continue
         level_roads = [r for r in roads if r.cls <= cut]
         tree = STRtree([r.line for r in level_roads])
-        tol = line_tolerance_deg(z)
+        tol = line_tolerance_deg(z, max_zoom)
         files = 0
         parts_written = 0
         level_bytes = 0

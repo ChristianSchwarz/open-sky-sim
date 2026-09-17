@@ -25,7 +25,7 @@ are. Two reasons, both about performance in the wide sense:
   runtime then stops fetching them at all - a pyramid with roads costs a
   player who does not want them nothing.
 
-## Five controls on the cost
+## Six controls on the cost
 
 1. **Class by zoom, at the vector bake.** `bake_osm_roads.py` writes a z8
    or z9 tile with motorways and trunks only, z10 adds primary and
@@ -56,6 +56,19 @@ are. Two reasons, both about performance in the wide sense:
    were most of the stroke: leaf tiles went 4780 -> 1541 road triangles,
    and drawn road triangles over Schönefeld 133k -> 40k, which had pushed
    the terrain over its 600K budget.
+
+6. **Curves on the leaf only, capped.** The leaf keeps road nodes to 1.5 m
+   (`LEAF_SIMPLIFY_M`; coarser levels stay at half a cell), then
+   `roadSpline.ts` smooths each road into a centripetal Catmull-Rom curve,
+   sampled to 1 m, keeping turns of 60 degrees or more as corners. A span
+   whose curve would leave its mapped segment by more than 1.5 m stays
+   straight: without that cap the spline cut straight roads meeting at
+   shallow angles by up to 33 m. Coarser tiles get no spline; there it
+   tripled their triangles for nothing visible.
+
+   Germany, road triangles per z12 tile: 598 with the old half-cell
+   simplification, 842 at 1.5 m without the spline, 967 with it. The
+   tighter simplification is most of the cost and most of the shape.
 
 ## Pipeline
 

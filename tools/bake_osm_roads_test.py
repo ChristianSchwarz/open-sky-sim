@@ -134,5 +134,14 @@ class ClipAndFormat(unittest.TestCase):
         self.assertAlmostEqual(back[1][2][2][1], 1.0, places=5)
 
 
+class Tolerance(unittest.TestCase):
+    def test_leaf_keeps_nodes_to_metres_coarse_levels_to_half_a_cell(self):
+        from bake_osm_roads import LEAF_SIMPLIFY_M, METRES_PER_DEGREE, line_tolerance_deg
+        self.assertAlmostEqual(line_tolerance_deg(12, 12) * METRES_PER_DEGREE, LEAF_SIMPLIFY_M, places=6)
+        half_cell_z11 = (180.0 / (1 << 11)) / 256 * 0.5
+        self.assertAlmostEqual(line_tolerance_deg(11, 12), half_cell_z11)
+        self.assertGreater(line_tolerance_deg(11, 12) * METRES_PER_DEGREE, LEAF_SIMPLIFY_M)
+
+
 if __name__ == '__main__':
     unittest.main()

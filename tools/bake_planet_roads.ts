@@ -150,7 +150,7 @@ function main(): void {
             const roads = decodeRvr(fs.readFileSync(rvrPath));
             tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
             level.roads += roads.length;
-            draped = drapeRoads(tile, basis, roads, capFor(k.z));
+            draped = drapeRoads(tile, basis, roads, capFor(k.z), k.z >= leafZoom);
         }
         if (draped === undefined || tile === undefined) {
             if (fs.existsSync(outPath)) {

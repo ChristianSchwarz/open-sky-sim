@@ -11,6 +11,10 @@
  * road where it crosses from one facet to the next, which is the only place
  * a straight segment on a planar facet needs a vertex.
  *
+ * Before any of that the centreline is smoothed into a centripetal
+ * Catmull-Rom curve (roadSpline.ts), so a bend reads as a bend at the
+ * stroke's true width rather than as a run of OSM's corners.
+ *
  * Output is two vertices per centreline point at the same position with
  * opposite unit offsets across the road, widened per frame by
  * RiverVertProgram, exactly as a river is.
@@ -21,6 +25,7 @@ import { PtmTile } from '../../src/script/terrain/ptm';
 import { PTR_MAX_VERTS } from '../../src/script/terrain/ptr';
 import { approxTileEdgeMetres, tileBounds } from '../../src/script/terrain/tiling';
 import { RoadLine } from './rvr';
+import { smoothRoad } from './roadSpline';
 
 /** Cells across the facet bucket grid; 6k facets over 4k cells is a few per cell. */
 const BUCKET_CELLS = 64;
@@ -61,6 +66,14 @@ interface Local {
  */
 export function drapeRoads(
     tile: PtmTile, basis: EnuBasis, roads: readonly RoadLine[], maxVerts: number = PTR_MAX_VERTS,
+    /**
+     * Smooth the centreline into a curve first (roadSpline.ts). Only worth it
+     * on a leaf: every coarser tile is drawn from where a road is a couple of
+     * pixels wide and a mapped corner cannot be told from a curve, and its
+     * nodes were simplified to half a cell, far past what the spline's offset
+     * cap lets it round anyway.
+     */
+    smooth: boolean = true,
 ): DrapedRoads | undefined {
     if (roads.length === 0) {
         return undefined;
@@ -82,6 +95,7 @@ export function drapeRoads(
     const upLen = Math.hypot(upX, upY, upZ);
     upX /= upLen; upY /= upLen; upZ /= upLen;
     const liftM = ROAD_LIFT_CELLS * approxTileEdgeMetres(tile.id) / 256;
+
 
     // --- the drawn facets, in metres, bucketed on x/z ----------------------
     const q = tile.quantScale;
@@ -278,7 +292,12 @@ export function drapeRoads(
     const cap = Math.min(maxVerts, PTR_MAX_VERTS);
     const ordered = [...roads].sort((a, b) => a.cls - b.cls);
     for (const road of ordered) {
-        const grid = resample(road.points.map(p => toLocal(p.lon, p.lat, tile.centerHeightM)));
+        // Smoothed into a curve first, in the tile's horizontal metres, so the
+        // facet crossings and the height simplifier below see the curve and
+        // not the OSM polyline (see roadSpline.ts).
+        const local = road.points.map(p => toLocal(p.lon, p.lat, tile.centerHeightM));
+        const track = smooth ? smoothRoad(local) : local;
+        const grid = resample(track.map(p => ({ x: p.x, y: 0, z: p.z })));
         if (grid.length < 2) {
             continue;
         }

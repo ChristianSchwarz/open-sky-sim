@@ -179,9 +179,9 @@ export class TileStreamer<T, G> {
      * for a fixed count to bound the cost, and a burst landing in one frame is
      * exactly what causes a hitch.
      */
-    pumpUploads(): number {
+    pumpUploads(budgetMsOverride?: number): number {
         const now = this.opts.now ?? (() => Date.now());
-        const budget = this.opts.uploadBudgetMs ?? TILE_UPLOAD_BUDGET_MS;
+        const budget = budgetMsOverride ?? this.opts.uploadBudgetMs ?? TILE_UPLOAD_BUDGET_MS;
         const start = now();
         let done = 0;
         for (const [key, entry] of this.ready) {
