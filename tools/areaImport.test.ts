@@ -178,35 +178,45 @@ describe('formatDuration', () => {
 });
 
 describe('the bake plans end with meshes then textures over the same box', () => {
-    /** The mesh bake must be followed, immediately, by the texture bake with the same --bbox. */
-    function assertMeshThenTextures(steps: Step[]): void {
+    /**
+     * The mesh bake must be followed, immediately, by the texture bake with
+     * the same --bbox. An import then drapes the road strokes over the
+     * finished meshes, and nothing runs after that.
+     */
+    function assertMeshThenTextures(steps: Step[], withRoads: boolean): void {
         const tools = steps.map(s => s.args.find(a => a.startsWith('tools/')));
         const mesh = tools.indexOf('tools/bake_planet_mesh.ts');
         assert.ok(mesh >= 0, 'no mesh bake in the plan');
         assert.equal(tools[mesh + 1], 'tools/bake_planet_tex.ts', 'texture bake does not follow the mesh bake');
-        assert.equal(mesh + 2, steps.length, 'something runs after the texture bake');
         const bboxOf = (s: Step) => s.args[s.args.indexOf('--bbox') + 1];
         assert.equal(bboxOf(steps[mesh + 1]), bboxOf(steps[mesh]));
         assert.ok(bboxOf(steps[mesh]).split(',').length === 4, 'mesh bake has no box');
+        if (withRoads) {
+            assert.equal(tools[mesh + 2], 'tools/bake_planet_roads.ts', 'road strokes do not follow the textures');
+            assert.equal(bboxOf(steps[mesh + 2]), bboxOf(steps[mesh]));
+            assert.equal(mesh + 3, steps.length, 'something runs after the road strokes');
+        } else {
+            assert.equal(mesh + 2, steps.length, 'something runs after the texture bake');
+        }
     }
 
     it('holds for an import, with and without cover', () => {
         const job = { name: 'Test Area', bbox: [7.6, 45.9, 7.8, 46.0] };
-        assertMeshThenTextures(plan(job, true));
-        assertMeshThenTextures(plan(job, false));
+        assertMeshThenTextures(plan(job, true), true);
+        assertMeshThenTextures(plan(job, false), true);
     });
 
     it('holds for a delete', () => {
-        assertMeshThenTextures(deletePlan('mad', [-17.53, 32.3, -16.17, 33.35]));
+        assertMeshThenTextures(deletePlan('mad', [-17.53, 32.3, -16.17, 33.35]), true);
     });
 });
 
 describe('prefetchPlan', () => {
-    it('warms the cache with the fetch-only modes of the two Overpass bakes, and the coast stage waits for it', () => {
+    it('warms the cache with the fetch-only modes of the three Overpass bakes, and the OSM stages wait for it', () => {
         const job = { name: 'Test Area', bbox: [7.6, 45.9, 7.8, 46.0] };
         const side = prefetchPlan(job);
         assert.deepEqual(side.map(s => s.args[0]),
-            ['tools/bake_osm_coast.py', 'tools/bake_osm_airports.py']);
+            ['tools/bake_osm_coast.py', 'tools/bake_osm_airports.py', 'tools/bake_osm_roads.py']);
         for (const s of side) {
             assert.ok(s.args.includes('--fetch-only'), `${s.label} would bake, not just fetch`);
             assert.ok(s.args.includes(`--bbox=${job.bbox.join(',')}`), `${s.label} has no box`);
@@ -216,8 +226,7 @@ describe('prefetchPlan', () => {
         assert.ok(side[0].args.includes('--osm-landuse'));
         const steps = plan(job, true);
         const waiting = steps.filter(s => s.afterPrefetch);
-        assert.equal(waiting.length, 1);
-        assert.equal(waiting[0].args[0], 'tools/bake_osm_coast.py');
+        assert.deepEqual(waiting.map(s => s.args[0]), ['tools/bake_osm_coast.py', 'tools/bake_osm_roads.py']);
         // The DEM stages run under the prefetch, not after it.
         assert.ok(steps.indexOf(waiting[0]) >= 2, 'nothing overlaps the prefetch');
     });

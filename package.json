@@ -17,6 +17,8 @@
         "bake:mesh": "node --import tsx tools/bake_planet_mesh.ts",
         "bake:errors": "node --import tsx tools/bake_planet_errors.ts",
         "bake:tex": "node --import tsx tools/bake_planet_tex.ts",
+        "bake:roads": "node tools/run-python.mjs tools/bake_osm_roads.py",
+        "bake:road-strokes": "node --import tsx tools/bake_planet_roads.ts",
         "verify:planet": "node --import tsx tools/verify_planet.ts",
         "preserve": "npm run build",
         "serve": "tsx tools/modserver.ts",

@@ -1232,7 +1232,7 @@ for (const [mount, dir] of TERRAIN_MOUNTS) {
             res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
             res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
             res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-            if (filePath.endsWith('.ptm') || filePath.endsWith('.ptx')) {
+            if (filePath.endsWith('.ptm') || filePath.endsWith('.ptx') || filePath.endsWith('.ptr')) {
                 res.setHeader('Content-Encoding', 'gzip');
                 res.setHeader('Content-Type', 'application/octet-stream');
             }

@@ -339,6 +339,8 @@ const FIXED_CAMERA_TUNING: FixedCameraTuning = {
 };
 /** How often the page URL follows a moving fixed camera. */
 const FIXED_CAMERA_URL_INTERVAL_S = 0.5;
+/** How often the page URL follows the camera in flight. */
+const FLIGHT_CAMERA_URL_INTERVAL_S = 1;
 const FIXED_CAMERA_MOVE_KEYS = new Set([
     'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown',
     'Numpad4', 'Numpad6', 'Numpad8', 'Numpad2',
@@ -554,6 +556,9 @@ export class Game {
     /** Seconds since the URL last followed the fixed camera; NaN when it is current. */
     private fixedCameraUrlAge = NaN;
     private _fixedCameraPos = new THREE.Vector3();
+    /** Seconds since the URL last followed the camera in flight. */
+    private flightCameraUrlAge = 0;
+    private _flightCameraDir = new THREE.Vector3();
 
     // Numpad orbit: how far the camera is currently orbited around the aircraft,
     // relative to the active view's default position (yaw about world UP, pitch
@@ -1712,6 +1717,7 @@ export class Game {
             this.scene.update(delta);
             this.pumpCombatSim(delta);
             this.updateAiStraightTimer(delta);
+            this.followFlightCameraInUrl(delta);
 
             if (this.player.isCrashed) {
                 this.transitionFromPlayerToCrashed();
@@ -2615,6 +2621,28 @@ export class Game {
         this.fixedCameraUrlAge = NaN;
     }
 
+    /**
+     * While flying, keep the page URL on the camera's current pose (whichever
+     * view is active), so a copy or reload opens the fixed camera there.
+     */
+    private followFlightCameraInUrl(delta: number): void {
+        this.flightCameraUrlAge += delta;
+        if (this.flightCameraUrlAge < FLIGHT_CAMERA_URL_INTERVAL_S) {
+            return;
+        }
+        this.flightCameraUrlAge = 0;
+        const camera = this.playerCamera.main;
+        camera.updateMatrixWorld();
+        const p = camera.getWorldPosition(this._fixedCameraPos);
+        const d = camera.getWorldDirection(this._flightCameraDir);
+        const g = worldToGeodetic(this.planetTerrain.basis, p.x, p.y, p.z);
+        // Same convention as FixedCameraUpdater: north is scene −z, up positive.
+        const headingDeg = (Math.atan2(d.x, -d.z) * 180 / Math.PI + 360) % 360;
+        const pitchDeg = Math.asin(Math.max(-1, Math.min(1, d.y))) * 180 / Math.PI;
+        this.cameraRoute = { lat: g.lat, lon: g.lon, altM: g.height, headingDeg, pitchDeg };
+        writeCameraRouteToLocation(this.cameraRoute);
+    }
+
     /** Scene position of a URL camera: its altitude is metres above the ellipsoid. */
     private cameraRouteWorld(route: CameraRoute): THREE.Vector3 {
         return geodeticToWorld(this.planetTerrain.basis, route.lat, route.lon, route.altM);
@@ -3205,6 +3233,7 @@ export class Game {
             landuseReveal: this.configService.landuseReveal,
             triangleBudget: this.configService.triangleBudget,
             farTileTextures: this.configService.farTileTextures,
+            roads: this.configService.roads,
         });
         await this.planetTerrain.load(DEFAULT_TERRAIN_URL);
         this.planetTerrain.setLodCamera(this.playerCamera.main);

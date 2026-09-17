@@ -802,12 +802,18 @@ async function main(): Promise<void> {
         + `${foldStats.rewritten} headers rewritten`);
 
     const outManifestPath = path.join(args.out, 'manifest.json');
-    const carriedTexture = fs.existsSync(outManifestPath)
-        ? (JSON.parse(fs.readFileSync(outManifestPath, 'utf8')) as { texture?: unknown }).texture
-        : undefined;
+    const previousManifest = fs.existsSync(outManifestPath)
+        ? JSON.parse(fs.readFileSync(outManifestPath, 'utf8')) as { texture?: unknown; roads?: unknown }
+        : {};
+    const carriedTexture = previousManifest.texture;
+    const carriedRoads = previousManifest.roads;
     if (carriedTexture !== undefined) {
         console.log('texture stream carried from the previous manifest; run `npm run bake:tex` '
             + (args.bbox ? 'with the same --bbox ' : '') + 'to refresh it for the re-meshed tiles');
+    }
+    if (carriedRoads !== undefined) {
+        console.log('road stream carried from the previous manifest; run `npm run bake:road-strokes` '
+            + (args.bbox ? 'with the same --bbox ' : '') + 'to drape it over the re-meshed tiles');
     }
 
     const outManifest = {
@@ -874,6 +880,10 @@ async function main(): Promise<void> {
         // rather than losing every texture in the pyramid the moment any
         // area is re-meshed.
         texture: carriedTexture,
+        // The road stroke stream, bake_planet_roads.ts's, for the same
+        // reason: dropped here, a re-mesh of any area switched roads off for
+        // the whole pyramid while every .ptr stayed on disk (2026-09-16).
+        roads: carriedRoads,
     };
     fs.writeFileSync(
         path.join(args.out, 'manifest.json'),

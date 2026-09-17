@@ -20,7 +20,7 @@ import {
     KeyboardPitchStickMode,
 } from '../../input/devices/keyboardControlDevice';
 import { formatSunTime } from '../../scene/materials/shaders/sun';
-import { AiPilotModels, FlightModels, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
+import { AiPilotModels, FlightModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
 import { PLAY_ORIGIN } from '../../state/worldLayout';
 import {
     DETAIL_DISTANCE_OFF, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
@@ -125,6 +125,12 @@ const TERRAIN_COLOUR_OPTIONS: Option<TerrainColours>[] = [
     { value: TerrainColours.SWATCH, label: 'Swatches (quantised imagery)' },
     { value: TerrainColours.HYBRID, label: 'Hybrid (palette hue, real shading)' },
     { value: TerrainColours.IMAGERY, label: 'Imagery (true colour)' },
+];
+
+const ROADS_OPTIONS: Option<RoadsMode>[] = [
+    { value: RoadsMode.ALL, label: 'All roads' },
+    { value: RoadsMode.MAJOR, label: 'Major roads only' },
+    { value: RoadsMode.OFF, label: 'Off' },
 ];
 
 const TERRAIN_SHADING_OPTIONS: Option<TerrainShading>[] = [
@@ -328,6 +334,22 @@ function sliderValue(event: Event): number {
                             <mat-slide-toggle [checked]="farTileTextures()" (change)="setFarTileTextures($event)">
                                 Paint far tiles from the detailed ground
                             </mat-slide-toggle>
+                        </section>
+
+                        <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Roads</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">
+                                Roads are drawn as lines over the ground where the terrain was baked
+                                with them. Major keeps motorways and main roads, the ones you can
+                                see from altitude, and drops the streets, which are most of the
+                                cost over a city.
+                            </p>
+                            <mat-radio-group class="grid grid-cols-1 sm:grid-cols-3"
+                                [value]="roads()" (change)="setRoads($event.value)">
+                                @for (option of roadsOptions; track option.value) {
+                                    <mat-radio-button [value]="option.value">{{ option.label }}</mat-radio-button>
+                                }
+                            </mat-radio-group>
                         </section>
 
                         <section>
@@ -622,6 +644,8 @@ export class SettingsDialog {
     readonly triangleBudget = signal(this.config.triangleBudget.getActive());
 
     readonly farTileTextures = signal(this.config.farTileTextures.getActive());
+    readonly roadsOptions = ROADS_OPTIONS;
+    readonly roads = signal(this.config.roads.getActive());
     readonly renderScales: Option<number>[] = RENDER_SCALES.map(scale => ({
         value: scale,
         label: scale >= 1 ? '100% (off)' : `${Math.round(scale * 100)}%`,
@@ -711,6 +735,12 @@ export class SettingsDialog {
         this.config.farTileTextures.setActive(event.checked);
         updateSettings({ farTileTextures: event.checked });
         this.farTileTextures.set(event.checked);
+    }
+
+    setRoads(mode: RoadsMode) {
+        this.config.roads.setActive(mode);
+        updateSettings({ roads: mode });
+        this.roads.set(mode);
     }
 
     setRenderScale(scale: number) {

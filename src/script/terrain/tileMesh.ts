@@ -27,6 +27,7 @@ import * as THREE from 'three';
 import { TerrainShading } from '../state/gameDefs';
 import { EnuBasis, ecefToEnu, geodeticToEcef, sceneFromEnu } from './geodesy';
 import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmTile } from './ptm';
+import type { RoadMeshes } from './roadStrokes';
 import { TileKey, tileBounds } from './tiling';
 import { LAND_TONE_BASE, TerrainTone } from './tones';
 
@@ -64,6 +65,11 @@ export interface TileMeshes {
      * it is bound to the land mesh. Disposed with the tile.
      */
     cover?: THREE.DataTexture | 'pending' | 'none';
+    /**
+     * The tile's road strokes, once attached (see RoadStrokes): the same
+     * three states as `cover`, then the bound meshes. Released with the tile.
+     */
+    roads?: RoadMeshes | 'pending' | 'none';
     /** Bytes of GPU buffer, for the cache budget. */
     bytes: number;
 }
@@ -585,8 +591,10 @@ export function buildTileMeshes(
         mesh.matrixAutoUpdate = false; // identity local transform, never moves
         // After the surface it lies on, always. The stroke is lifted off the
         // ground by the pixel floor rather than sunk into it, so it has to win
-        // ties against the terrain it covers rather than lose them.
-        mesh.renderOrder = 1;
+        // ties against the terrain it covers rather than lose them. And after
+        // the road strokes (ROAD_RENDER_ORDER), so a bridge over a canal
+        // still shows the water.
+        mesh.renderOrder = 2;
         if (onBeforeRender) {
             mesh.onBeforeRender = onBeforeRender;
         }

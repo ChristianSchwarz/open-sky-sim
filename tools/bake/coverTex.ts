@@ -267,3 +267,64 @@ export function quadrantOf(id: TileKey): { qx: number; qy: number } {
 export function boundsOf(id: TileKey): LonLatBounds {
     return tileBounds(id.z, id.x, id.y);
 }
+
+/**
+ * The texel a major road is painted with: the main-road grey of the noon
+ * palette, carrying the built-up class so the palette-tone colour modes
+ * paint it urban grey rather than the field it crosses. A leaf raster texel
+ * is 20-40 m across, so a one-texel line is a road at roughly its true
+ * width from the heights a far tile is drawn at.
+ */
+export const ROAD_TEXEL_RGB: readonly [number, number, number] = [0x55, 0x55, 0x55];
+
+/**
+ * Paint road centrelines into a leaf raster, one texel wide.
+ *
+ * What makes a road net visible from cruise altitude for no triangles at
+ * all: the far tiles sample this raster, and the moving map reads the same
+ * texels. Only the classes up to `maxClass` are painted - the residential
+ * grid of a city painted at texel width would fill the town solid grey.
+ * A road texel wins over whatever facet was there: it is drawn on top of
+ * the ground in the leaf too.
+ */
+export function paintRoads(
+    out: Uint8Array, size: number, bounds: LonLatBounds,
+    roads: ReadonlyArray<{ cls: number; points: ReadonlyArray<{ lon: number; lat: number }> }>,
+    maxClass: number, cls: number,
+): number {
+    const lonSpan = bounds.east - bounds.west;
+    const latSpan = bounds.north - bounds.south;
+    const [r, g, b] = ROAD_TEXEL_RGB;
+    let painted = 0;
+    const plot = (x: number, y: number) => {
+        if (x < 0 || y < 0 || x >= size || y >= size) {
+            return;
+        }
+        const o = (y * size + x) * 4;
+        out[o] = r;
+        out[o + 1] = g;
+        out[o + 2] = b;
+        out[o + 3] = cls;
+        painted++;
+    };
+    for (const road of roads) {
+        if (road.cls > maxClass) {
+            continue;
+        }
+        for (let i = 0; i + 1 < road.points.length; i++) {
+            const a = road.points[i], c = road.points[i + 1];
+            const x0 = ((a.lon - bounds.west) / lonSpan) * size;
+            const y0 = ((bounds.north - a.lat) / latSpan) * size;
+            const x1 = ((c.lon - bounds.west) / lonSpan) * size;
+            const y1 = ((bounds.north - c.lat) / latSpan) * size;
+            // Sample along the segment at half-texel steps: simpler than
+            // Bresenham and gap-free at any slope.
+            const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) * 2));
+            for (let s = 0; s <= steps; s++) {
+                const t = s / steps;
+                plot(Math.floor(x0 + (x1 - x0) * t), Math.floor(y0 + (y1 - y0) * t));
+            }
+        }
+    }
+    return painted;
+}

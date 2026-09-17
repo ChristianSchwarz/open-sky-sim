@@ -211,3 +211,28 @@ describe('shrinkTo', () => {
         assert.throws(() => shrinkTo(src, 8, 16), /grow/);
     });
 });
+
+describe('paintRoads', () => {
+    it('paints a one-texel line for the major classes only, over whatever was there', async () => {
+        const { paintRoads, ROAD_TEXEL_RGB } = await import('./coverTex');
+        const size = 8;
+        const raster = emptyRaster(size);
+        const bounds = { west: 0, south: 0, east: 1, north: 1 };
+        const painted = paintRoads(raster, size, bounds, [
+            // Straight across the middle, west to east: class 0 (motorway).
+            { cls: 0, points: [{ lon: 0.01, lat: 0.5 }, { lon: 0.99, lat: 0.5 }] },
+            // North to south: class 6 (residential), past the cut.
+            { cls: 6, points: [{ lon: 0.5, lat: 0.99 }, { lon: 0.5, lat: 0.01 }] },
+        ], 3, 5);
+        assert.equal(painted > 0, true);
+        // Row 4 (lat 0.5 from the north edge is row 4 of 8) is all road.
+        for (let x = 0; x < size; x++) {
+            const o = (4 * size + x) * 4;
+            assert.equal(raster[o], ROAD_TEXEL_RGB[0], `texel ${x} of row 4`);
+            assert.equal(raster[o + 3], 5, 'road texel carries the given class');
+        }
+        // Column 4 outside row 4 is untouched: the residential street was cut.
+        const o = (1 * size + 4) * 4;
+        assert.equal(raster[o + 3], PTX_NO_DATA);
+    });
+});

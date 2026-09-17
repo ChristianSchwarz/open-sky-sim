@@ -1,6 +1,6 @@
 import { FlightModel } from "../physics/model/flightModel";
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
-import { AiPilotModels, TerrainColours, TerrainShading, UnitSystems } from "../state/gameDefs";
+import { AiPilotModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from "../state/gameDefs";
 import { assertExpr, assertIsDefined } from "../utils/asserts";
 import {
     LANDUSE_REVEAL_MIN_PX, LEAF_REFINE_DISTANCE_SCALE, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
@@ -22,6 +22,7 @@ export type LanduseReachChangeListener = (scale: number) => void;
 export type LanduseRevealChangeListener = (px: number) => void;
 export type TriangleBudgetChangeListener = (triangles: number) => void;
 export type FarTileTexturesChangeListener = (enabled: boolean) => void;
+export type RoadsChangeListener = (mode: RoadsMode) => void;
 export type RenderScaleChangeListener = (scale: number) => void;
 export type SupersamplingChangeListener = (enabled: boolean) => void;
 
@@ -48,6 +49,7 @@ export class ConfigService {
     readonly landuseReveal: LanduseRevealSetting;
     readonly triangleBudget: TriangleBudgetSetting;
     readonly farTileTextures: FarTileTexturesSetting;
+    readonly roads: RoadsSetting;
     readonly renderScale: RenderScaleSetting;
     readonly supersampling: SupersamplingSetting;
     readonly daytime: DaytimeSetting;
@@ -69,6 +71,7 @@ export class ConfigService {
         initialFarTileTextures?: boolean,
         initialRenderScale?: number,
         initialSupersampling?: boolean,
+        initialRoads?: RoadsMode,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -82,6 +85,7 @@ export class ConfigService {
         this.landuseReveal = new LanduseRevealSetting(initialLanduseRevealPx);
         this.triangleBudget = new TriangleBudgetSetting(initialTriangleBudget);
         this.farTileTextures = new FarTileTexturesSetting(initialFarTileTextures);
+        this.roads = new RoadsSetting(initialRoads);
         this.renderScale = new RenderScaleSetting(initialRenderScale);
         this.supersampling = new SupersamplingSetting(initialSupersampling);
         this.daytime = new DaytimeSetting(initialDaytime);
@@ -285,6 +289,43 @@ export class FarTileTexturesSetting {
     }
 
     removeChangeListener(listener: FarTileTexturesChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * Which baked roads are drawn (see RoadStrokes). Off is how a pyramid baked
+ * without roads always looks; on costs nothing where there are none.
+ */
+export class RoadsSetting {
+    private active: RoadsMode;
+    private listeners: Set<RoadsChangeListener> = new Set();
+
+    constructor(initialActive: RoadsMode = RoadsMode.ALL) {
+        this.active = initialActive;
+    }
+
+    getActive(): RoadsMode {
+        return this.active;
+    }
+
+    setActive(mode: RoadsMode) {
+        if (mode === this.active) return;
+        this.active = mode;
+        this.notifyActive();
+    }
+
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: RoadsChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: RoadsChangeListener) {
         this.listeners.delete(listener);
     }
 }

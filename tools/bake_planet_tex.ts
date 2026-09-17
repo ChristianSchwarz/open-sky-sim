@@ -16,6 +16,7 @@
  *   node --import tsx tools/bake_planet_tex.ts [options]
  *
  *     --dir DIR        the mesh tree, read and written   (default assets/terrain)
+ *     --src DIR        the planet pyramid, for the road vectors (default assets/planet)
  *     --cache DIR      leaf rasters                      (default assets/planet/tex_cache)
  *     --size N         texels across a far tile          (default 256)
  *     --near-size N    texels across a near tile         (default 512)
@@ -33,9 +34,12 @@ import { decodePtm } from '../src/script/terrain/ptm';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import {
     PTX_HEADER_BYTES, boundsOf, decodePtx, emptyRaster, encodePtx, isEmptyRaster,
-    mergeQuadrant, quadrantOf, rasterizeLeaf, shrinkTo,
+    mergeQuadrant, paintRoads, quadrantOf, rasterizeLeaf, shrinkTo,
 } from './bake/coverTex';
+import { decodeRvr } from './bake/rvr';
 import { LonLatBounds } from './bake/shoreline';
+import { ROAD_MAJOR_MAX_CLASS } from '../src/script/terrain/ptr';
+import { TerrainClass } from '../src/script/terrain/tones';
 
 const DEFAULT_SIZE = 256;
 /**
@@ -60,6 +64,7 @@ const CACHE_META_FILE = 'meta.json';
 
 interface Args {
     dir: string;
+    src: string;
     cache: string;
     size: number;
     nearSize: number;
@@ -87,6 +92,7 @@ function overlaps(a: LonLatBounds, b: LonLatBounds): boolean {
 function parseArgs(argv: string[]): Args {
     const a: Args = {
         dir: 'assets/terrain',
+        src: 'assets/planet',
         cache: path.join('assets', 'planet', 'tex_cache'),
         size: DEFAULT_SIZE,
         nearSize: DEFAULT_NEAR_SIZE,
@@ -97,6 +103,7 @@ function parseArgs(argv: string[]): Args {
         const k = argv[i];
         const next = () => argv[++i];
         if (k === '--dir') a.dir = next();
+        else if (k === '--src') a.src = next();
         else if (k === '--cache') a.cache = next();
         else if (k === '--size') a.size = Number(next());
         else if (k === '--near-size') a.nearSize = Number(next());
@@ -128,6 +135,8 @@ interface CachedLeaf {
     size: number;
     mtimeMs: number;
     texSize: number;
+    /** The road vectors painted in, `size:mtime`, or absent when there were none. */
+    roads?: string;
 }
 
 interface CacheMeta {
@@ -225,8 +234,13 @@ function main(): void {
         const key = keyOf(k);
         const known = cacheMeta[key];
         const cachePath = tilePath(args.cache, k, '.ptx');
+        // Leaf rasters hold ground only. Roads are painted per level after
+        // the fold (see paintLevelRoads): painted here, every 2x2 fold
+        // averaged a one-texel road into its neighbours until z10 kept 53
+        // road texels of Berlin. A cache entry from that bake carries a
+        // `roads` key and is re-rasterised clean.
         if (known && known.size === st.size && known.mtimeMs === st.mtimeMs
-            && known.texSize === leafSize && fs.existsSync(cachePath)) {
+            && known.texSize === leafSize && known.roads === undefined && fs.existsSync(cachePath)) {
             fromCache++;
         } else {
             const tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
@@ -261,6 +275,28 @@ function main(): void {
         const { texels, size } = decodePtx(bytes[0] === 0x1f && bytes[1] === 0x8b ? zlib.gunzipSync(bytes) : bytes);
         return { texels, size };
     };
+    /**
+     * A copy of `texels` with the major roads of tile `k` painted in, or
+     * `texels` itself where the road bake wrote nothing for it.
+     *
+     * Per level rather than once at the leaf, because the fold is a 2x2
+     * average: a road painted into the leaf halves in contrast at every
+     * level and loses the class vote to the ground either side. And with
+     * the Ground class, which the shader paints in its own colour in every
+     * mode; the built-up class it had put it through the urban palette tone,
+     * grey on grey over a city.
+     */
+    let roadTiles = 0;
+    const paintLevelRoads = (k: TileKey, texels: Uint8Array, size: number): Uint8Array => {
+        const rvrPath = tilePath(args.src, k, '.rvr');
+        if (!fs.existsSync(rvrPath)) {
+            return texels;
+        }
+        const out = texels.slice();
+        const painted = paintRoads(out, size, boundsOf(k), decodeRvr(fs.readFileSync(rvrPath)),
+            ROAD_MAJOR_MAX_CLASS, TerrainClass.Ground);
+        return painted > 0 ? out : texels;
+    };
     let previous = new Map<string, Raster>();
     const written: TileKey[] = [];
     const emptied: TileKey[] = [];
@@ -282,6 +318,9 @@ function main(): void {
                     if (raster === undefined) {
                         raster = child.z === leafZoom
                             ? leafRaster(child)
+                            // A shipped child, roads painted in: a scoped run
+                            // folds these for siblings outside its box, which
+                            // leaves a faint trace of their roads one level up.
                             : readPtx(tilePath(args.dir, child, '.ptx'));
                     }
                     if (raster === undefined) {
@@ -301,8 +340,14 @@ function main(): void {
                 emptied.push(k);
                 continue;
             }
+            // The unpainted raster is what the next level folds; the shipped
+            // one gets this level's roads drawn crisp, one texel wide.
             current.set(keyOf(k), { texels: parent, size });
-            gz += writePtx(outPath, k, size, parent);
+            const shipped = paintLevelRoads(k, parent, size);
+            if (shipped !== parent) {
+                roadTiles++;
+            }
+            gz += writePtx(outPath, k, size, shipped);
             raw += PTX_HEADER_BYTES + parent.byteLength;
             count++;
             written.push(k);
@@ -358,7 +403,7 @@ function main(): void {
             + `- ${emptied.length} emptied -> ${all.length} tiles`);
     }
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    console.log(`wrote ${written.length} textures, ${mb(totalGz)} MB in ${secs}s`);
+    console.log(`wrote ${written.length} textures (${roadTiles} with roads), ${mb(totalGz)} MB in ${secs}s`);
 }
 
 main();

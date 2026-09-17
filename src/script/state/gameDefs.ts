@@ -59,6 +59,18 @@ export enum TerrainColours {
     IMAGERY = 'IMAGERY',
 }
 
+/**
+ * Which baked roads are drawn. Roads are a stroke sidecar per tile (see
+ * terrain/roadStrokes.ts); MAJOR keeps motorways to secondaries, the ones
+ * that read from altitude, and drops the streets that cost most of the
+ * triangles.
+ */
+export enum RoadsMode {
+    OFF = 'OFF',
+    MAJOR = 'MAJOR',
+    ALL = 'ALL',
+}
+
 /** uTerrainMode value per setting. */
 export const TERRAIN_COLOUR_MODE_INDEX: Readonly<Record<TerrainColours, TerrainColourMode>> = {
     [TerrainColours.LANDCOVER]: TerrainColourMode.Landcover,

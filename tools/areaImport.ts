@@ -449,6 +449,10 @@ export function prefetchPlan(job: { bbox: readonly number[] }): Step[] {
             label: 'prefetching airfields', cmd: PYTHON,
             args: ['tools/bake_osm_airports.py', `--bbox=${bbox}`, '--fetch-only'],
         },
+        {
+            label: 'prefetching roads', cmd: PYTHON,
+            args: ['tools/bake_osm_roads.py', `--bbox=${bbox}`, '--fetch-only'],
+        },
     ];
 }
 
@@ -478,6 +482,15 @@ export function plan(job: { name: string; bbox: readonly number[] }, withCover: 
             // mesh bake cuts facets along; the cover stage's flag of the same
             // name only paints .plc classes and cannot produce them.
             args: ['tools/bake_osm_coast.py', `--bbox=${bbox}`, '--osm-landuse'],
+            afterPrefetch: true,
+        },
+        // The road vectors: their own layer beside the coast's, read by the
+        // texture bake (major roads into the far rasters) and the road stroke
+        // bake at the end. Nothing else depends on them, so a failed fetch
+        // costs roads and nothing more.
+        {
+            label: 'baking road vectors', cmd: PYTHON,
+            args: ['tools/bake_osm_roads.py', `--bbox=${bbox}`],
             afterPrefetch: true,
         },
         // After the coast, because an airfield's platform is checked against
@@ -516,6 +529,13 @@ export function plan(job: { name: string; bbox: readonly number[] }, withCover: 
     steps.push({
         label: 'baking far-tile textures', cmd: process.execPath,
         args: ['--import', 'tsx', 'tools/bake_planet_tex.ts', '--bbox', bbox],
+    });
+    // Roads last: the strokes are draped on the finished meshes, and the
+    // texture bake above has already painted the major ones into the far
+    // rasters from the vectors the road bake wrote.
+    steps.push({
+        label: 'baking road strokes', cmd: process.execPath,
+        args: ['--import', 'tsx', 'tools/bake_planet_roads.ts', '--bbox', bbox],
     });
     return steps;
 }
@@ -563,6 +583,12 @@ export function deletePlan(name: string, bbox: readonly number[]): Step[] {
         {
             label: 'rebaking far-tile textures', cmd: process.execPath,
             args: ['--import', 'tsx', 'tools/bake_planet_tex.ts', '--bbox', bbox.join(',')],
+        },
+        // The re-meshed ancestors have new facets, so their road strokes are
+        // draped again; a tile whose .rvr went with the area loses its .ptr.
+        {
+            label: 'rebaking road strokes', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_roads.ts', '--bbox', bbox.join(',')],
         },
     ];
 }

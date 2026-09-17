@@ -57,6 +57,21 @@ export interface TextureStreamManifest {
     maxZoom: number;
 }
 
+/**
+ * Road stroke sidecars, written by tools/bake_planet_roads.ts. One PTR1 per
+ * tile that has a road on it, draped over that tile's drawn facets. Absent
+ * on a pyramid baked without roads, which the runtime treats as "no roads".
+ */
+export interface RoadStreamManifest {
+    /** Path template, e.g. `{z}/{x}/{y}.ptr`. */
+    path: string;
+    indexPath: string;
+    encoding: string;
+    transport?: string;
+    minZoom: number;
+    maxZoom: number;
+}
+
 export interface HeightStreamManifest {
     path: string;
     indexPath: string;
@@ -128,6 +143,7 @@ export interface TerrainManifest {
     enuOrigin: { lat: number; lon: number; height: number };
     mesh: MeshStreamManifest;
     texture?: TextureStreamManifest;
+    roads?: RoadStreamManifest;
     height: HeightStreamManifest;
     flattenPads: FlattenPadManifest[];
     /**
@@ -187,6 +203,17 @@ export function textureTileUrl(
 
 export function textureIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
     return manifest.texture ? `${base}/${manifest.texture.indexPath}` : undefined;
+}
+
+/** Only meaningful when `manifest.roads` is present. */
+export function roadTileUrl(
+    manifest: TerrainManifest, z: number, x: number, y: number, base: string,
+): string {
+    return `${base}/${expand(manifest.roads!.path, z, x, y)}`;
+}
+
+export function roadIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
+    return manifest.roads ? `${base}/${manifest.roads.indexPath}` : undefined;
 }
 
 export function meshIndexUrl(manifest: TerrainManifest, base: string): string {

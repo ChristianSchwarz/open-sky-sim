@@ -1,7 +1,7 @@
 import { KeyboardControlLayoutId } from "../input/devices/keyboardControlDevice";
 import { KeyboardPitchStickMode } from "../input/keyboardLayouts";
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
-import { AiPilotModels, FlightModels, TechProfiles, TerrainColours, TerrainShading } from "../state/gameDefs";
+import { AiPilotModels, FlightModels, RoadsMode, TechProfiles, TerrainColours, TerrainShading } from "../state/gameDefs";
 import {
     LANDUSE_REVEAL_MIN_PX, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
     LEAF_REFINE_DISTANCE_SCALE, LEAF_REFINE_DISTANCE_SCALE_MAX, LEAF_REFINE_DISTANCE_SCALE_MIN,
@@ -67,6 +67,8 @@ export interface AppSettings {
     terrainTriangleBudget: number;
     /** Paint far tiles with the leaf-level cover texture the bake shipped, where it did. */
     farTileTextures: boolean;
+    /** Which baked roads are stroked over the terrain: none, major only, or all. */
+    roads: RoadsMode;
     /** Fraction of the screen the 3D view is rendered at (see RENDER_SCALES); 1 is off. */
     renderScale: number;
     /** Supersample (SSAA) the 3D view where the resolution affords it. */
@@ -93,6 +95,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     landuseRevealPx: LANDUSE_REVEAL_MIN_PX,
     terrainTriangleBudget: TERRAIN_TRIANGLE_BUDGET,
     farTileTextures: true,
+    roads: RoadsMode.ALL,
     renderScale: 1,
     supersampling: true,
     volume: 0.7,
@@ -105,6 +108,7 @@ const PITCH_STICK_MODES = new Set<number>(Object.values(KeyboardPitchStickMode).
 const AI_PILOT_MODELS = new Set<string>(Object.values(AiPilotModels));
 const TERRAIN_COLOURS = new Set<string>(Object.values(TerrainColours));
 const TERRAIN_SHADING_VALUES = new Set<string>(Object.values(TerrainShading));
+const ROADS_MODES = new Set<string>(Object.values(RoadsMode));
 const SPAWN_MODES = new Set<SpawnMode>([
     'approach', 'runway', 'headon', 'carrier', 'carrierBarricade', 'carrierTakeoff', 'highAlt', 'space',
 ]);
@@ -144,6 +148,7 @@ export function loadSettings(): AppSettings {
                 ? parsed.terrainTriangleBudget : DEFAULT_SETTINGS.terrainTriangleBudget,
             farTileTextures: typeof parsed.farTileTextures === 'boolean'
                 ? parsed.farTileTextures : DEFAULT_SETTINGS.farTileTextures,
+            roads: isValidRoadsMode(parsed.roads) ? parsed.roads : DEFAULT_SETTINGS.roads,
             renderScale: isValidRenderScale(parsed.renderScale) ? parsed.renderScale : DEFAULT_SETTINGS.renderScale,
             supersampling: typeof parsed.supersampling === 'boolean'
                 ? parsed.supersampling : DEFAULT_SETTINGS.supersampling,
@@ -166,6 +171,10 @@ export function updateSettings(partial: Partial<AppSettings>): AppSettings {
     const next = { ...loadSettings(), ...partial };
     saveSettings(next);
     return next;
+}
+
+function isValidRoadsMode(value: unknown): value is RoadsMode {
+    return typeof value === 'string' && ROADS_MODES.has(value);
 }
 
 function isValidTechProfile(value: unknown): value is string {

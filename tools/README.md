@@ -420,8 +420,17 @@ npm run bake:airports -- --bbox 7.6,45.9,7.8,46.0
 npm run fetch:cover -- --bbox 7.6,45.9,7.8,46.0
 npm run bake:cover -- --bbox 7.6,45.9,7.8,46.0 --osm-landuse
 npm run bake:mesh -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:roads -- --bbox 7.6,45.9,7.8,46.0
 npm run bake:tex -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:road-strokes -- --bbox 7.6,45.9,7.8,46.0
 ```
+
+`bake:roads` fetches the OSM highways and writes per-tile road vectors
+(`.rvr`) into the planet pyramid; `bake:tex` paints the major ones into the
+far-tile rasters, and `bake:road-strokes` drapes them over the finished
+meshes into the `.ptr` stroke sidecars the runtime draws close up. Both road
+stages are optional and can be re-run on their own: nothing about a mesh
+changes. See [docs/terrain-roads.md](../docs/terrain-roads.md).
 
 `--osm-landuse` (the F9 import pipeline passes it too — see
 [`--osm-landuse`](#--osm-landuse-real-vector-edges-instead-of-raster-stairsteps)

@@ -28,6 +28,8 @@ interface TerrainStatsShape {
     triangleBudgetHit?: boolean;
     /** Resident tiles with a far cover texture attached. */
     textured?: number;
+    roadTiles?: number;
+    roadTriangles?: number;
 }
 
 /** Frame-time EMA smoothing factor — same order as the terrain LOD governor's own. */
@@ -99,7 +101,10 @@ export class PerfHudEntity implements Entity {
             const mb = (terrainStats.cacheBytes ?? 0) / 1048576;
             const failSuffix = (terrainStats.failed ?? 0) > 0 ? ` F${terrainStats.failed}` : '';
             const texSuffix = (terrainStats.textured ?? 0) > 0 ? ` TEX${terrainStats.textured}` : '';
-            lines.push(`Q${terrainStats.queued ?? 0} ${mb.toFixed(0)}MB ${terrainStats.heightTier ?? '?'}${failSuffix}${texSuffix}`);
+            // Road strokes bound, and what they cost: tiles and thousands of triangles.
+            const roadSuffix = (terrainStats.roadTiles ?? 0) > 0
+                ? ` RD${terrainStats.roadTiles}/${((terrainStats.roadTriangles ?? 0) / 1000).toFixed(1)}K` : '';
+            lines.push(`Q${terrainStats.queued ?? 0} ${mb.toFixed(0)}MB ${terrainStats.heightTier ?? '?'}${failSuffix}${texSuffix}${roadSuffix}`);
         }
 
         // Top-right, on a black box so it stays legible over bright sky/terrain.
