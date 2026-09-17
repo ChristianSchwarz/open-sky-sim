@@ -2144,6 +2144,16 @@ export class Game {
         };
     }
 
+    /**
+     * Terrain wireframe coloured by QT zoom (one hue per LOD), plus aircraft
+     * wireframe and visibility filtering for LOD debugging.
+     */
+    private toggleWireframeDebug(): void {
+        setTerrainWireframe(!isTerrainWireframe());
+        setAircraftWireframe(!isAircraftWireframe());
+        setVisibleMeshesOnly(!isVisibleMeshesOnly());
+    }
+
     private setupControls() {
         document.addEventListener('keydown', (event: KeyboardEvent) => {
             if (isOverlayKeyEvent(event)) {
@@ -2168,6 +2178,9 @@ export class Game {
                     this.heldFixedCameraKeys.clear();
                     this.fixedCameraRates = zeroFixedCameraRates();
                     this.enterSpawnMenu();
+                } else if (event.key === 'F8') {
+                    event.preventDefault();
+                    this.toggleWireframeDebug();
                 } else if (FIXED_CAMERA_MOVE_KEYS.has(event.code)) {
                     event.preventDefault();
                     this.heldFixedCameraKeys.add(event.code);
@@ -2214,11 +2227,7 @@ export class Game {
                 }
                 case 'F8': {
                     event.preventDefault();
-                    // Terrain wireframe coloured by QT zoom (one hue per LOD).
-                    // Aircraft wireframe + visibility filtering for LOD debugging.
-                    setTerrainWireframe(!isTerrainWireframe());
-                    setAircraftWireframe(!isAircraftWireframe());
-                    setVisibleMeshesOnly(!isVisibleMeshesOnly());
+                    this.toggleWireframeDebug();
                     break;
                 }
                 case 'F9': {
