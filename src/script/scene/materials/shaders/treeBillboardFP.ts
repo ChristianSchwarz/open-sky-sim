@@ -16,7 +16,6 @@ export const TreeBillboardFragProgram: string = `
   precision lowp float;
 
   uniform sampler2D uMap;
-  uniform vec3 color;
   uniform vec3 vCameraPos;
   uniform vec3 vCameraNormal;
   uniform float vCameraD;
@@ -27,7 +26,7 @@ export const TreeBillboardFragProgram: string = `
 
   varying vec3 vPosition;
   varying vec2 vUv;
-  varying vec4 vShade;
+  varying vec3 vLeaf;
 ${LOG_DEPTH_PARS_FRAGMENT}
   void main() {
     vec4 texel = texture2D(uMap, vUv);
@@ -40,10 +39,7 @@ ${LOG_DEPTH_PARS_FRAGMENT}
     // Low saturation = the neutral canopy fill; the trunk is a saturated
     // brown and fails this, so it keeps its own baked colour untinted.
     float canopyMask = step(mx - mn, 0.12);
-    vec3 leaf = mix(color, vShade.rgb, 0.5) * texel.r * vShade.a;
-    // Push the leaf colour away from its own grey to boost saturation.
-    float leafLuma = dot(leaf, vec3(0.299, 0.587, 0.114));
-    leaf = max(mix(vec3(leafLuma), leaf, 1.6), 0.0);
+    vec3 leaf = vLeaf * texel.r;
     vec3 tinted = mix(texel.rgb, leaf, canopyMask);
 
     float distance = 0.0;

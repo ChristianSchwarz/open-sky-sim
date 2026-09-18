@@ -97,6 +97,10 @@ export interface TileMeshes {
      * (most of an Alps view found none) and the forest stayed bare forever.
      */
     treeSource?: PtmTile;
+    /** Density scale the current trees were scattered with, to notice when the camera has moved far enough to rescatter. */
+    treesScale?: number;
+    /** True while an attach is in flight, so a rescatter never overlaps one. */
+    treesBusy?: boolean;
     /**
      * Set by disposeTileMeshes. Tree attachment resolves asynchronously
      * (waiting on a shared species atlas texture) and must not touch a tile

@@ -11,10 +11,8 @@
  * central European species, not a set of world biomes, so every scattered
  * tree just picks uniformly at random (a deterministic per-instance hash)
  * across the roster - a forest is a mix of all of them, not a monoculture
- * per tile. Each species needs its own atlas texture, so one tile's forest
- * becomes up to SPECIES_COUNT separate InstancedMeshes (see
- * scatterTreeSpecies / buildSpeciesTreeMesh), one per species actually
- * present rather than one per tile.
+ * per tile. All species share one atlas (see scatterTreeSpecies /
+ * buildTreeMesh), so a tile's whole forest is a single InstancedMesh with a per-instance species attribute.
  */
 
 import * as THREE from 'three';
@@ -46,13 +44,13 @@ const TREE_CLASS = 1;
 const TREE_SPACING_M2 = 200;
 /**
  * Last-resort safety valve, not a density knob - see TREE_SPACING_M2. Kept
- * low on purpose: buildSpeciesTreeMesh builds every instance's matrix in one
+ * low on purpose: buildTreeMesh builds every instance's matrix in one
  * synchronous pass (no pacing within a single tile), so this is also
  * effectively a ceiling on how long that pass can run - a large tile hitting
  * this cap is a visibly thinner treeline than its true density, not the
  * full-frame stall a much higher cap would risk once it triggers.
  */
-const TOTAL_TREE_SAFETY_CAP = 20000;
+const TOTAL_TREE_SAFETY_CAP = 8000;
 const TREE_HALF_WIDTH_M = 5;
 const TREE_HEIGHT_M = 14;
 
@@ -104,19 +102,26 @@ export interface SpeciesGroup {
     points: Vec3[];
     /** Observed ground colour (sRGB 0..1, rgb triplets) under each point, parallel to `points`. */
     tints: number[];
+    /** Unit up-facing surface normal (x, y, z triplets) of the facet under each point, parallel to `points`. */
+    normals: number[];
 }
 
 /** Full density within this range of the camera. */
-const TREE_DENSITY_NEAR_M = 3000;
+const TREE_DENSITY_NEAR_M = 2000;
 /** Density falls off linearly between the two, reaching TREE_DENSITY_FAR_SCALE at this range. */
-const TREE_DENSITY_FAR_M = 12000;
+const TREE_DENSITY_FAR_M = 8000;
 /** Density at TREE_DENSITY_FAR_M and beyond - thinned out, not zero, so distant forest doesn't have a hard edge. */
-const TREE_DENSITY_FAR_SCALE = 0.12;
+const TREE_DENSITY_FAR_SCALE = 0.08;
+/** Beyond this no trees are drawn at all: at that range they are sub-pixel and only cost overdraw, the ground colour already reads as forest. */
+const TREE_DENSITY_CUTOFF_M = 10000;
 
 /** How much to thin out a tile's tree density for a tile this far from the camera - 1 = full, down to TREE_DENSITY_FAR_SCALE. */
 export function treeDensityScaleForDistance(distanceM: number): number {
     if (distanceM <= TREE_DENSITY_NEAR_M) {
         return 1;
+    }
+    if (distanceM >= TREE_DENSITY_CUTOFF_M) {
+        return 0;
     }
     if (distanceM >= TREE_DENSITY_FAR_M) {
         return TREE_DENSITY_FAR_SCALE;
@@ -180,6 +185,13 @@ export function scatterTreeSpecies(tile: PtmTile, densityScale = 1): SpeciesGrou
         const v1 = readVert(tile, t, 1);
         const v2 = readVert(tile, t, 2);
         const area = triangleArea(v0, v1, v2);
+        // Facet normal, pointing up (tile axes: +X east, +Y up, +Z south).
+        let nx = (v1.y - v0.y) * (v2.z - v0.z) - (v1.z - v0.z) * (v2.y - v0.y);
+        let ny = (v1.z - v0.z) * (v2.x - v0.x) - (v1.x - v0.x) * (v2.z - v0.z);
+        let nz = (v1.x - v0.x) * (v2.y - v0.y) - (v1.y - v0.y) * (v2.x - v0.x);
+        const nLen = Math.hypot(nx, ny, nz) || 1;
+        const nSign = ny < 0 ? -1 / nLen : 1 / nLen;
+        nx *= nSign; ny *= nSign; nz *= nSign;
         const expected = (area / TREE_SPACING_M2) * densityScale * capScale;
         const seed = t * 97.13;
         const whole = Math.floor(expected);
@@ -199,10 +211,11 @@ export function scatterTreeSpecies(tile: PtmTile, densityScale = 1): SpeciesGrou
 
             let group = bySpecies.get(species);
             if (!group) {
-                group = { species, points: [], tints: [] };
+                group = { species, points: [], tints: [], normals: [] };
                 bySpecies.set(species, group);
             }
             group.points.push(point);
+            group.normals.push(nx, ny, nz);
             const a = (t * 3) * 4;
             group.tints.push(tile.landAttrs[a] / 255, tile.landAttrs[a + 1] / 255, tile.landAttrs[a + 2] / 255);
             total++;
@@ -231,13 +244,16 @@ function buildQuadGeometry(): THREE.BufferGeometry {
     return geometry;
 }
 
-/** Builds one species' worth of already-scattered points into an InstancedMesh bound to that species' atlas. */
-export function buildSpeciesTreeMesh(
-    group: SpeciesGroup,
+/** Builds every species' already-scattered points into one InstancedMesh (one draw call per tile) bound to the shared atlas. */
+export function buildTreeMesh(
+    groups: SpeciesGroup[],
     materials: SceneMaterialManager,
     atlas: THREE.Texture,
 ): THREE.InstancedMesh {
-    const { points } = group;
+    let count = 0;
+    for (const group of groups) {
+        count += group.points.length;
+    }
     const geometry = buildQuadGeometry();
     const material = materials.build({
         type: SceneMaterialPrimitiveType.TREE_BILLBOARD,
@@ -251,29 +267,42 @@ export function buildSpeciesTreeMesh(
         map: atlas,
     });
 
-    const mesh = new THREE.InstancedMesh(geometry, material, points.length);
-    const shade = new Float32Array(points.length * 4);
+    const mesh = new THREE.InstancedMesh(geometry, material, count);
+    const shade = new Float32Array(count * 4);
+    const speciesAttr = new Float32Array(count);
+    const normalAttr = new Float32Array(count * 3);
     const m = new THREE.Matrix4();
-    for (let i = 0; i < points.length; i++) {
-        const p = points[i];
-        // A little per-instance scale jitter reads as size variation without
-        // needing separate per-species geometry.
-        const scale = 0.85 + hash01(i * 5.113 + group.species * 13.1 + 1) * 0.3;
-        m.makeScale(scale, scale, scale);
-        m.setPosition(p.x, p.y, p.z);
-        mesh.setMatrixAt(i, m);
-        // Small per-instance brightness variation on top of the terrain-forest
-        // tint, so a dense patch doesn't read as one flat, uniform colour.
-        // rgb = the sampled ground colour, a = lighter/darker variation; the
-        // fragment shader mixes the ground colour 50:50 with the palette green.
-        shade[i * 4] = group.tints[i * 3];
-        shade[i * 4 + 1] = group.tints[i * 3 + 1];
-        shade[i * 4 + 2] = group.tints[i * 3 + 2];
-        shade[i * 4 + 3] = (0.3 + hash01(i * 6.451 + group.species * 17.3 + 2) * 0.3) * 0.9;
+    let i = 0;
+    for (const group of groups) {
+        for (let k = 0; k < group.points.length; k++, i++) {
+            const p = group.points[k];
+            // A little per-instance scale jitter reads as size variation without
+            // needing separate per-species geometry.
+            const scale = 0.85 + hash01(i * 5.113 + group.species * 13.1 + 1) * 0.3;
+            m.makeScale(scale, scale, scale);
+            m.setPosition(p.x, p.y, p.z);
+            mesh.setMatrixAt(i, m);
+            speciesAttr[i] = group.species;
+            normalAttr[i * 3] = group.normals[k * 3];
+            normalAttr[i * 3 + 1] = group.normals[k * 3 + 1];
+            normalAttr[i * 3 + 2] = group.normals[k * 3 + 2];
+            // rgb = the sampled ground colour, a = lighter/darker variation; the
+            // fragment shader mixes the ground colour 50:50 with the palette green.
+            shade[i * 4] = group.tints[k * 3];
+            shade[i * 4 + 1] = group.tints[k * 3 + 1];
+            shade[i * 4 + 2] = group.tints[k * 3 + 2];
+            shade[i * 4 + 3] = (0.3 + hash01(i * 6.451 + group.species * 17.3 + 2) * 0.3) * 0.9;
+        }
     }
     mesh.instanceMatrix.needsUpdate = true;
     geometry.setAttribute('instanceShade', new THREE.InstancedBufferAttribute(shade, 4));
-    mesh.frustumCulled = false;
+    geometry.setAttribute('instanceNormal', new THREE.InstancedBufferAttribute(normalAttr, 3));
+    geometry.setAttribute('instanceSpecies', new THREE.InstancedBufferAttribute(speciesAttr, 1));
+    // Real bounding sphere (instances plus the quad) so the renderer culls
+    // a tile's trees that are off-screen; the tile group's matrix is static
+    // (LOD push is a shader uniform), so the sphere stays valid.
+    mesh.computeBoundingSphere();
+    mesh.frustumCulled = true;
     mesh.matrixAutoUpdate = false;
     return mesh;
 }

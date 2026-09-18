@@ -390,6 +390,12 @@ const ZOOM_RATE = 1.5;
 const ZOOM_MIN = 0.3;
 const ZOOM_MAX = 5.0;
 
+const COVER_CLASS_NAMES: Record<number, string> = {
+    0: 'Unknown', 1: 'Forest', 2: 'Shrub', 3: 'Grass', 4: 'Cropland', 5: 'Built-up',
+    6: 'Bare ground', 7: 'Snow / ice', 8: 'Water', 9: 'Wetland', 10: 'Mangrove',
+    11: 'Moss / lichen', 12: 'Sand', 13: 'Open ground',
+};
+
 export class GameUpdateTask implements KernelUpdateTask {
 
     constructor(private game: Game) { }
@@ -1030,6 +1036,112 @@ export class Game {
                 }
             }, autoHideMs);
         }
+    }
+
+    private coverTooltipEl?: HTMLDivElement;
+    private coverTooltipMoveAt = 0;
+    private coverTooltipShown = false;
+    private coverTooltipClient = { x: 0, y: 0 };
+    private coverTooltipNdc = new THREE.Vector2();
+    private coverTooltipRaycaster = new THREE.Raycaster();
+
+    private onCoverTooltipMove(event: MouseEvent): void {
+        this.coverTooltipMoveAt = performance.now();
+        this.coverTooltipClient.x = event.clientX;
+        this.coverTooltipClient.y = event.clientY;
+        this.hideCoverTooltip();
+    }
+
+    private hideCoverTooltip(): void {
+        if (this.coverTooltipShown && this.coverTooltipEl) {
+            this.coverTooltipEl.classList.add('hidden');
+        }
+        this.coverTooltipShown = false;
+    }
+
+    /** After 2 s without mouse movement, names the land cover under the cursor. */
+    private updateCoverTooltip(): void {
+        if (this.coverTooltipShown || this.coverTooltipMoveAt === 0
+            || performance.now() - this.coverTooltipMoveAt < 2000) {
+            return;
+        }
+        // One attempt per rest; a new mouse move re-arms it.
+        this.coverTooltipMoveAt = 0;
+        const container = document.getElementById('container');
+        if (!container || this.view === PlayerViewState.SHOWCASE) {
+            return;
+        }
+        const rect = container.getBoundingClientRect();
+        const px = this.coverTooltipClient.x - rect.left;
+        const py = this.coverTooltipClient.y - rect.top;
+        if (px < 0 || py < 0 || px > rect.width || py > rect.height
+            || rect.width <= 0 || rect.height <= 0) {
+            return;
+        }
+        this.coverTooltipNdc.set((px / rect.width) * 2 - 1, -(py / rect.height) * 2 + 1);
+        const camera = this.playerCamera.main;
+        this.coverTooltipRaycaster.setFromCamera(this.coverTooltipNdc, camera);
+        const { origin, direction } = this.coverTooltipRaycaster.ray;
+        const terrain = this.planetTerrain;
+        // First t at which the ray is below a surface; height() returns
+        // undefined where the surface has no answer (holes, undrawn tiles).
+        const march = (height: (x: number, z: number) => number | undefined): number => {
+            let lo = 0;
+            let hi = -1;
+            const below = (t: number) => {
+                const h = height(origin.x + direction.x * t, origin.z + direction.z * t);
+                return h !== undefined && origin.y + direction.y * t < h;
+            };
+            for (let t = 10; t <= 100_000; t += Math.max(10, t * 0.02)) {
+                if (below(t)) {
+                    hi = t;
+                    break;
+                }
+                lo = t;
+            }
+            if (hi < 0) {
+                return -1;
+            }
+            for (let i = 0; i < 20; i++) {
+                const mid = (lo + hi) / 2;
+                if (below(mid)) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            return hi;
+        };
+        const tDem = march((x, z) => terrain.heightAtWorld(x, z));
+        if (tDem < 0) {
+            return;
+        }
+        // The drawn land mesh has holes where water is, so a ray that reaches
+        // the DEM well before it reaches drawn land is looking at water.
+        const tLand = march((x, z) => terrain.drawnHeightAtWorld(x, z));
+        const isWater = tLand < 0 || tLand > tDem * 1.05 + 20;
+        const cover = isWater ? { cls: 8 } : terrain.drawnCoverAtWorld(
+            origin.x + direction.x * tLand, origin.z + direction.z * tLand);
+        if (cover === undefined) {
+            return;
+        }
+        let el = this.coverTooltipEl;
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'hidden';
+            Object.assign(el.style, {
+                position: 'fixed', zIndex: '5', pointerEvents: 'none', color: 'white',
+                background: 'rgba(0,0,0,0.8)', border: '1px solid #8a8a8a',
+                borderRadius: '0.25rem', padding: '0.25rem 0.6rem', fontSize: '0.85rem',
+            });
+            document.body.appendChild(el);
+            this.coverTooltipEl = el;
+        }
+        el.textContent = COVER_CLASS_NAMES[cover.cls] ?? 'Unknown';
+        el.style.left = `${this.coverTooltipClient.x + 14}px`;
+        el.style.top = `${this.coverTooltipClient.y + 18}px`;
+        el.classList.remove('hidden');
+        this.coverTooltipShown = true;
     }
 
     private setShowcasePickLabel(text: string | null): void {
@@ -1897,6 +2009,7 @@ export class Game {
         }
         this.updateHdResolution();
         this.updateShowcasePicking(this.hdResolutionWidth || H_RES);
+        this.updateCoverTooltip();
 
         let layers: RenderLayer[];
         if (this.view === PlayerViewState.SHOWCASE) {
@@ -2287,6 +2400,7 @@ export class Game {
 
         document.addEventListener('mousemove', (event: MouseEvent) => {
             this.updateShowcasePointerFromEvent(event);
+            this.onCoverTooltipMove(event);
         });
         document.addEventListener('mousedown', (event: MouseEvent) => {
             if (event.button !== 0 || this.view !== PlayerViewState.SHOWCASE) {

@@ -23,9 +23,9 @@ import { Palette } from '../config/palettes/palette';
 import { CanvasPainter } from '../render/screen/canvasPainter';
 import { updateUniforms } from '../scene/utils';
 import { attachToRenderList } from '../render/renderList';
-import { getTreeSpeciesAtlas } from '../scene/textures/treeAtlas';
+import { getTreeAtlas } from '../scene/textures/treeAtlas';
 import {
-    TREE_DENSITY_MULTIPLIER_DEFAULT, buildSpeciesTreeMesh, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
+    TREE_DENSITY_MULTIPLIER_DEFAULT, buildTreeMesh, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
 } from './treeBillboards';
 import { sphereInFrustum } from './culling';
 import { DemTile, decodePdm } from './demTile';
@@ -389,6 +389,17 @@ export class TerrainEntity implements Entity {
      * tile using that species) before its mesh can be built; scattering
      * itself is synchronous.
      */
+    /** Density scale for this tile from its current distance to the LOD camera, times the user setting. */
+    private treeScaleFor(tile: PtmTile): number {
+        const distanceM = this.lodCamera
+            ? this.lodCamera.position.distanceTo(tileOriginWorld(tile.id, tile.centerHeightM, this.basis))
+            : 0;
+        return treeDensityScaleForDistance(distanceM) * this.treeDensity;
+    }
+
+    /** Tiles rescattered this frame, capped so a big camera move spreads the work over frames. */
+    private treeRescattersThisFrame = 0;
+
     private async attachTrees(tile: PtmTile, meshes: TileMeshes, materials: SceneMaterialManager): Promise<void> {
         // Thin out density with distance from whichever camera is currently
         // driving LOD - the same camera-to-tile distance the quadtree itself
@@ -397,21 +408,20 @@ export class TerrainEntity implements Entity {
         // already proven consistent rather than inventing a second one.
         // Falls back to full density if no LOD camera is set yet (e.g. very
         // first boot tiles).
-        const distanceM = this.lodCamera
-            ? this.lodCamera.position.distanceTo(tileOriginWorld(tile.id, tile.centerHeightM, this.basis))
-            : 0;
-        const densityScale = treeDensityScaleForDistance(distanceM) * this.treeDensity;
+        const densityScale = this.treeScaleFor(tile);
+        meshes.treesScale = densityScale;
+        meshes.treesBusy = true;
         const groups = scatterTreeSpecies(tile, densityScale);
         const treeMeshes = groups.length > 0
-            ? await Promise.all(groups.map(group =>
-                getTreeSpeciesAtlas(group.species)
-                    .then(atlas => buildSpeciesTreeMesh(group, materials, atlas)),
-            )).catch(() => {
-                // No atlas (e.g. a canvas-less test environment) - the tile
-                // still draws, it just grows no trees.
-                return undefined;
-            })
+            ? await getTreeAtlas()
+                .then(atlas => [buildTreeMesh(groups, materials, atlas)])
+                .catch(() => {
+                    // No atlas (e.g. a canvas-less test environment) - the tile
+                    // still draws, it just grows no trees.
+                    return undefined;
+                })
             : undefined;
+        meshes.treesBusy = false;
         if (meshes.disposed) {
             return;
         }
@@ -1375,6 +1385,7 @@ export class TerrainEntity implements Entity {
     private syncGroup(camPos: THREE.Vector3): void {
         this.group.clear();
         this.drawnTriangles = 0;
+        this.treeRescattersThisFrame = 0;
         this.triangleBudgetHit = false;
         this.pruneDrawnHeightIndices();
         // Nearest first: when the triangle budget below has to cut the list
@@ -1427,6 +1438,19 @@ export class TerrainEntity implements Entity {
                     if (src) {
                         meshes.treesRequested = true;
                         void this.attachTrees(src, meshes, this.treeMaterials);
+                    }
+                } else if (!node.under && meshes.treeSource && !meshes.treesBusy
+                    && meshes.treesScale !== undefined && this.treeRescattersThisFrame < 1) {
+                    // The camera moved since this tile's density was chosen:
+                    // rescatter once it differs enough (or trees appear /
+                    // vanish at the cutoff), one tile per frame.
+                    const want = this.treeScaleFor(meshes.treeSource);
+                    const had = meshes.treesScale;
+                    const changed = (want === 0) !== (had === 0)
+                        || (want > 0 && (want > had * 1.6 || want < had / 1.6));
+                    if (changed) {
+                        this.treeRescattersThisFrame++;
+                        void this.attachTrees(meshes.treeSource, meshes, this.treeMaterials);
                     }
                 }
                 this.drawnTriangles += countTriangles(meshes) + this.roads.trianglesOf(meshes);

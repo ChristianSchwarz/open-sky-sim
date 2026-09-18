@@ -1,15 +1,22 @@
 import * as THREE from 'three';
-import { Species, TREE_VIEWS, TreeView, generateTreeSprite } from '../vegetation/treeSprites';
+import { SPECIES_COUNT, Species, TREE_VIEWS, TreeView, generateTreeSprite } from '../vegetation/treeSprites';
 
 /**
- * One 2x2 CanvasTexture per species: 0deg/30deg top row, 60deg/90deg bottom
- * row. `treeBillboardVP.ts` picks a quadrant per instance per frame from the
+ * One shared CanvasTexture for every species, so a tile's whole forest is a
+ * single instanced draw: a 2x2 grid of species blocks, each block a 2x2 grid
+ * of views (0deg/30deg top row, 60deg/90deg bottom row). `treeBillboardVP.ts` picks a quadrant per instance per frame from the
  * camera's elevation angle above the tree (0 = eye-level, 90 = straight
  * down), so the runtime only ever binds one texture per species no matter how
  * many trees or view angles are on screen.
  */
 const CELL_SIZE = 128;
-const ATLAS_SIZE = CELL_SIZE * 2;
+const BLOCK_SIZE = CELL_SIZE * 2;
+const ATLAS_SIZE = BLOCK_SIZE * 2;
+
+/** (col, row) of a species' block within the 2x2 block grid - must match treeBillboardVP.ts (species % 2, floor(species / 2)). */
+function speciesBlock(species: Species): [number, number] {
+    return [species % 2, Math.floor(species / 2)];
+}
 
 /** (col, row) within the 2x2 atlas each view is rasterised into - must match the bucket layout in treeBillboardVP.ts. */
 const VIEW_CELL: Record<TreeView, [number, number]> = {
@@ -19,7 +26,7 @@ const VIEW_CELL: Record<TreeView, [number, number]> = {
     [TreeView.DEG_90]: [1, 1],
 };
 
-const cache = new Map<Species, Promise<THREE.CanvasTexture>>();
+let atlasPromise: Promise<THREE.CanvasTexture> | undefined;
 
 function loadSvgImage(svg: string): Promise<HTMLImageElement> {
     return new Promise((resolve, reject) => {
@@ -30,7 +37,7 @@ function loadSvgImage(svg: string): Promise<HTMLImageElement> {
     });
 }
 
-async function buildAtlas(species: Species): Promise<THREE.CanvasTexture> {
+async function buildAtlas(): Promise<THREE.CanvasTexture> {
     const canvas = document.createElement('canvas');
     canvas.width = ATLAS_SIZE;
     canvas.height = ATLAS_SIZE;
@@ -39,11 +46,17 @@ async function buildAtlas(species: Species): Promise<THREE.CanvasTexture> {
         throw new Error('2D canvas context unavailable for tree atlas');
     }
 
-    await Promise.all(TREE_VIEWS.map(async view => {
-        const img = await loadSvgImage(generateTreeSprite(species, view));
-        const [col, row] = VIEW_CELL[view];
-        ctx.drawImage(img, col * CELL_SIZE, row * CELL_SIZE, CELL_SIZE, CELL_SIZE);
-    }));
+    const jobs: Promise<void>[] = [];
+    for (let species = 0 as Species; species < SPECIES_COUNT; species++) {
+        const [bx, by] = speciesBlock(species);
+        for (const view of TREE_VIEWS) {
+            jobs.push(loadSvgImage(generateTreeSprite(species, view)).then(img => {
+                const [col, row] = VIEW_CELL[view];
+                ctx.drawImage(img, bx * BLOCK_SIZE + col * CELL_SIZE, by * BLOCK_SIZE + row * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+            }));
+        }
+    }
+    await Promise.all(jobs);
 
     // flipY = false: canvas row order then matches vUv directly (see
     // treeBillboardVP.ts), rather than three.js's default bottom-up sampling.
@@ -65,17 +78,13 @@ async function buildAtlas(species: Species): Promise<THREE.CanvasTexture> {
     return texture;
 }
 
-/** Lazily rasterises and caches one atlas texture per species, shared across every tile that needs it. */
-export function getTreeSpeciesAtlas(species: Species): Promise<THREE.CanvasTexture> {
-    let promise = cache.get(species);
-    if (!promise) {
-        promise = buildAtlas(species);
-        cache.set(species, promise);
-    }
-    return promise;
+/** Lazily rasterises and caches the one shared tree atlas. */
+export function getTreeAtlas(): Promise<THREE.CanvasTexture> {
+    atlasPromise ??= buildAtlas();
+    return atlasPromise;
 }
 
-/** Test/teardown hook: drops every cached atlas so a later call rebuilds them. */
-export function clearTreeSpeciesAtlasCache(): void {
-    cache.clear();
+/** Test/teardown hook: drops the cached atlas so a later call rebuilds it. */
+export function clearTreeAtlasCache(): void {
+    atlasPromise = undefined;
 }
