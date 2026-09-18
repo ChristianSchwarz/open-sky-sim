@@ -8,6 +8,8 @@ import { ConstantFragProgram } from './shaders/constantFP';
 import { DepthFragProgram } from './shaders/depthFP';
 import { FlatVertProgram, HighpFlatVertProgram } from './shaders/flatVP';
 import { ImpostorVertProgram } from './shaders/impostorVP';
+import { TreeBillboardFragProgram } from './shaders/treeBillboardFP';
+import { TreeBillboardVertProgram } from './shaders/treeBillboardVP';
 import { LineVertProgram } from './shaders/lineVP';
 import { ParticleMeshFragProgram } from './shaders/particlesMeshFP';
 import { ParticleMeshVertProgram } from './shaders/particlesMeshVP';
@@ -28,6 +30,7 @@ export enum SceneMaterialPrimitiveType {
     POINT,
     PARTICLE_MESH,
     IMPOSTOR,
+    TREE_BILLBOARD,
 }
 
 export type SceneMaterialProperties = SceneMaterialCommonProperties & (
@@ -35,7 +38,8 @@ export type SceneMaterialProperties = SceneMaterialCommonProperties & (
     SceneMaterialLineProperties |
     SceneMaterialPointProperties |
     SceneMaterialParticleMeshProperties |
-    SceneMaterialImpostorProperties
+    SceneMaterialImpostorProperties |
+    SceneMaterialTreeBillboardProperties
 );
 
 export interface SceneMaterialCommonProperties {
@@ -142,6 +146,15 @@ export interface SceneMaterialImpostorProperties {
     type: SceneMaterialPrimitiveType.IMPOSTOR;
 }
 
+/**
+ * Camera-facing billboard sampling a species' 4-view tree atlas (see
+ * treeAtlas.ts) instead of a flat palette colour.
+ */
+export interface SceneMaterialTreeBillboardProperties {
+    type: SceneMaterialPrimitiveType.TREE_BILLBOARD;
+    map: THREE.Texture;
+}
+
 export type SceneMaterialUniforms = SceneFlatMaterialUniforms | SceneShadedMaterialUniforms;
 
 export interface SceneFlatMaterialUniforms {
@@ -216,6 +229,7 @@ export class SceneMaterialManager implements KernelTask {
     private readonly pointProto: THREE.ShaderMaterial;
     private readonly particleMeshProto: THREE.ShaderMaterial;
     private readonly impostorProto: THREE.ShaderMaterial;
+    private readonly treeBillboardProto: THREE.ShaderMaterial;
     private readonly colorCache: ColorCache = new ColorCache();
     private palette: Palette;
     private fog: FogQuality;
@@ -298,6 +312,14 @@ export class SceneMaterialManager implements KernelTask {
         this.impostorProto = new THREE.ShaderMaterial({
             vertexShader: ImpostorVertProgram,
             fragmentShader: DepthFragProgram,
+            side: THREE.DoubleSide,
+            depthWrite: true,
+            userData: {},
+            uniforms: {}
+        });
+        this.treeBillboardProto = new THREE.ShaderMaterial({
+            vertexShader: TreeBillboardVertProgram,
+            fragmentShader: TreeBillboardFragProgram,
             side: THREE.DoubleSide,
             depthWrite: true,
             userData: {},
@@ -442,6 +464,11 @@ export class SceneMaterialManager implements KernelTask {
                 },
                 uMaxStretch: { value: RIVER_MAX_STRETCH },
                 uRenderOrigin: { value: new THREE.Vector3() },
+                uMap: {
+                    value: properties.type === SceneMaterialPrimitiveType.TREE_BILLBOARD
+                        ? properties.map
+                        : null,
+                },
                 // Shared by reference: moving the sun (time of day) rewrites
                 // these once and every material sees it.
                 ...SUN_UNIFORMS,
@@ -549,6 +576,8 @@ export class SceneMaterialManager implements KernelTask {
             return this.particleMeshProto.clone();
         } else if (properties.type === SceneMaterialPrimitiveType.IMPOSTOR) {
             return this.impostorProto.clone();
+        } else if (properties.type === SceneMaterialPrimitiveType.TREE_BILLBOARD) {
+            return this.treeBillboardProto.clone();
         }
         assertExpr(false, 'This should never happen');
     }

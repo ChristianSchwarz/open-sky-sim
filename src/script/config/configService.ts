@@ -7,6 +7,7 @@ import {
     clampDetailDistanceM, clampLanduseRevealPx, clampLeafRefineScale, clampTriangleBudget,
 } from "../terrain/lod";
 import { LANDUSE_BLEND_DEFAULT, clampLanduseBlend } from "../terrain/tones";
+import { TREE_DENSITY_MULTIPLIER_DEFAULT, clampTreeDensityMultiplier } from "../terrain/treeBillboards";
 import { TechProfile } from "./profiles/profile";
 
 export type ProfileChangeListener = (profile: TechProfile, newId: string, oldId: string) => void;
@@ -16,6 +17,7 @@ export type AiPilotModelChangeListener = (model: AiPilotModels) => void;
 export type TerrainColourChangeListener = (mode: TerrainColours) => void;
 export type TerrainShadingChangeListener = (mode: TerrainShading) => void;
 export type LanduseBlendChangeListener = (blend: number) => void;
+export type TreeDensityChangeListener = (multiplier: number) => void;
 export type DaytimeChangeListener = (hours: number) => void;
 export type TerrainDetailChangeListener = (distanceM: number) => void;
 export type LanduseReachChangeListener = (scale: number) => void;
@@ -44,6 +46,7 @@ export class ConfigService {
     readonly terrainColour: TerrainColourSetting;
     readonly terrainShading: TerrainShadingSetting;
     readonly landuseBlend: LanduseBlendSetting;
+    readonly treeDensity: TreeDensitySetting;
     readonly terrainDetail: TerrainDetailSetting;
     readonly landuseReach: LanduseReachSetting;
     readonly landuseReveal: LanduseRevealSetting;
@@ -72,6 +75,7 @@ export class ConfigService {
         initialRenderScale?: number,
         initialSupersampling?: boolean,
         initialRoads?: RoadsMode,
+        initialTreeDensity?: number,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -88,6 +92,7 @@ export class ConfigService {
         this.roads = new RoadsSetting(initialRoads);
         this.renderScale = new RenderScaleSetting(initialRenderScale);
         this.supersampling = new SupersamplingSetting(initialSupersampling);
+        this.treeDensity = new TreeDensitySetting(initialTreeDensity);
         this.daytime = new DaytimeSetting(initialDaytime);
     }
 }
@@ -642,6 +647,47 @@ export class LanduseBlendSetting {
     }
 
     removeChangeListener(listener: LanduseBlendChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * Overall tree density multiplier, 0..20 (1 = the baked-in default spacing,
+ * see TREE_SPACING_M2 in treeBillboards.ts; 0 turns trees off). A change
+ * re-scatters every resident tile's trees (see
+ * TerrainEntity.rebuildResidentTrees), not just tiles streamed in afterward.
+ */
+export class TreeDensitySetting {
+    private active: number;
+    private listeners: Set<TreeDensityChangeListener> = new Set();
+
+    constructor(initialActive: number = TREE_DENSITY_MULTIPLIER_DEFAULT) {
+        this.active = clampTreeDensityMultiplier(initialActive);
+    }
+
+    getActive(): number {
+        return this.active;
+    }
+
+    setActive(multiplier: number) {
+        const clamped = clampTreeDensityMultiplier(multiplier);
+        if (clamped === this.active) return;
+        this.active = clamped;
+        this.notifyActive();
+    }
+
+    /** Push the current value to listeners (used once after they register). */
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: TreeDensityChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: TreeDensityChangeListener) {
         this.listeners.delete(listener);
     }
 }

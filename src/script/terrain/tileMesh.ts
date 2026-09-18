@@ -70,6 +70,39 @@ export interface TileMeshes {
      * three states as `cover`, then the bound meshes. Released with the tile.
      */
     roads?: RoadMeshes | 'pending' | 'none';
+    /**
+     * Tree billboards, once attached (see treeBillboards.ts and
+     * terrainEntity.ts's upload callback). One InstancedMesh per species
+     * actually present in the tile's forest (a mixed stand, not a single
+     * species per tile), each bound to that species' own atlas. Undefined
+     * until every present species' atlas texture has loaded (or the tile
+     * turned out to have no forest triangles) — trees pop in shortly after
+     * the rest of a newly streamed tile, not with it.
+     */
+    trees?: THREE.InstancedMesh[];
+    /**
+     * The quantScale-cancelling wrapper `trees` is parented under (see
+     * terrainEntity.ts's attachTrees) — kept so a later rebuild (e.g. the
+     * tree edge-density setting changing) can remove exactly this and only
+     * this from the tile group before attaching fresh ones, without
+     * disturbing land/water/rivers/outlines.
+     */
+    treesGroup?: THREE.Group;
+    /** Set once the draw loop has asked for this tile's trees, so it asks only once. */
+    treesRequested?: boolean;
+    /**
+     * The decoded source tile, kept only when it has forest triangles. The
+     * mesh store evicts raw tiles independently of their GPU meshes, so by the
+     * time the draw loop asks for a tile's trees the source is routinely gone
+     * (most of an Alps view found none) and the forest stayed bare forever.
+     */
+    treeSource?: PtmTile;
+    /**
+     * Set by disposeTileMeshes. Tree attachment resolves asynchronously
+     * (waiting on a shared species atlas texture) and must not touch a tile
+     * that was evicted before that resolved.
+     */
+    disposed?: boolean;
     /** Bytes of GPU buffer, for the cache budget. */
     bytes: number;
 }
@@ -619,7 +652,15 @@ export function disposeTileMeshes(m: TileMeshes): void {
     if (m.cover instanceof THREE.DataTexture) {
         m.cover.dispose();
     }
+    for (const trees of m.trees ?? []) {
+        trees.geometry.dispose();
+        (trees.material as THREE.Material).dispose();
+    }
     // A sidecar still in flight must not bind to a released tile.
     m.cover = 'none';
+    // Tree attachment is the one part of a tile still resolving
+    // asynchronously (an in-flight species atlas fetch) after this runs.
+    m.disposed = true;
+    m.treeSource = undefined;
     m.group.clear();
 }

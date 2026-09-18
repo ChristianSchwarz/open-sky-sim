@@ -9,6 +9,7 @@ import {
     TERRAIN_TRIANGLE_BUDGET_MIN,
 } from "../terrain/lod";
 import { LANDUSE_BLEND_DEFAULT } from "../terrain/tones";
+import { TREE_DENSITY_MULTIPLIER_DEFAULT, TREE_DENSITY_MULTIPLIER_MAX, TREE_DENSITY_MULTIPLIER_MIN } from "../terrain/treeBillboards";
 import { RENDER_SCALES } from "./configService";
 
 const STORAGE_KEY = 'retroflightsim.settings';
@@ -31,6 +32,8 @@ export interface AppSettings {
      * tone rather than the sampled terrain colour, 0..1.
      */
     landuseBlend: number;
+    /** Overall tree density multiplier, 0..20; 1 is the baked-in default. */
+    treeDensity: number;
     /** Last aircraft (+ livery) id chosen in the spawn menu. */
     aircraftId: string;
     /** Last spawn mode used to start a flight. */
@@ -86,6 +89,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     terrainColour: TerrainColours.HYBRID,
     terrainShading: TerrainShading.FACETED,
     landuseBlend: LANDUSE_BLEND_DEFAULT,
+    treeDensity: TREE_DENSITY_MULTIPLIER_DEFAULT,
     aircraftId: 'f22',
     spawnMode: 'headon',
     daytime: DEFAULT_SUN_HOURS,
@@ -130,6 +134,8 @@ export function loadSettings(): AppSettings {
             terrainColour: isValidTerrainColour(parsed.terrainColour) ? parsed.terrainColour : DEFAULT_SETTINGS.terrainColour,
             terrainShading: isValidTerrainShading(parsed.terrainShading) ? parsed.terrainShading : DEFAULT_SETTINGS.terrainShading,
             landuseBlend: isValidLanduseBlend(parsed.landuseBlend) ? parsed.landuseBlend : DEFAULT_SETTINGS.landuseBlend,
+            treeDensity: isValidTreeDensity(parsed.treeDensity)
+                ? parsed.treeDensity : DEFAULT_SETTINGS.treeDensity,
             aircraftId: isValidAircraftId(parsed.aircraftId) ? parsed.aircraftId : DEFAULT_SETTINGS.aircraftId,
             spawnMode: isValidSpawnMode(parsed.spawnMode) ? parsed.spawnMode : DEFAULT_SETTINGS.spawnMode,
             daytime: isValidDaytime(parsed.daytime) ? parsed.daytime : DEFAULT_SETTINGS.daytime,
@@ -207,6 +213,11 @@ function isValidTerrainShading(value: unknown): value is TerrainShading {
 
 function isValidLanduseBlend(value: unknown): value is number {
     return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function isValidTreeDensity(value: unknown): value is number {
+    return typeof value === 'number' && Number.isFinite(value)
+        && value >= TREE_DENSITY_MULTIPLIER_MIN && value <= TREE_DENSITY_MULTIPLIER_MAX;
 }
 
 function isValidLanduseReach(value: unknown): value is number {

@@ -3243,6 +3243,7 @@ export class Game {
             triangleBudget: this.configService.triangleBudget,
             farTileTextures: this.configService.farTileTextures,
             roads: this.configService.roads,
+            treeDensity: this.configService.treeDensity,
         });
         await this.planetTerrain.load(DEFAULT_TERRAIN_URL);
         this.planetTerrain.setLodCamera(this.playerCamera.main);

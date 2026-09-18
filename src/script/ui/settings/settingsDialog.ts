@@ -383,6 +383,23 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Tree density</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">
+                                How many trees are placed in each wood, as a multiplier on the default
+                                spacing - 0 turns trees off. Re-grows forest already loaded, so it
+                                takes a moment to catch up over a large area.
+                            </p>
+                            <div class="flex items-center gap-4">
+                                <span class="text-sm opacity-70">0x</span>
+                                <mat-slider class="flex-1" [min]="0" [max]="20" [step]="1">
+                                    <input matSliderThumb [value]="treeDensity()" (input)="setTreeDensity($event)">
+                                </mat-slider>
+                                <span class="text-sm opacity-70">20x</span>
+                                <output class="w-16 text-right tabular-nums">{{ treeDensity() }}x</output>
+                            </div>
+                        </section>
+
+                        <section>
                             <h3 class="m-0 mb-1 text-base font-medium">Terrain shading</h3>
                             <p class="m-0 mb-2 text-sm opacity-70">
                                 Flat colour per facet, or smoothly blended across neighbouring facets.
@@ -610,6 +627,7 @@ export class SettingsDialog {
     readonly terrainShading = signal(this.config.terrainShading.getActive());
     /** Percent of a land-use facet's colour taken from its land type's tone. */
     readonly landuseBlend = signal(Math.round(this.config.landuseBlend.getActive() * 100));
+    readonly treeDensity = signal(Math.round(this.config.treeDensity.getActive()));
     readonly flightModel = signal(this.config.flightModels.getActiveKey());
     readonly aiPilotModel = signal(this.config.aiPilotModels.getActive());
     readonly unitSystem = signal(this.config.unitSystem.getActive());
@@ -767,6 +785,13 @@ export class SettingsDialog {
         this.config.landuseBlend.setActive(percent / 100);
         updateSettings({ landuseBlend: percent / 100 });
         this.landuseBlend.set(percent);
+    }
+
+    setTreeDensity(event: Event) {
+        const multiplier = Math.round(sliderValue(event));
+        this.config.treeDensity.setActive(multiplier);
+        updateSettings({ treeDensity: multiplier });
+        this.treeDensity.set(multiplier);
     }
 
     setDaytime(event: Event) {

@@ -23,6 +23,10 @@ import { Palette } from '../config/palettes/palette';
 import { CanvasPainter } from '../render/screen/canvasPainter';
 import { updateUniforms } from '../scene/utils';
 import { attachToRenderList } from '../render/renderList';
+import { getTreeSpeciesAtlas } from '../scene/textures/treeAtlas';
+import {
+    TREE_DENSITY_MULTIPLIER_DEFAULT, buildSpeciesTreeMesh, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
+} from './treeBillboards';
 import { sphereInFrustum } from './culling';
 import { DemTile, decodePdm } from './demTile';
 import {
@@ -61,7 +65,7 @@ import {
 import { RoadsMode, TERRAIN_COLOUR_MODE_INDEX, TerrainColours, TerrainShading } from '../state/gameDefs';
 import {
     FarTileTexturesSetting, LanduseBlendSetting, LanduseReachSetting, LanduseRevealSetting, RoadsSetting, TerrainColourSetting,
-    TerrainDetailSetting, TerrainShadingSetting, TriangleBudgetSetting,
+    TerrainDetailSetting, TerrainShadingSetting, TreeDensitySetting, TriangleBudgetSetting,
 } from '../config/configService';
 import { publishTerrainStats, trackTerrainMaterial } from './debug';
 
@@ -194,6 +198,12 @@ export interface TerrainEntityOptions {
     farTileTextures?: FarTileTexturesSetting;
     /** Live road switch. Omit and every road the bake shipped is drawn. */
     roads?: RoadsSetting;
+    /**
+     * Live overall tree density multiplier (0..20). A change re-scatters
+     * every resident tile's trees (paced - see rebuildResidentTrees), not
+     * just tiles streamed in afterward. Omit and TREE_DENSITY_MULTIPLIER_DEFAULT stays.
+     */
+    treeDensity?: TreeDensitySetting;
 }
 
 export interface TerrainStats {
@@ -276,6 +286,26 @@ export class TerrainEntity implements Entity {
 
     /** Which of a resident tile's two land geometries new uploads start on. */
     private landShading: TerrainShading = TerrainShading.FACETED;
+    /** Overall tree density multiplier; read fresh per tile scatter, see TerrainEntityOptions.treeDensity. */
+    private treeDensity: number = TREE_DENSITY_MULTIPLIER_DEFAULT;
+    /**
+     * True until the boot-time pinned load finishes (see waitForPinned).
+     * SMOOTH costs a second, expensive weld-and-average geometry per tile on
+     * top of the always-built FACETED one - fine to pay tile-by-tile once
+     * streaming is paced normally, but paying it for every one of a large
+     * pinned set in one eager burst was doubling both the CPU cost and peak
+     * memory of the whole boot phase, on top of everything tilesAround's
+     * circular filter and waitForPinned's adaptive pacing were already
+     * trying to keep down. Uploads during boot always build FACETED
+     * regardless of the active setting; once boot finishes, a real SMOOTH
+     * setting is applied the same lazy way a live switch already is (see
+     * setTerrainShading) - once per tile, at the normal streaming pace, not
+     * all at once.
+     */
+    private bootstrapping = true;
+
+    /** True while upgradeResidentToSmooth is already pacing through the resident set, so a second call doesn't start a redundant one. */
+    private smoothUpgradeRunning = false;
 
     /**
      * Switch between flat per-facet colour and smooth (Gouraud) shading.
@@ -283,23 +313,170 @@ export class TerrainEntity implements Entity {
      * A tile upload only builds the SMOOTH geometry when SMOOTH is already
      * the active setting (see buildTileMeshes) — the weld-and-average pass is
      * too expensive to pay on every streamed tile regardless of which mode is
-     * showing. So switching here also builds it lazily, once, for whatever is
-     * resident right now and still missing it; the geometry is then cached on
-     * the tile's meshes like any other, and later switches are a pure
-     * `land.geometry` swap with no rebuild.
+     * showing. Switching to SMOOTH swaps in whatever's already cached
+     * immediately (cheap - no allocation), then hands off to
+     * upgradeResidentToSmooth to build the rest: it used to build every
+     * still-missing one right here, in one uninterrupted loop, which was
+     * exactly the boot-time OOM (see `bootstrapping`) moved to whenever a
+     * saved SMOOTH setting got applied instead of avoided.
      */
     setTerrainShading(mode: TerrainShading): void {
         this.landShading = mode;
         for (const meshes of this.streamer.values()) {
-            if (mode === TerrainShading.SMOOTH && !meshes.landGeometrySmooth && meshes.landGeometryFaceted) {
-                meshes.landGeometrySmooth = buildSmoothLandGeometryFromFaceted(meshes.landGeometryFaceted);
-            }
             const geometry = mode === TerrainShading.SMOOTH
                 ? meshes.landGeometrySmooth ?? meshes.landGeometryFaceted
                 : meshes.landGeometryFaceted;
             if (meshes.land && geometry) {
                 meshes.land.geometry = geometry;
             }
+        }
+        if (mode === TerrainShading.SMOOTH) {
+            void this.upgradeResidentToSmooth();
+        }
+    }
+
+    /**
+     * Paces through the resident set building any still-missing SMOOTH
+     * geometry, a short burst at a time with a real yield in between - the
+     * same burst/yield/GC-opportunity shape as waitForPinned, for the same
+     * reason: building many of these back to back with no yield lets their
+     * temporary buffers pile up as un-reclaimable garbage across the whole
+     * burst instead of being reclaimed between tiles. Safe to call whenever
+     * SMOOTH becomes active; only one pass ever runs at a time, and it stops
+     * on its own if the mode is switched away before it finishes.
+     */
+    private async upgradeResidentToSmooth(): Promise<void> {
+        if (this.smoothUpgradeRunning) {
+            return;
+        }
+        this.smoothUpgradeRunning = true;
+        try {
+            const BUDGET_MS = 15;
+            const YIELD_MS = 20;
+            let moreToBuild = true;
+            while (moreToBuild && this.landShading === TerrainShading.SMOOTH) {
+                moreToBuild = false;
+                const burstStart = Date.now();
+                for (const meshes of this.streamer.values()) {
+                    if (meshes.landGeometrySmooth || !meshes.landGeometryFaceted) {
+                        continue;
+                    }
+                    const smoothLg = buildSmoothLandGeometryFromFaceted(meshes.landGeometryFaceted);
+                    meshes.landGeometrySmooth = smoothLg;
+                    if (smoothLg && meshes.land && this.landShading === TerrainShading.SMOOTH) {
+                        meshes.land.geometry = smoothLg;
+                    }
+                    if (Date.now() - burstStart >= BUDGET_MS) {
+                        moreToBuild = true;
+                        break;
+                    }
+                }
+                if (moreToBuild) {
+                    await new Promise(r => setTimeout(r, YIELD_MS));
+                }
+            }
+        } finally {
+            this.smoothUpgradeRunning = false;
+        }
+    }
+
+    /**
+     * Scatters and builds this tile's tree billboards and attaches them,
+     * replacing whatever was there before (if any) - used both for a freshly
+     * streamed-in tile and for rebuildResidentTrees's live re-scatter when
+     * the density setting changes. Async because each species group
+     * present needs its own atlas texture (loaded once, cached across every
+     * tile using that species) before its mesh can be built; scattering
+     * itself is synchronous.
+     */
+    private async attachTrees(tile: PtmTile, meshes: TileMeshes, materials: SceneMaterialManager): Promise<void> {
+        // Thin out density with distance from whichever camera is currently
+        // driving LOD - the same camera-to-tile distance the quadtree itself
+        // already uses for refinement (see Quadtree.walk's
+        // camPos.distanceTo(tilePosition(id))), so this reuses a comparison
+        // already proven consistent rather than inventing a second one.
+        // Falls back to full density if no LOD camera is set yet (e.g. very
+        // first boot tiles).
+        const distanceM = this.lodCamera
+            ? this.lodCamera.position.distanceTo(tileOriginWorld(tile.id, tile.centerHeightM, this.basis))
+            : 0;
+        const densityScale = treeDensityScaleForDistance(distanceM) * this.treeDensity;
+        const groups = scatterTreeSpecies(tile, densityScale);
+        const treeMeshes = groups.length > 0
+            ? await Promise.all(groups.map(group =>
+                getTreeSpeciesAtlas(group.species)
+                    .then(atlas => buildSpeciesTreeMesh(group, materials, atlas)),
+            )).catch(() => {
+                // No atlas (e.g. a canvas-less test environment) - the tile
+                // still draws, it just grows no trees.
+                return undefined;
+            })
+            : undefined;
+        if (meshes.disposed) {
+            return;
+        }
+        if (meshes.treesGroup) {
+            meshes.group.remove(meshes.treesGroup);
+            for (const old of meshes.trees ?? []) {
+                old.geometry.dispose();
+                (old.material as THREE.Material).dispose();
+            }
+        }
+        meshes.trees = undefined;
+        meshes.treesGroup = undefined;
+        if (!treeMeshes || treeMeshes.length === 0) {
+            return;
+        }
+        // scatterTreeSpecies already turns quantised positions into metres
+        // (it needs real distances for area/spacing math), but the tile
+        // group itself also scales by quantScale to do that same conversion
+        // for the land and water meshes, whose positions stay quantised.
+        // Without this wrapper the group would apply quantScale a second
+        // time and every tree would collapse toward the tile origin.
+        const treesGroup = new THREE.Group();
+        treesGroup.scale.setScalar(1 / tile.quantScale);
+        for (const trees of treeMeshes) {
+            trees.onBeforeRender = tileBeforeRender;
+            treesGroup.add(trees);
+        }
+        meshes.group.add(treesGroup);
+        meshes.trees = treeMeshes;
+        meshes.treesGroup = treesGroup;
+    }
+
+    /** True while rebuildResidentTrees is already pacing through the resident set, so a second call (another slider nudge) doesn't start a redundant one. */
+    private treeRebuildRunning = false;
+    private treeMaterials!: SceneMaterialManager;
+
+    /**
+     * Re-scatters trees for every currently resident leaf tile whose source
+     * data is still cached - best-effort, since a tile uploaded a while ago
+     * may have had its raw decoded bytes evicted independently of its GPU
+     * resources (see TileStore); such a tile just keeps its trees at the old
+     * density until it streams in again. Paced a handful of tiles at a time
+     * with a real yield in between, the same shape as upgradeResidentToSmooth,
+     * since scattering runs synchronously and re-attaching awaits atlas
+     * textures that are normally already cached and resolve immediately.
+     */
+    private async rebuildResidentTrees(materials: SceneMaterialManager): Promise<void> {
+        if (this.treeRebuildRunning) {
+            return;
+        }
+        this.treeRebuildRunning = true;
+        try {
+            const TILES_PER_BURST = 5;
+            const YIELD_MS = 16;
+            const entries = this.meshStore.peekAll();
+            for (let i = 0; i < entries.length; i += TILES_PER_BURST) {
+                const burst = entries.slice(i, i + TILES_PER_BURST).map(({ id, value: tile }) => {
+                    const meshes = this.streamer.get(id);
+                    return meshes && meshes.treesRequested && !meshes.disposed ? this.attachTrees(meshes.treeSource ?? tile, meshes, materials) : undefined;
+                });
+                await Promise.all(burst);
+                await new Promise(r => setTimeout(r, YIELD_MS));
+            }
+        } finally {
+            this.treeRebuildRunning = false;
         }
     }
 
@@ -474,6 +651,19 @@ export class TerrainEntity implements Entity {
             opts.triangleBudget.addChangeListener(n => { this.triangleBudget = n; });
         }
 
+        this.treeMaterials = opts.materials;
+        if (opts.treeDensity) {
+            this.treeDensity = clampTreeDensityMultiplier(opts.treeDensity.getActive());
+            opts.treeDensity.addChangeListener(n => {
+                this.treeDensity = clampTreeDensityMultiplier(n);
+                // Otherwise the slider only affects tiles streamed in after
+                // the change - invisible if the player is just sitting over
+                // forest already loaded, which is exactly when someone is
+                // most likely to be watching the slider to see it do anything.
+                void this.rebuildResidentTrees(opts.materials);
+            });
+        }
+
         // One uniform, like the colour mode: both colours are already baked.
         if (opts.landuseBlend) {
             this.landMaterial.uniforms.uLanduseBlend.value = opts.landuseBlend.getActive();
@@ -540,11 +730,24 @@ export class TerrainEntity implements Entity {
 
         this.streamer = new TileStreamer<PtmTile, TileMeshes>({
             store: this.meshStore,
-            upload: (id, tile) => buildTileMeshes(
-                tile, this.basis, this.materials, this.riverMaterial,
-                tileBeforeRender, this.frameFix, this.landShading,
-                undefined, opts.manifest.mesh.maxZoom,
-            ),
+            upload: (id, tile) => {
+                const meshes = buildTileMeshes(
+                    tile, this.basis, this.materials, this.riverMaterial,
+                    tileBeforeRender, this.frameFix,
+                    this.bootstrapping ? TerrainShading.FACETED : this.landShading,
+                    undefined, opts.manifest.mesh.maxZoom,
+                );
+                // Trees are attached lazily from the draw loop (see
+                // syncGroup), for the tiles actually being drawn - not here.
+                // Keep the source for that: the store may evict it first.
+                for (let i = 3; i < tile.landAttrs.length; i += 4) {
+                    if (tile.landAttrs[i] === 1) {
+                        meshes.treeSource = tile;
+                        break;
+                    }
+                }
+                return meshes;
+            },
             release: (_id, m) => {
                 this.cover.release(m);
                 this.roads.release(m);
@@ -694,22 +897,66 @@ export class TerrainEntity implements Entity {
 
     /** Resolve once every pinned tile is uploaded, reporting progress. */
     async waitForPinned(onProgress?: (done: number, total: number) => void): Promise<void> {
+        try {
+            await this.waitForPinnedInner(onProgress);
+        } finally {
+            // Whether this finished, gave up at the deadline, or had nothing
+            // to do: boot is over either way, and a real SMOOTH setting is
+            // applied lazily now, tile by tile at the normal streaming pace,
+            // rather than every pinned tile having eagerly paid for it during
+            // the burst above - see `bootstrapping`.
+            this.bootstrapping = false;
+            if (this.landShading === TerrainShading.SMOOTH) {
+                this.setTerrainShading(TerrainShading.SMOOTH);
+            }
+        }
+    }
+
+    private async waitForPinnedInner(onProgress?: (done: number, total: number) => void): Promise<void> {
         const total = this.pinned.size;
         if (total === 0) {
             return;
         }
-        for (let guard = 0; guard < 2000; guard++) {
+        // Building a tile (landGeometry/regionSizes and friends) allocates a
+        // handful of temporary buffers - union-find arrays, a corner map -
+        // that turn to garbage the moment it finishes. Batching many tiles
+        // into one long synchronous burst means none of that garbage can be
+        // reclaimed until the whole burst ends, so peak memory during this
+        // boot-time pinned load can run far higher than the tiles' own
+        // steady-state footprint - enough to OOM on a large, densely
+        // forested area even after cutting the pinned set's tile count (see
+        // tilesAround's circular filter). But nearly every area is nowhere
+        // near that limit, so paying a slow, small-burst pace unconditionally
+        // punishes the common case for a problem that's actually rare.
+        // Instead run at a fast pace by default and only drop to the slow,
+        // GC-friendly one once real heap pressure shows up - self-correcting
+        // rather than a single fixed trade-off. performance.memory is
+        // Chromium-only; anywhere else this just always runs at the fast
+        // pace (no way to detect pressure, and the fast pace is what every
+        // area used before this was ever a problem).
+        const FAST_PUMP_BUDGET_MS = 50;
+        const FAST_YIELD_MS = 16;
+        const SLOW_PUMP_BUDGET_MS = 15;
+        const SLOW_YIELD_MS = 20;
+        // Heap usage past this fraction of the engine's limit switches to the
+        // slow pace; comfortably before the point an allocation would fail.
+        const HEAP_PRESSURE_THRESHOLD = 0.7;
+        // A wall-clock deadline rather than a fixed iteration count, so the
+        // slow pace (if it ever kicks in) doesn't make this give up on a
+        // legitimately large pinned set before it has actually had time to
+        // finish.
+        const DEADLINE_MS = 600000;
+        const start = Date.now();
+        while (Date.now() - start < DEADLINE_MS) {
             const outstanding = this.outstandingPinned();
             const done = total - outstanding.length;
             onProgress?.(done, total);
             if (outstanding.length === 0) {
                 return;
             }
-            // The per-frame upload budget exists to avoid hitching a rendered
-            // frame; nothing is being rendered in this boot wait, so pump
-            // uploads far harder than that budget allows.
-            this.streamer.pumpUploads(50);
-            await new Promise(r => setTimeout(r, 16));
+            const constrained = heapUnderPressure(HEAP_PRESSURE_THRESHOLD);
+            this.streamer.pumpUploads(constrained ? SLOW_PUMP_BUDGET_MS : FAST_PUMP_BUDGET_MS);
+            await new Promise(r => setTimeout(r, constrained ? SLOW_YIELD_MS : FAST_YIELD_MS));
         }
         console.warn(
             `[terrain] gave up waiting on ${this.outstandingPinned().length} pinned tiles`,
@@ -1168,6 +1415,20 @@ export class TerrainEntity implements Entity {
                 lod.fadeM = node.fadeM;
                 lod.fadeFromMs = node.fadeFromMs;
                 this.group.add(meshes.group);
+                // Trees follow the draw selection, not residency: a cached
+                // ancestor drawn beneath its children stays bare (they carry
+                // the trees), while a coarse tile that is the real LOD
+                // choice for its ground gets its own instead of a bare hole.
+                if (meshes.treesGroup) {
+                    meshes.treesGroup.visible = !node.under;
+                }
+                if (!node.under && !meshes.treesRequested) {
+                    const src = meshes.treeSource;
+                    if (src) {
+                        meshes.treesRequested = true;
+                        void this.attachTrees(src, meshes, this.treeMaterials);
+                    }
+                }
                 this.drawnTriangles += countTriangles(meshes) + this.roads.trianglesOf(meshes);
                 // Nearest first, like the meshes; a leaf never has one and
                 // returns from this at once.
@@ -1258,6 +1519,25 @@ function countTriangles(m: TileMeshes): number {
     return n;
 }
 
+/** Non-standard, Chromium-only; absent elsewhere. */
+interface PerformanceMemory {
+    usedJSHeapSize: number;
+    jsHeapSizeLimit: number;
+}
+
+/**
+ * Whether used heap is past `fraction` of the engine's limit. Returns false
+ * (never throttle) where performance.memory isn't available, since there's
+ * no signal to act on there - not a reason to assume the worst.
+ */
+function heapUnderPressure(fraction: number): boolean {
+    const mem = (performance as Performance & { memory?: PerformanceMemory }).memory;
+    if (!mem || !mem.jsHeapSizeLimit) {
+        return false;
+    }
+    return mem.usedJSHeapSize / mem.jsHeapSizeLimit > fraction;
+}
+
 async function fetchIndex(url: string): Promise<TileIndex | undefined> {
     try {
         const res = await fetch(url);
@@ -1270,21 +1550,52 @@ async function fetchIndex(url: string): Promise<TileIndex | undefined> {
     }
 }
 
-/** Tile ids covering a radius around a scene point at one zoom. */
+/**
+ * Tile ids covering a radius around a scene point at one zoom.
+ *
+ * The longitude search half-width is widened by 1/cos(lat) so it still spans
+ * radiusM real metres at any latitude - correct, and unavoidably means a
+ * high-latitude location needs more, narrower tiles than an equatorial one
+ * for the same physical radius. But that widened search is a rectangle, and
+ * a wide, short rectangle's corners reach well outside the actual circle it
+ * was sized to cover - at 52 degrees latitude the corners are farther from
+ * centre than the circle's own radius by a factor of several, so without
+ * this filter this pulls in a real fraction of tiles that don't cover
+ * anything within radiusM at all. Since pinned tiles bypass the normal
+ * cache/eviction budget entirely (see waitForPinned), every wasted tile here
+ * is pure, un-evictable memory pressure toward the boot-time OOM this was
+ * fixed for - filtering to the circle (with a half-diagonal margin, so a
+ * tile only touching the circle's edge is still kept) removes that waste
+ * without changing how much real ground ends up covered.
+ */
 function tilesAround(
     basis: EnuBasis, x: number, z: number, radiusM: number, zoom: number, span: number,
 ): TileKey[] {
     const c = enuToGeodeticApprox(basis, x, northFromSceneZ(z), 0);
+    const cosLat = Math.max(0.1, Math.cos(c.lat * Math.PI / 180));
     const dLat = radiusM / 110540;
-    const dLon = radiusM / (111320 * Math.max(0.1, Math.cos(c.lat * Math.PI / 180)));
+    const dLon = radiusM / (111320 * cosLat);
     const x0 = Math.floor((c.lon - dLon + 180) / span);
     const x1 = Math.floor((c.lon + dLon + 180) / span);
     const y0 = Math.floor((90 - (c.lat + dLat)) / span);
     const y1 = Math.floor((90 - (c.lat - dLat)) / span);
+
+    // Half the diagonal of one tile, in metres, as the inclusion margin.
+    const tileWidthM = span * 111320 * cosLat;
+    const tileHeightM = span * 110540;
+    const marginM = 0.5 * Math.hypot(tileWidthM, tileHeightM);
+    const maxDistM = radiusM + marginM;
+
     const out: TileKey[] = [];
     for (let y = y0; y <= y1; y++) {
+        const tileLat = 90 - (y + 0.5) * span;
         for (let x = x0; x <= x1; x++) {
-            out.push({ z: zoom, x, y });
+            const tileLon = (x + 0.5) * span - 180;
+            const dEastM = (tileLon - c.lon) * 111320 * cosLat;
+            const dNorthM = (tileLat - c.lat) * 110540;
+            if (Math.hypot(dEastM, dNorthM) <= maxDistM) {
+                out.push({ z: zoom, x, y });
+            }
         }
     }
     return out;
