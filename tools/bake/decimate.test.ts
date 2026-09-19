@@ -491,6 +491,25 @@ describe('restricted-quadtree decimation', () => {
         assert.ok(landArea(asLand) > landArea(asWater), 'regionAt drives the saddle resolution');
     });
 
+    it('holds the tile border to borderErrorM however coarse the interior is allowed', () => {
+        // A ridge along the interior of a 32-cell tile with a huge tolerance:
+        // the whole tile merges to one leaf. With a border tolerance the
+        // border strip must refine to follow a bump on the south edge.
+        const size = 33;
+        const heights = new Float32Array(size * size);
+        for (let x = 0; x < size; x++) {
+            heights[(size - 1) * size + x] = Math.max(0, 60 - Math.abs(x - 16) * 15);
+        }
+        const run = (borderErrorM?: number) => decimate({
+            size, heights, regionNodes: new Uint16Array(size * size).fill(1),
+            maxErrorM: 1e9, borderErrorM,
+        }).triangles;
+        const border = (tris: GridTriangle[]) => tris.filter(
+            t => t.pts.filter(p => p.y === size - 1).length === 2).length;
+        assert.equal(border(run()), 1, 'unbounded: one chord along the south edge');
+        assert.ok(border(run(5)) > 1, 'bounded: the bump keeps border vertices');
+    });
+
     it('rejects a grid whose cell count is not a power of two', () => {
         assert.throws(() => decimate({
             size: 30,

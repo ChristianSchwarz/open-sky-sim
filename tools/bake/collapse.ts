@@ -52,6 +52,11 @@ export interface CollapseInput {
     cellM: number;
     /** Vertical tolerance (m) the collapsed surface must keep. */
     maxErrorM: number;
+    /**
+     * Tolerance (m) for a collapse that moves a border vertex; see
+     * DecimateInput.borderErrorM. Omit for no extra limit.
+     */
+    borderErrorM?: number;
     /** Largest normal deviation (deg) inside a vertex's ring worth trying. */
     maxAngleDeg: number;
     /** See DecimateInput.padHeights / padErrorM. */
@@ -365,7 +370,9 @@ export function collapse(input: CollapseInput): CollapseResult {
                     continue;
                 }
                 // Every node under the ring must stay within tolerance of the
-                // DEM under whichever new triangle now covers it.
+                // DEM under whichever new triangle now covers it. A border
+                // vertex answers to the tighter border tolerance.
+                const tolM = onBorder(v.p) ? Math.min(maxErrorM, input.borderErrorM ?? Infinity) : maxErrorM;
                 let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
                 for (const ti of v.tris) {
                     for (const p of tris[ti]!.pts) {
@@ -383,7 +390,7 @@ export function collapse(input: CollapseInput): CollapseResult {
                             if (flat(k.tri)) {
                                 break;
                             }
-                            if (Math.abs(h - heights[y * size + x]) > maxErrorM
+                            if (Math.abs(h - heights[y * size + x]) > tolM
                                 || (padHeights !== undefined
                                     && Math.abs(padPlaneHeight(k.tri, x, y) - padHeights[y * size + x]) > padErrorM)) {
                                 ok = false;

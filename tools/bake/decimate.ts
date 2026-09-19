@@ -54,6 +54,15 @@ export interface DecimateInput {
     /** Vertical tolerance (m) for merging a block. */
     maxErrorM: number;
     /**
+     * Tighter tolerance (m) for a block touching the tile border. The triangle
+     * budget can push `maxErrorM` to the relief of the whole tile, and a
+     * border decimated that far is a chord hundreds of metres off the ground
+     * that the neighbour, cut on its own terms, still follows. The skirt seals
+     * a seam only up to its own depth, so the border must stay within a
+     * fraction of it whatever the interior costs. Omit for no extra limit.
+     */
+    borderErrorM?: number;
+    /**
      * Row-major TerrainClass per *node*, `size * size` — the same `.plc`
      * cover raster `classify()` samples later, one node per DEM node, no
      * finer. Omit for a tile with no cover data (or none baked yet): every
@@ -295,6 +304,10 @@ export function decimate(input: DecimateInput): DecimateResult {
         }
         return worst;
     };
+
+    const borderErrorM = Math.min(maxErrorM, input.borderErrorM ?? Infinity);
+    const touchesBorder = (bx: number, by: number, s: number): boolean =>
+        bx === 0 || by === 0 || bx + s === cells || by + s === cells;
 
     const padHeights = input.padHeights;
     const padErrorM = input.padErrorM ?? maxErrorM;
@@ -547,7 +560,7 @@ export function decimate(input: DecimateInput): DecimateResult {
         }
         const uniform = blockUniform(bx, by, s);
         if (uniform) {
-            if (!mergeUniform || (s <= maxLeafSize && blockError(heights, bx, by, s) <= maxErrorM
+            if (!mergeUniform || (s <= maxLeafSize && blockError(heights, bx, by, s) <= (touchesBorder(bx, by, s) ? borderErrorM : maxErrorM)
                 && padFits(bx, by, s) && coverUniform(bx, by, s))) {
                 out.push({ x: bx, y: by, size: s, uniform: true, regionId: regionIdAt(bx, by) });
                 return;

@@ -840,6 +840,12 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         }
     }
 
+    // The skirt closes a seam only as deep as it hangs, and each side of a seam
+    // decimates the border on its own, so each may stray a quarter of the depth:
+    // together they stay inside half of it, whatever tolerance the budget forced
+    // on the interior. Without it a tile that fit only as coast-only left its
+    // border as one chord metres off the ground and the seam opened to the sky.
+    const borderErrorM = input.skirtDepthM > 0 ? input.skirtDepthM / 4 : undefined;
     let attempts = 0;
     let collapsedVertices = 0;
     const collapseCellM = ((bounds.north - bounds.south) / cells) * 110540;
@@ -853,6 +859,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             regionNodes: regionField.regionNodes,
             coverClasses: meshCoverClasses,
             maxErrorM: err,
+            borderErrorM,
             minLeafSize: leaf,
             edgeCrossing: regionField.edgeCrossing,
             regionAt: regionField.regionAt,
@@ -1117,6 +1124,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         cellM: collapseCellM,
         maxErrorM: Number.isFinite(maxErrorM) ? maxErrorM : input.maxErrorM,
         maxAngleDeg: COLLAPSE_MAX_ANGLE_DEG,
+        borderErrorM,
         padHeights: meshPadHeights,
         padErrorM: PAD_ERROR_M,
         coverClasses: meshCoverClasses,
