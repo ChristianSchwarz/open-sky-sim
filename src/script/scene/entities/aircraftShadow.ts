@@ -15,12 +15,21 @@ const FOOTPRINT_SAMPLES = 3;
  */
 const MAX_GROUND_SLOPE = 1;
 /**
- * Extra lift as a fraction of the relief measured under the footprint. The
- * fitted plane only provably clears the sampled points; this buys margin for
- * the ground between them, and for the render mesh disagreeing slightly with
- * the height sampler (baked tile geometry vs DEM raster).
+ * Extra lift as a fraction of the height the ground overshoots the plane by.
+ * The plane only provably clears the sampled points; this buys margin for the
+ * ground between them, and for the render mesh disagreeing slightly with the
+ * height sampler (baked tile geometry vs DEM raster). Zero when nothing
+ * overshoots, so ground that falls away costs the silhouette no height.
  */
 const RELIEF_CLEARANCE = 0.05;
+/**
+ * The most the plane is raised above the ground under the aircraft to clear
+ * higher ground elsewhere in the footprint. A kerb, a ledge or a building base
+ * beside the aircraft would otherwise carry the whole silhouette up to its top,
+ * leaving it hovering over the ground the aircraft actually stands on. Past
+ * this the high side is allowed to sink into the terrain instead.
+ */
+const MAX_LIFT_M = 0.5;
 
 const _heading = new THREE.Vector3();
 const _right = new THREE.Vector3();
@@ -84,10 +93,16 @@ export function setAircraftShadowPose(
 }
 
 /**
- * Least-squares plane through a grid of ground samples over the footprint,
- * written into `outPosition.y` and `outQuaternion` via the module scratch.
- * Separated only to keep the pose function readable; it mutates `_normal`,
- * `_tilt` and the caller's position/orientation.
+ * Plane through the ground under the aircraft, tilted by the slope across the
+ * footprint, written into `outPosition.y` and `outQuaternion`. Separated only
+ * to keep the pose function readable; it mutates `_normal`, `_tilt` and the
+ * caller's position/orientation.
+ *
+ * The plane is anchored on the centre sample, the ground the aircraft stands
+ * on, and its slopes come from the samples on the shadow's own axes. A
+ * least-squares fit through the mean of the grid let one low or high corner
+ * skew both the slope and the height, so over a ledge the silhouette hung
+ * above the ground beneath the aircraft.
  */
 function fitGroundPlane(
     groundHeightAt: (x: number, z: number) => number,
@@ -99,38 +114,25 @@ function fitGroundPlane(
     // Sample on the shadow's own axes so the grid always covers the silhouette
     // rather than an axis-aligned box around it.
     const step = 2 / (FOOTPRINT_SAMPLES - 1);
-    let sumY = 0;
-    let sumUY = 0;
-    let sumVY = 0;
-    let sumUU = 0;
-    let sumVV = 0;
-    let minY = Infinity;
-    let maxY = -Infinity;
+    const mid = (FOOTPRINT_SAMPLES - 1) / 2;
 
     for (let i = 0; i < FOOTPRINT_SAMPLES; i++) {
         const u = (-1 + i * step) * halfLength;
         for (let j = 0; j < FOOTPRINT_SAMPLES; j++) {
             const v = (-1 + j * step) * halfWidth;
-            const y = groundHeightAt(
+            _samples[i * FOOTPRINT_SAMPLES + j] = groundHeightAt(
                 outPosition.x + _heading.x * u + _right.x * v,
                 outPosition.z + _heading.z * u + _right.z * v,
             );
-            _samples[i * FOOTPRINT_SAMPLES + j] = y;
-            sumY += y;
-            sumUY += u * y;
-            sumVY += v * y;
-            sumUU += u * u;
-            sumVV += v * v;
-            minY = Math.min(minY, y);
-            maxY = Math.max(maxY, y);
         }
     }
 
-    // The grid is symmetric about the centre, so the u and v columns are
-    // centred and mutually orthogonal: the normal equations decouple into two
-    // independent slopes and no matrix solve is needed.
-    let slopeU = sumUU > 1e-9 ? sumUY / sumUU : 0;
-    let slopeV = sumVV > 1e-9 ? sumVY / sumVV : 0;
+    const at = (i: number, j: number) => _samples[i * FOOTPRINT_SAMPLES + j];
+    const centreY = at(mid, mid);
+    // Central differences along the two axes through the centre: the corners,
+    // where a neighbouring structure is likeliest, do not steer the tilt.
+    let slopeU = (at(FOOTPRINT_SAMPLES - 1, mid) - at(0, mid)) / (2 * halfLength);
+    let slopeV = (at(mid, FOOTPRINT_SAMPLES - 1) - at(mid, 0)) / (2 * halfWidth);
     const gradient = Math.hypot(slopeU, slopeV);
     if (gradient > MAX_GROUND_SLOPE) {
         const k = MAX_GROUND_SLOPE / gradient;
@@ -148,21 +150,18 @@ function fitGroundPlane(
     // Tilt after heading so the silhouette's nose lies in the slope plane.
     outQuaternion.premultiply(_tilt);
 
-    // Raise the fitted plane until no sample pokes through it. Walking the
-    // cached grid against the mean-fit plane is what turns a best fit into an
-    // upper bound, which is what the depth test actually needs.
-    const meanY = sumY / (FOOTPRINT_SAMPLES * FOOTPRINT_SAMPLES);
+    // Raise the plane until no sample pokes through it, but only so far: see
+    // MAX_LIFT_M. The residual is measured against the plane through the centre.
     let lift = 0;
     for (let i = 0; i < FOOTPRINT_SAMPLES; i++) {
         const u = (-1 + i * step) * halfLength;
         for (let j = 0; j < FOOTPRINT_SAMPLES; j++) {
             const v = (-1 + j * step) * halfWidth;
-            const residual = _samples[i * FOOTPRINT_SAMPLES + j] - (meanY + slopeU * u + slopeV * v);
+            const residual = at(i, j) - (centreY + slopeU * u + slopeV * v);
             lift = Math.max(lift, residual);
         }
     }
+    lift = Math.min(lift * (1 + RELIEF_CLEARANCE), MAX_LIFT_M);
 
-    outPosition.y = meanY + lift
-        + SHADOW_SURFACE_EPSILON_M
-        + RELIEF_CLEARANCE * (maxY - minY);
+    outPosition.y = centreY + lift + SHADOW_SURFACE_EPSILON_M;
 }

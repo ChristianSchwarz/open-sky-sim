@@ -4,6 +4,12 @@ import * as THREE from 'three';
 import { FORWARD, RIGHT, UP } from '../../utils/math';
 import { setAircraftShadowPose, SHADOW_SURFACE_EPSILON_M } from './aircraftShadow';
 
+/** Height of the shadow plane straight above the aircraft, from the pose it was given. */
+function planeYAt(x: number, z: number, position: THREE.Vector3, orientation: THREE.Quaternion): number {
+    const n = new THREE.Vector3().copy(UP).applyQuaternion(orientation);
+    return position.y - (n.x * (x - position.x) + n.z * (z - position.z)) / n.y;
+}
+
 describe('setAircraftShadowPose', () => {
     const pos = new THREE.Vector3();
     const quat = new THREE.Quaternion();
@@ -77,6 +83,44 @@ describe('setAircraftShadowPose', () => {
                     `ground at (${dx}, ${dz}) pokes through the shadow plane`);
             }
         }
+    });
+
+    it('stays on the ground under the aircraft beside a ledge', () => {
+        // Ground level under the aircraft, a 2 m ledge starting 6 m to one side.
+        // Lifting the plane to clear the ledge carried the whole silhouette up
+        // to its top, hovering over the ground the aircraft stands on.
+        const ground = (x: number, _z: number) => (x > 6 ? 2 : 0);
+        setAircraftShadowPose(
+            new THREE.Vector3(0, 30, 0), new THREE.Quaternion(), ground, 10,
+            pos, quat, scale, tmp,
+        );
+        const under = planeYAt(0, 0, pos, quat);
+        assert.ok(under - 0 < 0.7, `shadow hangs ${under} m above the ground under the aircraft`);
+        assert.ok(under >= SHADOW_SURFACE_EPSILON_M - 1e-9, 'never below the ground under the aircraft');
+    });
+
+    it('is not skewed by a single low corner of the footprint', () => {
+        // Flat ground with one corner over a 12 m drop. A fit through the mean
+        // of the samples tilted the plane and lifted it off the flat ground.
+        const ground = (x: number, z: number) => (x < -6 && z < -6 ? -12 : 0);
+        setAircraftShadowPose(
+            new THREE.Vector3(0, 30, 0), new THREE.Quaternion(), ground, 10,
+            pos, quat, scale, tmp,
+        );
+        assert.ok(Math.abs(planeYAt(0, 0, pos, quat) - SHADOW_SURFACE_EPSILON_M) < 1e-6,
+            `expected the plane on the ground, got ${planeYAt(0, 0, pos, quat)}`);
+        const normal = tmp.copy(UP).applyQuaternion(quat);
+        assert.ok(normal.distanceTo(UP) < 1e-6, 'level ground keeps a level shadow');
+    });
+
+    it('still clears a bump that is small enough to clear', () => {
+        const ground = (x: number, z: number) => (x > 6 && z > 6 ? 0.2 : 0);
+        setAircraftShadowPose(
+            new THREE.Vector3(0, 30, 0), new THREE.Quaternion(), ground, 10,
+            pos, quat, scale, tmp,
+        );
+        const at = planeYAt(10, 10, pos, quat);
+        assert.ok(at >= 0.2, `bump pokes through the plane (${at})`);
     });
 
     it('keeps the single-sample placement when the footprint is degenerate', () => {
