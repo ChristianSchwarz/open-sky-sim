@@ -40,6 +40,15 @@ ${LOG_DEPTH_PARS_VERTEX}
 
     vec4 viewCenter = viewMatrix * worldBase;
     viewCenter.xy += position.xy * s;
+    // The quad is screen-aligned, so looking steeply down its "up" runs along
+    // the ground and the tree's top sits at the base's depth - inside any
+    // terrain rising behind it, which slices the sprite away more and more
+    // as the pitch grows. A real tree's top is nearer the camera by
+    // height * sin(elevation); push the quad toward the camera by that (depth
+    // only, so its on-screen size is unchanged).
+    vec3 toCamW = cameraPosition - worldBase.xyz;
+    float sinElev = clamp((cameraPosition.y - worldBase.y) / max(length(toCamW), 0.001), 0.0, 1.0);
+    viewCenter.z += position.y * s * sinElev;
 
     vPosition = vec3(worldBase.x, 0.0, worldBase.z);
     // Leaf colour is per instance, so resolve it here (a handful of vertices)
