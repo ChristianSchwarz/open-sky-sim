@@ -464,6 +464,10 @@ export class SceneMaterialManager implements KernelTask {
                 },
                 uMaxStretch: { value: RIVER_MAX_STRETCH },
                 uRenderOrigin: { value: new THREE.Vector3() },
+                // Reference (noon) forest colour, in the same colour space as the
+                // palette's, so the tree shader can dim trunks by how much the
+                // current palette's forest has darkened against it.
+                uNoonForest: { value: new THREE.Color('#2f6b3c') },
                 uMap: {
                     value: properties.type === SceneMaterialPrimitiveType.TREE_BILLBOARD
                         ? properties.map

@@ -27,6 +27,7 @@ export const TreeBillboardFragProgram: string = `
   varying vec3 vPosition;
   varying vec2 vUv;
   varying vec3 vLeaf;
+  varying vec3 vTrunk;
 ${LOG_DEPTH_PARS_FRAGMENT}
   void main() {
     vec4 texel = texture2D(uMap, vUv);
@@ -40,7 +41,7 @@ ${LOG_DEPTH_PARS_FRAGMENT}
     // brown and fails this, so it keeps its own baked colour untinted.
     float canopyMask = step(mx - mn, 0.12);
     vec3 leaf = vLeaf * texel.r;
-    vec3 tinted = mix(texel.rgb, leaf, canopyMask);
+    vec3 tinted = mix(texel.rgb * vTrunk, leaf, canopyMask);
 
     float distance = 0.0;
     float fogSteps = 12.0;

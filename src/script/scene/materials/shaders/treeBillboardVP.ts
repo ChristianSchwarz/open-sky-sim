@@ -22,6 +22,7 @@ export const TreeBillboardVertProgram: string = `
   uniform float halfHeight;
   uniform int shadingType;
   uniform vec3 color;
+  uniform vec3 uNoonForest;
   uniform vec3 uSunDir;
   uniform vec3 uSunAmbient;
   uniform vec3 uSunDirect;
@@ -33,6 +34,7 @@ export const TreeBillboardVertProgram: string = `
   varying vec3 vPosition;
   varying vec2 vUv;
   varying vec3 vLeaf;
+  varying vec3 vTrunk;
 ${LOG_DEPTH_PARS_VERTEX}
   void main() {
     vec4 worldBase = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
@@ -56,19 +58,28 @@ ${LOG_DEPTH_PARS_VERTEX}
     // green, darkened by the brightness factor, then pushed away from its own
     // grey for saturation. Linear in the sprite's canopy value, so the
     // fragment shader only has to scale it.
-    vec3 leaf = mix(color, instanceShade.rgb, 0.5) * instanceShade.a;
+    // The sampled ground colour is the baked (daylight) satellite colour, so
+    // it is used as a colour *ratio* against a typical forest value and applied
+    // to the palette colour: brightness then comes from the palette - which
+    // darkens at dusk and night like the terrain's own - and only the local
+    // hue/lightness variation comes from the ground under the tree.
+    vec3 groundRatio = clamp(instanceShade.rgb / 0.25, 0.3, 2.0);
+    vec3 leaf = color * mix(vec3(1.0), groundRatio, 0.5) * instanceShade.a;
     float leafLuma = dot(leaf, vec3(0.299, 0.587, 0.114));
     vLeaf = max(mix(vec3(leafLuma), leaf, 1.6), 0.0);
 
-    // Brightness follows the facet the tree stands on, lit the way the
-    // terrain lights it (same sun uniforms, same ambient/direct terms),
-    // relative to flat ground so level forest keeps its tuned brightness and
-    // slopes turn darker or lighter with their aspect to the sun.
+    // Lit exactly the way the terrain is (same sun uniforms, same ambient and
+    // direct terms, same facet normal), in absolute terms: the leaves darken
+    // at dusk, warm and cool with the sun and brighten by day together with
+    // the ground they stand on, and slopes shade by their aspect to the sun.
     vec3 n = normalize(instanceNormal);
     vec3 lit = uSunAmbient * mix(0.4, 1.0, 0.5 + 0.5 * n.y)
         + uSunDirect * pow(max(dot(n, uSunDir), 0.0), 1.69);
-    vec3 flatLit = uSunAmbient + uSunDirect * pow(max(uSunDir.y, 0.0), 1.69);
-    vLeaf *= clamp(lit / max(flatLit, vec3(0.001)), 0.0, 2.0);
+    vLeaf *= lit;
+    // Trunks are not tinted, so dim them by how far the palette's forest colour
+    // has darkened from its noon value, and light them the same way.
+    vec3 lumaW = vec3(0.299, 0.587, 0.114);
+    vTrunk = lit * clamp(dot(color, lumaW) / max(dot(uNoonForest, lumaW), 0.001), 0.03, 1.0);
 
     vec2 toCam = cameraPosition.xz - worldBase.xz;
     float horizDist = max(length(toCam), 0.001);
