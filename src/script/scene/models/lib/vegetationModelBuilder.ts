@@ -1,37 +1,5 @@
 import * as THREE from 'three';
 
-enum VegetationKind {
-    OAK,
-    PINE,
-    BUSH,
-    BIRCH,
-    SCRUB,
-}
-
-/** Silhouette used for a species' distant billboard impostor. */
-export enum ImpostorShape {
-    /** Small camera-facing quad centred on the canopy — low shrubs. */
-    DOT,
-    /** Broad upright quad — round broadleaf canopies. */
-    QUAD,
-    /** Upright triangle — conifers and slender trees. */
-    TRIANGLE,
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 export function mergeGeometries(geometries: THREE.BufferGeometry[]): THREE.BufferGeometry {
     let totalVertices = 0;
     const nonIndexed: THREE.BufferGeometry[] = [];
