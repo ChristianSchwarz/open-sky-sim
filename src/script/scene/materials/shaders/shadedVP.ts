@@ -24,6 +24,12 @@ export const ShadedVertProgram: string = `
    */
   const float AMBIENT_SKY_FLOOR = 0.65;
 
+  /** Same terminator sharpening as terrain, so meshes read from slope shading alone. */
+  const float SHADOW_CONTRAST_POWER = 1.0;
+  /** Skylight kept on a face fully turned from the sun, and the beam boost toward it. */
+  const float SHADE_AWAY_AMBIENT = 0.95;
+  const float SUN_FACING_GAIN = 1.0;
+
   /** Fresnel rim: how sharply it tightens to the edge, and how far it lifts. */
   const float RIM_POWER = 3.0;
   const float RIM_STRENGTH = 0.35;
@@ -44,18 +50,23 @@ ${LOG_DEPTH_PARS_VERTEX}
 
     // Clamped at zero: a surface turned away from the sun receives none of the
     // beam, never a negative amount of it.
-    float ndl = max(dot(worldNormal, uSunDir), 0.0);
+    float rawNdl = max(dot(worldNormal, uSunDir), 0.0);
+    float ndl = pow(rawNdl, SHADOW_CONTRAST_POWER);
     // How much of the sky this surface can see, 1 looking up and a floor's
     // worth looking straight down.
     float skyView = mix(AMBIENT_SKY_FLOOR, 1.0, 0.5 + 0.5 * worldNormal.y);
 
     // Ambient floor so land keeps the palette base colour in shadow. The direct
     // weight fades to 0 as the sun sets, leaving night lit flat by its palette.
-    shade = uSunShade.x * skyView + uSunShade.y * ndl;
+    // Faces turned from the sun lose part of their skylight, faces toward it
+    // gain a boosted beam: contrast both ways around the old mid-tone.
+    float ambientScale = mix(SHADE_AWAY_AMBIENT, 1.0, rawNdl);
+    float directGain = SUN_FACING_GAIN;
+    shade = uSunShade.x * skyView * ambientScale + uSunShade.y * ndl * directGain;
     // Same ramp in colour: a reddened beam over a blue skylight fill, so a low
     // sun leaves the faces it strikes warmer than the ones it misses. Both
     // tints are luminance-normalised, so this matches shade in brightness.
-    vLight = uSunAmbient * skyView + uSunDirect * ndl;
+    vLight = uSunAmbient * skyView * ambientScale + uSunDirect * ndl * directGain;
 
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldY = worldPos.y;
