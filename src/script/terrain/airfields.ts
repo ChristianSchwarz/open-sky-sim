@@ -34,13 +34,13 @@ export interface AirfieldRunway {
     refDerived?: boolean;
 }
 
-export interface AirfieldTaxiway {
+interface AirfieldTaxiway {
     widthM: number;
     /** `[lat, lon]` along the centreline. */
     points: number[][];
 }
 
-export interface AirfieldApron {
+interface AirfieldApron {
     /** `[lat, lon]` ring, closed. */
     ring: number[][];
 }
@@ -64,7 +64,7 @@ export interface AirfieldBuilding {
 }
 
 /** The single plane every part of one airfield is cut to. */
-export interface AirfieldPlane {
+interface AirfieldPlane {
     heightMsl: number;
     /** Rise per metre along `headingDeg`. */
     gradient: number;
@@ -97,7 +97,7 @@ export interface AirfieldsFile {
 }
 
 /** Where the manifest says the airfield file is. */
-export interface AirfieldsManifest {
+interface AirfieldsManifest {
     path: string;
     count: number;
 }

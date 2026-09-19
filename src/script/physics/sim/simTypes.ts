@@ -20,7 +20,7 @@ export type SimControlMode = 'external' | 'ai';
 export type SimFlightModelKind = 'fm2' | 'debug' | 'fm3';
 
 export type Vec3 = [number, number, number];
-export type Quat = [number, number, number, number];
+type Quat = [number, number, number, number];
 
 export type { AircraftCollisionMesh };
 
@@ -82,7 +82,7 @@ export interface SimAircraftDesc {
 }
 
 /** Authoritative per-aircraft state mirrored by the render-side proxy. */
-export interface SimAircraftState {
+interface SimAircraftState {
     id: string;
     position: Vec3;
     quaternion: Quat;
@@ -112,7 +112,7 @@ export interface SimAircraftState {
 }
 
 /** A live projectile, rendered as a tracer on the main thread. */
-export interface SimProjectileState {
+interface SimProjectileState {
     position: Vec3;
     quaternion: Quat;
 }
@@ -132,7 +132,7 @@ export interface SimHitEvent {
     source?: 'gun' | 'scrape';
 }
 
-export interface SimSnapshot {
+interface SimSnapshot {
     aircraft: SimAircraftState[];
     projectiles: SimProjectileState[];
     hits: SimHitEvent[];
@@ -184,7 +184,7 @@ export type SimToWorkerMessage =
 // --- Worker -> main thread messages ------------------------------------------
 
 /** Lightweight state when pose floats live in SharedArrayBuffer. */
-export type WorkerSharedStateMessage = {
+type WorkerSharedStateMessage = {
     type: 'state';
     shared: true;
     seq: number;

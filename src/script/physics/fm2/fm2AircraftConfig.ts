@@ -25,7 +25,7 @@ const DEG = Math.PI / 180;
 export type { SurfaceGeometry, Fm2ForebodyAsymmetryConfig };
 
 /** Reference mass / planform geometry (SI). */
-export interface Fm2GeometryConfig {
+interface Fm2GeometryConfig {
     massKg: number;
     wingAreaM2: number;
     wingSpanM: number;
@@ -33,7 +33,7 @@ export interface Fm2GeometryConfig {
 }
 
 /** Principal moments of inertia in the sim body frame (kg·m²). */
-export interface Fm2InertiaConfig {
+interface Fm2InertiaConfig {
     pitch: number; // about +X (RIGHT)
     yaw: number;   // about +Y (UP)
     roll: number;  // about +Z (FORWARD)
@@ -65,13 +65,13 @@ export interface Fm2SurfaceSet {
     foreStrake?: SurfaceGeometry;
 }
 
-export interface Fm2FlapsConfig {
+interface Fm2FlapsConfig {
     aoaBiasRad: number;
     stallReductionRad: number;
     extraCd: number;
 }
 
-export interface Fm2WaveDragConfig {
+interface Fm2WaveDragConfig {
     machOnset: number;
     scale: number;
 }
@@ -100,7 +100,7 @@ export function fm2GroundRestHeight(config: Fm2AircraftConfig): number {
  * schedule with the same ISA density lapse is applied and the throttle behaves
  * as a plain 0–100% lever.
  */
-export interface Fm2EngineConfig {
+interface Fm2EngineConfig {
     afterburner: boolean;
     idleThrustKn: number;
     milThrustKn: number;
@@ -153,7 +153,7 @@ export interface Fm2FcsConfig {
  * @deprecated Legacy tuning for the removed limiters-OFF direct pitch path.
  * Retained for aircraft-manifest compatibility only.
  */
-export interface Fm2HighAoaFcsConfig {
+interface Fm2HighAoaFcsConfig {
     /** Pitch / AoA-rate damping scale (legacy; unused by the limiter strategies). */
     directDampScale?: number;
 }
@@ -326,7 +326,7 @@ export interface Fm2RollLawConfig {
 }
 
 /** Yaw-axis control law tuning (shared by fly-by-wire and mechanical aircraft). */
-export interface Fm2YawLawConfig {
+interface Fm2YawLawConfig {
     /** Pedal authority scale. */
     maxRudderCmd: number;
     /** Washed-out yaw-rate damper gain. */
@@ -337,7 +337,7 @@ export interface Fm2YawLawConfig {
 }
 
 /** Speed / stall / touchdown envelope. */
-export interface Fm2EnvelopeConfig {
+interface Fm2EnvelopeConfig {
     stallAoaRad: number;
     minFlyingSpeedMps: number;
     /** Reference cruise condition used to normalize FBW dynamic-pressure fades. */

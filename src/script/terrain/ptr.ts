@@ -36,12 +36,12 @@
 
 import { TileKey } from './tiling';
 
-export const PTR_MAGIC = 0x31525450; // 'PTR1' little-endian
-export const PTR_VERSION = 1;
-export const PTR_HEADER_BYTES = 24;
+const PTR_MAGIC = 0x31525450; // 'PTR1' little-endian
+const PTR_VERSION = 1;
+const PTR_HEADER_BYTES = 24;
 /** Two per centreline point, and u16 indices. */
 export const PTR_MAX_VERTS = 65534;
-export const PTR_MAX_HALF_M = 6553.5;
+const PTR_MAX_HALF_M = 6553.5;
 
 /**
  * Road classes, most important first, as the fourth byte of `dir`. The
@@ -57,7 +57,7 @@ export const enum RoadClass {
     Unclassified = 5,
     Residential = 6,
 }
-export const ROAD_CLASS_COUNT = 7;
+const ROAD_CLASS_COUNT = 7;
 
 /**
  * The coarsest class drawn as a major road: the ones that read from

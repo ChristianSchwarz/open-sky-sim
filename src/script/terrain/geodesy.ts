@@ -3,9 +3,9 @@
 import * as THREE from 'three';
 
 export const WGS84_A = 6378137.0;
-export const WGS84_F = 1 / 298.257223563;
-export const WGS84_E2 = WGS84_F * (2 - WGS84_F);
-export const WGS84_B = WGS84_A * (1 - WGS84_F);
+const WGS84_F = 1 / 298.257223563;
+const WGS84_E2 = WGS84_F * (2 - WGS84_F);
+const WGS84_B = WGS84_A * (1 - WGS84_F);
 
 export interface Geodetic {
     /** Degrees. */
@@ -38,7 +38,7 @@ export function degToRad(d: number): number {
     return d * DEG;
 }
 
-export function radToDeg(r: number): number {
+function radToDeg(r: number): number {
     return r * RAD;
 }
 
@@ -249,7 +249,7 @@ export function enuFrameRotation(from: EnuBasis, to: EnuBasis): THREE.Quaternion
  * Maps ECEF metres into Three.js render space.
  * Fixed ENU: +X east, +Y up, +Z south — see {@link sceneFromEnu}.
  */
-export class EnuFrame {
+class EnuFrame {
     constructor(readonly basis: EnuBasis) { }
 
     ecefToWorld(ecef: Ecef, out: THREE.Vector3 = new THREE.Vector3()): THREE.Vector3 {

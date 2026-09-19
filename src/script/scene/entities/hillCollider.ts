@@ -16,7 +16,7 @@ export interface HillCollider {
 
 const COLLIDER_GEO_QUAT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), HILL_GEOMETRY_Y_ROT);
 
-export function createHillCollider(
+function createHillCollider(
     position: THREE.Vector3,
     quaternion: THREE.Quaternion,
     scale: THREE.Vector3,

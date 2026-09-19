@@ -10,7 +10,7 @@ export const PARTICLE_MESH_ATTR_SCALE = 'scale';
 export const PARTICLE_MESH_ATTR_ROTATION = 'rotation';
 export const PARTICLE_MESH_ATTR_COLOR = 'color';
 
-export class ParticleMeshModelLibBuilder implements ModelLibBuilder {
+class ParticleMeshModelLibBuilder implements ModelLibBuilder {
     type: string;
 
     constructor(

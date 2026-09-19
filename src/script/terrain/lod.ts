@@ -5,13 +5,13 @@ import { WGS84_A } from './geodesy';
 import { approxTileEdgeMetres, TileKey } from './tiling';
 
 /** Cap on mesh / camera range (m) — enough for LEO limb with margin. */
-export const TERRAIN_VIEW_RANGE_MAX_M = 3_000_000;
+const TERRAIN_VIEW_RANGE_MAX_M = 3_000_000;
 
 /** Hide atmospheric sky billboard above this AGL (m). */
 export const SPACE_SKY_ALTITUDE_M = 80_000;
 
 /** Subtracted from the altitude zoom curve for inland / open-ocean tiles only. */
-export const TERRAIN_ZOOM_OFFSET = 1;
+const TERRAIN_ZOOM_OFFSET = 1;
 
 /**
  * Target projected error in pixels before a tile is refined.
@@ -25,7 +25,7 @@ export const TERRAIN_ZOOM_OFFSET = 1;
  * so it is a target rather than a promise: if the frame budget cannot carry the
  * extra tiles the governor multiplies it back up and the detail recedes again.
  */
-export const SSE_TARGET_PX = 1;
+const SSE_TARGET_PX = 1;
 
 /**
  * How much earlier the leaf level comes in than screen-space error alone
@@ -295,7 +295,7 @@ export const FRUSTUM_CULL_MARGIN_TAN = Math.tan(FRUSTUM_CULL_MARGIN_RAD);
 export const MESH_CACHE_BYTES = 256 * 1024 * 1024;
 
 /** Geometric horizon distance (m) for a spherical Earth of radius `radiusM`. */
-export function geometricHorizonDistanceM(altitudeM: number, radiusM: number = WGS84_A): number {
+function geometricHorizonDistanceM(altitudeM: number, radiusM: number = WGS84_A): number {
     const h = Math.max(0, altitudeM);
     return Math.sqrt(Math.max(0, 2 * radiusM * h + h * h));
 }
@@ -338,7 +338,7 @@ const ZOOM_ALTITUDE_ANCHORS_M: ReadonlyArray<readonly [number, number]> = [
     [400_000, 4],
 ];
 
-export function terrainZoomCurveForAltitudeM(altitudeM: number): number {
+function terrainZoomCurveForAltitudeM(altitudeM: number): number {
     const h = Math.max(0, altitudeM);
     const anchors = ZOOM_ALTITUDE_ANCHORS_M;
     if (h <= anchors[0][0]) {
@@ -409,7 +409,7 @@ export function ellipsoidSagittaM(id: TileKey): number {
  * Projected screen-space error in pixels.
  * `geometricErrorM` is a world-space metres bound (tile geometric error or sagitta).
  */
-export function screenSpaceErrorPx(
+function screenSpaceErrorPx(
     geometricErrorM: number,
     distanceM: number,
     screenHeightPx: number,

@@ -152,7 +152,7 @@ export class RigidBody6 {
     }
 }
 
-export function normalizeQuat(q: Float64Array): void {
+function normalizeQuat(q: Float64Array): void {
     const len = Math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     if (len > 0) {
         const inv = 1 / len;

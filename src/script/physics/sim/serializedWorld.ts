@@ -25,7 +25,7 @@ import { SkiJumpCollider } from '../../scene/entities/skiJump';
  * aircraft move (see {@link import('../../terrain/heightMirror')}) rather than
  * frozen into a lattice at boot.
  */
-export interface SerializedHill {
+interface SerializedHill {
     worldToLocal: number[];
     localToWorld: number[];
     baseRadius: number;
@@ -35,20 +35,20 @@ export interface SerializedHill {
     worldReach: number;
 }
 
-export interface SerializedObstacle {
+interface SerializedObstacle {
     position: [number, number, number];
     radius: number;
     height: number;
 }
 
-export interface SerializedRunway {
+interface SerializedRunway {
     center: [number, number, number];
     heading: number;
     halfLength: number;
     halfWidth: number;
 }
 
-export interface SerializedSkiJump {
+interface SerializedSkiJump {
     originX: number;
     originY: number;
     originZ: number;
@@ -58,7 +58,7 @@ export interface SerializedSkiJump {
     halfWidth: number;
 }
 
-export interface SerializedCarrierMesh {
+interface SerializedCarrierMesh {
     originX: number;
     originY: number;
     originZ: number;
@@ -288,6 +288,6 @@ export function defaultArrestorCableField(
 }
 
 /** Expose locals for callers that need to inspect layout without THREE world build. */
-export function defaultArrestorLocals(): ArrestorCableLocal[] {
+function defaultArrestorLocals(): ArrestorCableLocal[] {
     return arrestorCableLocals();
 }

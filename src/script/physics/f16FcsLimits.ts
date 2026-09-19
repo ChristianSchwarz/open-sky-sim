@@ -24,7 +24,7 @@ export function computeF16PitchGLimit(currentG: number, pitchStick: number, maxG
 }
 
 /** FBW alpha limiter: fade nose-up command as AOA approaches the stall. */
-export function computeF16PitchAoaAuthority(aoaRad: number, pitchStick: number, stallAoaRad: number): number {
+function computeF16PitchAoaAuthority(aoaRad: number, pitchStick: number, stallAoaRad: number): number {
     if (pitchStick <= 0) {
         return 1;
     }
@@ -36,7 +36,7 @@ export function computeF16PitchAoaAuthority(aoaRad: number, pitchStick: number, 
 }
 
 /** Nose-down recovery rate (rad/s) when |AOA| exceeds the stall limit. */
-export function computeF16AoaRecoveryRate(aoaRad: number, stallAoaRad: number, speed: number): number {
+function computeF16AoaRecoveryRate(aoaRad: number, stallAoaRad: number, speed: number): number {
     if (speed < 10) {
         return 0;
     }

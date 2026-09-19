@@ -10,8 +10,8 @@ import { LANDUSE_BLEND_DEFAULT, clampLanduseBlend } from "../terrain/tones";
 import { TREE_DENSITY_MULTIPLIER_DEFAULT, clampTreeDensityMultiplier } from "../terrain/treeBillboards";
 import { TechProfile } from "./profiles/profile";
 
-export type ProfileChangeListener = (profile: TechProfile, newId: string, oldId: string) => void;
-export type FlightModelChangeListener = (flightModel: FlightModel, newId: string, oldId: string) => void;
+type ProfileChangeListener = (profile: TechProfile, newId: string, oldId: string) => void;
+type FlightModelChangeListener = (flightModel: FlightModel, newId: string, oldId: string) => void;
 export type UnitSystemChangeListener = (unitSystem: UnitSystems) => void;
 export type AiPilotModelChangeListener = (model: AiPilotModels) => void;
 export type TerrainColourChangeListener = (mode: TerrainColours) => void;
@@ -97,7 +97,7 @@ export class ConfigService {
     }
 }
 
-export type ConfigSetChangeListener<T> = (item: T, newId: string, oldId: string) => void;
+type ConfigSetChangeListener<T> = (item: T, newId: string, oldId: string) => void;
 
 /**
  * Local solar time of day, in hours (0..24). Drives the sun direction, the
@@ -453,7 +453,7 @@ export class TriangleBudgetSetting {
 }
 
 /** 24:00 wraps to 00:00 so the slider's two ends are the same midnight. */
-export function clampDaytime(hours: number): number {
+function clampDaytime(hours: number): number {
     if (!Number.isFinite(hours)) return DEFAULT_SUN_HOURS;
     return ((hours % 24) + 24) % 24;
 }

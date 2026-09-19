@@ -225,6 +225,6 @@ export function classifyTacticalState(geom: TacticalGeometry): TacticalState {
     return 'NEUTRAL';
 }
 
-export function clampSpeed(speed: number, max: number): number {
+function clampSpeed(speed: number, max: number): number {
     return clamp(speed, 40, max);
 }

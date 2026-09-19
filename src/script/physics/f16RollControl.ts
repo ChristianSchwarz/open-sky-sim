@@ -11,7 +11,7 @@ export const F16_ROLL_CAT1: F16RollControlConfig = {
     actuatorTauS: 0.075,
 };
 
-export const F16_ROLL_CAT3: F16RollControlConfig = {
+const F16_ROLL_CAT3: F16RollControlConfig = {
     maxRollRateDegS: 180,
     actuatorTauS: 0.09,
 };

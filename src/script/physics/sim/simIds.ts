@@ -4,7 +4,7 @@
 export const PLAYER_SIM_ID = 'player';
 
 /** The first (and, for now, only) AI opponent. */
-export const AI_SIM_ID = 'ai0';
+const AI_SIM_ID = 'ai0';
 
 /** Deterministic id for the Nth AI opponent. */
 export function aiSimId(index: number): string {

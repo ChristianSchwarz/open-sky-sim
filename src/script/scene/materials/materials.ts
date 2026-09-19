@@ -42,7 +42,7 @@ export type SceneMaterialProperties = SceneMaterialCommonProperties & (
     SceneMaterialTreeBillboardProperties
 );
 
-export interface SceneMaterialCommonProperties {
+interface SceneMaterialCommonProperties {
     category: PaletteCategory;
     depthWrite: boolean;
     /**
@@ -83,7 +83,7 @@ export interface TerrainMaterialSpec {
     shadeSpread: number;
 }
 
-export type SceneMaterialMeshProperties = {
+type SceneMaterialMeshProperties = {
     type: SceneMaterialPrimitiveType.MESH;
 } & (
         {
@@ -124,15 +124,15 @@ export type SceneMaterialMeshProperties = {
         }
     );
 
-export interface SceneMaterialPointProperties {
+interface SceneMaterialPointProperties {
     type: SceneMaterialPrimitiveType.POINT;
 }
 
-export interface SceneMaterialLineProperties {
+interface SceneMaterialLineProperties {
     type: SceneMaterialPrimitiveType.LINE;
 }
 
-export interface SceneMaterialParticleMeshProperties {
+interface SceneMaterialParticleMeshProperties {
     type: SceneMaterialPrimitiveType.PARTICLE_MESH;
     /**
      * Minimum projected height in pixels. Distant particles are enlarged to this
@@ -142,7 +142,7 @@ export interface SceneMaterialParticleMeshProperties {
 }
 
 /** Camera-facing billboard used as a distant vegetation impostor. */
-export interface SceneMaterialImpostorProperties {
+interface SceneMaterialImpostorProperties {
     type: SceneMaterialPrimitiveType.IMPOSTOR;
 }
 
@@ -150,14 +150,14 @@ export interface SceneMaterialImpostorProperties {
  * Camera-facing billboard sampling a species' 4-view tree atlas (see
  * treeAtlas.ts) instead of a flat palette colour.
  */
-export interface SceneMaterialTreeBillboardProperties {
+interface SceneMaterialTreeBillboardProperties {
     type: SceneMaterialPrimitiveType.TREE_BILLBOARD;
     map: THREE.Texture;
 }
 
 export type SceneMaterialUniforms = SceneFlatMaterialUniforms | SceneShadedMaterialUniforms;
 
-export interface SceneFlatMaterialUniforms {
+interface SceneFlatMaterialUniforms {
     overbright: { value: number; };
     halfWidth: { value: number; };
     halfHeight: { value: number; };
@@ -175,7 +175,7 @@ export interface SceneFlatMaterialUniforms {
     [uniform: string]: THREE.IUniform<any>;
 }
 
-export interface SceneShadedMaterialUniforms {
+interface SceneShadedMaterialUniforms {
     halfWidth: { value: number; };
     halfHeight: { value: number; };
     distance: { value: number; };
@@ -192,7 +192,7 @@ export interface SceneShadedMaterialUniforms {
 
 export type SceneMaterialData = SceneCommonMaterialData & (SceneFlatMaterialData | SceneShadedMaterialData);
 
-export interface SceneCommonMaterialData {
+interface SceneCommonMaterialData {
     category: PaletteCategory;
     rawColor?: string;
     depthWrite: boolean;
@@ -204,12 +204,12 @@ export interface SceneCommonMaterialData {
     ramp?: THREE.Color[]; // Particle materials only
 }
 
-export interface SceneFlatMaterialData {
+interface SceneFlatMaterialData {
     shaded: false;
     highp: boolean;
 }
 
-export interface SceneShadedMaterialData {
+interface SceneShadedMaterialData {
     shaded: true;
     /** Absolute ENU Y waterline clip (metres); adjusted by RENDER_ORIGIN each draw. */
     clipBelowYAbs: number;

@@ -37,7 +37,7 @@ import { TileKey, tileBounds } from './tiling';
  * lives with the tile, so this only has to hold what is in flight or about
  * to be attached; an eviction here costs a re-fetch, nothing more.
  */
-export const COVER_TEXTURE_CACHE_BYTES = 48 * 1024 * 1024;
+const COVER_TEXTURE_CACHE_BYTES = 48 * 1024 * 1024;
 
 /** What the land material's per-draw refresh reads off a tile's land mesh. */
 export interface CoverBinding {
@@ -149,7 +149,7 @@ export function coverTextureBytes(size: number): number {
     return Math.ceil(size * size * 4 * 4 / 3);
 }
 
-export function buildCoverTexture(tile: PtxTile): THREE.DataTexture {
+function buildCoverTexture(tile: PtxTile): THREE.DataTexture {
     const mips = buildCoverMips(tile.texels, tile.size);
     const texture = new THREE.DataTexture(tile.texels, tile.size, tile.size, THREE.RGBAFormat, THREE.UnsignedByteType);
     texture.mipmaps = mips;

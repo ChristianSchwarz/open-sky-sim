@@ -22,7 +22,7 @@ const INV_FOUR_PI = 1 / (4 * Math.PI);
  * A and B along the downstream unit vector d. Adds into out[o..o+2].
  * `core2` (m²) softens the singularity next to a vortex line.
  */
-export function addHorseshoeVelocity(
+function addHorseshoeVelocity(
     px: number, py: number, pz: number,
     ax: number, ay: number, az: number,
     bx: number, by: number, bz: number,
@@ -58,7 +58,7 @@ export function addHorseshoeVelocity(
  * sideslip (NASA conventions: the aircraft moves along
  * (cos α cos β, sin β, sin α cos β), so the air leaves the other way).
  */
-export function wakeDirection(alpha: number, beta: number, out: Float64Array): Float64Array {
+function wakeDirection(alpha: number, beta: number, out: Float64Array): Float64Array {
     const ca = Math.cos(alpha), sa = Math.sin(alpha);
     const cb = Math.cos(beta), sb = Math.sin(beta);
     // NASA downstream (−cosα cosβ, −sinβ, −sinα cosβ) → sim (−y_N, −z_N, x_N).

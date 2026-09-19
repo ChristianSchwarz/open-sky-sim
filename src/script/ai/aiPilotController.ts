@@ -23,7 +23,7 @@ export interface AiPilotController {
     getManeuverLabel(): string;
 }
 
-export type AiPilotFactory = (
+type AiPilotFactory = (
     aircraft: PilotableAircraft,
     world: WorldQuery,
     options: AiPilotOptions,

@@ -80,7 +80,7 @@ export interface AppSettings {
     volume: number;
 }
 
-export const DEFAULT_SETTINGS: AppSettings = {
+const DEFAULT_SETTINGS: AppSettings = {
     techProfile: TechProfiles.HD,
     flightModel: FlightModels.FM2,
     keyboardLayout: KeyboardControlLayoutId.ARROWS,
@@ -165,7 +165,7 @@ export function loadSettings(): AppSettings {
     }
 }
 
-export function saveSettings(settings: AppSettings): void {
+function saveSettings(settings: AppSettings): void {
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
     } catch {

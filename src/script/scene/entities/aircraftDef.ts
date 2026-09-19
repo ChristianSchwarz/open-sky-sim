@@ -32,7 +32,7 @@ export interface ControlSurfaceConfig {
 }
 
 /** TCA hardpoint / loadout attachment empty (body frame). */
-export interface AircraftAttachmentConfig {
+interface AircraftAttachmentConfig {
     name: string;
     position: [number, number, number];
     /** Local +Z forward axis in body frame. */
@@ -40,7 +40,7 @@ export interface AircraftAttachmentConfig {
 }
 
 /** Optional visual effects; omit fields to use auto-derived defaults. */
-export interface AircraftFxConfig {
+interface AircraftFxConfig {
     /** Wingtip vortex trail origins [left, right] (body frame); null/omit auto-derives. */
     wingtips?: [[number, number, number], [number, number, number]] | null;
     /** Afterburner nozzle exit origins (body frame); null uses the twin default. */
@@ -50,7 +50,7 @@ export interface AircraftFxConfig {
 }
 
 /** Optional spawn metadata from TCA Aircraft2 JSON. */
-export interface AircraftSpawnConfig {
+interface AircraftSpawnConfig {
     /** Ground-contact tweak from TCA SpawnOffset (metres). Not applied to FM2 runway spawn Y — see game.runwaySpawnPosition. */
     offset?: number;
     /** Ramp heading offset from TCA SpawnRotation (degrees). */

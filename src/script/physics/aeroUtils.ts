@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 const GRAVITY = 9.8;
 
-export const GROUND_AIR_DENSITY = 1.225; // kg/m³ at sea level, ISA
+const GROUND_AIR_DENSITY = 1.225; // kg/m³ at sea level, ISA
 const VNE_MACH = 0.95; // transonic drag rise onset (sim only; paper k₂ = 0)
 
 const ISA_SEA_LEVEL_PRESSURE = 101325; // Pa
@@ -82,7 +82,7 @@ export function computeDynamicPressureDragPenalty(speedMps: number, altitudeMete
     return 0.55 * excess * excess;
 }
 
-export function computeMaxEquilibriumSpeed(
+function computeMaxEquilibriumSpeed(
     airDensity: number,
     thrustForce: number,
     wingArea: number,
@@ -94,7 +94,7 @@ export function computeMaxEquilibriumSpeed(
     return Math.sqrt(2 * thrustForce / (airDensity * wingArea * dragCoefficient));
 }
 
-export function computeAngleOfAttack(
+function computeAngleOfAttack(
     forward: THREE.Vector3,
     right: THREE.Vector3,
     velocity: THREE.Vector3,

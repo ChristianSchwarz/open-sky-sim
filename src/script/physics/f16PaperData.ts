@@ -36,7 +36,7 @@ export const F16_PAPER_VSPAERO = {
     maxLiftToDragAlphaDeg: 4,
 } as const;
 
-export type F16PaperMetric =
+type F16PaperMetric =
     | 'liftToDrag'
     | 'minGlideAngleDeg'
     | 'thrustRequiredLb'

@@ -82,13 +82,13 @@ export const PTM_FLAG_HAS_WATER = 1 << 1;
 export const PTM_FLAG_HAS_RIVERS = 1 << 2;
 
 /** Water indices are u16, so a tile may not exceed this many water vertices. */
-export const PTM_MAX_WATER_VERTS = 65536;
+const PTM_MAX_WATER_VERTS = 65536;
 
 /** Same u16 index limit for the river stroke. */
 export const PTM_MAX_RIVER_VERTS = 65536;
 
 /** riverHalf is stored in decimetres, so this is the widest stroke it holds. */
-export const PTM_MAX_RIVER_HALF_M = 6553.5;
+const PTM_MAX_RIVER_HALF_M = 6553.5;
 
 const I16_MAX = 32767;
 
@@ -121,7 +121,7 @@ export interface PtmLandInput {
 }
 
 /** Water input: shared vertices, indexed triangles, one tone each. */
-export interface PtmWaterInput {
+interface PtmWaterInput {
     /** 3 floats per vertex, tile-local metres. */
     positions: Float32Array;
     /** 3 indices per triangle. */

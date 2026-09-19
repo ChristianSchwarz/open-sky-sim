@@ -2,7 +2,7 @@
 
 import { LonLatBounds } from './tiling';
 
-export interface MeshStreamManifest {
+interface MeshStreamManifest {
     /** Path template, e.g. `{z}/{x}/{y}.ptm`. */
     path: string;
     indexPath: string;
@@ -62,7 +62,7 @@ export interface TextureStreamManifest {
  * tile that has a road on it, draped over that tile's drawn facets. Absent
  * on a pyramid baked without roads, which the runtime treats as "no roads".
  */
-export interface RoadStreamManifest {
+interface RoadStreamManifest {
     /** Path template, e.g. `{z}/{x}/{y}.ptr`. */
     path: string;
     indexPath: string;
@@ -72,7 +72,7 @@ export interface RoadStreamManifest {
     maxZoom: number;
 }
 
-export interface HeightStreamManifest {
+interface HeightStreamManifest {
     path: string;
     indexPath: string;
     tileSize: number;

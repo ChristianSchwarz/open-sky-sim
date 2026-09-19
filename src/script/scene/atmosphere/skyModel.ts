@@ -471,7 +471,7 @@ const DOME_ELEVATIONS_DEG = [0.3, 1.5, 4, 8, 15, 26, 42, 62, 90];
 const DOME_AZIMUTHS_DEG = [0, 20, 40, 60, 90, 120, 150, 180];
 
 /** Sky gains across the dome, indexed [elevation][azimuth-from-sun]. */
-export type DomeGrid = Rgb[][];
+type DomeGrid = Rgb[][];
 
 function buildDomeGrid(sunElevationDeg: number): DomeGrid {
     const sunAngle = sunElevationDeg * Math.PI / 180;

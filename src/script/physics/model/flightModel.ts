@@ -3,7 +3,7 @@ import { UP } from '../../utils/math';
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { FcsPitchLimiter } from '../fm2/fcs';
 
-export const SIM_FPS = 120;
+const SIM_FPS = 120;
 const SIM_DELTA = 1.0 / SIM_FPS;
 
 const EMPTY_GEAR_COMPRESSION: ReadonlyArray<number> = Object.freeze([]);

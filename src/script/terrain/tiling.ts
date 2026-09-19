@@ -58,7 +58,7 @@ export function parentOf(id: TileKey): TileKey | undefined {
 }
 
 /** Same-zoom edge neighbors (W,E,N,S). Lon wraps; lat clamps. */
-export function edgeNeighbors(id: TileKey): TileKey[] {
+function edgeNeighbors(id: TileKey): TileKey[] {
     const xc = xCount(id.z);
     const yc = yCount(id.z);
     const out: TileKey[] = [];
@@ -100,7 +100,7 @@ export function tileAtLonLat(z: number, lon: number, lat: number): TileKey {
     return { z, x, y };
 }
 
-export function boundsOverlap(a: LonLatBounds, b: LonLatBounds): boolean {
+function boundsOverlap(a: LonLatBounds, b: LonLatBounds): boolean {
     return a.west < b.east && a.east > b.west && a.south < b.north && a.north > b.south;
 }
 

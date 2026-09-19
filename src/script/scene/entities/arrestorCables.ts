@@ -24,9 +24,9 @@ export const ARRESTOR_CABLE_LOCAL_Z = [95, 83, 71, 59] as const;
 /** Max horizontal miss from cable for a catch (m). */
 export const ARRESTOR_CATCH_RADIUS_M = 2.0;
 /** Max |hookY − cableY| allowed for a catch (m). */
-export const ARRESTOR_CATCH_VERT_M = 2.5;
+const ARRESTOR_CATCH_VERT_M = 2.5;
 /** Minimum along-deck speed to snag (m/s). */
-export const ARRESTOR_MIN_SNAG_SPEED_MPS = 15;
+const ARRESTOR_MIN_SNAG_SPEED_MPS = 15;
 /** Release when along-deck speed drops below this (m/s). */
 export const ARRESTOR_STOP_SPEED_MPS = 0.5;
 /** After a completed trap, drop the cable once groundspeed exceeds this (m/s). */
@@ -34,13 +34,13 @@ export const ARRESTOR_RELEASE_SPEED_MPS = 3.0;
 /** Deck run-out from snag to full stop (m). */
 export const ARRESTOR_PULL_OUT_M = 140;
 /** Cap on arrest deceleration (m/s²); ~4 g. */
-export const ARRESTOR_MAX_DECEL_MPS2 = 4.0 * 9.80665;
+const ARRESTOR_MAX_DECEL_MPS2 = 4.0 * 9.80665;
 
 /**
  * Whole hook assembly (hinge and tip) sits this far above the belly line it was
  * originally authored at, so the arm hangs off the fuselage instead of the air.
  */
-export const TAILHOOK_MOUNT_UP_M = 0.7;
+const TAILHOOK_MOUNT_UP_M = 0.7;
 
 /** Default body-frame hook tip — coincides with default nozzle exit Z. */
 export const DEFAULT_ARRESTOR_HOOK_BODY: [number, number, number] = [
@@ -49,7 +49,7 @@ export const DEFAULT_ARRESTOR_HOOK_BODY: [number, number, number] = [
     DEFAULT_ENGINE_NOZZLES[0][2],
 ];
 /** Hinge sits this far above the tip in body Y (m). */
-export const ARRESTOR_HOOK_HINGE_UP_M = 0.75;
+const ARRESTOR_HOOK_HINGE_UP_M = 0.75;
 /** Hinge sits this far forward of the tip in body +Z (m). */
 export const ARRESTOR_HOOK_HINGE_FWD_M = 1.0;
 /** Body-frame hinge for the visible tailhook arm (belly, forward of the tip). */
@@ -66,7 +66,7 @@ export const TAILHOOK_ARM_LENGTH_M = Math.hypot(
 );
 
 /** Rearmost nozzle-exit Z from a nozzle list (body +Z forward → aft is min Z). */
-export function nozzleExitZ(
+function nozzleExitZ(
     nozzles: readonly (readonly [number, number, number])[],
 ): number {
     let z = nozzles[0][2];
@@ -105,7 +105,7 @@ export function resolveArrestorHookTip(opts: {
 }
 
 /** Visible-arm hinge from a resolved tip (same relative offset as the default). */
-export function arrestorHookHingeFromTip(
+function arrestorHookHingeFromTip(
     tip: readonly [number, number, number],
 ): [number, number, number] {
     return [
@@ -183,7 +183,7 @@ export function carrierLocalToWorld(
 }
 
 /** World-space midpoint of cable `index` (rest position / tension target). */
-export function arrestorCableMidWorld(
+function arrestorCableMidWorld(
     index: number,
     origin: ArrestorCarrierPose | { x: number; y: number; z: number } = ARRESTOR_CARRIER_ORIGIN,
     out: THREE.Vector3,
@@ -259,7 +259,7 @@ export interface ArrestorCableLocal {
     bz: number;
 }
 
-export interface ArrestorCableSegment {
+interface ArrestorCableSegment {
     readonly a: THREE.Vector3;
     readonly b: THREE.Vector3;
 }

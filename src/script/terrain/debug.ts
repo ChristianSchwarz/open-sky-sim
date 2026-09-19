@@ -25,7 +25,7 @@ export function trackTerrainMaterial(mat: THREE.Material): void {
     }
 }
 
-export function clearTerrainMaterialTracking(): void {
+function clearTerrainMaterialTracking(): void {
     materials.clear();
 }
 

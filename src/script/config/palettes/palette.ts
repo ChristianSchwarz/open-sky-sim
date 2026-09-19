@@ -107,7 +107,7 @@ export enum PaletteCategory {
 
 export const PALETTE_FX_PREFIX: string = 'FX';
 /** Airframe skins (VEHICLE_PLANE_*). */
-export const PALETTE_VEHICLE_PREFIX: string = 'VEHICLE';
+const PALETTE_VEHICLE_PREFIX: string = 'VEHICLE';
 
 export enum PaletteTime {
     DAY = 'day',

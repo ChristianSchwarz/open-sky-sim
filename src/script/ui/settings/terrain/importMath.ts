@@ -65,7 +65,7 @@ export function worldToLat(y: number, z: number): number {
 }
 
 /** Rough ground size of a box, for the readout. */
-export function boxKm(b: Box): { w: number; h: number } {
+function boxKm(b: Box): { w: number; h: number } {
     const midLat = (b.south + b.north) / 2;
     return {
         w: (b.east - b.west) * 111.32 * Math.cos(midLat * Math.PI / 180),

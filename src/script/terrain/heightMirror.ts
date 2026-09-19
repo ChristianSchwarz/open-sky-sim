@@ -25,7 +25,7 @@ import { HeightSampler, HeightTier } from './heightSampler';
 import { TileKey, tileKeyString } from './tiling';
 
 /** One decoded DEM tile, structured-clone-safe (heights are transferable). */
-export interface SerializedDemTile {
+interface SerializedDemTile {
     z: number;
     x: number;
     y: number;
@@ -59,7 +59,7 @@ export interface HeightTileUpdate {
     absent?: string[];
 }
 
-export function serializeDemTile(id: TileKey, tile: DemTile): SerializedDemTile {
+function serializeDemTile(id: TileKey, tile: DemTile): SerializedDemTile {
     return {
         z: id.z,
         x: id.x,

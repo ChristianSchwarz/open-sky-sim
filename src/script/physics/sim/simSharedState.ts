@@ -4,10 +4,10 @@ import { AC_STRIDE, PROJ_STRIDE } from './simSnapshotCodec';
 export const SIM_SHARED_MAX_AIRCRAFT = 16;
 
 /** Must match combatSim projectile pool size. */
-export const SIM_SHARED_MAX_PROJECTILES = 480;
+const SIM_SHARED_MAX_PROJECTILES = 480;
 
 /** Int32 control-block indices (Atomics). */
-export const CTRL = {
+const CTRL = {
     BUSY: 0,
     WRITE_SEQ: 1,
     ACTIVE_BANK: 2,

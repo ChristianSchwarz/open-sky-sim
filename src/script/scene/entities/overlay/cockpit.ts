@@ -30,7 +30,7 @@ export interface MovingMapSource {
  */
 
 /** Scope range ladder (Km); the smallest ring holding the lock is used. */
-export const TACTICAL_RANGES_KM = [5, 10, 20, 40, 80];
+const TACTICAL_RANGES_KM = [5, 10, 20, 40, 80];
 
 /** Scope range (Km) used while nothing is designated. */
 export const TACTICAL_DEFAULT_RANGE_KM = 20;
@@ -40,7 +40,7 @@ export const TACTICAL_DEFAULT_RANGE_KM = 20;
  * positions are read every frame; only the list itself is rebuilt on this
  * interval, since scanning the scene by tag walks every entity.
  */
-export const TACTICAL_SCAN_INTERVAL = 0.5;
+const TACTICAL_SCAN_INTERVAL = 0.5;
 
 /** Where a contact sits on the scope, in pixels from its centre. */
 export interface TacticalPlot {

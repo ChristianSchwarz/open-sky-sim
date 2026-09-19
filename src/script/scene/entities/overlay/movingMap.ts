@@ -29,10 +29,10 @@ export interface MapTileSource {
  * for in the frustum, since the map is a handful of tiles and the pilot is
  * looking straight at it.
  */
-export const MOVING_MAP_PRIORITY = 2e6;
+const MOVING_MAP_PRIORITY = 2e6;
 
 /** Tile canvases kept; each z11 one is a megabyte of RGBA. */
-export const MOVING_MAP_CANVAS_CACHE = 48;
+const MOVING_MAP_CANVAS_CACHE = 48;
 
 /** Metres per degree of latitude, and of longitude at `latDeg`. */
 export function metresPerDegree(latDeg: number): { lat: number; lon: number } {

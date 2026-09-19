@@ -6,15 +6,15 @@ import { computeLevelFlightDragN } from './f16AnalyticalModel';
 import { computeF16EngineThrustN } from './f16Engine';
 import { F16_PROFILE } from './f16Profile';
 
-export const F16_DRY_MASS = F16_PROFILE.combatMassKg;
-export const F16_WING_AREA = F16_PROFILE.wingAreaM2;
-export const F16_CD0 = F16_PROFILE.cd0;
+const F16_DRY_MASS = F16_PROFILE.combatMassKg;
+const F16_WING_AREA = F16_PROFILE.wingAreaM2;
+const F16_CD0 = F16_PROFILE.cd0;
 
 export function computeF16AfterburnerThrust(altitudeMeters: number): number {
     return computeF16EngineThrustN(1.0, altitudeMeters);
 }
 
-export function computeF16MilThrust(altitudeMeters: number): number {
+function computeF16MilThrust(altitudeMeters: number): number {
     return computeF16EngineThrustN(F16_PROFILE.milLeverEnd, altitudeMeters);
 }
 

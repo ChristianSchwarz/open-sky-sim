@@ -27,7 +27,7 @@ import { TileStore } from './tileStore';
 import { TileKey } from './tiling';
 
 /** Decoded sidecars kept; a bound tile no longer needs its bytes. */
-export const ROAD_STROKE_CACHE_BYTES = 32 * 1024 * 1024;
+const ROAD_STROKE_CACHE_BYTES = 32 * 1024 * 1024;
 
 /**
  * Draw order of the road strokes among a tile's meshes: over the ground and

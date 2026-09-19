@@ -22,21 +22,21 @@ export const CARRIER_AOA_ON_SPEED_MIN_DEG = 8.0;
 /** Upper bound of the carrier on-speed AoA band (deg). */
 export const CARRIER_AOA_ON_SPEED_MAX_DEG = 8.5;
 /** Midpoint used when a single on-speed reference is needed. */
-export const CARRIER_AOA_ON_SPEED_DEG =
+const CARRIER_AOA_ON_SPEED_DEG =
     0.5 * (CARRIER_AOA_ON_SPEED_MIN_DEG + CARRIER_AOA_ON_SPEED_MAX_DEG);
 
 /** Nominal carrier approach speed (KIAS); mid of the 130–145 band. */
 export const CARRIER_APPROACH_SPEED_KIAS = 137;
 /** Nominal approach sink rate down the groove (ft/min). */
-export const CARRIER_APPROACH_SINK_FPM = 700;
+const CARRIER_APPROACH_SINK_FPM = 700;
 
 const KIAS_TO_MPS = 0.514444;
 const FPM_TO_MPS = 0.00508;
 
 /** Nominal carrier approach speed (m/s). */
-export const CARRIER_APPROACH_SPEED_MPS = CARRIER_APPROACH_SPEED_KIAS * KIAS_TO_MPS;
+const CARRIER_APPROACH_SPEED_MPS = CARRIER_APPROACH_SPEED_KIAS * KIAS_TO_MPS;
 /** Nominal approach sink rate (m/s, negative = descending). */
-export const CARRIER_APPROACH_SINK_MPS = -CARRIER_APPROACH_SINK_FPM * FPM_TO_MPS;
+const CARRIER_APPROACH_SINK_MPS = -CARRIER_APPROACH_SINK_FPM * FPM_TO_MPS;
 
 /** Full-scale localizer deflection ≈ this lateral miss (m). */
 const LOC_FULL_SCALE_M = 90;

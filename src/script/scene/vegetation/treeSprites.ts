@@ -51,7 +51,7 @@ export enum TreeView {
     DEG_90 = 3,
 }
 
-export const TREE_VIEW_ANGLES_DEG: Readonly<Record<TreeView, number>> = {
+const TREE_VIEW_ANGLES_DEG: Readonly<Record<TreeView, number>> = {
     [TreeView.DEG_0]: 0,
     [TreeView.DEG_30]: 30,
     [TreeView.DEG_60]: 60,
@@ -79,7 +79,7 @@ export const SPECIES_COUNT = 4;
  *   (birch, poplar, alder), distinct from a conifer's point or a broadleaf's
  *   round scatter.
  */
-export type CrownShape = 'round' | 'conical' | 'spreading' | 'sparse' | 'columnar';
+type CrownShape = 'round' | 'conical' | 'spreading' | 'sparse' | 'columnar';
 
 /** A silhouette spec is not tied to Species - see renderTreeSilhouette, used to preview species specs that aren't (yet) wired into the roster. */
 export interface TreeSilhouetteSpec {
@@ -281,7 +281,7 @@ function canopyPath(spec: TreeSilhouetteSpec, angleDeg: number): string {
  * exposed so species specs that aren't (yet) wired into that roster can
  * still be previewed with it.
  */
-export function renderTreeSilhouette(spec: TreeSilhouetteSpec, angleDeg: number): string {
+function renderTreeSilhouette(spec: TreeSilhouetteSpec, angleDeg: number): string {
     return svgWrap(canopyPath(spec, angleDeg));
 }
 

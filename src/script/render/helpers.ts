@@ -242,7 +242,7 @@ export class LODHelper {
     }
 }
 
-export class ParticleSystemHelper {
+class ParticleSystemHelper {
 
     private objVolumes: THREE.Object3D = new THREE.Object3D();
 
@@ -344,13 +344,13 @@ export function getLodLevel(position: THREE.Vector3, scale: THREE.Vector3, targe
 }
 
 /** True when a LOD level carries at least one drawable mesh. */
-export function lodLevelHasGeometry(model: Model, lodLevel: number): boolean {
+function lodLevelHasGeometry(model: Model, lodLevel: number): boolean {
     const level = model.lod[lodLevel];
     return level !== undefined && (level.flats.length > 0 || level.volumes.length > 0);
 }
 
 /** Indices of LOD levels that contain at least one mesh, ascending. */
-export function populatedLodLevels(model: Model): number[] {
+function populatedLodLevels(model: Model): number[] {
     const levels: number[] = [];
     for (let i = 0; i < model.lod.length; i++) {
         if (lodLevelHasGeometry(model, i)) {

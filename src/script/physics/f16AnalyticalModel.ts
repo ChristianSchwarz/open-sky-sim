@@ -15,7 +15,7 @@ function wingAreaM2(): number {
     return F16_PROFILE.wingAreaM2;
 }
 
-export function clFromAlphaRad(
+function clFromAlphaRad(
     alphaRad: number,
     clAlpha: number = F16_PROFILE.clAlphaPerRad,
     cl0: number = F16_PROFILE.cl0,
@@ -23,7 +23,7 @@ export function clFromAlphaRad(
     return cl0 + clAlpha * alphaRad;
 }
 
-export function cdFromCl(cl: number, cd0: number = F16_PROFILE.cd0, k: number = F16_PROFILE.inducedDragK): number {
+function cdFromCl(cl: number, cd0: number = F16_PROFILE.cd0, k: number = F16_PROFILE.inducedDragK): number {
     return cd0 + k * cl * cl;
 }
 
@@ -48,7 +48,7 @@ export function minGlideAngleDeg(maxLiftToDrag = F16_PAPER_ANALYTICAL.maxLiftToD
 }
 
 /** Level-flight CL for weight support at speed (Anderson, L = W). */
-export function levelFlightCl(
+function levelFlightCl(
     speedMps: number,
     altitudeMeters: number,
     massKg: number,
@@ -144,11 +144,11 @@ export function liftToDragVspaero(alphaDeg: number): number {
     );
 }
 
-export function weightToMassKg(weightLb: number): number {
+function weightToMassKg(weightLb: number): number {
     return weightLb * LB_TO_KG;
 }
 
-export function cruiseDynamicPressurePa(): number {
+function cruiseDynamicPressurePa(): number {
     const v = F16_PAPER_ANALYTICAL.cruiseVelocityFps * FPS_TO_MPS;
     const rho = computeAirDensity(F16_PAPER_ANALYTICAL.cruiseAltitudeFt * FT_TO_M);
     return 0.5 * rho * v * v;

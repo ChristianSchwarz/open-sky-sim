@@ -17,7 +17,7 @@ export interface CameraRoute {
 }
 
 /** Query parameter names, in the order they are written. */
-export const CAMERA_ROUTE_PARAMS = ['lat', 'lng', 'alt', 'hdg', 'pitch'] as const;
+const CAMERA_ROUTE_PARAMS = ['lat', 'lng', 'alt', 'hdg', 'pitch'] as const;
 const DEFAULT_ALT_M = 1000;
 const PITCH_LIMIT_DEG = 89;
 

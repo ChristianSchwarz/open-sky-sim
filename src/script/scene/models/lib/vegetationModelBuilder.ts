@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { PaletteCategory } from '../../../config/palettes/palette';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from "../../materials/materials";
 
-export enum VegetationKind {
+enum VegetationKind {
     OAK,
     PINE,
     BUSH,
@@ -21,7 +21,7 @@ export enum ImpostorShape {
 }
 
 /** Raw, un-merged geometry for a single plant, in local space (base at y=0). */
-export interface VegetationInstanceGeometry {
+interface VegetationInstanceGeometry {
     foliageCategory: PaletteCategory;
     canopy: THREE.BufferGeometry[];
     trunk?: THREE.BufferGeometry;
@@ -37,7 +37,7 @@ interface VegetationSpec {
     buildInstance: () => { canopy: THREE.BufferGeometry[]; trunk?: THREE.BufferGeometry };
 }
 
-export const VEGETATION_SPECS: Record<VegetationKind, VegetationSpec> = {
+const VEGETATION_SPECS: Record<VegetationKind, VegetationSpec> = {
     [VegetationKind.OAK]: {
         foliage: PaletteCategory.SCENERY_TREE_FOLIAGE,
         maxRadius: 28,
@@ -80,9 +80,9 @@ export const VEGETATION_SPECS: Record<VegetationKind, VegetationSpec> = {
  * per-tree (1.15x) and per-patch (1.45x) field scaling, the tallest species
  * (pine, ~47m raw) stays under the 20m height budget: 47 * 0.25 * 1.15 * 1.45 ≈ 19.6m.
  */
-export const VEGETATION_SCALE = 0.25;
+const VEGETATION_SCALE = 0.25;
 
-export function buildVegetationInstance(kind: VegetationKind): VegetationInstanceGeometry {
+function buildVegetationInstance(kind: VegetationKind): VegetationInstanceGeometry {
     const spec = VEGETATION_SPECS[kind];
     const { canopy, trunk } = spec.buildInstance();
     for (const geo of canopy) {
@@ -106,7 +106,7 @@ export function buildVegetationInstance(kind: VegetationKind): VegetationInstanc
  * parts use the flat (unshaded) material so per-fragment fog stays correct once
  * the vertex shader applies each instance's transform.
  */
-export interface VegetationParts {
+interface VegetationParts {
     foliageGeometry: THREE.BufferGeometry;
     foliageMaterial: THREE.Material;
     trunkGeometry?: THREE.BufferGeometry;
@@ -154,7 +154,7 @@ function buildImpostorGeometry(shape: ImpostorShape, maxRadius: number, maxHeigh
     return geometry;
 }
 
-export function buildVegetationParts(materials: SceneMaterialManager, kind: VegetationKind): VegetationParts {
+function buildVegetationParts(materials: SceneMaterialManager, kind: VegetationKind): VegetationParts {
     const inst = buildVegetationInstance(kind);
 
     const foliageGeometry = mergeGeometries(inst.canopy);
@@ -204,7 +204,7 @@ export function buildVegetationParts(materials: SceneMaterialManager, kind: Vege
     };
 }
 
-export function makeTrunkGeometry(topRadius: number, bottomRadius: number, height: number): THREE.BufferGeometry {
+function makeTrunkGeometry(topRadius: number, bottomRadius: number, height: number): THREE.BufferGeometry {
     const geometry = new THREE.CylinderGeometry(topRadius, bottomRadius, height, 4, undefined, true).toNonIndexed();
     geometry.translate(0, height / 2, 0);
     geometry.rotateY(Math.PI / 4);

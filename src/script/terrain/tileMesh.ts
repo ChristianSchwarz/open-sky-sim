@@ -124,7 +124,7 @@ const GROUND_CLASS = 13;
  * land-use regions (exact fills on the leaf, votes above it); on a raster-only
  * tile the classes *are* the ground.
  */
-export function hasLanduseGround(landAttrs: Uint8Array): boolean {
+function hasLanduseGround(landAttrs: Uint8Array): boolean {
     for (let i = 3; i < landAttrs.length; i += 4) {
         if (landAttrs[i] === GROUND_CLASS) {
             return true;

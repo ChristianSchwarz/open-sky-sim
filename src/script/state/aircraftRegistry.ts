@@ -60,7 +60,7 @@ export function buildF22Def(): FlyableAircraftDef {
 }
 
 /** Raw shape of a packed `manifest.json` (subset the sim consumes). */
-export interface AircraftManifest {
+interface AircraftManifest {
     id?: string;
     name?: string;
     displayName?: string;
@@ -160,7 +160,7 @@ export function groupAircraftByModel(defs: FlyableAircraftDef[]): AircraftModelG
     return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
-export function manifestToDef(id: string, m: AircraftManifest): FlyableAircraftDef {
+function manifestToDef(id: string, m: AircraftManifest): FlyableAircraftDef {
     return {
         id: m.id ?? id,
         name: m.displayName ?? m.name ?? id,

@@ -45,7 +45,7 @@ export const F16_PROFILE = {
     landingMinPitchDeg: -12,
 } as const;
 
-export type F16ReferenceMetric =
+type F16ReferenceMetric =
     | 'massKg'
     | 'wingAreaM2'
     | 'wingSpanM'

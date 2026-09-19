@@ -178,7 +178,7 @@ export function slopeMachFactor(mach: number, cnAlpha: number): number {
 }
 
 /** Shock-induced separation arrives earlier with Mach: the break angle shrinks by up to 40%. */
-export function stallMachFactor(mach: number): number {
+function stallMachFactor(mach: number): number {
     if (mach <= 0.3) return 1;
     const t = mach >= 0.9 ? 1 : (mach - 0.3) / 0.6;
     const s = t * t * (3 - 2 * t);

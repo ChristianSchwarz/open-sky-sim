@@ -30,7 +30,7 @@ export const CHANNEL_INDEX: Readonly<Record<Fm3Channel, number>> = {
     stabL: 0, stabR: 1, flapL: 2, flapR: 3, rudder: 4, lef: 5, speedbrake: 6,
 };
 
-export interface Fm3ControlSegment {
+interface Fm3ControlSegment {
     kind: 'flap' | 'leadingEdge' | 'allMoving';
     /** Channel for the surface as defined (the starboard side of a mirrored one). */
     channel: Fm3Channel;
@@ -83,7 +83,7 @@ export interface Fm3LiftingSurface {
 }
 
 /** A leading-edge extension / strake, flown by the Polhamus suction analogy. */
-export interface Fm3Strake {
+interface Fm3Strake {
     name: string;
     /** Apex of the starboard strake. */
     apex: Vec3;
@@ -120,7 +120,7 @@ export interface Fm3Strake {
 }
 
 /** A slender body — fuselage, pod, tank — as a string of elliptical cross-sections. */
-export interface Fm3Body {
+interface Fm3Body {
     name: string;
     /** Nose to tail: [x, z of the section centre, width, height]. */
     stations: [number, number, number, number][];
@@ -130,7 +130,7 @@ export interface Fm3Body {
     potentialFactor?: number;
 }
 
-export interface Fm3BluffBody {
+interface Fm3BluffBody {
     name: string;
     position: Vec3;
     /** Drag area C_D·A (m²) fully deployed. */
@@ -153,7 +153,7 @@ export interface Fm3Engine {
     maxThrustN: number;
 }
 
-export interface Fm3Actuator {
+interface Fm3Actuator {
     channel: Fm3Channel;
     min: number;
     max: number;

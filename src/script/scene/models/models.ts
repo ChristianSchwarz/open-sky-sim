@@ -21,7 +21,7 @@ export interface Model {
     center: THREE.Vector3;
 }
 
-export const LIB_PREFFIX = 'lib:';
+const LIB_PREFFIX = 'lib:';
 export type ModelLoadedListener = (url: string, model: Model) => void;
 
 // The GLASS material is drawn as a flat dark-grey surface with a light ordered

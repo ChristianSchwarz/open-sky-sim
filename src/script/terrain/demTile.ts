@@ -2,9 +2,9 @@
 
 import { unzlibSync } from 'fflate';
 
-export const PDM_MAGIC = 0x314D4450; // 'PDM1' little-endian
-export const PDM_NODATA = 0xFFFF;
-export const PDM_HEADER_BYTES = 24;
+const PDM_MAGIC = 0x314D4450; // 'PDM1' little-endian
+const PDM_NODATA = 0xFFFF;
+const PDM_HEADER_BYTES = 24;
 
 export interface DemTile {
     size: number;
@@ -155,7 +155,7 @@ export function sampleBilinear(tile: DemTile, u: number, v: number): number {
 }
 
 /** Lon/lat → normalised UV inside a tile's lon/lat bounds. */
-export function lonLatToUv(
+function lonLatToUv(
     lon: number,
     lat: number,
     west: number,

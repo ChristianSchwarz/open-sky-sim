@@ -105,7 +105,7 @@ export function segmentHitsTriangleBody(
 }
 
 /** Transform a world-space segment into the aircraft body frame. */
-export function worldSegmentToBody(
+function worldSegmentToBody(
     worldStart: THREE.Vector3,
     worldEnd: THREE.Vector3,
     position: THREE.Vector3,
@@ -214,7 +214,7 @@ const contactCache = new WeakMap<AircraftCollisionMesh, ContactSamples>();
  * still well clear — 8 m AGL on a 26 degree slope in a 20 degree bank. Real hull
  * vertices cannot do that: if one is under the ground, the aircraft is in it.
  */
-export function collisionContactPoints(mesh: AircraftCollisionMesh): ContactSamples {
+function collisionContactPoints(mesh: AircraftCollisionMesh): ContactSamples {
     const cached = contactCache.get(mesh);
     if (cached) {
         return cached;
@@ -260,7 +260,7 @@ export function collisionContactPoints(mesh: AircraftCollisionMesh): ContactSamp
 }
 
 /** Sample body-frame contact points (and the origin) in world space. */
-export function forEachContactWorldSample(
+function forEachContactWorldSample(
     position: THREE.Vector3,
     quaternion: THREE.Quaternion,
     points: Float32Array,

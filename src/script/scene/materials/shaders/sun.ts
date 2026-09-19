@@ -187,12 +187,12 @@ export function sunElevationAt(hours: number): number {
 }
 
 /** Ramps 0 (night) to 1 (sun well up) across civil twilight. */
-export function dayFactorFor(elevationDeg: number): number {
+function dayFactorFor(elevationDeg: number): number {
     return THREE.MathUtils.smoothstep(elevationDeg, DAY_FACTOR_MIN_ELEVATION_DEG, DAY_FACTOR_MAX_ELEVATION_DEG);
 }
 
 /** Weight for cast shadows; see {@link SHADOW_MIN_ELEVATION_DEG}. */
-export function shadowStrengthFor(elevationDeg: number): number {
+function shadowStrengthFor(elevationDeg: number): number {
     return THREE.MathUtils.smoothstep(elevationDeg, SHADOW_MIN_ELEVATION_DEG, SHADOW_MAX_ELEVATION_DEG);
 }
 

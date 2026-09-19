@@ -30,7 +30,7 @@ export interface RampFrame {
     heading: number;
 }
 
-export const STATIC_AIRCRAFT_TYPES: StaticAircraftType[] = [
+const STATIC_AIRCRAFT_TYPES: StaticAircraftType[] = [
     {
         name: 'F-22',
         body: 'assets/f22_scenery.glb',
