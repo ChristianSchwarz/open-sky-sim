@@ -219,6 +219,10 @@ export class ModelManager {
                     return;
                 }
 
+                if ('isMesh' in obj) {
+                    obj.geometry = ModelManager.withFaceNormals(obj.geometry);
+                }
+
                 obj.matrix.copy(obj.matrixWorld);
                 obj.matrix.decompose(obj.position, obj.quaternion, obj.scale);
                 obj.matrixAutoUpdate = true;
@@ -318,6 +322,26 @@ export class ModelManager {
         model.maxSize = Math.max(...AABBox.getSize(new THREE.Vector3()).toArray());
         AABBox.getCenter(model.center);
         return model;
+    }
+
+    /**
+     * Mod imports export every vertex normal as straight up, which lights all
+     * faces alike. Where that is the case, give each face its own normal.
+     */
+    private static withFaceNormals(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
+        const normal = geometry.getAttribute('normal');
+        if (normal) {
+            let allUp = true;
+            for (let i = 0; i < normal.count && allUp; i++) {
+                allUp = Math.abs(normal.getX(i)) < 1e-3 && normal.getY(i) > 0.999 && Math.abs(normal.getZ(i)) < 1e-3;
+            }
+            if (!allUp) {
+                return geometry;
+            }
+        }
+        const flat = geometry.index ? geometry.toNonIndexed() : geometry;
+        flat.computeVertexNormals();
+        return flat;
     }
 
     /** True for flyable-aircraft ground-shadow assets (`*_shadow.gltf` / `.glb`). */

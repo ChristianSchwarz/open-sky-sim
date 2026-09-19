@@ -10,7 +10,8 @@ import { AiPilotOptions } from '../../ai/aiPilot';
 import { Combatant, Faction } from '../../weapons/combatant';
 import { Entity, ENTITY_TAGS } from '../entity';
 import { SceneMaterialManager } from '../materials/materials';
-import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef } from './aircraftDef';
+import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef, SwingWingsConfig } from './aircraftDef';
+import { poseSurface, stepWingSweep, WingSweepMode, wingSweepTarget } from './wingSweep';
 import { AircraftFx } from './aircraftFx';
 import { setAircraftShadowPose } from './aircraftShadow';
 import { SUN_STATE } from '../materials/shaders/sun';
@@ -42,6 +43,10 @@ interface AiControlSurface {
     control: ControlAxis;
     sign: number;
     range: number;
+    /** Index of the sweep surface this one rides on, or -1. */
+    parentIndex: number;
+    /** Current deflection (rad), refreshed each frame before posing. */
+    deflection: number;
 }
 
 export interface AiAircraftSpawn {
@@ -77,6 +82,7 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
     private gearAnimated = false;
     private gearAnimReady = false;
     private controlSurfaces: AiControlSurface[] = [];
+    private swingWings: SwingWingsConfig | undefined;
 
     private readonly obj = new THREE.Object3D();
     private readonly displayPosition = new THREE.Vector3();
@@ -199,7 +205,11 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             control: s.control,
             sign: s.sign,
             range: s.rangeRad,
+            parentIndex: s.sweepParent ? def.surfaces.findIndex(o => o.role === s.sweepParent) : -1,
+            deflection: 0,
         }));
+        this.swingWings = def.swingWings;
+        this.fx.setWingSweepSource(() => this.wingSweepUnit);
     }
 
     /** Snap or play the gear clip to match deployed/retracted (F-22: t=1 extended). */
@@ -270,6 +280,10 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
         if (airbrakes !== null) {
             this.airbrakesExtended = airbrakes;
         }
+        this.wingSweepUnit = stepWingSweep(
+            this.wingSweepUnit,
+            wingSweepTarget(WingSweepMode.AUTO, this.flightModel.velocityVector.length(), this.swingWings),
+            delta, this.swingWings);
         const health = this.flightModel.getSimHealth();
         if (health >= 0) {
             this.health = health;
@@ -312,6 +326,9 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
         // No-op: authoritative health lives in the combat sim worker.
     }
 
+    /** Visual wing sweep [0,1], scheduled against airspeed. */
+    private wingSweepUnit = 0;
+
     private get flapsProgressUnit(): number {
         return this.flapsExtended ? 1 : 0;
     }
@@ -340,6 +357,7 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             case 'flaps': return sign * this.flapsProgressUnit;
             case 'slats': return sign * this.slatDeploymentUnit();
             case 'airbrake': return sign * this.airbrakesProgressUnit;
+            case 'sweep': return sign * this.wingSweepUnit;
             case 'flaperonLeft':
                 return this.flapsProgressUnit * -FLAPS_EXTENDED_ANGLE
                     - (1.0 - this.flapsProgressUnit * 0.5) * ROLL_VIS_AILERON * roll;
@@ -474,13 +492,15 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
                     SceneLayers.EntityFlats, SceneLayers.EntityVolumes, lists, 0);
             }
 
+            const crashed = this.isCrashed();
+            for (const d of this.controlSurfaces) {
+                d.deflection = crashed ? 0 : this.surfaceValue(d.control, d.sign) * d.range;
+            }
             for (let i = 0; i < this.controlSurfaces.length; i++) {
                 const d = this.controlSurfaces[i];
-                const deflection = this.isCrashed() ? 0 : this.surfaceValue(d.control, d.sign) * d.range;
-                this._q
-                    .setFromAxisAngle(this._v.copy(d.axis).applyQuaternion(this.displayQuaternion), deflection)
-                    .multiply(this.displayQuaternion);
-                this._v.copy(d.pivot).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
+                poseSurface(
+                    d, d.parentIndex >= 0 ? this.controlSurfaces[d.parentIndex] : undefined,
+                    this.displayPosition, this.displayQuaternion, this._v, this._q);
                 d.model.addToRenderList(
                     this._v, this._q, this.scale,
                     targetWidth, camera, palette,

@@ -6,13 +6,14 @@ import { Fm2AircraftConfig } from '../../physics/fm2/fm2AircraftConfig';
  *   flaps          : flap deployment progress [0,1].
  *   slats          : leading-edge slats — follow flaps and high AoA.
  *   airbrake       : speedbrake / airbrake deployment progress [0,1].
+ *   sweep          : variable-geometry wing sweep [0,1] (0 spread, 1 swept).
  *   flaperonLeft/Right : the F-22's combined flap + roll blend (kept so the
  *                        default aircraft animates exactly as before).
  *   stabilatorLeft/Right : an all-moving tail that combines pitch with a
  *                        differential (taileron) roll deflection, so the roll
  *                        the tail actually flies is visible on the model.
  */
-export type ControlAxis = 'pitch' | 'roll' | 'yaw' | 'flaps' | 'slats' | 'airbrake'
+export type ControlAxis = 'pitch' | 'roll' | 'yaw' | 'flaps' | 'slats' | 'airbrake' | 'sweep'
     | 'flaperonLeft' | 'flaperonRight' | 'stabilatorLeft' | 'stabilatorRight';
 
 /** A single animated control surface loaded as its own hinge-pivoted model. */
@@ -25,10 +26,24 @@ export interface ControlSurfaceConfig {
     /** Hinge axis (body frame unit vector). */
     axis: [number, number, number];
     control: ControlAxis;
+    /**
+     * Role of the `sweep` surface this one is mounted on (flaps and spoilers on a
+     * swing wing). It is carried along the sweep arc about the parent's pivot.
+     */
+    sweepParent?: string;
     /** Deflection sign multiplier. */
     sign: number;
     /** Maximum deflection scale (rad) applied to the control value. */
     rangeRad: number;
+}
+
+/** When and how fast a variable-geometry wing sweeps (from the mod's SwingWings). */
+export interface SwingWingsConfig {
+    /** Spread below this speed (knots), fully swept above `maxKias`. */
+    minKias: number;
+    maxKias: number;
+    /** Seconds for a full spread <-> swept transit. */
+    travelSeconds: number;
 }
 
 /** TCA hardpoint / loadout attachment empty (body frame). */
@@ -83,6 +98,8 @@ export interface FlyableAircraftDef {
     /** True when the gear model carries a retract/extend animation clip. */
     gearAnimated?: boolean;
     surfaces: ControlSurfaceConfig[];
+    /** Present on swing-wing aircraft that have `sweep` surfaces. */
+    swingWings?: SwingWingsConfig;
     fx?: AircraftFxConfig;
     /** Hardpoint/loadout attachment empties from the source mod (optional). */
     attachments?: AircraftAttachmentConfig[] | null;

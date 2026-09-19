@@ -5,6 +5,7 @@ import { SceneLayers } from '../scene';
 import { AfterburnerCones } from './afterburnerCones';
 import { FlyableAircraftDef } from './aircraftDef';
 import { countBodyMeshVertices, deriveWingtipOriginsFromModel } from './wingtipOrigins';
+import { sweptTip, tipSweepsFromDef, TipSweep } from './wingSweep';
 import { WingtipTrails } from './wingtipTrails';
 
 /**
@@ -21,6 +22,11 @@ export class AircraftFx {
     private readonly thrustOrigin = new THREE.Vector3();
     private hasThrustOrigin = false;
     private readonly _v = new THREE.Vector3();
+    /** Wingtips that ride on sweeping wings, and where the sweep [0,1] is read from. */
+    private tipSweeps: [TipSweep, TipSweep] | null = null;
+    private wingSweepUnit: () => number = () => 0;
+    private readonly _sweptLeft = new THREE.Vector3();
+    private readonly _sweptRight = new THREE.Vector3();
 
     constructor(private readonly materials: SceneMaterialManager) {
         this.afterburnerCones = new AfterburnerCones(materials);
@@ -51,6 +57,7 @@ export class AircraftFx {
             this.thrustOrigin.multiplyScalar(1 / nozzles.length);
         }
 
+        this.tipSweeps = tipSweepsFromDef(def);
         const tips = def.fx?.wingtips ?? null;
         if (tips && tips.length >= 2) {
             this.wingtipTrails.setTipOrigins(
@@ -60,6 +67,11 @@ export class AircraftFx {
             this.wingtipTrails.reset();
             this.wingtipsReady = true;
         }
+    }
+
+    /** Where a swing-wing aircraft's current sweep [0,1] comes from (call once). */
+    setWingSweepSource(source: () => number): void {
+        this.wingSweepUnit = source;
     }
 
     /** Body-model load callback — bind nozzle glow + wingtip origins. */
@@ -98,6 +110,13 @@ export class AircraftFx {
             displayQuaternion,
         );
         if (this.wingtipsReady) {
+            if (this.tipSweeps) {
+                const sweep = this.wingSweepUnit();
+                this.wingtipTrails.setTipOrigins(
+                    sweptTip(this._sweptLeft, this.tipSweeps[0], sweep),
+                    sweptTip(this._sweptRight, this.tipSweeps[1], sweep),
+                );
+            }
             this.wingtipTrails.update(
                 displayPosition,
                 displayQuaternion,

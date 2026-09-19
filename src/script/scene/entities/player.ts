@@ -19,7 +19,8 @@ import { setAircraftShadowPose } from './aircraftShadow';
 import { trackAircraftMaterial, trackAircraftMesh } from './aircraftDebug';
 import { SUN_STATE } from '../materials/shaders/sun';
 import { WeaponsTarget } from './weaponsTarget';
-import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef } from './aircraftDef';
+import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef, SwingWingsConfig } from './aircraftDef';
+import { nextWingSweepMode, poseSurface, stepWingSweep, WingSweepMode, wingSweepTarget } from './wingSweep';
 import { Combatant, Faction } from '../../weapons/combatant';
 import { CombatSimClient } from '../../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../../physics/model/simProxyFlightModel';
@@ -63,10 +64,14 @@ const SLAT_AOA_FULL_RAD = 18 * Math.PI / 180;
 
 interface ControlSurfaceDescriptor {
     model: LODHelper;
-    position: THREE.Vector3;
+    pivot: THREE.Vector3;
     axis: THREE.Vector3;
     value: () => number;
     range: number;
+    /** Index of the sweep surface this one rides on, or -1. */
+    parentIndex: number;
+    /** Current deflection (rad), refreshed each frame before posing. */
+    deflection: number;
 }
 
 export enum AircraftDeviceState {
@@ -122,6 +127,10 @@ export class PlayerEntity implements Entity {
     private airbrakesState: AircraftDeviceState = AircraftDeviceState.RETRACTED;
     private airbrakesProgress = 0;
     private airbrakesProgressUnit = 0;
+    /** Visual wing sweep [0,1] and the pilot's selection (render-only). */
+    private wingSweepUnit = 0;
+    private wingSweepMode = WingSweepMode.AUTO;
+    private swingWings: SwingWingsConfig | undefined;
     /** Tailhook: sim owns the commanded state, this is the visible swing. */
     private hookState: AircraftDeviceState = AircraftDeviceState.RETRACTED;
     private hookProgress = 0;
@@ -279,12 +288,16 @@ export class PlayerEntity implements Entity {
             this.trackAircraftModel(surfaceModel);
             return {
                 model: new LODHelper(surfaceModel),
-                position: new THREE.Vector3().fromArray(s.pivot),
+                pivot: new THREE.Vector3().fromArray(s.pivot),
                 axis: new THREE.Vector3().fromArray(s.axis),
                 value: () => this.surfaceValue(s.control, s.sign),
                 range: s.rangeRad,
+                parentIndex: s.sweepParent ? def.surfaces.findIndex(o => o.role === s.sweepParent) : -1,
+                deflection: 0,
             };
         });
+        this.swingWings = def.swingWings;
+        this.fx.setWingSweepSource(() => this.wingSweepUnit);
     }
 
     private trackAircraftModel(model: Model): void {
@@ -366,6 +379,7 @@ export class PlayerEntity implements Entity {
             case 'flaps': return sign * this.flapsProgressUnit;
             case 'slats': return sign * this.slatDeploymentUnit();
             case 'airbrake': return sign * this.airbrakesProgressUnit;
+            case 'sweep': return sign * this.wingSweepUnit;
             // Flaperons: flap camber blended with the ailerons' SHARE of the roll.
             // Roll is tail-dominant (~20% aileron), so the flaperon shows only a
             // small roll deflection.
@@ -470,7 +484,20 @@ export class PlayerEntity implements Entity {
             this.updateFlaps(delta);
             this.updateAirbrakes(delta);
             this.updateTailhook(delta);
+            this.updateWingSweep(delta);
         }
+    }
+
+    private updateWingSweep(delta: number) {
+        const target = wingSweepTarget(
+            this.wingSweepMode, this.flightModel.velocityVector.length(), this.swingWings);
+        this.wingSweepUnit = stepWingSweep(this.wingSweepUnit, target, delta, this.swingWings);
+    }
+
+    /** Cycle AUTO -> SPREAD -> SWEPT (N key); returns the new mode. */
+    cycleWingSweepMode(): WingSweepMode {
+        this.wingSweepMode = nextWingSweepMode(this.wingSweepMode);
+        return this.wingSweepMode;
     }
 
     private isWorkerControlled(): boolean {
@@ -585,6 +612,8 @@ export class PlayerEntity implements Entity {
         this.airbrakesState = AircraftDeviceState.RETRACTED;
         this.airbrakesProgress = 0;
         this.airbrakesProgressUnit = 0;
+        this.wingSweepUnit = 0;
+        this.wingSweepMode = WingSweepMode.AUTO;
         this.hookState = AircraftDeviceState.RETRACTED;
         this.hookProgress = 0;
         this.hookProgressUnit = 0;
@@ -859,12 +888,15 @@ export class PlayerEntity implements Entity {
                     this.renderTailhook(targetWidth, camera, palette, lists);
                 }
 
+                const still = this._showcaseMode || this.isCrashed;
+                for (const d of this.controlSurfaceDescriptors) {
+                    d.deflection = still ? 0 : d.value() * d.range;
+                }
                 for (let i = 0; i < this.controlSurfaceDescriptors.length; i++) {
                     const d = this.controlSurfaceDescriptors[i];
-                    const deflection = this._showcaseMode || this.isCrashed ? 0 : d.value() * d.range;
-
-                    this._q.setFromAxisAngle(this._v.copy(d.axis).applyQuaternion(this.displayQuaternion), deflection).multiply(this.displayQuaternion);
-                    this._v.copy(d.position).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
+                    poseSurface(
+                        d, d.parentIndex >= 0 ? this.controlSurfaceDescriptors[d.parentIndex] : undefined,
+                        this.displayPosition, this.displayQuaternion, this._v, this._q);
                     d.model.addToRenderList(
                         this._v, this._q, this.obj.scale,
                         targetWidth, camera, palette,
@@ -969,7 +1001,7 @@ export class PlayerEntity implements Entity {
         for (let i = 0; i < this.controlSurfaceDescriptors.length; i++) {
             const d = this.controlSurfaceDescriptors[i];
             this._q.copy(this.displayQuaternion);
-            this._v.copy(d.position).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
+            this._v.copy(d.pivot).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
             d.model.addToRenderList(
                 this._v, this._q, this.obj.scale,
                 targetWidth, camera, palette,

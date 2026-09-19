@@ -2384,6 +2384,10 @@ export class Game {
             if (event.code === 'KeyV') {
                 event.preventDefault();
                 this.player.setForceVectorsEnabled(!this.player.forceVectorsEnabled);
+            } else if (event.code === 'KeyN') {
+                // Wing sweep: AUTO (Mach schedule) -> SPREAD -> SWEPT. Visual only.
+                event.preventDefault();
+                this.player.cycleWingSweepMode();
             } else if (event.code === 'KeyM') {
                 // The tactical MFD's map page: the cover rasters under the scope.
                 event.preventDefault();
