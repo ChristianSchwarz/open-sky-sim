@@ -6,7 +6,6 @@ const _q = new THREE.Quaternion();
 
 const EPSILON = 0.0001;
 
-const ZERO = new THREE.Vector3(0, 0, 0);
 export const UP = new THREE.Vector3(0, 1, 0);
 export const FORWARD = new THREE.Vector3(0, 0, 1);
 export const RIGHT = new THREE.Vector3(1, 0, 0);

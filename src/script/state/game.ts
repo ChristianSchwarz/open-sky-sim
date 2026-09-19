@@ -254,11 +254,6 @@ const PLAYER_STARTING_POSITION = new THREE.Vector3(
     APPROACH_ALTITUDE_M,
     AIRBASE_RUNWAY.z - LAND_APPROACH_FINAL_M,
 );
-const PLAYER_LAND_POSITION = new THREE.Vector3(
-    AIRBASE_RUNWAY.x,
-    PLANE_DISTANCE_TO_GROUND,
-    AIRBASE_RUNWAY.z - RUNWAY_HALF_LENGTH_M + RUNWAY_SPAWN_INSET_M,
-);
 const PLAYER_LAND_SPAWN: PlayerSpawnState = {
     throttle: 0,
     airborne: false,
@@ -763,7 +758,6 @@ export class Game {
 
     async setup() {
         setBootProgress(5, 'Initializing renderer...');
-        const textColors = this.getTextColors();
 
         this.renderer.setPalette(this.getPalette());
         this.materials.setPalette(this.getPalette());

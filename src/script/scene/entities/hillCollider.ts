@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { HILL_GEOMETRY_Y_ROT } from '../models/lib/mountainModelBuilder';
 import { NO_SURFACE_Y } from './carrierDeck';
 
 /** Analytic cone collider matching lib:hill / lib:mountain geometry. */
@@ -14,7 +13,6 @@ export interface HillCollider {
     worldReach: number;
 }
 
-const COLLIDER_GEO_QUAT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), HILL_GEOMETRY_Y_ROT);
 
 
 const TMP_LOCAL = new THREE.Vector3();

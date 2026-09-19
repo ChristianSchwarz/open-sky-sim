@@ -743,7 +743,6 @@ export class AiPilot implements AiPilotController {
      * true when the pull-up override is engaged this frame.
      */
     private updateTerrainAvoidance(delta: number): boolean {
-        const speed = Math.max(1, this.aircraft.getAirspeed());
         let minClearance = Infinity;
         // Probe points from now to the look-ahead horizon.
         for (let t = 0.5; t <= TERRAIN_LOOKAHEAD_S; t += 0.5) {

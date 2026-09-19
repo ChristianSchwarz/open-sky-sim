@@ -8,7 +8,6 @@ import {
 import { AircraftSnapshot, TacticalGeometry } from './shawTypes';
 
 const _los = new THREE.Vector3();
-const _scratch = new THREE.Vector3();
 
 /**
  * Shaw-named geometry aliases over the shared dogfight helpers.
