@@ -1,7 +1,7 @@
 import { Rgb } from "../../scene/atmosphere/atmosphere";
 import { skyFor, SkySample } from "../../scene/atmosphere/skyModel";
 import { SUN_STATE } from "../../scene/materials/shaders/sun";
-import { Palette, PaletteCategory, PaletteColor, PaletteColors, PaletteTime, PaletteValues } from "./palette";
+import { Palette, PaletteCategory, PaletteColors, PaletteTime, PaletteValues } from "./palette";
 
 /**
  * Builds the palette for a given sun position by blending a profile's noon and

@@ -124,7 +124,6 @@ export class Fm2FlightModel extends FlightModel {
     private readonly gearForceWorld = new THREE.Vector3();
     private readonly gearMomentBody = new THREE.Vector3();
     private readonly invOrient = new THREE.Quaternion();
-    private readonly _up = new THREE.Vector3();
     private readonly _fwd = new THREE.Vector3();
     private readonly _right = new THREE.Vector3();
     private readonly _v = new THREE.Vector3();
@@ -136,8 +135,6 @@ export class Fm2FlightModel extends FlightModel {
     private readonly _groundNormal = new THREE.Vector3();
     private readonly _vTan = new THREE.Vector3();
     private readonly _impulseR = new THREE.Vector3();
-    private readonly _impulseK = new THREE.Vector3();
-    private readonly _impulseT = new THREE.Vector3();
     /** Last forebody asymmetry side force (body frame, N); for the debug overlay. */
     private readonly forebodyForceBody = new THREE.Vector3();
 

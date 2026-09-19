@@ -14,9 +14,6 @@ export function computeF16AfterburnerThrust(altitudeMeters: number): number {
     return computeF16EngineThrustN(1.0, altitudeMeters);
 }
 
-function computeF16MilThrust(altitudeMeters: number): number {
-    return computeF16EngineThrustN(F16_PROFILE.milLeverEnd, altitudeMeters);
-}
 
 /** Level-flight drag: Anderson polar (CD₀ + K·CL²), L = W. Optional transonic penalty above VNE. */
 export function computeF16LevelFlightDrag(
@@ -37,8 +34,6 @@ export function computeF16LevelFlightDrag(
 
     const airDensity = computeAirDensity(altitudeMeters);
     const dynamicPressure = 0.5 * airDensity * speedMps * speedMps;
-    const weightN = massKg * 9.8;
-    const cl = weightN / (dynamicPressure * F16_WING_AREA);
     const cdParasitic = F16_CD0 * waveDrag;
     return drag + dynamicPressure * F16_WING_AREA * cdParasitic;
 }

@@ -84,7 +84,3 @@ export function getTreeAtlas(): Promise<THREE.CanvasTexture> {
     return atlasPromise;
 }
 
-/** Test/teardown hook: drops the cached atlas so a later call rebuilds it. */
-function clearTreeAtlasCache(): void {
-    atlasPromise = undefined;
-}

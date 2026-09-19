@@ -35,22 +35,7 @@ export function vectorHeading(v: THREE.Vector3): number {
     return bearing;
 }
 
-function roundToZero(v: THREE.Vector3, epsilon: number = EPSILON): THREE.Vector3 {
-    if (equals(v.x, 0.0, epsilon)) {
-        v.x = 0;
-    }
-    if (equals(v.y, 0.0, epsilon)) {
-        v.y = 0;
-    }
-    if (equals(v.z, 0.0, epsilon)) {
-        v.z = 0;
-    }
-    return v;
-}
 
-function easeOutCirc(x: number): number {
-    return Math.sqrt(1 - (x - 1) * (x - 1));
-}
 
 export function easeOutQuad(x: number) {
     return 1 - (1 - x) * (1 - x);

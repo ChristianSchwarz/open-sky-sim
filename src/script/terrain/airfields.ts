@@ -96,11 +96,6 @@ export interface AirfieldsFile {
     items: Airfield[];
 }
 
-/** Where the manifest says the airfield file is. */
-interface AirfieldsManifest {
-    path: string;
-    count: number;
-}
 
 export const EMPTY_AIRFIELDS: AirfieldsFile = {
     source: 'none',

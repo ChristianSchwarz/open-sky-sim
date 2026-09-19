@@ -54,7 +54,6 @@ const LADDER_HALF_WIDTH = Math.floor(LADDER_WIDTH / 2);
 const LADDER_HALF_HEIGHT = Math.floor(LADDER_HEIGHT / 2);
 
 const TARGET_HALF_WIDTH = 8; // Pixels
-const TARGET_WIDTH = TARGET_HALF_WIDTH * 2 + 1;
 
 /** Matches player gun muzzle velocity in game.ts / combat sim. */
 const GUN_MUZZLE_VELOCITY_MPS = 1000;
@@ -86,7 +85,6 @@ export class HUDEntity implements Entity {
     /** The same altitude in metres, for the physics readouts that want SI. */
     private altitudeM: number = 0;
     private renderFps: number = 0;
-    private throttle: number = 0; // Normalised percentage [0, 1]
     private speed: number = 0; // display units (km/h or kt)
     private verticalSpeed: number = 0; // m/s or ft/min
     private velocityDirection: THREE.Vector3 = new THREE.Vector3();
@@ -193,7 +191,6 @@ export class HUDEntity implements Entity {
         if (!lists.has(SceneLayers.Overlay)) return;
 
         this.refreshVisualState();
-        this.throttle = this.actor.throttleUnit;
 
         const layout = getOverlayLayout(targetWidth, targetHeight);
         const { detailScale, layoutScale } = layout;

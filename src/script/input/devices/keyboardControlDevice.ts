@@ -3,7 +3,6 @@ import { isOverlayKeyEvent } from "../overlayKeys";
 import { CombatSimClient } from "../../physics/sim/combatSimClient";
 import { SimProxyFlightModel } from "../../physics/model/simProxyFlightModel";
 import { PLAYER_SIM_ID } from "../../physics/sim/simIds";
-import { FlightModel } from "../../physics/model/flightModel";
 import {
     PITCH_STICK_BASE_UNIT_RATE,
     PITCH_STICK_MAX_UNIT_RATE,
@@ -15,7 +14,6 @@ import {
     KeyboardControlAction,
     KeyboardControlLayout,
     KeyboardControlLayoutId,
-    KeyboardControlLayouts,
     KeyboardPitchStickMode,
     getKeyboardLayout,
 } from "../keyboardLayouts";

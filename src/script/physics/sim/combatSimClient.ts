@@ -49,7 +49,6 @@ export class CombatSimClient {
 
     private busy = false;
     private pendingDelta = 0;
-    private lastDelta = 0;
 
     private readonly shared: SimSharedViews | undefined;
     private lastSharedSeq = 0;
@@ -73,7 +72,6 @@ export class CombatSimClient {
         this.worker.onmessage = (event: MessageEvent<WorkerToSimMessage>) => {
             const data = event.data;
             if (data.type === 'state') {
-                const workerStepMs = data.workerStepMs ?? -1;
                 if (data.shared) {
                     this.sharedIds = data.ids;
                     this.sharedForceVectors = data.forceVectors ?? {};
@@ -354,7 +352,6 @@ export class CombatSimClient {
         if (this.shared) {
             setSharedBusy(this.shared, true);
         }
-        this.lastDelta = delta;
         this.post({ type: 'step', delta, inputs });
     }
 

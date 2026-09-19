@@ -32,7 +32,6 @@ import {
     trySnag,
 } from '../../scene/entities/arrestorCables';
 // Barricade imports removed
-import { triangleBvhFor } from '../collision/triangleBvh';
 
 import { AC, AC_STRIDE, PROJ_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
 import {

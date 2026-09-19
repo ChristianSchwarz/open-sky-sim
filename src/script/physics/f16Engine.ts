@@ -62,9 +62,6 @@ export function getF16AfterburnerConeDither(lever: number): F16AfterburnerConeDi
     return null;
 }
 
-function isF16AfterburnerActive(lever: number): boolean {
-    return getF16ThrottleZone(lever) !== 'mil';
-}
 
 const F16_AFTERBURNER_CONE_LENGTH_M = {
     mil: 0,

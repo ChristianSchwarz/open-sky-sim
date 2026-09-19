@@ -182,24 +182,6 @@ export function carrierLocalToWorld(
     return out.add(pose.position as THREE.Vector3);
 }
 
-/** World-space midpoint of cable `index` (rest position / tension target). */
-function arrestorCableMidWorld(
-    index: number,
-    origin: ArrestorCarrierPose | { x: number; y: number; z: number } = ARRESTOR_CARRIER_ORIGIN,
-    out: THREE.Vector3,
-): THREE.Vector3 {
-    const locals = arrestorCableLocals();
-    const i = Math.max(0, Math.min(locals.length - 1, index | 0));
-    const c = locals[i];
-    const pose = normalizeCarrierPose(origin);
-    return carrierLocalToWorld(
-        (c.ax + c.bx) * 0.5,
-        (c.ay + c.by) * 0.5,
-        (c.az + c.bz) * 0.5,
-        pose,
-        out,
-    );
-}
 
 /** World position of the left sheave ("start") of cable `index`. */
 export function arrestorCableStartWorld(

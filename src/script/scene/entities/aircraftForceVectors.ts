@@ -32,7 +32,6 @@ const AXIS_DIRS: Record<Axis, THREE.Vector3> = {
     z: new THREE.Vector3(0, 0, 1),
 };
 
-const AXIS_ORDER: Axis[] = ['x', 'y', 'z'];
 
 /**
  * Debug overlay that draws, for every body part reported by the flight model,

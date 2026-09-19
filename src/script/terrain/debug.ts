@@ -25,9 +25,6 @@ export function trackTerrainMaterial(mat: THREE.Material): void {
     }
 }
 
-function clearTerrainMaterialTracking(): void {
-    materials.clear();
-}
 
 export function publishTerrainStats(stats: TerrainStats & { altitudeM: number }): void {
     (globalThis as Record<string, unknown>).__terrainStats = stats;

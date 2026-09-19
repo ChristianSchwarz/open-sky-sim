@@ -49,7 +49,6 @@ export class Fm3FlightModel extends FlightModel {
     private readonly fcsConfig: Fm3FcsConfig;
     private readonly engine: Fm3Engine;
     private readonly gear: Fm3GroundContact;
-    private world: WorldQuery | undefined;
 
     private readonly env: AeroEnvironment = { rho: 1.225, soundSpeed: 340, heightAboveGround: Infinity, gearDown: 1 };
     private readonly nozzle: Vec3;
@@ -137,7 +136,6 @@ export class Fm3FlightModel extends FlightModel {
     }
 
     setWorldQuery(world: WorldQuery | undefined): void {
-        this.world = world;
         this.gear.world = world;
     }
 

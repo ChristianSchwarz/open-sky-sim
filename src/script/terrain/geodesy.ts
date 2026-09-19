@@ -245,22 +245,3 @@ export function enuFrameRotation(from: EnuBasis, to: EnuBasis): THREE.Quaternion
     return new THREE.Quaternion().setFromRotationMatrix(_to.multiply(_from));
 }
 
-/**
- * Maps ECEF metres into Three.js render space.
- * Fixed ENU: +X east, +Y up, +Z south — see {@link sceneFromEnu}.
- */
-class EnuFrame {
-    constructor(readonly basis: EnuBasis) { }
-
-    ecefToWorld(ecef: Ecef, out: THREE.Vector3 = new THREE.Vector3()): THREE.Vector3 {
-        return sceneFromEnu(ecefToEnu(this.basis, ecef), out);
-    }
-
-    worldToEcef(world: THREE.Vector3, out: Ecef = { x: 0, y: 0, z: 0 }): Ecef {
-        return enuToEcef(this.basis, enuFromScene(world), out);
-    }
-
-    worldToEnu(world: THREE.Vector3): Enu {
-        return enuFromScene(world);
-    }
-}

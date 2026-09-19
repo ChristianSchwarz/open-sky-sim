@@ -1,7 +1,5 @@
 import type { Combatant } from '../weapons/combatant';
-import type { AiFlightPhase, AiPilotOptions } from './aiPilot';
-import type { PilotableAircraft } from './aircraftControls';
-import type { WorldQuery } from './worldQuery';
+import type { AiFlightPhase } from './aiPilot';
 
 /**
  * Shared surface for every in-worker AI pilot model (classic BFM and Shaw).
@@ -23,8 +21,3 @@ export interface AiPilotController {
     getManeuverLabel(): string;
 }
 
-type AiPilotFactory = (
-    aircraft: PilotableAircraft,
-    world: WorldQuery,
-    options: AiPilotOptions,
-) => AiPilotController;

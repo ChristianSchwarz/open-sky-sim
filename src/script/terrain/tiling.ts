@@ -57,24 +57,6 @@ export function parentOf(id: TileKey): TileKey | undefined {
     return { z: id.z - 1, x: id.x >> 1, y: id.y >> 1 };
 }
 
-/** Same-zoom edge neighbors (W,E,N,S). Lon wraps; lat clamps. */
-function edgeNeighbors(id: TileKey): TileKey[] {
-    const xc = xCount(id.z);
-    const yc = yCount(id.z);
-    const out: TileKey[] = [];
-    const push = (x: number, y: number) => {
-        if (y < 0 || y >= yc) {
-            return;
-        }
-        const xx = ((x % xc) + xc) % xc;
-        out.push({ z: id.z, x: xx, y });
-    };
-    push(id.x - 1, id.y);
-    push(id.x + 1, id.y);
-    push(id.x, id.y - 1);
-    push(id.x, id.y + 1);
-    return out;
-}
 
 /** Root tiles covering the whole Earth (z0: 2×1). */
 export function rootTiles(): TileKey[] {
@@ -100,9 +82,6 @@ export function tileAtLonLat(z: number, lon: number, lat: number): TileKey {
     return { z, x, y };
 }
 
-function boundsOverlap(a: LonLatBounds, b: LonLatBounds): boolean {
-    return a.west < b.east && a.east > b.west && a.south < b.north && a.north > b.south;
-}
 
 /** Approximate tile edge length in metres at the tile centre latitude. */
 export function approxTileEdgeMetres(id: TileKey): number {

@@ -1,12 +1,10 @@
 import * as THREE from 'three';
 import { PlayerEntity } from "../../scene/entities/player";
 import { GroundTargetEntity } from "../../scene/entities/groundTarget";
-import { FORWARD, UP } from '../../utils/math';
 import { CameraUpdater } from "./cameraUpdater";
 
 export class CarrierOverSternCameraUpdater extends CameraUpdater {
 
-    private tmpVector = new THREE.Vector3();
     private tmpSternPos = new THREE.Vector3();
     private tmpCameraPos = new THREE.Vector3();
 

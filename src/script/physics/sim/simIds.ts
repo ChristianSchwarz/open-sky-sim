@@ -3,8 +3,6 @@
 /** The player aircraft (shared by its FM2/DEBUG render proxies). */
 export const PLAYER_SIM_ID = 'player';
 
-/** The first (and, for now, only) AI opponent. */
-const AI_SIM_ID = 'ai0';
 
 /** Deterministic id for the Nth AI opponent. */
 export function aiSimId(index: number): string {

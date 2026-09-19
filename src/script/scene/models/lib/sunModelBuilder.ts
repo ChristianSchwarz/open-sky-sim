@@ -5,7 +5,7 @@ import { SceneMaterialManager, SceneMaterialPrimitiveType } from "../../material
 import { updateUniforms } from '../../utils';
 import { Model, ModelLibBuilder } from "../models";
 import {
-    createSkyMaterial, makeSkyPainter, paintDirections, SkyPainter,
+    createSkyMaterial, makeSkyPainter, paintDirections,
 } from './skyDomeModelBuilder';
 import { Palette } from '../../../config/palettes/palette';
 

@@ -3,8 +3,6 @@ import { Obstacle, Runway, SceneWorldQuery } from '../../ai/worldQuery';
 import { CarrierMeshCollider } from '../../scene/entities/carrierDeck';
 import {
     ArrestorCableField,
-    ArrestorCableLocal,
-    arrestorCableLocals,
     buildArrestorCableField,
 } from '../../scene/entities/arrestorCables';
 import { HillCollider } from '../../scene/entities/hillCollider';
@@ -287,7 +285,3 @@ export function defaultArrestorCableField(
     return buildArrestorCableField(originX, originY, originZ, undefined, orientation);
 }
 
-/** Expose locals for callers that need to inspect layout without THREE world build. */
-function defaultArrestorLocals(): ArrestorCableLocal[] {
-    return arrestorCableLocals();
-}

@@ -44,15 +44,5 @@ export function computeTacticalGeometry(self: AircraftSnapshot, target: Aircraft
     };
 }
 
-/** Bank angle that aligns lift toward a world direction (rad, +right). */
-function bankAngleForDirection(self: AircraftSnapshot, targetDir: THREE.Vector3): number {
-    _scratch.copy(targetDir);
-    if (_scratch.lengthSq() < 1e-9) {
-        return 0;
-    }
-    _scratch.normalize();
-    // Project onto the roll plane spanned by right/up.
-    return Math.atan2(self.right.dot(_scratch), self.up.dot(_scratch));
-}
 
 export { specificEnergyHeight };

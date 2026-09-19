@@ -9,7 +9,7 @@ import { Entity } from "../../entity";
 import { Scene, SceneLayers } from "../../scene";
 import { updateTargetCamera } from '../../utils';
 import { WeaponsTarget } from '../weaponsTarget';
-import { AircraftDeviceState, PlayerEntity } from "../player";
+import { PlayerEntity } from "../player";
 import { formatHeading, getAircraftDeviceStatusPosition, getOverlayLayout, renderAircraftDeviceStatus } from './overlayUtils';
 import { EnuBasis, worldToGeodetic } from '../../../terrain/geodesy';
 import { MapTileSource, MovingMapRenderer } from './movingMap';
@@ -157,8 +157,6 @@ export class CockpitEntity implements Entity {
     private aiPitch: number = 0;
     private aiRoll: number = 0;
 
-    private landingGear: AircraftDeviceState = AircraftDeviceState.EXTENDED;
-    private flaps: AircraftDeviceState = AircraftDeviceState.EXTENDED;
     private ownHeading: number = 0;
     /** Designatable targets plotted on the tactical display. */
     private readonly contacts: WeaponsTarget[] = [];
@@ -194,8 +192,6 @@ export class CockpitEntity implements Entity {
 
     update(delta: number): void {
         this.weaponsTarget = this.actor.weaponsTarget;
-        this.flaps = this.actor.flaps;
-        this.landingGear = this.actor.landingGear;
 
         this.contactScanTimer -= delta;
         if (this.contactScanTimer <= 0) {

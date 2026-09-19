@@ -10,7 +10,7 @@ import { HDNoonPalette } from '../config/palettes/hd-noon';
 import { loadSettings, SpawnMode, updateSettings } from '../config/settingsStorage';
 import { KernelRenderTask, KernelUpdateTask } from '../core/kernel';
 import { fm2GroundRestHeight } from '../physics/fm2/fm2AircraftConfig';
-import { AIRBASE_RUNWAY as AIRBASE_RUNWAY_RAW, APPROACH_ALTITUDE_M, APPROACH_FINAL_DISTANCE_M, APPROACH_SPEED_MPS, COCKPIT_FAR, COCKPIT_FOV, HIGH_ALTITUDE_M, H_RES, PLANE_DISTANCE_TO_GROUND, RUNWAY_HALF_LENGTH_M, SPACE_ALTITUDE_M, V_RES } from '../defs';
+import { AIRBASE_RUNWAY as AIRBASE_RUNWAY_RAW, APPROACH_ALTITUDE_M, APPROACH_SPEED_MPS, COCKPIT_FAR, COCKPIT_FOV, HIGH_ALTITUDE_M, H_RES, PLANE_DISTANCE_TO_GROUND, RUNWAY_HALF_LENGTH_M, SPACE_ALTITUDE_M, V_RES } from '../defs';
 import {
     DEFAULT_SUN_HOURS, setSunTime, SUN_DIRECTION, SUN_STATE, SUN_VISIBILITY, sunVisibilityFor,
 } from '../scene/materials/shaders/sun';
@@ -30,7 +30,7 @@ import { DebrisField } from '../scene/entities/debrisField';
 import { DamageSmokeField } from '../scene/entities/damageSmokeField';
 import { GroundTargetEntity } from '../scene/entities/groundTarget';
 import { ActivePlayArea, homeArea, resolvePlayArea, terrainAreas } from '../terrain/playArea';
-import { Airfield, AirfieldBuilding, airfieldsInArea } from '../terrain/airfields';
+import { AirfieldBuilding, airfieldsInArea } from '../terrain/airfields';
 import {
     SceneRunway, airfieldChoices, headingForward, pickStartRunway, sceneRunwaysOf,
 } from './activeAirfield';
@@ -43,14 +43,13 @@ import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
 import { ShipWakeEntity } from '../scene/entities/shipWake';
 import {
-    CockpitEntity, CockpitMFD1X, CockpitMFD1Y, CockpitMFD2X, CockpitMFD2Y, CockpitMFDSize,
+    CockpitEntity, CockpitMFD2X, CockpitMFD2Y, CockpitMFDSize,
 } from '../scene/entities/overlay/cockpit';
 import { ILS_GLIDESLOPE_TAN } from '../scene/entities/overlay/approachAids';
 import { ExteriorDataEntity } from '../scene/entities/overlay/exteriorData';
 import { HUDEntity } from '../scene/entities/overlay/hud';
 import { PerfHudEntity } from '../scene/entities/overlay/perfHud';
 import { PlayerEntity, PlayerSpawnState } from '../scene/entities/player';
-import { AircraftCollisionMesh } from '../scene/entities/aircraftDef';
 import {
     bakeCollisionMeshFromModel,
     createCarrierMeshCollider,
@@ -106,7 +105,7 @@ import { CombatSimClient } from '../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../physics/model/simProxyFlightModel';
 import { serializeWorld, defaultArrestorCableField } from '../physics/sim/serializedWorld';
 import { HeightFieldSender, MirrorFocus } from '../terrain/heightMirror';
-import { SimAircraftDesc, SimAircraftSpawn, SimFlightModelKind, SimGunConfig } from '../physics/sim/simTypes';
+import { SimAircraftSpawn, SimFlightModelKind, SimGunConfig } from '../physics/sim/simTypes';
 import { PLAYER_SIM_ID, WINGMAN_SIM_ID, aiSimId } from '../physics/sim/simIds';
 import { AiPilotModels } from './gameDefs';
 import {
@@ -132,8 +131,6 @@ const CIRRUS_BASE_ALTITUDE_M = 9200;
 const CIRRUS_ALTITUDE_VARIATION_M = 400;
 
 const AI_OPPONENT_COUNT = 1;
-/** Seconds the AI flies straight before engaging. */
-const AI_STRAIGHT_DURATION_SEC = 1;
 /** Spawn distance ahead of the player when a same-heading merge begins (m). */
 const AI_ENGAGE_SPAWN_DISTANCE_M = 300;
 /** Spawn distance ahead of the player for a head-on merge (m). */
@@ -196,7 +193,6 @@ const AIRBASE_RUNWAY = new THREE.Vector3(AIRBASE_RUNWAY_RAW.x, AIRBASE_RUNWAY_RA
 const RUNWAY_SPAWN_INSET_M = 120;
 /** Paved runway strip only — biome patches fill the shoulders beside it. */
 const RUNWAY_STRIP_HALF_WIDTH = 75;
-const RUNWAY_STRIP_HALF_LENGTH = RUNWAY_HALF_LENGTH_M + 150;
 /** Half-width of the physical pavement, matching assets/runway01.gltf (±40 m). */
 const RUNWAY_PAVEMENT_HALF_WIDTH = 40;
 /** Skirt around pad edges blending down to the surrounding ground — no hard vertical lip. */
@@ -263,7 +259,6 @@ const PLAYER_LAND_POSITION = new THREE.Vector3(
     PLANE_DISTANCE_TO_GROUND,
     AIRBASE_RUNWAY.z - RUNWAY_HALF_LENGTH_M + RUNWAY_SPAWN_INSET_M,
 );
-const PLAYER_LAND_HEADING = PLAYER_STARTING_HEADING;
 const PLAYER_LAND_SPAWN: PlayerSpawnState = {
     throttle: 0,
     airborne: false,
@@ -2620,14 +2615,6 @@ export class Game {
         }
     }
 
-    private setExteriorSideView() {
-        restoreMainCameraParameters(this.playerCamera.main);
-        if (this.view !== PlayerViewState.EXTERIOR_RIGHT) {
-            this.setExteriorView(PlayerViewState.EXTERIOR_RIGHT);
-        } else {
-            this.setExteriorView(PlayerViewState.EXTERIOR_LEFT);
-        }
-    }
 
     private setCarrierOverSternView() {
         restoreMainCameraParameters(this.playerCamera.main);
@@ -2660,14 +2647,6 @@ export class Game {
         this.setExteriorView(PlayerViewState.AI_CHASE);
     }
 
-    private cycleStaticModelView() {
-        if (this.view !== PlayerViewState.STATIC_MODEL) {
-            this.staticModelIndex = 0;
-        } else {
-            this.staticModelIndex = (this.staticModelIndex + 1) % this.staticModelViews.length;
-        }
-        this.setStaticModelView(this.staticModelIndex);
-    }
 
     private setStaticModelView(index: number) {
         restoreMainCameraParameters(this.playerCamera.main);
@@ -3939,9 +3918,6 @@ export class Game {
         await this.addSolidSceneryMesh('assets/control01.gltf', tower);
     }
 
-    private isLandAt(worldX: number, worldZ: number): boolean {
-        return this.planetTerrain.isLandAtWorld(worldX, worldZ);
-    }
 
     private getPalette(): Palette {
         return this.palette;

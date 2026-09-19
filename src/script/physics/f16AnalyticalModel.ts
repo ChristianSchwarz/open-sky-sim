@@ -144,15 +144,7 @@ export function liftToDragVspaero(alphaDeg: number): number {
     );
 }
 
-function weightToMassKg(weightLb: number): number {
-    return weightLb * LB_TO_KG;
-}
 
-function cruiseDynamicPressurePa(): number {
-    const v = F16_PAPER_ANALYTICAL.cruiseVelocityFps * FPS_TO_MPS;
-    const rho = computeAirDensity(F16_PAPER_ANALYTICAL.cruiseAltitudeFt * FT_TO_M);
-    return 0.5 * rho * v * v;
-}
 
 export function simTotalDragLb(
     velocityFps: number,

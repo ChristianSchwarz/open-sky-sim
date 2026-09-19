@@ -154,17 +154,3 @@ export function sampleBilinear(tile: DemTile, u: number, v: number): number {
     return w > 0 ? sum / w : Number.NaN;
 }
 
-/** Lon/lat → normalised UV inside a tile's lon/lat bounds. */
-function lonLatToUv(
-    lon: number,
-    lat: number,
-    west: number,
-    south: number,
-    east: number,
-    north: number,
-): { u: number; v: number } {
-    return {
-        u: (lon - west) / (east - west),
-        v: (north - lat) / (north - south),
-    };
-}

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { AudioClip } from '../../audio/audioSystem';
 import { isOverlayKeyEvent } from '../../input/overlayKeys';
 import { Palette } from "../../config/palettes/palette";
-import { AIRBASE_RUNWAY, PITCH_STICK_AFT_UNITS, PITCH_STICK_FWD_UNITS, PLANE_DISTANCE_TO_GROUND, RUNWAY_HALF_LENGTH_M } from '../../defs';
+import { PITCH_STICK_AFT_UNITS, PITCH_STICK_FWD_UNITS, PLANE_DISTANCE_TO_GROUND } from '../../defs';
 import { FlightModel } from '../../physics/model/flightModel';
 import { FcsPitchLimiter } from '../../physics/fm2/fcs';
 import { LODHelper, getLodLevel } from '../../render/helpers';
@@ -90,8 +90,6 @@ export class PlayerEntity implements Entity {
     private modelShadow!: LODHelper;
     private modelLandingGear: LODHelper | undefined;
     private modelTailhook: LODHelper | undefined;
-    /** Prefetched invisible collider mesh (not drawn; combat uses baked triangles). */
-    private modelCollision: LODHelper | undefined;
     private shadowPosition = new THREE.Vector3();
     private shadowQuaternion = new THREE.Quaternion();
     private shadowScale = new THREE.Vector3();
@@ -242,11 +240,9 @@ export class PlayerEntity implements Entity {
         this.modelShadow = new LODHelper(shadowModel, 5);
         this.trackAircraftModel(shadowModel);
 
-        this.modelCollision = undefined;
         if (def.collision) {
             // Prefetch so the asset is resident; meshes stay visible=false in ModelManager.
             const collisionModel = this.models.getModel(def.collision);
-            this.modelCollision = new LODHelper(collisionModel);
             this.trackAircraftModel(collisionModel);
         }
 

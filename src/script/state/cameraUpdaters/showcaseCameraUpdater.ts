@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { PlayerEntity } from '../../scene/entities/player';
 import { FORWARD, UP } from '../../utils/math';
 import { CameraUpdater } from './cameraUpdater';
 

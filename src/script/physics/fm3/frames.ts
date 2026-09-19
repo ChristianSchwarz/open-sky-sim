@@ -78,7 +78,5 @@ export function simOmegaFromNasaRates(p: number, q: number, r: number, out: Floa
     return out;
 }
 
-const SLUG_FT2_TO_KG_M2 = 1.3558179483;
 export const FT_TO_M = 0.3048;
-const LBF_TO_N = 4.4482216153;
 export const DEG = Math.PI / 180;

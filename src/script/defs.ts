@@ -4,18 +4,13 @@ export const HD_FPS_CAP = 30;
 
 export const H_RES = 320;
 export const V_RES = 200;
-const H_RES_HALF = H_RES / 2;
-const V_RES_HALF = V_RES / 2;
 
 export const PITCH_RATE = Math.PI / 5; // Radians/s
 export const ROLL_RATE = Math.PI / 2; // Radians/s (was π/3, +50%)
 export const YAW_RATE = Math.PI / 12; // Radians/s
 export const MAX_SPEED = 250.0; // World units/s
 export const THROTTLE_RATE = 33; // Percentage of maximum/s [0,100]
-const STICK_RATE = 1.5; // Full stick deflection per second (non-arrow layouts)
 export const PLANE_DISTANCE_TO_GROUND = 2.0; // World units
-const PLANE_COCKPIT_OFFSET_Y = 1.0; // World units
-const PLANE_COCKPIT_OFFSET_Z = 8.0; // World units
 /** Ceiling for kinematic free-fly; must clear the space spawn altitude. */
 export const MAX_ALTITUDE = 400000; // World units
 /** High-altitude start mode spawn height (m AGL). */

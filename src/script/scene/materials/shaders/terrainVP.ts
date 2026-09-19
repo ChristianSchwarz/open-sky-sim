@@ -1,5 +1,4 @@
 import { LOD_FADE_NEAR, LOD_FADE_SOFTNESS } from '../../../terrain/lod';
-import { TerrainClass } from '../../../terrain/tones';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 import { TERRAIN_COVER_PARS } from './terrainCover';
 

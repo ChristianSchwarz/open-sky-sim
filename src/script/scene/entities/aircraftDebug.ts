@@ -46,7 +46,3 @@ export function trackAircraftMesh(mesh: THREE.Mesh | THREE.LineSegments): void {
     }
 }
 
-function clearAircraftMaterialTracking(): void {
-    materials.clear();
-    meshes.clear();
-}

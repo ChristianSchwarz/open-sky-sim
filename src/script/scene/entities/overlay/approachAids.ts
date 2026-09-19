@@ -21,9 +21,6 @@ export const ILS_GLIDESLOPE_TAN = Math.tan((ILS_GLIDESLOPE_DEG * Math.PI) / 180)
 export const CARRIER_AOA_ON_SPEED_MIN_DEG = 8.0;
 /** Upper bound of the carrier on-speed AoA band (deg). */
 export const CARRIER_AOA_ON_SPEED_MAX_DEG = 8.5;
-/** Midpoint used when a single on-speed reference is needed. */
-const CARRIER_AOA_ON_SPEED_DEG =
-    0.5 * (CARRIER_AOA_ON_SPEED_MIN_DEG + CARRIER_AOA_ON_SPEED_MAX_DEG);
 
 /** Nominal carrier approach speed (KIAS); mid of the 130–145 band. */
 export const CARRIER_APPROACH_SPEED_KIAS = 137;

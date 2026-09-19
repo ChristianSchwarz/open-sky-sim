@@ -16,30 +16,6 @@ export interface HillCollider {
 
 const COLLIDER_GEO_QUAT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), HILL_GEOMETRY_Y_ROT);
 
-function createHillCollider(
-    position: THREE.Vector3,
-    quaternion: THREE.Quaternion,
-    scale: THREE.Vector3,
-    baseRadius: number,
-    height: number,
-): HillCollider {
-    const obj = new THREE.Object3D();
-    obj.position.copy(position);
-    // Cone mesh bakes this Y rotation into its geometry; include it in the collider.
-    obj.quaternion.copy(quaternion).multiply(COLLIDER_GEO_QUAT);
-    obj.scale.copy(scale);
-    obj.updateMatrixWorld(true);
-    const horizontalScale = Math.max(Math.abs(scale.x), Math.abs(scale.z));
-    return {
-        worldToLocal: obj.matrixWorld.clone().invert(),
-        localToWorld: obj.matrixWorld.clone(),
-        baseRadius,
-        height,
-        worldX: position.x,
-        worldZ: position.z,
-        worldReach: horizontalScale * baseRadius,
-    };
-}
 
 const TMP_LOCAL = new THREE.Vector3();
 const TMP_WORLD = new THREE.Vector3();

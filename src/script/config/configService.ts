@@ -10,8 +10,6 @@ import { LANDUSE_BLEND_DEFAULT, clampLanduseBlend } from "../terrain/tones";
 import { TREE_DENSITY_MULTIPLIER_DEFAULT, clampTreeDensityMultiplier } from "../terrain/treeBillboards";
 import { TechProfile } from "./profiles/profile";
 
-type ProfileChangeListener = (profile: TechProfile, newId: string, oldId: string) => void;
-type FlightModelChangeListener = (flightModel: FlightModel, newId: string, oldId: string) => void;
 export type UnitSystemChangeListener = (unitSystem: UnitSystems) => void;
 export type AiPilotModelChangeListener = (model: AiPilotModels) => void;
 export type TerrainColourChangeListener = (mode: TerrainColours) => void;

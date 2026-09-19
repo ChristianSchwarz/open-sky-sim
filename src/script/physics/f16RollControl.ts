@@ -11,10 +11,6 @@ export const F16_ROLL_CAT1: F16RollControlConfig = {
     actuatorTauS: 0.075,
 };
 
-const F16_ROLL_CAT3: F16RollControlConfig = {
-    maxRollRateDegS: 180,
-    actuatorTauS: 0.09,
-};
 
 const DEG_TO_RAD = Math.PI / 180;
 

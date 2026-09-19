@@ -57,7 +57,6 @@ export const enum RoadClass {
     Unclassified = 5,
     Residential = 6,
 }
-const ROAD_CLASS_COUNT = 7;
 
 /**
  * The coarsest class drawn as a major road: the ones that read from
