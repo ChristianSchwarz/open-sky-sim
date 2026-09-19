@@ -3,8 +3,133 @@ import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PaletteCategory } from '../../../config/palettes/palette';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from "../../materials/materials";
 import { updateUniforms } from '../../utils';
+import { SUN_UNIFORMS, SUN_VISIBILITY } from '../../materials/shaders/sun';
 import { Model, ModelLibBuilder } from "../models";
 import { mergeGeometries } from './vegetationModelBuilder';
+
+/** Share of its light a cloud keeps when the sun is wholly hidden from the viewer. */
+const HIDDEN_SUN_CLOUD_LIGHT = 0.35;
+
+/** Light a solid cloud keeps with the sun hidden: a dim, slightly blue skylight. */
+const HIDDEN_SUN_SKYLIGHT = new THREE.Vector3(0.3, 0.3, 0.38);
+
+type BeforeRender = THREE.Object3D['onBeforeRender'];
+type BeforeRenderArgs = Parameters<typeof updateUniforms>;
+
+/**
+ * One of a material's colour uniforms, with the undimmed value kept beside it.
+ *
+ * The palette rewrites the uniform in place whenever it changes, so the base is
+ * re-read from the material whenever it holds something other than what this
+ * last wrote.
+ */
+class DimmedColour {
+    readonly base = new THREE.Color();
+    private readonly applied = new THREE.Color(NaN, NaN, NaN);
+
+    constructor(readonly target: THREE.Color) {}
+
+    refresh(): void {
+        if (!this.target.equals(this.applied)) {
+            this.base.copy(this.target);
+        }
+    }
+
+    write(colour: THREE.Color): void {
+        this.target.copy(colour);
+        this.applied.copy(colour);
+    }
+}
+
+/** Per-material state, found from the material a draw is actually given. */
+const hazeStates = new WeakMap<THREE.Material, DimmedColour[]>();
+
+/**
+ * A before-render hook for the unshaded haze puffs: dims their palette colours
+ * by the same factor the solid body's light falls by. It works on the material
+ * the draw passes in, not the one the builder made, since a pass may swap or
+ * clone materials.
+ */
+function sunVisibleColours(): BeforeRender {
+    const scratch = new THREE.Color();
+    const hook = function (this: THREE.Mesh, ...args: BeforeRenderArgs) {
+        const material = args[4] as THREE.ShaderMaterial;
+        let slots = hazeStates.get(material);
+        if (slots === undefined) {
+            slots = ['color', 'colorSecondary'].map(n => new DimmedColour(material.uniforms[n].value));
+            hazeStates.set(material, slots);
+        }
+        const scale = HIDDEN_SUN_CLOUD_LIGHT + (1 - HIDDEN_SUN_CLOUD_LIGHT) * SUN_VISIBILITY.value;
+        for (const s of slots) {
+            s.refresh();
+            s.write(scratch.copy(s.base).multiplyScalar(scale));
+        }
+        updateUniforms.apply(this, args);
+    } as BeforeRender;
+    return Object.assign(hook, { keepOnClone: true });
+}
+
+interface SolidCloudState {
+    direct: THREE.Vector3;
+    tint: THREE.Vector3;
+    ambient: THREE.Vector3;
+    shade: THREE.Vector2;
+    lit: DimmedColour;
+    shadow: DimmedColour;
+}
+
+const solidStates = new WeakMap<THREE.Material, SolidCloudState>();
+
+/**
+ * A before-render hook that lights the solid cloud with the sun scaled by how
+ * much of it the viewer can see (SUN_VISIBILITY), leaving every other material
+ * on the shared sun uniforms untouched.
+ *
+ * The material gets private copies of the direct-beam uniforms, rewritten each
+ * draw from the shared ones, so the time of day still drives them.
+ */
+function sunVisibleUniforms(): BeforeRender {
+    const hidden = new THREE.Color();
+    const dimmed = new THREE.Color();
+    const hook = function (this: THREE.Mesh, ...args: BeforeRenderArgs) {
+        const material = args[4] as THREE.ShaderMaterial;
+        let st = solidStates.get(material);
+        if (st === undefined) {
+            st = {
+                direct: new THREE.Vector3(),
+                tint: new THREE.Vector3(),
+                ambient: new THREE.Vector3(),
+                shade: new THREE.Vector2(),
+                lit: new DimmedColour(material.uniforms.color.value),
+                shadow: new DimmedColour(material.uniforms.colorSecondary.value),
+            };
+            material.uniforms.uSunDirect = { value: st.direct };
+            material.uniforms.uSunTint = { value: st.tint };
+            material.uniforms.uSunShade = { value: st.shade };
+            material.uniforms.uSunAmbient = { value: st.ambient };
+            solidStates.set(material, st);
+        }
+        const v = SUN_VISIBILITY.value;
+        // The shared ambient is nearly out by dusk, so scaling it cannot leave a
+        // hidden-sun cloud anything: it blends to a fixed cool skylight instead.
+        st.ambient.copy(SUN_UNIFORMS.uSunAmbient.value).lerp(HIDDEN_SUN_SKYLIGHT, 1 - v);
+        st.direct.copy(SUN_UNIFORMS.uSunDirect.value).multiplyScalar(v);
+        st.tint.copy(SUN_UNIFORMS.uSunTint.value).multiplyScalar(v);
+        // The duotone modes cut on this scalar pair instead of multiplying, and
+        // dusk leaves the ambient weight near 1, which reads as fully lit. Both
+        // weights fall with the sun so a hidden sun drops the cloud to its
+        // shadow tone, which is then lifted off black below.
+        const total = SUN_UNIFORMS.uSunShade.value;
+        st.shade.set(total.x * (0.5 + 0.5 * v), total.y * v);
+        st.lit.refresh();
+        st.shadow.refresh();
+        st.lit.write(st.lit.base);
+        st.shadow.write(hidden.copy(st.shadow.base).lerp(
+            dimmed.copy(st.lit.base).multiplyScalar(HIDDEN_SUN_CLOUD_LIGHT), 1 - v));
+        updateUniforms.apply(this, args);
+    } as BeforeRender;
+    return Object.assign(hook, { keepOnClone: true });
+}
 
 /** A single faceted puff within a cloud cluster, in local space (metres). */
 export interface CloudPuffLobe {
@@ -271,7 +396,7 @@ export class CloudModelLibBuilder implements ModelLibBuilder {
             // a shadowed, flat underside.
             shaded: true,
         }));
-        mesh.onBeforeRender = updateUniforms;
+        mesh.onBeforeRender = sunVisibleUniforms();
 
         // Screen-space stipple discard — no real alpha blend pipeline here,
         // just soft, semi-transparent growth puffs over the cloud top, one
@@ -290,7 +415,7 @@ export class CloudModelLibBuilder implements ModelLibBuilder {
                 alphaDither: tier.alphaDither,
                 colorDither: true,
             }));
-            m.onBeforeRender = updateUniforms;
+            m.onBeforeRender = sunVisibleColours();
             return m;
         });
 

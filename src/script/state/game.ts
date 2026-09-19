@@ -11,8 +11,15 @@ import { loadSettings, SpawnMode, updateSettings } from '../config/settingsStora
 import { KernelRenderTask, KernelUpdateTask } from '../core/kernel';
 import { fm2GroundRestHeight } from '../physics/fm2/fm2AircraftConfig';
 import { AIRBASE_RUNWAY as AIRBASE_RUNWAY_RAW, APPROACH_ALTITUDE_M, APPROACH_FINAL_DISTANCE_M, APPROACH_SPEED_MPS, COCKPIT_FAR, COCKPIT_FOV, HIGH_ALTITUDE_M, H_RES, PLANE_DISTANCE_TO_GROUND, RUNWAY_HALF_LENGTH_M, SPACE_ALTITUDE_M, V_RES } from '../defs';
-import { DEFAULT_SUN_HOURS, setSunTime, SUN_DIRECTION, SUN_STATE } from '../scene/materials/shaders/sun';
-import { placeSun, SUN_SET_ELEVATION_DEG } from '../scene/models/lib/sunModelBuilder';
+import {
+    DEFAULT_SUN_HOURS, setSunTime, SUN_DIRECTION, SUN_STATE, SUN_VISIBILITY, sunVisibilityFor,
+} from '../scene/materials/shaders/sun';
+import {
+    DISC_DIAMETER_DEG as SUN_DISC_DIAMETER_DEG, placeSun, SUN_SET_ELEVATION_DEG,
+} from '../scene/models/lib/sunModelBuilder';
+
+/** How far out along the sun's bearing terrain is searched for a skyline. */
+const SUN_SKYLINE_RANGE_M = 100_000;
 import { paintSkyDome, SkyDome, skyDomeOf } from '../scene/models/lib/skyDomeModelBuilder';
 import { paintSunBloom } from '../scene/models/lib/sunModelBuilder';
 import { Model } from '../scene/models/models';
@@ -2006,6 +2013,7 @@ export class Game {
             }
             this.targetCamera.update();
             this.applySpaceSkyState();
+            this.updateSunVisibility();
         }
         this.updateHdResolution();
         this.updateShowcasePicking(this.hdResolutionWidth || H_RES);
@@ -2063,6 +2071,33 @@ export class Game {
             this.targetCamera.main.far = far;
             this.targetCamera.main.updateProjectionMatrix();
         }
+    }
+
+    /**
+     * Sets how much of the sun's disc the camera can see over the terrain, for
+     * the clouds' lighting.
+     *
+     * Walks the ground out along the sun's bearing and keeps the steepest angle
+     * it subtends from the camera: that is the skyline the sun has to clear. The
+     * step widens with range, as the picking march does, since a far ridge
+     * needs far less resolution to be found.
+     */
+    private updateSunVisibility(): void {
+        const cam = this.playerCamera.main.position;
+        const horizontal = Math.hypot(SUN_DIRECTION.x, SUN_DIRECTION.z);
+        let skylineDeg = -90;
+        if (horizontal > 1e-4) {
+            const dx = SUN_DIRECTION.x / horizontal;
+            const dz = SUN_DIRECTION.z / horizontal;
+            let steepest = -Infinity;
+            for (let t = 20; t <= SUN_SKYLINE_RANGE_M; t += Math.max(20, t * 0.03)) {
+                const h = this.planetTerrain.heightAtWorld(cam.x + dx * t, cam.z + dz * t);
+                steepest = Math.max(steepest, (h - cam.y) / t);
+            }
+            skylineDeg = Math.atan(steepest) * THREE.MathUtils.RAD2DEG;
+        }
+        SUN_VISIBILITY.value = sunVisibilityFor(
+            SUN_STATE.elevationDeg, skylineDeg, SUN_DISC_DIAMETER_DEG);
     }
 
     /** Hide the flat sky billboard in space; restore it in atmosphere. */
@@ -3971,6 +4006,12 @@ export class Game {
             (at?: { x: number; z: number }) => this.groundProbe(at);
         (globalThis as Record<string, unknown>).__skyDome = this.skyDome;
         (globalThis as Record<string, unknown>).__player = this.player;
+        (globalThis as Record<string, unknown>).__setSunHours = (hours: number) => {
+            setSunTime(hours);
+            this.refreshDaytimePalette();
+            this.updateSunEntity();
+        };
+        (globalThis as Record<string, unknown>).__sunVisibility = () => SUN_VISIBILITY.value;
         (globalThis as Record<string, unknown>).__sunModel = this.sunModel;
         // Unpaved strips still in their stand-in tone: empty once every one
         // has been drawn over ground that is on screen.

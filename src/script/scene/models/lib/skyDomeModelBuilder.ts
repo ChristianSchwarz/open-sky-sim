@@ -127,13 +127,11 @@ ${LOG_DEPTH_PARS_FRAGMENT}
     // ridge has to stay a ridge rather than being veiled away.
     float sceneDist = sceneDistance(gl_FragCoord.xy);
     float occluded = step(sceneDist, uSceneFar * float(${SCENE_DEPTH_SKY_CUT}));
-    coverage *= mix(1.0, 1.0 - exp2(-uVeilDensity * sceneDist), occluded);
-    // The cap is the part of the ring that lies over the disc. It has to stay
-    // out of the way while the disc is visible - that is the whole reason the
-    // glare was an annulus - but once terrain has taken the disc, leaving the
-    // hole open punches the ground colour through the brightest point of the
-    // sky. Occlusion is exactly the test that tells those two apart.
-    coverage *= mix(1.0, occluded, vSkyCap);
+    // Terrain is opaque to the sun: whatever the scene has drawn over the glare
+    // takes none of it, so a ridge in front of the sun stays dark instead of
+    // glowing. Only open sky carries the glare, and the cap therefore needs no
+    // special case - with the ring gone over terrain too, there is no hole.
+    coverage *= 1.0 - occluded;
     if (coverage <= 0.0) {
       discard;
     }

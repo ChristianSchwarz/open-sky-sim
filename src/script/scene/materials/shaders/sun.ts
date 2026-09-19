@@ -134,6 +134,23 @@ export const SUN_UNIFORMS = {
 };
 
 /**
+ * How much of the sun's disc the viewer can see, 0 (wholly behind terrain) to 1
+ * (wholly clear). Written per frame by the game from the skyline along the sun's
+ * bearing; the clouds scale their direct light by it, since a cloud seen past a
+ * ridge that hides the sun is not one the viewer sees lit.
+ */
+export const SUN_VISIBILITY = { value: 1 };
+
+/**
+ * Fraction of a sun disc `diameterDeg` wide that stands above a skyline at
+ * `skylineDeg`, both in degrees of elevation. Linear in the height cleared, so
+ * the light comes up evenly as the disc rises out from behind the ridge.
+ */
+export function sunVisibilityFor(sunElevationDeg: number, skylineDeg: number, diameterDeg: number): number {
+    return THREE.MathUtils.clamp((sunElevationDeg - skylineDeg) / diameterDeg + 0.5, 0, 1);
+}
+
+/**
  * Writes the direction towards the sun at `hours` local solar time into `out`.
  * Equinox declination, so the day is symmetric around 12:00 and the sun rises
  * due east and sets due west.

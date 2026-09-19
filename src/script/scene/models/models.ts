@@ -376,7 +376,11 @@ export class ModelManager {
 
     private cloneObj(obj: THREE.Object3D): THREE.Object3D {
         const o = obj.clone();
-        o.onBeforeRender = updateUniforms;
+        // A builder's own hook (which must call updateUniforms itself) survives
+        // the clone when it says so; everything else gets the plain refresh.
+        o.onBeforeRender = (obj.onBeforeRender as { keepOnClone?: boolean }).keepOnClone
+            ? obj.onBeforeRender
+            : updateUniforms;
         return o;
     }
 }

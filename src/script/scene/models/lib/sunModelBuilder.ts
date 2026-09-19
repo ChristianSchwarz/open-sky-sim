@@ -29,7 +29,7 @@ export const SUN_DISTANCE = 500;
  * times oversize, and so does this - about four times, which lands it around
  * 9 px at 320x200 and 18 px at 640x400.
  */
-const DISC_DIAMETER_DEG = 2.2;
+export const DISC_DIAMETER_DEG = 2.2;
 
 /**
  * How far the glare reaches, as an apparent diameter in degrees.
