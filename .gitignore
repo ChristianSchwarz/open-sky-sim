@@ -29,3 +29,6 @@ dist
 
 # esbuild bundle of the mesh bake worker, rebuilt on every bake
 /tools/bake/.build/
+
+# Global coarse DEM/imagery sources for the orbit view - see tools/prep_global_dem.py
+/data/global/

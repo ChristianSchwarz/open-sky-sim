@@ -25,6 +25,7 @@ import { ArrestorCablesModelLibBuilder } from './scene/models/lib/arrestorCables
 import { TailhookModelLibBuilder } from './scene/models/lib/tailhookModelBuilder';
 import { SkiJumpModelLibBuilder } from './scene/models/lib/skiJumpModelBuilder';
 import { SkyDomeModelLibBuilder } from './scene/models/lib/skyDomeModelBuilder';
+import { AtmosphereShellModelLibBuilder } from './scene/models/lib/atmosphereShellModelBuilder';
 import { SunModelLibBuilder } from './scene/models/lib/sunModelBuilder';
 import { TracerModelLibBuilder } from './scene/models/lib/tracerModelBuilder';
 import { ModelManager } from './scene/models/models';
@@ -69,6 +70,7 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
     const renderer = new Renderer(materials, H_RES, V_RES, HDNoonPalette);
     const models = new ModelManager(materials, [
         new SkyDomeModelLibBuilder('skyDome'),
+        new AtmosphereShellModelLibBuilder('atmosphereShell'),
         new SunModelLibBuilder('sun'),
         new CloudModelLibBuilder('cloudNone', []),
         new CloudModelLibBuilder('cloudSmall', CLOUD_PUFF_SHAPES.small),

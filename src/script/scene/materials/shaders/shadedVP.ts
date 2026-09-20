@@ -37,6 +37,8 @@ export const ShadedVertProgram: string = `
   varying float shade;
   varying vec3 vLight;
   varying float vWorldY;
+  /** Camera distance at this vertex, so haze varies across a mesh, not per draw. */
+  varying float vDist;
 ${LOG_DEPTH_PARS_VERTEX}
   void main() {
     vec3 worldNormal;
@@ -70,6 +72,7 @@ ${LOG_DEPTH_PARS_VERTEX}
 
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldY = worldPos.y;
+    vDist = length(worldPos.xyz);
 
     // Rim light. The lists are drawn camera-relative, so the camera is at the
     // origin and the direction back to it is just the negated position.

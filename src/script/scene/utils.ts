@@ -1,3 +1,4 @@
+import { SPACE_FOG } from './materials/shaders/spaceFog';
 import * as THREE from 'three';
 import { FogQuality } from '../config/profiles/profile';
 import { COCKPIT_FOV, H_RES, V_RES } from '../defs';
@@ -81,6 +82,7 @@ export function updateUniforms(this: THREE.Mesh, renderer: THREE.WebGLRenderer, 
         } else {
             u.distance.value = 0;
         }
+        u.distance.value *= SPACE_FOG.scale;
 
         (u.normalModelMatrix.value as THREE.Matrix3).getNormalMatrix(this.matrixWorld);
         if (u.clipBelowY && data.clipBelowYAbs > -1e20) {

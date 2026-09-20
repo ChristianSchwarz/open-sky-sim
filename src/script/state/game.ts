@@ -22,6 +22,8 @@ import {
 const SUN_SKYLINE_RANGE_M = 100_000;
 import { paintSkyDome, SkyDome, skyDomeOf } from '../scene/models/lib/skyDomeModelBuilder';
 import { paintSunBloom } from '../scene/models/lib/sunModelBuilder';
+import { ATMOSPHERE_SHELL_UNIFORMS } from '../scene/models/lib/atmosphereShellModelBuilder';
+import { SPACE_FOG } from '../scene/materials/shaders/spaceFog';
 import { Model } from '../scene/models/models';
 import { terrainMaxZoomForAltitudeM } from '../terrain/lod';
 import { Renderer, RenderLayer, RenderTargetType } from "../render/renderer";
@@ -37,7 +39,7 @@ import {
 import {
     AIRFIELD_SURFACE_EPS_M, GroundStrip, buildAirfieldModel, buildingHeightM, repaintGroundStrip,
 } from '../scene/airfield/airfieldModel';
-import { ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, worldToGeodetic } from '../terrain/geodesy';
+import { WGS84_A, WGS84_B, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, worldToGeodetic } from '../terrain/geodesy';
 import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
@@ -121,6 +123,15 @@ import {
 
 /** How many AI opponents the combat sim spawns. */
 /** Loose cloud deck: base altitude and per-puff undulation, well under HIGH_ALTITUDE_M. */
+/** Altitude at which the atmosphere shell starts to fade in over the sky dome. */
+const ATMOSPHERE_SHELL_FADE_IN_M = 30_000;
+/** Scratch for {@link Game.updateAtmosphereShell}. */
+const SHELL_CENTRE = new THREE.Vector3();
+const SHELL_AXIS = new THREE.Vector3();
+const SHELL_REL = new THREE.Vector3();
+const SHELL_STRETCHED = new THREE.Vector3();
+const SHELL_MATRIX = new THREE.Matrix4();
+
 /** Scratch for {@link Game.updateSunEntity}. */
 const SUN_FACING = new THREE.Quaternion();
 
@@ -470,6 +481,8 @@ export class Game {
     private skyEntity: SimpleEntity | undefined;
     /** Its vertex colours, repainted from the atmosphere when the sun moves. */
     private skyDome: SkyDome | undefined;
+    /** The atmosphere seen from outside, a full-screen pass that fades in with altitude. */
+    private atmosphereShell: SimpleEntity | undefined;
     /** The sun's model; its bloom is repainted from the same sky painter. */
     private sunModel: Model | undefined;
     /** The sun disc; parked in the sun's direction by {@link updateSunEntity}. */
@@ -487,7 +500,7 @@ export class Game {
      * live via `this`, so field init order relative to setupScene() doesn't matter.
      */
     private readonly excludeSkyFieldsFilter = (entity: Entity): boolean =>
-        entity !== this.cloudField && entity !== this.cirrusField;
+        entity !== this.cloudField && entity !== this.cirrusField && entity !== this.atmosphereShell;
     /** F9-toggled live FPS / draw-call / terrain-LOD readout. */
     private perfHud: PerfHudEntity | undefined;
 
@@ -2002,6 +2015,7 @@ export class Game {
             }
             this.targetCamera.update();
             this.applySpaceSkyState();
+            this.updateAtmosphereShell();
             this.updateSunVisibility();
         }
         this.updateHdResolution();
@@ -2087,6 +2101,54 @@ export class Game {
         }
         SUN_VISIBILITY.value = sunVisibilityFor(
             SUN_STATE.elevationDeg, skylineDeg, SUN_DISC_DIAMETER_DEG);
+    }
+
+    /**
+     * Feeds the atmosphere shell the frame's camera and the planet's place.
+     *
+     * The ellipsoid's centre and polar axis are expressed in scene axes from
+     * the terrain's ENU basis, so the shell agrees with the tiles to the
+     * metre. The centre goes in camera-relative and the camera's height above
+     * the ellipsoid comes from doubles here, because the shader's floats
+     * cannot difference two numbers 6.4 Mm long.
+     */
+    private updateAtmosphereShell(): void {
+        if (!this.atmosphereShell) {
+            return;
+        }
+        const camera = this.playerCamera.main;
+        const altitude = camera.position.y;
+        const weight = THREE.MathUtils.smoothstep(altitude, ATMOSPHERE_SHELL_FADE_IN_M, SPACE_SKY_ALTITUDE_M);
+        const show = weight > 0 && this.view !== PlayerViewState.SHOWCASE;
+        SPACE_FOG.scale = show ? 1 - weight : 1;
+        this.atmosphereShell.enabled = show;
+        if (!show) {
+            return;
+        }
+        const basis = this.planetTerrain.basis;
+        const centre = sceneFromEnu(ecefToEnu(basis, { x: 0, y: 0, z: 0 }), SHELL_CENTRE);
+        const m = basis.ecefToEnu;
+        // Polar axis (ECEF z) in ENU is the third column of the ecef->enu matrix.
+        SHELL_AXIS.set(m[2], m[8], -m[5]).normalize();
+
+        // Height above the ellipsoid, in doubles: distance from the centre with
+        // the polar axis stretched by a / b, less the equatorial radius.
+        const rel = SHELL_REL.set(-centre.x + camera.position.x, -centre.y + camera.position.y,
+            -centre.z + camera.position.z);
+        const along = rel.dot(SHELL_AXIS) * (WGS84_A / WGS84_B - 1);
+        const stretched = SHELL_STRETCHED.copy(rel).addScaledVector(SHELL_AXIS, along);
+        const height = stretched.length() - WGS84_A;
+
+        const u = ATMOSPHERE_SHELL_UNIFORMS;
+        u.uCentre.value.copy(centre).sub(camera.position);
+        u.uAxis.value.copy(SHELL_AXIS);
+        u.uSun.value.copy(SUN_DIRECTION);
+        u.uCamHeight.value = height;
+        u.uWeight.value = weight;
+        SHELL_MATRIX.makeRotationFromQuaternion(camera.quaternion);
+        u.uCamRot.value.setFromMatrix4(SHELL_MATRIX);
+        const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+        u.uTanHalfFov.value.set(tanHalf * camera.aspect, tanHalf);
     }
 
     /** Hide the flat sky billboard in space; restore it in atmosphere. */
@@ -3289,6 +3351,13 @@ export class Game {
         this.skyDome = skyDomeOf(skyModel);
         this.repaintSkyDome();
 
+        // Above the air the dome is the wrong picture; this pass ray-marches the
+        // shell instead. Its own weight keeps it off near the ground.
+        this.atmosphereShell = new SimpleEntity(
+            this.models.getModel('lib:atmosphereShell'), SceneLayers.ForegroundSky, SceneLayers.ForegroundSky);
+        this.atmosphereShell.enabled = false;
+        this.scene.add(this.atmosphereShell);
+
         // Same layer as the billboard, so it rides the rotation-only background
         // camera and the terrain pass paints over it where the ground is.
         // Disc into the background pass, glare into the foreground one: the
@@ -3979,6 +4048,7 @@ export class Game {
         (globalThis as Record<string, unknown>).__probe =
             (at?: { x: number; z: number }) => this.groundProbe(at);
         (globalThis as Record<string, unknown>).__skyDome = this.skyDome;
+        (globalThis as Record<string, unknown>).__shell = ATMOSPHERE_SHELL_UNIFORMS;
         (globalThis as Record<string, unknown>).__player = this.player;
         (globalThis as Record<string, unknown>).__setSunHours = (hours: number) => {
             setSunTime(hours);

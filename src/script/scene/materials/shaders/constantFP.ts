@@ -16,6 +16,7 @@ export const ConstantFragProgram: string = `
   varying float shade;
   varying vec3 vLight;
   varying float vWorldY;
+  varying float vDist;
 ${LOG_DEPTH_PARS_FRAGMENT}
 ${DITHER_PARS_FRAGMENT}
   void main() {
@@ -30,7 +31,7 @@ ${DITHER_PARS_FRAGMENT}
       fogSteps = 24.0;
     }
 
-    float fogFactor = exp2(-fogDensity * distance);
+    float fogFactor = exp2(-fogDensity * vDist);
     fogFactor = 1.0 - clamp(fogFactor, 0.0, 1.0);
     if (shadingType != 3) {
       fogFactor = floor(fogFactor * fogSteps + 0.5) / fogSteps;

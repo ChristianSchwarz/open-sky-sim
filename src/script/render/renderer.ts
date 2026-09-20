@@ -426,7 +426,9 @@ export class Renderer {
         const small = this.backgroundSkyTargetFor(layer.target, renderTarget);
 
         this.renderer.setRenderTarget(small);
-        this.renderer.setClearColor(PaletteColor(palette, PaletteCategory.BACKGROUND));
+        // The layer's own clear colour, or above the air the blit paints the
+        // palette's sky blue over the black the target was just cleared to.
+        this.renderer.setClearColor(layer.clearColor ?? PaletteColor(palette, PaletteCategory.BACKGROUND));
         this.renderer.clear();
         this.render3D(renderTarget, scene, layer, palette);
 

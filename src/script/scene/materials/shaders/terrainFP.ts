@@ -45,6 +45,7 @@ export const TerrainFragProgram: string = `
   varying vec3 vBase;
   varying float vReveal;
   varying vec2 vCoverUv;
+  varying float vDist;
 ${LOG_DEPTH_PARS_FRAGMENT}
 ${DITHER_PARS_FRAGMENT}
 ${TERRAIN_COVER_PARS}
@@ -60,7 +61,7 @@ ${TERRAIN_COVER_PARS}
       fogSteps = 24.0;
     }
 
-    float fogFactor = exp2(-fogDensity * distance);
+    float fogFactor = exp2(-fogDensity * vDist);
     fogFactor = 1.0 - clamp(fogFactor, 0.0, 1.0);
     if (shadingType != 3) {
       fogFactor = floor(fogFactor * fogSteps + 0.5) / fogSteps;

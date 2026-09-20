@@ -73,7 +73,7 @@ ${TERRAIN_COVER_PARS}
   /** Width (m) of this vertex's land-use region on the tile; 0 for ground. */
   attribute float regionSize;
 
-  const float AMBIENT_SKY_FLOOR = 0.4;
+  const float AMBIENT_SKY_FLOOR = 0.3;
   /**
    * Sharpens the light/shadow terminator across slopes: N·L still spans the
    * same 0..1 range, but a facet only half turned to the sun now reads
@@ -81,7 +81,7 @@ ${TERRAIN_COVER_PARS}
    * terrain relief legible from slope shading alone, so it runs steeper than
    * ShadedVertProgram's plain N·L for aircraft and objects.
    */
-  const float SHADOW_CONTRAST_POWER = 1.69;
+  const float SHADOW_CONTRAST_POWER = 2.2;
   const float RIM_POWER = 3.0;
   const float RIM_STRENGTH = 0.35;
 
@@ -93,6 +93,8 @@ ${TERRAIN_COVER_PARS}
   varying float vReveal;
   /** Where in the tile's cover texture this vertex falls; see uCoverEast. */
   varying vec2 vCoverUv;
+  /** Camera distance at this vertex, so haze varies across a tile, not per draw. */
+  varying float vDist;
 ${LOG_DEPTH_PARS_VERTEX}
 
   /**
@@ -139,6 +141,7 @@ ${LOG_DEPTH_PARS_VERTEX}
 
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     float d = length(worldPos.xyz);
+    vDist = d;
     float bySize = sizeReveal(d);
     bool fills = uLodFills > 0.5;
     vBase = facetColor(coverColor, coverClass, fills ? 1.0 : bySize);
