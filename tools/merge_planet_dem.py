@@ -297,6 +297,15 @@ def merge(args: argparse.Namespace) -> int:
         print(f'areas       none recorded; adopting existing coverage as '
               f'"{args.existing_name}"')
     name = area_name_for(args.input, args.name)
+    if args.extend_area:
+        # A chunked import merges one box after another under one name; each
+        # must grow the entry the previous chunk wrote, not replace it.
+        prior = next((a for a in areas if a.get('name') == name), None)
+        if prior:
+            claim = Bounds(
+                min(prior['west'], claim.west), min(prior['south'], claim.south),
+                max(prior['east'], claim.east), max(prior['north'], claim.north),
+            )
     manifest['areas'] = merge_area(areas, name, claim)
     print(f'areas       {", ".join(a["name"] for a in manifest["areas"])}')
 
@@ -333,6 +342,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--existing-name', default='home',
                     help='name to give the coverage already baked, when the '
                          'manifest predates areas being recorded (default: home)')
+    ap.add_argument('--extend-area', action='store_true',
+                    help='grow an existing area entry of the same name to the '
+                         'union with this box instead of replacing it '
+                         '(chunked imports)')
     ap.add_argument('--dry-run', action='store_true',
                     help='report what would be written and stop')
     ap.add_argument('--jobs', type=int, default=DEFAULT_JOBS,

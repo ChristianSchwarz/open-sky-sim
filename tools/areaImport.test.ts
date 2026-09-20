@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-    Step, deletePlan, formatDuration, isProgressLine, parseProgress, plan, snapBboxToTiles, splitStream,
+    Step, deletePlan, formatDuration, isProgressLine, parseProgress, plan, chunkBbox, snapBboxToTiles, splitStream,
     stepOutcome,
     prefetchPlan,
 } from './areaImport';
@@ -256,5 +256,28 @@ describe('stepOutcome', () => {
         assert.ok(airfields.partialWarning, 'a partial step needs a warning to report');
         assert.equal(stepOutcome(2, airfields), 'partial');
         assert.equal(stepOutcome(1, airfields), 'failed');
+    });
+});
+
+describe('chunkBbox', () => {
+    it('leaves a small box whole', () => {
+        const box: [number, number, number, number] = [-17.5, 32.25, -16.25, 33.5];
+        assert.deepEqual(chunkBbox(box), [box]);
+    });
+
+    it('tiles a big box exactly, on tile edges, without overlap', () => {
+        const box = snapBboxToTiles([10.03, 40.11, 15.2, 44.9]);
+        const chunks = chunkBbox(box);
+        assert.ok(chunks.length > 1);
+        const area = (c: number[]) => (c[2] - c[0]) * (c[3] - c[1]);
+        const total = chunks.reduce((s, c) => s + area(c), 0);
+        assert.ok(Math.abs(total - area(box)) < 1e-6);
+        const tile = 180 / 4096;
+        for (const c of chunks) {
+            assert.ok(c[2] - c[0] <= 2 + 1e-9 && c[3] - c[1] <= 2 + 1e-9);
+            for (const v of [c[0] - box[0], c[1] - box[1]]) {
+                assert.ok(Math.abs(v / tile - Math.round(v / tile)) < 1e-6);
+            }
+        }
     });
 });

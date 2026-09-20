@@ -46,6 +46,9 @@ const MAX_SPAN_DEG = 6;
  */
 const SNAP_ZOOM = 12;
 
+/** Largest side, in degrees, of one chunk of an import (see chunkBbox). */
+const CHUNK_SPAN_DEG = 2;
+
 /**
  * Grow a hand-drawn box outwards onto whole tile edges.
  *
@@ -465,8 +468,56 @@ export function prefetchPlan(job: { bbox: readonly number[] }): Step[] {
  * describes textures the texture bake then refreshes.
  */
 export function plan(job: { name: string; bbox: readonly number[] }, withCover: boolean): Step[] {
+    return [...dataSteps(job, withCover), ...meshSteps(job.bbox)];
+}
+
+/**
+ * Chunks an import is cut into: tile-aligned boxes of at most `maxSpan`
+ * degrees a side, west to east then north to south.
+ *
+ * Every cut lies on a z12 tile edge counted from the (already snapped) box's
+ * own corner, which is what `snapBboxToTiles` exists to guarantee - a stage
+ * that writes whole tiles never rewrites half of a neighbour chunk's tile. The
+ * bakes are super-linear in box size (the DEM tool's own MAX_SPAN note says
+ * quadratic), so several small boxes cost less than one big one, hold less in
+ * memory, and leave finished chunks on disk if a later one fails.
+ */
+export function chunkBbox(
+    bbox: readonly [number, number, number, number],
+    maxSpan = CHUNK_SPAN_DEG,
+): [number, number, number, number][] {
+    const [west, south, east, north] = bbox;
+    const tile = 180 / (1 << SNAP_ZOOM);
+    const step = Math.max(1, Math.floor(maxSpan / tile)) * tile;
+    const cuts = (lo: number, hi: number): number[] => {
+        const out = [lo];
+        for (let i = 1; i * step < hi - lo - tile / 2; i++) {
+            out.push(lo + i * step);
+        }
+        out.push(hi);
+        return out;
+    };
+    const xs = cuts(west, east);
+    const ys = cuts(south, north);
+    const chunks: [number, number, number, number][] = [];
+    for (let j = ys.length - 1; j > 0; j--) {
+        for (let i = 0; i + 1 < xs.length; i++) {
+            chunks.push([xs[i], ys[j - 1], xs[i + 1], ys[j]]);
+        }
+    }
+    return chunks;
+}
+
+/**
+ * The stages that fetch and bake source data for one box - everything up to,
+ * not including, the meshes. `extend` makes the DEM merge grow the area's
+ * manifest entry, for the second and later chunks of one import.
+ */
+export function dataSteps(
+    job: { name: string; bbox: readonly number[] }, withCover: boolean, extend = false,
+): Step[] {
     const bbox = job.bbox.join(',');
-    const tif = path.join('data', 'imports', `${slug(job.name)}.tif`);
+    const tif = path.join('data', 'imports', `${slug(job.name)}-${job.bbox.join('_')}.tif`);
     const steps: Step[] = [
         {
             label: 'fetching heights', cmd: PYTHON,
@@ -474,7 +525,8 @@ export function plan(job: { name: string; bbox: readonly number[] }, withCover: 
         },
         {
             label: 'merging into the pyramid', cmd: PYTHON,
-            args: ['tools/merge_planet_dem.py', '--input', tif, '--name', job.name],
+            args: ['tools/merge_planet_dem.py', '--input', tif, '--name', job.name,
+                ...(extend ? ['--extend-area'] : [])],
         },
         {
             label: 'baking coastline', cmd: PYTHON,
@@ -522,47 +574,77 @@ export function plan(job: { name: string; bbox: readonly number[] }, withCover: 
             args: ['tools/bake_planet_cover.py', `--bbox=${bbox}`, '--osm-landuse'],
         });
     }
-    steps.push({
-        label: 'baking meshes', cmd: process.execPath,
-        args: ['--import', 'tsx', 'tools/bake_planet_mesh.ts', '--bbox', bbox],
-    });
-    steps.push({
-        label: 'baking far-tile textures', cmd: process.execPath,
-        args: ['--import', 'tsx', 'tools/bake_planet_tex.ts', '--bbox', bbox],
-    });
-    // Roads last: the strokes are draped on the finished meshes, and the
-    // texture bake above has already painted the major ones into the far
-    // rasters from the vectors the road bake wrote.
-    steps.push({
-        label: 'baking road strokes', cmd: process.execPath,
-        args: ['--import', 'tsx', 'tools/bake_planet_roads.ts', '--bbox', bbox],
-    });
     return steps;
+}
+
+/** The mesh, far-texture and road-stroke bakes: once, over the whole import box. */
+export function meshSteps(box: readonly number[]): Step[] {
+    const bbox = box.join(',');
+    return [
+        {
+            label: 'baking meshes', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_mesh.ts', '--bbox', bbox],
+        },
+        {
+            label: 'baking far-tile textures', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_tex.ts', '--bbox', bbox],
+        },
+        // Roads last: the strokes are draped on the finished meshes, and the
+        // texture bake above has already painted the major ones into the far
+        // rasters from the vectors the road bake wrote.
+        {
+            label: 'baking road strokes', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_roads.ts', '--bbox', bbox],
+        },
+    ];
 }
 
 async function runImport(job: Job, withCover: boolean): Promise<void> {
     fs.mkdirSync(IMPORTS_DIR, { recursive: true });
-    // One bbox throughout: it is what scopes every stage to this area instead
-    // of rewriting everything already baked.
-    const steps = plan(job, withCover);
-    job.stepCount = steps.length;
-    // The Overpass prefetch starts now and runs under the DEM stages; the
-    // first stage that would fetch waits for it. It is never awaited for
-    // its result, only for its end: whatever it could not cache, the stage
-    // fetches itself.
-    let prefetch: Promise<void> = Promise.resolve();
-    for (const p of prefetchPlan(job)) {
-        prefetch = prefetch.then(() => runSide(job, p.label, p.cmd, p.args));
-    }
-    for (let i = 0; i < steps.length; i++) {
-        const s = steps[i];
-        if (s.afterPrefetch) {
-            await prefetch;
+    // Every stage is scoped to a box instead of rewriting everything already
+    // baked. The data stages take one chunk at a time; the meshes take the
+    // whole box, since they need every chunk's data and are cheap per tile.
+    const chunks = job.bbox.length === 4 ? chunkBbox(job.bbox as [number, number, number, number]) : [];
+    const many = chunks.length > 1;
+    const stepsPerChunk = chunks.map((c, ci) =>
+        dataSteps({ name: job.name, bbox: c }, withCover, ci > 0).map(s => ({
+            ...s, label: many ? `chunk ${ci + 1}/${chunks.length}: ${s.label}` : s.label,
+        })));
+    const tail = meshSteps(job.bbox);
+    job.stepCount = stepsPerChunk.reduce((n, s) => n + s.length, 0) + tail.length;
+
+    // Each chunk's Overpass prefetch starts now, chained one behind another
+    // so the mirrors see one batch at a time, and overlaps whatever runs
+    // before that chunk's own stages. The first stage that would fetch waits
+    // for its chunk's prefetch, never for its result, only its end.
+    const prefetches = chunks.map(c => c);
+    let chain: Promise<void> = Promise.resolve();
+    const prefetchDone: Promise<void>[] = prefetches.map((c, ci) => {
+        for (const p of prefetchPlan({ bbox: c })) {
+            chain = chain.then(() => runSide(
+                job, many ? `chunk ${ci + 1}/${chunks.length}: ${p.label}` : p.label,
+                p.cmd, p.args));
+        }
+        return chain;
+    });
+
+    let index = 0;
+    const run = async (s: Step, wait?: Promise<void>) => {
+        if (s.afterPrefetch && wait) {
+            await wait;
         }
         const partial = s.partialCode !== undefined && s.partialWarning
             ? { code: s.partialCode, warning: s.partialWarning }
             : undefined;
-        await runStep(job, s.label, i, s.cmd, s.args, partial);
+        await runStep(job, s.label, index++, s.cmd, s.args, partial);
+    };
+    for (let ci = 0; ci < stepsPerChunk.length; ci++) {
+        for (const s of stepsPerChunk[ci]) {
+            await run(s, prefetchDone[ci]);
+        }
+    }
+    for (const s of tail) {
+        await run(s);
     }
 }
 
