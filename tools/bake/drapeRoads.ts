@@ -95,7 +95,15 @@ export function drapeRoads(
     const upLen = Math.hypot(upX, upY, upZ);
     upX /= upLen; upY /= upLen; upZ /= upLen;
     const liftM = ROAD_LIFT_CELLS * approxTileEdgeMetres(tile.id) / 256;
-
+    // The drape works in a sheared frame: every point slides along the local
+    // vertical to the y = 0 plane, so a road point at (lon, lat) and the mesh
+    // vertex above it share one (x, z) whatever their height. Without it a
+    // road placed at the tile's centre height and a facet at real height
+    // part company horizontally by dh * sin(tilt), and far from the frame's
+    // origin (tilt 60+ deg) that was hundreds of metres to a mile.
+    const shear = Math.abs(upY) > 0.05;
+    const shearX = shear ? upX / upY : 0;
+    const shearZ = shear ? upZ / upY : 0;
 
     // --- the drawn facets, in metres, bucketed on x/z ----------------------
     const q = tile.quantScale;
@@ -109,17 +117,21 @@ export function drapeRoads(
     const tri = new Float64Array(triCount * 9);
     let t = 0;
     for (let v = 0; v + 8 < land.length; v += 9) {
-        for (let k = 0; k < 9; k++) {
-            tri[t * 9 + k] = land[v + k] * q;
+        for (let k = 0; k < 9; k += 3) {
+            const y = land[v + k + 1] * q;
+            tri[t * 9 + k] = land[v + k] * q - y * shearX;
+            tri[t * 9 + k + 1] = y;
+            tri[t * 9 + k + 2] = land[v + k + 2] * q - y * shearZ;
         }
         t++;
     }
     for (let i = 0; i + 2 < waterIdx.length; i += 3) {
         for (let k = 0; k < 3; k++) {
             const vi = waterIdx[i + k] * 3;
-            tri[t * 9 + k * 3] = water[vi] * q;
-            tri[t * 9 + k * 3 + 1] = water[vi + 1] * q;
-            tri[t * 9 + k * 3 + 2] = water[vi + 2] * q;
+            const y = water[vi + 1] * q;
+            tri[t * 9 + k * 3] = water[vi] * q - y * shearX;
+            tri[t * 9 + k * 3 + 1] = y;
+            tri[t * 9 + k * 3 + 2] = water[vi + 2] * q - y * shearZ;
         }
         t++;
     }
@@ -295,7 +307,10 @@ export function drapeRoads(
         // Smoothed into a curve first, in the tile's horizontal metres, so the
         // facet crossings and the height simplifier below see the curve and
         // not the OSM polyline (see roadSpline.ts).
-        const local = road.points.map(p => toLocal(p.lon, p.lat, tile.centerHeightM));
+        const local = road.points.map(p => {
+            const l = toLocal(p.lon, p.lat, tile.centerHeightM);
+            return { x: l.x - l.y * shearX, y: l.y, z: l.z - l.y * shearZ };
+        });
         const track = smooth ? smoothRoad(local) : local;
         const grid = resample(track.map(p => ({ x: p.x, y: 0, z: p.z })));
         if (grid.length < 2) {
@@ -315,8 +330,11 @@ export function drapeRoads(
             continue;
         }
         const kept = simplifyDraped(grid, ys as number[], liftM * SIMPLIFY_LIFT_FRACTION);
-        const grid2 = kept.map(i => grid[i]);
         const ys2 = kept.map(i => ys[i]!);
+        // Back out of the sheared frame: the point sits at its facet's height.
+        const grid2 = kept.map((i, k) => ({
+            x: grid[i].x + ys2[k] * shearX, y: 0, z: grid[i].z + ys2[k] * shearZ,
+        }));
         if (half.length + grid2.length * 2 > cap) {
             dropped++;
             continue;
