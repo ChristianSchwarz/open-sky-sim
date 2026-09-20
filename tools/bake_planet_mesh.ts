@@ -803,10 +803,11 @@ async function main(): Promise<void> {
 
     const outManifestPath = path.join(args.out, 'manifest.json');
     const previousManifest = fs.existsSync(outManifestPath)
-        ? JSON.parse(fs.readFileSync(outManifestPath, 'utf8')) as { texture?: unknown; roads?: unknown }
+        ? JSON.parse(fs.readFileSync(outManifestPath, 'utf8')) as { texture?: unknown; roads?: unknown; bridges?: unknown }
         : {};
     const carriedTexture = previousManifest.texture;
     const carriedRoads = previousManifest.roads;
+    const carriedBridges = previousManifest.bridges;
     if (carriedTexture !== undefined) {
         console.log('texture stream carried from the previous manifest; run `npm run bake:tex` '
             + (args.bbox ? 'with the same --bbox ' : '') + 'to refresh it for the re-meshed tiles');
@@ -884,6 +885,8 @@ async function main(): Promise<void> {
         // reason: dropped here, a re-mesh of any area switched roads off for
         // the whole pyramid while every .ptr stayed on disk (2026-09-16).
         roads: carriedRoads,
+        // Likewise the bridge geometry stream, bake_planet_bridges.ts's.
+        bridges: carriedBridges,
     };
     fs.writeFileSync(
         path.join(args.out, 'manifest.json'),

@@ -18,6 +18,8 @@ import { decodePdm } from '../../src/script/terrain/demTile';
 import { LanduseRegion, Watercourse, decodeLvr } from './lvr';
 import { PLC_FLAG_REAL_IMAGERY, decodePlc } from './plc';
 import { buildTile } from './buildTile';
+import { conformBorders, Side } from './borderConform';
+import { carveGrid, decodeRgr } from './roadGrade';
 import { GroundMeans, groundColorAt } from './groundColor';
 import { CoastPolygon, InlandPolygon, LonLatBounds } from './shoreline';
 import { EnuBasis } from '../../src/script/terrain/geodesy';
@@ -225,6 +227,32 @@ function parentErrorM(src: string, z: number, x: number, y: number, ownErrM: num
     return decodePdm(fs.readFileSync(p)).geometricErrorM;
 }
 
+const ancestorGrids = new Map<string, { size: number; heights: Float32Array } | null>();
+
+/** One side of an ancestor's raw height grid; a few are read over and over, so they are kept. */
+function ancestorBorder(src: string, z: number, x: number, y: number, side: Side): Float32Array | undefined {
+    const key = `${src}|${z}/${x}/${y}`;
+    let grid = ancestorGrids.get(key);
+    if (grid === undefined) {
+        const p = path.join(src, String(z), String(x), `${y}.pdm`);
+        grid = fs.existsSync(p) ? decodePdm(fs.readFileSync(p)) : null;
+        if (ancestorGrids.size > 64) {
+            ancestorGrids.clear();
+        }
+        ancestorGrids.set(key, grid);
+    }
+    if (!grid) {
+        return undefined;
+    }
+    const n = grid.size;
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+        out[i] = grid.heights[side === 'W' ? i * n : side === 'E' ? i * n + n - 1
+            : side === 'N' ? i : (n - 1) * n + i];
+    }
+    return out;
+}
+
 /** Reads one tile's inputs, builds it and writes its `.ptm`. Returns undefined if there is no DEM tile. */
 export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessResult | undefined {
     const { z, x, y } = task;
@@ -234,6 +262,18 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         return undefined;
     }
     const dem = decodePdm(fs.readFileSync(pdmPath));
+    conformBorders(dem.heights, dem.size, z, x, y, cfg.seaLevel, {
+        border: (az, ax, ay, side) => ancestorBorder(cfg.src, az, ax, ay, side),
+    });
+
+    // Motorway roadbeds (bake_planet_roadgrade.ts): embankment and cutting are
+    // laid into the grid before anything is built from it. Leaf only: the
+    // .rgr exists at the leaf level alone.
+    const rgrPath = `${stem}.rgr`;
+    if (fs.existsSync(rgrPath)) {
+        const b = tileBounds(z, x, y);
+        carveGrid(dem.heights, dem.size, b, decodeRgr(fs.readFileSync(rgrPath)), cfg.seaLevel);
+    }
 
     let polygons: CoastPolygon[] | undefined;
     let inland: InlandPolygon[] | undefined;
