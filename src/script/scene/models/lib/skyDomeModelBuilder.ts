@@ -155,7 +155,14 @@ ${LOG_DEPTH_PARS_FRAGMENT}
     // frame, with depth testing off: nothing behind it still needs to sort
     // against it, so blending it costs nothing a discard doesn't already.
     vec3 toned = vSkyColor * mix(1.0, uSkyOverbright, vSkyFalloff);
-    gl_FragColor = vec4(clamp(toned, 0.0, 1.0), coverage);
+    toned = clamp(toned, 0.0, 1.0);
+#ifdef SKY_GLARE
+    // The glare's cap is drawn over the sun's own disc, so it has to be the
+    // disc's colour, not tinted sky: white at the limb, easing into the sky
+    // colour over the inner part of the ramp.
+    toned = mix(toned, vec3(1.0), smoothstep(0.8, 1.0, vSkyFalloff));
+#endif
+    gl_FragColor = vec4(toned, coverage);
 ${LOG_DEPTH_FRAGMENT}
   }
 `;
