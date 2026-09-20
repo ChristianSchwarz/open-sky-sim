@@ -222,11 +222,47 @@ function vertexCountOf(g: THREE.BufferGeometry): number {
     return g.getAttribute('position').count;
 }
 
+/**
+ * Tile-edge vertices only see their own tile's triangles, so two neighbours
+ * light the shared edge differently and a step shows - worst between tiles of
+ * different detail, whose facets slope differently. Both sides agree on
+ * straight up, so vertices on the tile's bounding-box edge lean their normal
+ * toward it and the two meet in the middle. Edits `normals` in place; the
+ * smooth geometry is built from the same arrays afterwards.
+ */
+function leanEdgeNormals(positions: Int16Array, normals: Int8Array): void {
+    const count = positions.length / 3;
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let v = 0; v < count; v++) {
+        minX = Math.min(minX, positions[v * 3]);
+        maxX = Math.max(maxX, positions[v * 3]);
+        minZ = Math.min(minZ, positions[v * 3 + 2]);
+        maxZ = Math.max(maxZ, positions[v * 3 + 2]);
+    }
+    const edgeX = (maxX - minX) * EDGE_NORMAL_BAND;
+    const edgeZ = (maxZ - minZ) * EDGE_NORMAL_BAND;
+    for (let v = 0; v < count; v++) {
+        const px = positions[v * 3];
+        const pz = positions[v * 3 + 2];
+        if (px - minX > edgeX && maxX - px > edgeX && pz - minZ > edgeZ && maxZ - pz > edgeZ) {
+            continue;
+        }
+        const nx = (normals[v * 4] / 127) * (1 - EDGE_NORMAL_LEAN);
+        const ny = (normals[v * 4 + 1] / 127) * (1 - EDGE_NORMAL_LEAN) + EDGE_NORMAL_LEAN;
+        const nz = (normals[v * 4 + 2] / 127) * (1 - EDGE_NORMAL_LEAN);
+        const len = Math.hypot(nx, ny, nz) || 1;
+        normals[v * 4] = Math.round((nx / len) * 127);
+        normals[v * 4 + 1] = Math.round((ny / len) * 127);
+        normals[v * 4 + 2] = Math.round((nz / len) * 127);
+    }
+}
+
 function landGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
     const vertexCount = tile.landPositions.length / 3;
     if (vertexCount === 0) {
         return undefined;
     }
+    leanEdgeNormals(tile.landPositions, tile.landNormals);
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(tile.landPositions, 3));
 
@@ -271,6 +307,11 @@ function regionKeyOf(attrs: Uint8Array, v: number, landuse: boolean): number {
     }
     return attrs[v * 4] | (attrs[v * 4 + 1] << 8) | (attrs[v * 4 + 2] << 16) | (cls << 24);
 }
+
+/** Fraction of the tile's width, from each edge, that counts as its border. */
+const EDGE_NORMAL_BAND = 0.01;
+/** How far a border normal leans toward straight up, 0..1. */
+const EDGE_NORMAL_LEAN = 0;
 
 /**
  * The FACETED land geometry welded into shared vertices, with `coverColor`
@@ -362,6 +403,7 @@ export function buildSmoothLandGeometry(
     }
 
     const uniqueCount = uniquePositions.length / 3;
+
     const outPositions = new Int16Array(uniquePositions);
     const outNormals = new Int8Array(uniqueCount * 4);
     const outAttrs = new Uint8Array(uniqueCount * 4);

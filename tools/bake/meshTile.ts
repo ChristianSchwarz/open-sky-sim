@@ -109,6 +109,46 @@ export function skirtDepthForTile(parentErrM: number, edgeM: number): number {
 }
 
 /**
+ * How much deeper than {@link skirtDepthForTile} the skirt actually hangs.
+ *
+ * That figure covers a seam against a neighbour one level coarser: each side
+ * holds its border to a quarter of it, so the seam stays inside half. The
+ * cut is not restricted to one level, though. A z12 tile beside a z9 tile
+ * meets a border that strayed a quarter of z9's depth - eight times z12's
+ * own - and the crack between the two, wider than the finer skirt is deep,
+ * shows the sky as a triangle up the slope. Depth is what closes it and is
+ * free (a skirt hangs under the ground), so it is sized for a neighbour four
+ * levels coarser: 2^4 / 4 + 1 / 4 of the base, rounded up.
+ *
+ * The border tolerance stays a quarter of the *base* depth; only the wall
+ * is deeper. Tiles already baked are brought up by tools/deepen_skirts.ts.
+ */
+export const SKIRT_SEAM_FACTOR = 5;
+
+/**
+ * The tolerance a tile's border is held to, as a fraction of the base skirt.
+ *
+ * It was a quarter, which is right for a seam against one level coarser and
+ * leaves a seam against a coarse neighbour up to a quarter of *its* depth off
+ * (97 m at z9): a deep skirt closes that as a wall, not as ground. A sixteenth
+ * puts the worst seam at a few metres to tens of metres; only border vertices
+ * pay for it.
+ */
+export const BORDER_ERROR_FRACTION = 1 / 16;
+
+/**
+ * Where the deepening stops. A coarse tile's own skirt is already kilometres
+ * deep, and the factor would make it ten; below the cut it gains nothing a
+ * neighbour at that scale could show.
+ */
+export const SKIRT_DEEPEN_CAP_M = 2500;
+
+/** The depth a tile whose seam-against-one-level-coarser figure is `baseM` hangs. */
+export function deepenedSkirtM(baseM: number): number {
+    return Math.max(baseM, Math.min(baseM * SKIRT_SEAM_FACTOR, SKIRT_DEEPEN_CAP_M));
+}
+
+/**
  * Floor on the interior tolerance, in cells. A tile is drawn from where
  * its cells are a few pixels wide, and a bump under a quarter of a cell
  * tall does not read at that range; before the floor a flat tile spent its
@@ -119,11 +159,36 @@ export function skirtDepthForTile(parentErrM: number, edgeM: number): number {
 export const MIN_ERROR_CELLS = 0.25;
 
 /**
+ * Deepest zoom that is a *global* tile: the coarse pyramid that covers the whole
+ * planet from ETOPO's 1.85 km grid, where a tile is seen whole from orbit rather
+ * than studied from a cockpit.
+ */
+export const GLOBAL_MAX_ZOOM = 6;
+
+/**
+ * Ceiling on the interior tolerance of a global tile, metres.
+ *
+ * The rules below scale tolerance with the tile, which is right when tiles are
+ * kilometres across and wrong at the top of the pyramid. A z3 cell is 9.8 km
+ * wide, so the quarter-cell floor is 2.4 km, and a continent's relief is inside
+ * that: the interior collapsed to a quad whose corners sit at sea level, the
+ * quad was dropped as water, and every coarse tile over land came out as ocean.
+ * A land tile has to keep its land, so relief above this is kept whatever the
+ * tile's own error says. The triangle budget search still coarsens a tile that
+ * cannot afford it, so this bounds the tolerance from above and nothing else.
+ */
+export const GLOBAL_MAX_ERROR_M = 100;
+
+/**
  * Interior tolerance: half the tile's own geometric error, floored at a
  * metre so flats collapse and at MIN_ERROR_CELLS of the cell size so a
- * quiet tile does not buy detail nobody can see.
+ * quiet tile does not buy detail nobody can see. A global tile (see
+ * GLOBAL_MAX_ZOOM) is capped instead of floored, so its land survives.
  */
-export function maxErrorForTile(tileErrM: number, cellM = 0): number {
+export function maxErrorForTile(tileErrM: number, cellM = 0, z = Infinity): number {
+    if (z <= GLOBAL_MAX_ZOOM) {
+        return Math.min(GLOBAL_MAX_ERROR_M, tileErrM <= 0 ? 1 : Math.max(1, tileErrM * 0.5));
+    }
     const floor = Math.max(1, cellM * MIN_ERROR_CELLS);
     return tileErrM <= 0 ? floor : Math.max(floor, tileErrM * 0.5);
 }
@@ -217,9 +282,10 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
 
     const bounds = tileBounds(z, x, y);
     const edgeM = tileEdgeMetres(z, x, y);
-    const skirtDepthM = skirtDepthForTile(parentErrorM(cfg.src, z, x, y, dem.geometricErrorM), edgeM);
+    const baseSkirtM = skirtDepthForTile(parentErrorM(cfg.src, z, x, y, dem.geometricErrorM), edgeM);
+    const skirtDepthM = deepenedSkirtM(baseSkirtM);
     const cellM = edgeM / (dem.size - 1);
-    const maxErrorM = maxErrorForTile(dem.geometricErrorM, cellM);
+    const maxErrorM = maxErrorForTile(dem.geometricErrorM, cellM, z);
     // Simplify the coast to roughly the interior tolerance, in cells, floored
     // by zoom so a coarse tile's shoreline is not cut at fine-tile cost.
     const simplifyCells = cellM > 0
@@ -234,6 +300,8 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         seaLevel: cfg.seaLevel,
         maxErrorM,
         skirtDepthM,
+        borderErrorM: baseSkirtM * BORDER_ERROR_FRACTION,
+        skirtSeamFactor: SKIRT_SEAM_FACTOR,
         geometricErrorM: dem.geometricErrorM,
         maxZoom: cfg.maxZoom,
         basis: cfg.basis,

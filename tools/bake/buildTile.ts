@@ -213,6 +213,13 @@ export interface BuildTileInput {
     maxErrorM: number;
     skirtDepthM: number;
     /**
+     * Tolerance the tile border is held to, when the skirt is deeper than the
+     * border needs (see SKIRT_SEAM_FACTOR); a quarter of the skirt otherwise.
+     */
+    borderErrorM?: number;
+    /** Recorded in the header so tools/deepen_skirts.ts leaves the tile alone. */
+    skirtSeamFactor?: number;
+    /**
      * The DEM's own geometric error for this tile - what its children hold
      * that it does not - straight from the .pdm header; 0 on a leaf.
      */
@@ -845,7 +852,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // together they stay inside half of it, whatever tolerance the budget forced
     // on the interior. Without it a tile that fit only as coast-only left its
     // border as one chord metres off the ground and the seam opened to the sky.
-    const borderErrorM = input.skirtDepthM > 0 ? input.skirtDepthM / 4 : undefined;
+    const borderErrorM = input.borderErrorM ?? (input.skirtDepthM > 0 ? input.skirtDepthM / 4 : undefined);
     let attempts = 0;
     let collapsedVertices = 0;
     const collapseCellM = ((bounds.north - bounds.south) / cells) * 110540;
@@ -1755,7 +1762,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // The drop is read off ENU u, which is only the vertical near the frame
     // origin, but a wall this tall is tall in any axis close to it; the count
     // is a diagnostic, not geometry.
-    const tallWallM = Math.max(150, 3 * input.skirtDepthM);
+    const shallowSkirtM = input.skirtSeamFactor ? input.skirtDepthM / input.skirtSeamFactor : input.skirtDepthM;
+    const tallWallM = Math.max(150, 3 * shallowSkirtM);
     let tallWallTriangles = 0;
     for (const t of tris) {
         if (!isLandTriangle(t)) {
@@ -2239,6 +2247,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         centerHeightM,
         tileHalfWidthM,
         skirtDepthM: skirt,
+        skirtSeamFactor: input.skirtSeamFactor,
         geometricErrorM,
         land: {
             positions: new Float32Array(landPos),

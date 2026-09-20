@@ -19,11 +19,11 @@
  *     5  u8   z                     40  u32  waterIndexCount
  *     6  u16  flags                 44  u32  riverVertCount
  *     8  u32  x                     48  u32  riverIndexCount
- *    12  u32  y                     52  u32  reserved
+ *    12  u32  y                     52  u32  skirtSeamFactor
  *    16  f32  centerHeightM         56  u32  waterDeepIdx     | = waterIndexCount
  *    20  f32  quantScale            60  u32  waterShallowIdx  |
  *    24  u32  reserved              64  f32  skirtDepthM
- *    28  f32  boundingRadiusM       68  u32  reserved
+ *    28  f32  boundingRadiusM       68  f32  geometricErrorM
  *
  *   payload, each section padded to a 4-byte boundary
  *     landPos    i16 x3 per vertex   tile-local (x=E, y=U, z=S)
@@ -167,6 +167,11 @@ export interface PtmEncodeInput {
     /** Half the tile's ground width (m); the floor for the quantisation step. */
     tileHalfWidthM: number;
     skirtDepthM: number;
+    /**
+     * How many times deeper than the seam-against-one-level-coarser figure the
+     * skirt hangs; 0 or absent when it is that figure. Header word 52.
+     */
+    skirtSeamFactor?: number;
     /**
      * World-space error bound (m) the runtime refines on: what drawing this
      * tile's children instead of it would gain. The DEM's own child-detail
@@ -503,7 +508,7 @@ export function encodePtm(input: PtmEncodeInput): Uint8Array {
     view.setUint32(40, waterIndexCount, true);
     view.setUint32(44, riverVertCount, true);
     view.setUint32(48, riverIndexCount, true);
-    view.setUint32(52, 0, true);
+    view.setUint32(52, input.skirtSeamFactor ?? 0, true);
     view.setUint32(56, waterOrder[TerrainTone.Water].length * 3, true);
     view.setUint32(60, waterOrder[TerrainTone.ShallowWater].length * 3, true);
     view.setFloat32(64, input.skirtDepthM, true);
