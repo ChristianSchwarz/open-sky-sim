@@ -45,9 +45,11 @@ import {
 import {
     TerrainManifest, baseUrlOf, heightIndexUrl, heightTileUrl, meshIndexUrl, meshTileUrl,
     textureIndexUrl,
+    bridgeIndexUrl,
     roadIndexUrl,
 } from './manifest';
 import { CoverBinding, CoverTextures } from './coverTextures';
+import { BridgeMeshes } from './bridgeMeshes';
 import { RoadStrokes } from './roadStrokes';
 import { OceanPatch, buildOceanPatch, disposeOceanPatch } from './oceanPatch';
 import { PtmTile, decodePtm } from './ptm';
@@ -230,6 +232,9 @@ export interface TerrainStats {
     /** Resident tiles with road strokes bound, and the triangles they hold. */
     roadTiles: number;
     roadTriangles: number;
+    /** Resident tiles with bridge geometry bound, and the triangles they hold. */
+    bridgeTiles: number;
+    bridgeTriangles: number;
 }
 
 export class TerrainEntity implements Entity {
@@ -249,6 +254,7 @@ export class TerrainEntity implements Entity {
     private readonly streamer: TileStreamer<PtmTile, TileMeshes>;
     private readonly cover: CoverTextures;
     private readonly roads: RoadStrokes;
+    private readonly bridges: BridgeMeshes;
     private readonly quadtree: Quadtree;
     private readonly oceans = new Map<string, OceanPatch>();
     private readonly pinned = new Set<string>();
@@ -282,6 +288,7 @@ export class TerrainEntity implements Entity {
     /** Switch which roads are drawn: a visibility flip on what is attached, no re-stream. */
     setRoads(mode: RoadsMode): void {
         this.roads.setMode(mode);
+        this.bridges.setMode(mode);
     }
 
     /** Which of a resident tile's two land geometries new uploads start on. */
@@ -761,6 +768,7 @@ export class TerrainEntity implements Entity {
             release: (_id, m) => {
                 this.cover.release(m);
                 this.roads.release(m);
+                this.bridges.release(m);
                 disposeTileMeshes(m);
             },
         });
@@ -772,6 +780,28 @@ export class TerrainEntity implements Entity {
             baseUrl: base,
             majorMaterial: majorRoadMaterial,
             minorMaterial: minorRoadMaterial,
+            onBeforeRender: tileBeforeRender,
+        });
+
+        // Bridges are lit solids on the leaf, in the two road greys: the
+        // surface in the main road's, the concrete a shade off it. Both
+        // depth-write, unlike the strokes they replace.
+        const bridgeMaterial = (category: PaletteCategory) => {
+            const m = opts.materials.build({
+                type: SceneMaterialPrimitiveType.MESH,
+                category,
+                depthWrite: true,
+                shaded: true as const,
+            }) as THREE.ShaderMaterial;
+            m.side = THREE.DoubleSide;
+            trackTerrainMaterial(m);
+            return m;
+        };
+        this.bridges = new BridgeMeshes({
+            manifest: opts.manifest,
+            baseUrl: base,
+            deckMaterial: bridgeMaterial(PaletteCategory.SCENERY_ROAD_MAIN),
+            concreteMaterial: bridgeMaterial(PaletteCategory.SCENERY_ROAD_SECONDARY),
             onBeforeRender: tileBeforeRender,
         });
         if (opts.roads) {
@@ -829,16 +859,19 @@ export class TerrainEntity implements Entity {
         const base = baseUrlOf(manifestUrl);
         const texIndexUrl = textureIndexUrl(this.manifest, base);
         const roadsIndexUrl = roadIndexUrl(this.manifest, base);
-        const [meshIdx, heightIdx, texIdx, roadIdx] = await Promise.all([
+        const bridgesIndexUrl = bridgeIndexUrl(this.manifest, base);
+        const [meshIdx, heightIdx, texIdx, roadIdx, bridgeIdx] = await Promise.all([
             fetchIndex(meshIndexUrl(this.manifest, base)),
             fetchIndex(heightIndexUrl(this.manifest, base)),
             texIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(texIndexUrl),
             roadsIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(roadsIndexUrl),
+            bridgesIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(bridgesIndexUrl),
         ]);
         this.meshIndex = meshIdx;
         this.heightIndex = heightIdx;
         this.cover.setIndex(texIdx);
         this.roads.setIndex(roadIdx);
+        this.bridges.setIndex(bridgeIdx);
         await this.heights.loadCoarse(heightIdx);
     }
 
@@ -1164,6 +1197,7 @@ export class TerrainEntity implements Entity {
         this.meshStore.nextGeneration();
         this.cover.nextGeneration();
         this.roads.nextGeneration();
+        this.bridges.nextGeneration();
 
         const r = this.quadtree.update(
             camera,
@@ -1453,12 +1487,14 @@ export class TerrainEntity implements Entity {
                         void this.attachTrees(meshes.treeSource, meshes, this.treeMaterials);
                     }
                 }
-                this.drawnTriangles += countTriangles(meshes) + this.roads.trianglesOf(meshes);
+                this.drawnTriangles += countTriangles(meshes) + this.roads.trianglesOf(meshes)
+                    + this.bridges.trianglesOf(meshes);
                 // Nearest first, like the meshes; a leaf never has one and
                 // returns from this at once.
                 const priority = PRIORITY_IN_FRUSTUM - Math.sqrt(node.center.distanceToSquared(camPos));
                 this.cover.attach(node.id, meshes, priority);
                 this.roads.attach(node.id, meshes, priority);
+                this.bridges.attach(node.id, meshes, priority);
                 continue;
             }
             const key = node.key;
@@ -1525,6 +1561,8 @@ export class TerrainEntity implements Entity {
             texturesInflight: this.cover.stats.inflight,
             roadTiles: this.roads.stats.attached,
             roadTriangles: this.roads.stats.triangles,
+            bridgeTiles: this.bridges.stats.attached,
+            bridgeTriangles: this.bridges.stats.triangles,
         };
     }
 }

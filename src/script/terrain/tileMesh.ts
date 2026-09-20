@@ -27,6 +27,7 @@ import * as THREE from 'three';
 import { TerrainShading } from '../state/gameDefs';
 import { EnuBasis, ecefToEnu, geodeticToEcef, sceneFromEnu } from './geodesy';
 import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmTile } from './ptm';
+import type { BridgeMeshSet } from './bridgeMeshes';
 import type { RoadMeshes } from './roadStrokes';
 import { TileKey, tileBounds } from './tiling';
 import { LAND_TONE_BASE, TerrainTone } from './tones';
@@ -70,6 +71,8 @@ export interface TileMeshes {
      * three states as `cover`, then the bound meshes. Released with the tile.
      */
     roads?: RoadMeshes | 'pending' | 'none';
+    /** The tile's bridge geometry, once attached (see BridgeMeshes); same states as `roads`. */
+    bridges?: BridgeMeshSet | 'pending' | 'none';
     /**
      * Tree billboards, once attached (see treeBillboards.ts and
      * terrainEntity.ts's upload callback). One InstancedMesh per species

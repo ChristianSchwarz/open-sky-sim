@@ -56,6 +56,7 @@ from osm_common import (
     ways_map,
 )
 from bake_osm_coast import decode_index, scan_pdm_tiles
+from osm_bridges import Bridge, encode_rbr, extract_bridges, is_span, polyline_length_m
 
 RVR_MAGIC = b'RVR1'
 
@@ -163,7 +164,7 @@ def overpass_roads_query(c: Bounds) -> str:
 '''
 
 
-def assemble_roads(data: dict) -> List[Road]:
+def assemble_roads(data: dict, skip_spans: bool = False) -> List[Road]:
     """Chain the fetched ways into runs, one per class.
 
     OSM splits a road into a new way at every junction and every change of
@@ -183,6 +184,10 @@ def assemble_roads(data: dict) -> List[Road]:
         tags = way.get('tags', {})
         cls = road_class(tags)
         if cls is None:
+            continue
+        # The leaf draws a bridge as a deck and a tunnel not at all, so the
+        # ground stroke must not also run through the valley under it.
+        if skip_spans and is_span(tags):
             continue
         ids = [nid for nid in way.get('nodes', []) if nid in nodes]
         if len(ids) < 2:
@@ -320,6 +325,47 @@ def write_rvr(out_dir: str, z: int, x: int, y: int, blob: bytes) -> int:
     return len(blob)
 
 
+def rbr_path(out_dir: str, z: int, x: int, y: int) -> str:
+    return os.path.join(out_dir, str(z), str(x), f'{y}.rbr')
+
+
+def write_rbr(out_dir: str, z: int, x: int, y: int, blob: bytes) -> int:
+    path = rbr_path(out_dir, z, x, y)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'wb') as fh:
+        fh.write(blob)
+    return len(blob)
+
+
+def span_midpoint(points: Sequence[Tuple[float, float]]) -> Tuple[float, float]:
+    """The point half way along a polyline by length: the span's owner tile is the one holding it."""
+    half = polyline_length_m(points) / 2
+    run = 0.0
+    for a, b in zip(points, points[1:]):
+        leg = polyline_length_m([a, b])
+        if leg > 0 and run + leg >= half:
+            t = (half - run) / leg
+            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        run += leg
+    return points[-1]
+
+
+def bridges_by_tile(bridges: Sequence[Bridge], z: int, bbox: Bounds) -> Dict[Tuple[int, int], List[Bridge]]:
+    """Each span filed under the one tile of level `z` that holds its midpoint.
+
+    A span is never clipped: cut at a tile border its deck would end in the
+    air. It is drawn whole by its owner and may overhang the neighbour.
+    """
+    out: Dict[Tuple[int, int], List[Bridge]] = {}
+    for b in bridges:
+        lon, lat = span_midpoint(b.points)
+        if not (bbox.west <= lon <= bbox.east and bbox.south <= lat <= bbox.north):
+            continue
+        x, y, _x1, _y1 = tile_range_for_bounds(z, Bounds(lon, lat, lon, lat))
+        out.setdefault((x, y), []).append(b)
+    return out
+
+
 def line_tolerance_deg(z: int, max_zoom: int) -> float:
     """Douglas-Peucker tolerance for zoom `z`, in degrees.
 
@@ -367,6 +413,10 @@ def bake(args: argparse.Namespace) -> int:
         print('fetch-only: cache filled, nothing baked')
         return 0
     roads = assemble_roads(data)
+    # The leaf's own set, spans left out, only when there are bridge files to
+    # replace them: a run of them missing from the leaf and present nowhere
+    # else would be a hole in the road.
+    leaf_roads = assemble_roads(data, skip_spans=not args.no_bridges)
     way_count = sum(1 for el in data.get('elements', []) if el.get('type') == 'way')
     print(f'assembled   {len(roads)} runs from {way_count} ways')
     if not roads:
@@ -393,7 +443,7 @@ def bake(args: argparse.Namespace) -> int:
         level_tiles = sorted(t for t in tiles.get(z, ()) if x0 <= t[0] <= x1 and y0 <= t[1] <= y1)
         if cut is None or not level_tiles:
             continue
-        level_roads = [r for r in roads if r.cls <= cut]
+        level_roads = [r for r in (leaf_roads if z >= max_zoom else roads) if r.cls <= cut]
         tree = STRtree([r.line for r in level_roads])
         tol = line_tolerance_deg(z, max_zoom)
         files = 0
@@ -417,6 +467,22 @@ def bake(args: argparse.Namespace) -> int:
               f'{parts_written} runs, {level_bytes / 1024:.0f} KB, classes <= {ROAD_CLASSES[cut]}',
               flush=True)
 
+    # Bridges ride only the leaf: a span is a few hundred metres, and the
+    # deck and piers are drawn from close enough that a coarser tile has no
+    # use for them. Filed by midpoint, never clipped (see bridges_by_tile).
+    bridge_files = 0
+    bridge_spans = 0
+    spans = [] if args.no_bridges else extract_bridges(data)
+    owned = bridges_by_tile(spans, max_zoom, bbox)
+    on_disk = {t for t in tiles.get(max_zoom, ())}
+    for (x, y), items in sorted(owned.items()):
+        if (x, y) not in on_disk:
+            continue
+        write_rbr(out_dir, max_zoom, x, y, encode_rbr(items))
+        bridge_files += 1
+        bridge_spans += len(items)
+    print(f'bridges     {bridge_spans}/{len(spans)} spans in {bridge_files} leaf tiles (.rbr)')
+
     previous = (manifest.get('roads') or {}).get('coverage')
     merged = {
         'west': min(previous['west'], bbox.west) if previous else bbox.west,
@@ -429,6 +495,7 @@ def bake(args: argparse.Namespace) -> int:
         'source': 'osm',
         'minZoom': min_zoom,
         'coverage': merged,
+        'bridges': {'path': '{z}/{x}/{y}.rbr', 'zoom': max_zoom},
     }
     with open(manifest_path, 'w', encoding='utf-8') as fh:
         json.dump(manifest, fh, indent=2)
@@ -450,6 +517,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                         help=f'coarsest level that carries roads (default {DEFAULT_MIN_ZOOM})')
     parser.add_argument('--refresh-osm', action='store_true',
                         help='ignore the cached Overpass response and re-fetch')
+    parser.add_argument('--no-bridges', action='store_true',
+                        help='keep bridge and tunnel ways in the leaf road strokes and write no .rbr')
     parser.add_argument('--fetch-only', action='store_true',
                         help='only fetch the Overpass answers into the cache; bake nothing')
     raw = list(argv) if argv is not None else sys.argv[1:]

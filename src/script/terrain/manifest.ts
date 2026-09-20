@@ -72,6 +72,21 @@ interface RoadStreamManifest {
     maxZoom: number;
 }
 
+/**
+ * Bridge geometry sidecars, written by tools/bake_planet_bridges.ts. One PBR1
+ * per leaf tile that has a bridge: deck, parapets, piers and abutments in the
+ * tile's own frame. Absent on a pyramid baked without bridges.
+ */
+interface BridgeStreamManifest {
+    /** Path template, e.g. `{z}/{x}/{y}.pbr`. */
+    path: string;
+    indexPath: string;
+    encoding: string;
+    transport?: string;
+    minZoom: number;
+    maxZoom: number;
+}
+
 interface HeightStreamManifest {
     path: string;
     indexPath: string;
@@ -144,6 +159,7 @@ export interface TerrainManifest {
     mesh: MeshStreamManifest;
     texture?: TextureStreamManifest;
     roads?: RoadStreamManifest;
+    bridges?: BridgeStreamManifest;
     height: HeightStreamManifest;
     flattenPads: FlattenPadManifest[];
     /**
@@ -214,6 +230,17 @@ export function roadTileUrl(
 
 export function roadIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
     return manifest.roads ? `${base}/${manifest.roads.indexPath}` : undefined;
+}
+
+/** Only meaningful when `manifest.bridges` is present. */
+export function bridgeTileUrl(
+    manifest: TerrainManifest, z: number, x: number, y: number, base: string,
+): string {
+    return `${base}/${expand(manifest.bridges!.path, z, x, y)}`;
+}
+
+export function bridgeIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
+    return manifest.bridges ? `${base}/${manifest.bridges.indexPath}` : undefined;
 }
 
 export function meshIndexUrl(manifest: TerrainManifest, base: string): string {

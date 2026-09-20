@@ -145,3 +145,28 @@ class Tolerance(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SpanMasking(unittest.TestCase):
+    def test_leaf_roads_leave_bridge_and_tunnel_ways_out(self):
+        data = {'elements': [
+            _node(1, 0.0, 0.0), _node(2, 1.0, 0.0), _node(3, 2.0, 0.0), _node(4, 3.0, 0.0),
+            _way(10, [1, 2], highway='primary'),
+            _way(11, [2, 3], highway='primary', bridge='yes'),
+            _way(12, [3, 4], highway='primary', tunnel='yes'),
+        ]}
+        self.assertEqual(len(assemble_roads(data)), 1)  # all chained into one run
+        (leaf,) = assemble_roads(data, skip_spans=True)
+        self.assertEqual(list(leaf.line.coords), [(0.0, 0.0), (1.0, 0.0)])
+
+
+class BridgeOwnership(unittest.TestCase):
+    def test_a_span_is_filed_whole_under_the_tile_holding_its_midpoint(self):
+        from bake_osm_roads import bridges_by_tile, span_midpoint
+        from osm_bridges import Bridge
+        # z12 tiles are ~0.088 degrees wide; this span straddles the x=2048 border at lon 0.
+        span = Bridge(1, 9.0, 0, 0.0, [(-0.001, 0.05), (0.002, 0.05)])
+        got = bridges_by_tile([span], 12, Bounds(-1.0, -1.0, 1.0, 1.0))
+        self.assertEqual(sum(len(v) for v in got.values()), 1)
+        mid = span_midpoint(span.points)
+        self.assertAlmostEqual(mid[0], 0.0005, places=4)

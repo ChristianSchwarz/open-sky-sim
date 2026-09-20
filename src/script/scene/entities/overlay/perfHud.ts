@@ -30,6 +30,8 @@ interface TerrainStatsShape {
     textured?: number;
     roadTiles?: number;
     roadTriangles?: number;
+    bridgeTiles?: number;
+    bridgeTriangles?: number;
 }
 
 /** Frame-time EMA smoothing factor — same order as the terrain LOD governor's own. */
@@ -104,7 +106,9 @@ export class PerfHudEntity implements Entity {
             // Road strokes bound, and what they cost: tiles and thousands of triangles.
             const roadSuffix = (terrainStats.roadTiles ?? 0) > 0
                 ? ` RD${terrainStats.roadTiles}/${((terrainStats.roadTriangles ?? 0) / 1000).toFixed(1)}K` : '';
-            lines.push(`Q${terrainStats.queued ?? 0} ${mb.toFixed(0)}MB ${terrainStats.heightTier ?? '?'}${failSuffix}${texSuffix}${roadSuffix}`);
+            const bridgeSuffix = (terrainStats.bridgeTiles ?? 0) > 0
+                ? ` BR${terrainStats.bridgeTiles}/${((terrainStats.bridgeTriangles ?? 0) / 1000).toFixed(1)}K` : '';
+            lines.push(`Q${terrainStats.queued ?? 0} ${mb.toFixed(0)}MB ${terrainStats.heightTier ?? '?'}${failSuffix}${texSuffix}${roadSuffix}${bridgeSuffix}`);
         }
 
         // Top-right, on a black box so it stays legible over bright sky/terrain.
