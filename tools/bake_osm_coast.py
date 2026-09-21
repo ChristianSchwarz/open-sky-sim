@@ -104,6 +104,7 @@ LVR_MAGIC = b'LVR1'
 LVR2_MAGIC = b'LVR2'
 LVR3_MAGIC = b'LVR3'
 LVR4_MAGIC = b'LVR4'
+LVR5_MAGIC = b'LVR5'
 
 # Below this zoom a tile's own grid is already coarser than any landuse
 # boundary is worth cutting precisely (see the cell-size table in the
@@ -435,6 +436,9 @@ class WaterBody:
     geom: object
     flat: bool
     height: Optional[float] = None
+    # Flowing water only: (n, 3) array of lon, lat, surface height along the
+    # river that runs through this body. See :func:`resolve_river_profiles`.
+    profile: Optional[object] = None
 
 
 def waterway_width_m(tags: dict) -> Optional[float]:
@@ -925,6 +929,196 @@ def flat_body_height(
     return float(np.percentile(samples, SURFACE_PERCENTILE))
 
 
+# A river is fitted from DEM samples spaced this many grid cells apart.
+PROFILE_STEP_CELLS = 2.0
+# Median filter width (samples) applied before the monotone fit. SRTM over
+# water is speckle; one wild sample must not become a step.
+PROFILE_MEDIAN_WINDOW = 9
+# A reach whose fitted fall is under this many metres is lowland water (the
+# Havel falls well under a metre in tens of kilometres). The DEM cannot resolve
+# a gradient that small, so it is replaced by a straight ramp between the two
+# ends, which is monotone by construction, instead of a staircase of noise.
+PROFILE_LOWLAND_FALL_M = 3.0
+# A steeper reach keeps the fitted shape, smoothed over this many samples so a
+# one-sample step does not become a vertical face.
+PROFILE_SMOOTH_WINDOW = 5
+# Samples of one river carried into one tile, thinned by stride above this.
+MAX_TILE_PROFILE_SAMPLES = 400
+
+
+def _median_filter(values: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1 or len(values) < 3:
+        return values.copy()
+    half = window // 2
+    padded = np.pad(values, half, mode='edge')
+    stacked = np.lib.stride_tricks.sliding_window_view(padded, window)
+    return np.median(stacked, axis=1)
+
+
+def _non_increasing(values: np.ndarray) -> np.ndarray:
+    """Least-squares non-increasing fit (pool adjacent violators)."""
+    blocks: List[List[float]] = []  # [sum, count]
+    for v in values:
+        blocks.append([float(v), 1.0])
+        while len(blocks) > 1 and blocks[-2][0] / blocks[-2][1] < blocks[-1][0] / blocks[-1][1]:
+            s, c = blocks.pop()
+            blocks[-1][0] += s
+            blocks[-1][1] += c
+    out = np.empty(len(values))
+    i = 0
+    for s, c in blocks:
+        n = int(c)
+        out[i:i + n] = s / c
+        i += n
+    return out
+
+
+def fit_river_profile(heights: np.ndarray) -> Optional[np.ndarray]:
+    """Water surface heights down a river, first sample upstream.
+
+    Never rises downstream. A NaN sample is bridged by interpolation, and None
+    comes back when fewer than three samples are usable.
+
+    Lowland reaches become a straight ramp between their ends, steeper ones the
+    monotone fit itself, lightly smoothed; see PROFILE_LOWLAND_FALL_M.
+    """
+    heights = np.asarray(heights, dtype=np.float64)
+    good = np.isfinite(heights)
+    if good.sum() < 3:
+        return None
+    idx = np.arange(len(heights))
+    filled = np.interp(idx, idx[good], heights[good])
+    iso = _non_increasing(_median_filter(filled, PROFILE_MEDIAN_WINDOW))
+    if iso[0] - iso[-1] < PROFILE_LOWLAND_FALL_M:
+        edge = max(1, len(iso) // 10)
+        top = float(np.mean(iso[:edge]))
+        bottom = float(np.mean(iso[-edge:]))
+        return np.linspace(top, min(top, bottom), len(iso))
+    half = PROFILE_SMOOTH_WINDOW // 2
+    padded = np.pad(iso, half, mode='edge')
+    smooth = np.convolve(padded, np.ones(PROFILE_SMOOTH_WINDOW) / PROFILE_SMOOTH_WINDOW, mode='valid')
+    return np.minimum.accumulate(smooth)
+
+
+def anchor_profile(fitted: np.ndarray, anchors: np.ndarray) -> np.ndarray:
+    """Pin a fitted river profile to the level water it passes through.
+
+    `anchors` holds a lake's surface height where a sample lies inside a flat
+    body and NaN elsewhere. Those samples take the lake's height exactly, and
+    each free run between them is shifted (and, between two anchors, tilted) so
+    it meets them, then made non-increasing again. Without this a river would
+    arrive at a lake a metre above the lake's own surface, which is what a DEM
+    that cannot resolve a lowland fall does.
+    """
+    out = np.asarray(fitted, dtype=np.float64).copy()
+    n = len(out)
+    pinned = np.isfinite(anchors)
+    out[pinned] = anchors[pinned]
+    i = 0
+    while i < n:
+        if pinned[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and not pinned[j]:
+            j += 1
+        run = out[i:j].copy()
+        up = out[i - 1] if i > 0 else None
+        down = out[j] if j < n else None
+        if up is not None and down is not None:
+            t = np.linspace(0.0, 1.0, len(run))
+            run = run + (up - run[0]) * (1.0 - t) + (down - run[-1]) * t
+            lo, hi = min(up, down), max(up, down)
+            run = np.clip(run, lo, hi)
+        elif up is not None:
+            run = run + (up - run[0])
+        elif down is not None:
+            run = np.maximum(run + (down - run[-1]), down)
+        out[i:j] = np.minimum.accumulate(run)
+        i = j
+    return out
+
+
+def resolve_river_profiles(
+    bodies: Sequence[WaterBody], courses: Sequence[Watercourse], dem: DemSampler,
+    cell_deg: float, sea_level: float = 0.0,
+) -> int:
+    """Give every flowing body a surface that descends along its river.
+
+    OSM orders a waterway's nodes in the direction of flow, so ways are joined
+    end to start (never reversed) and each chain is sampled from the DEM and
+    fitted once, whole. Fitting per tile instead would put a step in the river
+    at every tile edge. Returns how many bodies got a profile; the rest keep
+    following the DEM per node.
+    """
+    from shapely.ops import linemerge
+    flowing = [b for b in bodies if not b.flat and b.height is None]
+    if not flowing or not courses:
+        return 0
+    merged = linemerge([c.line for c in courses], directed=True)
+    lines = [merged] if isinstance(merged, LineString) else list(getattr(merged, 'geoms', []))
+    step = cell_deg * PROFILE_STEP_CELLS
+    lakes = [b for b in bodies if b.flat and b.height is not None]
+    chains: List[np.ndarray] = []
+    anchored_chains = 0
+    for line in lines:
+        if line.length < step * 3:
+            continue
+        count = int(line.length / step) + 1
+        pts = shapely.line_interpolate_point(line, np.linspace(0.0, line.length, count))
+        xs, ys = shapely.get_x(pts), shapely.get_y(pts)
+        h = np.array([dem.sample(float(x), float(y)) for x, y in zip(xs, ys)])
+        fitted = fit_river_profile(h)
+        if fitted is None:
+            continue
+        anchors = np.full(len(xs), np.nan)
+        for lake in lakes:
+            minx, miny, maxx, maxy = lake.geom.bounds
+            near = np.nonzero((xs >= minx) & (xs <= maxx) & (ys >= miny) & (ys <= maxy))[0]
+            if len(near):
+                inside = shapely.contains_xy(lake.geom, xs[near], ys[near])
+                anchors[near[inside]] = lake.height
+        if np.isfinite(anchors).any():
+            anchored_chains += 1
+            fitted = anchor_profile(fitted, anchors)
+        chains.append(np.column_stack([xs, ys, np.maximum(fitted, sea_level)]))
+    print(f'            {len(chains)} river chains fitted, {anchored_chains} pinned to a lake, '
+          f'{len(lakes)} lakes considered')
+    if not chains:
+        return 0
+    all_samples = np.concatenate(chains)
+    resolved = 0
+    for body in flowing:
+        reach = body.geom.buffer(step * 2.0)
+        minx, miny, maxx, maxy = reach.bounds
+        near = all_samples[(all_samples[:, 0] >= minx) & (all_samples[:, 0] <= maxx)
+                           & (all_samples[:, 1] >= miny) & (all_samples[:, 1] <= maxy)]
+        if len(near):
+            near = near[shapely.contains_xy(reach, near[:, 0], near[:, 1])]
+        if len(near) >= 2:
+            body.profile = near
+            resolved += 1
+    return resolved
+
+
+def _tile_profile(profile, b: Bounds) -> List[Tuple[float, float, float]]:
+    """A body's profile samples that matter to one tile, thinned to a budget.
+
+    A margin of a twentieth of the tile is kept so a node at the tile edge finds
+    its nearest sample on the far side of it, which is what makes neighbouring
+    tiles agree at their seam.
+    """
+    if profile is None:
+        return []
+    mx = (b.east - b.west) / 20.0
+    my = (b.north - b.south) / 20.0
+    sel = profile[(profile[:, 0] >= b.west - mx) & (profile[:, 0] <= b.east + mx)
+                  & (profile[:, 1] >= b.south - my) & (profile[:, 1] <= b.north + my)]
+    if len(sel) > MAX_TILE_PROFILE_SAMPLES:
+        sel = sel[::int(math.ceil(len(sel) / MAX_TILE_PROFILE_SAMPLES))]
+    return [(float(x), float(y), float(h)) for x, y, h in sel]
+
+
 def resolve_body_heights(
     bodies: Sequence[WaterBody], dem: DemSampler, cell_deg: float, sea_level: float = 0.0,
     progress: Optional[PhaseProgress] = None,
@@ -1172,7 +1366,7 @@ def clip_inland_bodies(
             for poly in _simplified_parts(geom, tolerance):
                 rings = _rings_of(poly)
                 if rings is not None:
-                    out.append((body.height, rings[0], rings[1]))
+                    out.append((body.height, rings[0], rings[1], _tile_profile(body.profile, b)))
     return out
 
 
@@ -1229,7 +1423,7 @@ def _encode_polys(
 
 def encode_lvr(
     polys: Sequence[Tuple[List[Tuple[float, float]], List[List[Tuple[float, float]]]]],
-    inland: Sequence[Tuple[Optional[float], List[Tuple[float, float]], List[List[Tuple[float, float]]]]] = (),
+    inland: Sequence[tuple] = (),
     lines: Sequence[Tuple[float, List[Tuple[float, float]]]] = (),
     regions: Sequence[
         Tuple[bool, Optional[int], List[Tuple[float, float]], List[List[Tuple[float, float]]]]
@@ -1253,22 +1447,29 @@ def encode_lvr(
     """
     if not inland and not lines and not regions:
         return zlib.compress(bytes(bytearray(LVR_MAGIC) + _encode_polys(polys)), 6)
-    magic = LVR4_MAGIC if regions else (LVR3_MAGIC if lines else LVR2_MAGIC)
+    # An inland entry is (height, exterior, holes) or, with a river profile,
+    # (height, exterior, holes, [(lon, lat, height), ...]). LVR5 is LVR4 plus a
+    # profile list per inland body, and is only written for a tile with one.
+    has_profile = any(len(e) > 3 and e[3] for e in inland)
+    if has_profile:
+        magic = LVR5_MAGIC
+    else:
+        magic = LVR4_MAGIC if regions else (LVR3_MAGIC if lines else LVR2_MAGIC)
     payload = bytearray(magic)
     payload += _encode_polys(polys)
     payload += struct.pack('<H', len(inland))
-    for height, ext, holes in inland:
+    for height, ext, holes, *_ in inland:
         payload += struct.pack('<f', float('nan') if height is None else float(height))
         payload += struct.pack('<H', 1 + len(holes))
         payload += _encode_ring(ext)
         for hole in holes:
             payload += _encode_ring(hole)
-    if magic in (LVR3_MAGIC, LVR4_MAGIC):
+    if magic in (LVR3_MAGIC, LVR4_MAGIC, LVR5_MAGIC):
         payload += struct.pack('<H', len(lines))
         for width_m, pts in lines:
             payload += struct.pack('<f', float(width_m))
             payload += _encode_ring(pts)
-    if magic == LVR4_MAGIC:
+    if magic in (LVR4_MAGIC, LVR5_MAGIC):
         payload += struct.pack('<H', len(regions))
         for is_land, cls, ext, holes in regions:
             payload += struct.pack(
@@ -1277,6 +1478,12 @@ def encode_lvr(
             payload += _encode_ring(ext)
             for hole in holes:
                 payload += _encode_ring(hole)
+    if magic == LVR5_MAGIC:
+        for entry in inland:
+            samples = entry[3] if len(entry) > 3 else []
+            payload += struct.pack('<H', len(samples))
+            for lon, lat, h in samples:
+                payload += struct.pack('<fff', float(lon), float(lat), float(h))
     return zlib.compress(bytes(payload), 6)
 
 
@@ -1863,10 +2070,11 @@ def bake(args: argparse.Namespace) -> int:
     # Inland surface heights come off the DEM that was merged in before this
     # stage ran, so the pyramid is already on disk to read.
     flat_count = sum(1 for b in inland if b.flat)
-    if flat_count:
-        progress.begin('heights')
+    if inland:
         cell_deg = (180.0 / (1 << max_zoom)) / max(1, tile_size - 1)
         dem = DemSampler(out_dir, max_zoom, tile_size)
+    if flat_count:
+        progress.begin('heights')
         resolved = resolve_body_heights(
             inland, dem, cell_deg, manifest.get('seaLevel', 0.0), progress.update)
         print(f'inland      {len(inland)} bodies ({flat_count} flat, '
@@ -1878,6 +2086,13 @@ def bake(args: argparse.Namespace) -> int:
     else:
         progress.skip('heights', 'no flat inland water' if not inland
                       else f'{len(inland)} inland bodies all flowing')
+    if inland:
+        # After the lake heights, because a river is pinned to the lakes it runs
+        # through.
+        profiled = resolve_river_profiles(
+            inland, courses, dem, cell_deg, manifest.get('seaLevel', 0.0))
+        print(f'rivers      {profiled} flowing bodies given a downhill profile '
+              f'({sum(1 for b in inland if not b.flat) - profiled} left on the DEM)')
 
     index_path = os.path.join(out_dir, manifest.get('indexPath', 'index.bin'))
     pdm_tiles = scan_pdm_tiles(out_dir, min_zoom, max_zoom)

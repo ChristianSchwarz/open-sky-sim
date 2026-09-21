@@ -20,6 +20,7 @@ from bake_osm_coast import (
     LVR2_MAGIC,
     LVR3_MAGIC,
     LVR4_MAGIC,
+    LVR5_MAGIC,
     REGION_CLASS_NONE,
     WATERWAY_FALLBACK_WIDTH_M,
     Bounds,
@@ -27,6 +28,8 @@ from bake_osm_coast import (
     _clip_rect,
     _clip_worker_inline,
     _polygons_from_osm,
+    anchor_profile,
+    fit_river_profile,
     clip_watercourses,
     encode_lvr,
     snap_bounds_to_tiles,
@@ -383,3 +386,52 @@ class IslandsInInlandWaterTest(unittest.TestCase):
         land, inland, _ = _polygons_from_osm(_tagged_answer(self.ISLAND), TILE)
         self.assertAlmostEqual(land.area, TILE.as_box().area, places=9)
         self.assertEqual(inland, [])
+
+
+class RiverProfile(unittest.TestCase):
+    def test_never_rises_downstream(self):
+        import numpy as np
+        rng = np.random.default_rng(1)
+        h = np.linspace(200.0, 120.0, 300) + rng.normal(0, 4, 300)
+        fit = fit_river_profile(h)
+        self.assertTrue(np.all(np.diff(fit) <= 1e-9))
+        self.assertGreater(fit[0] - fit[-1], 50.0)
+
+    def test_lowland_noise_becomes_a_ramp(self):
+        import numpy as np
+        rng = np.random.default_rng(2)
+        h = 31.0 + rng.normal(0, 1.5, 400)
+        fit = fit_river_profile(h)
+        self.assertTrue(np.all(np.diff(fit) <= 1e-9))
+        self.assertLess(fit[0] - fit[-1], 3.0)
+        # A ramp has no plateaus and no steps: constant slope.
+        d = np.diff(fit)
+        self.assertLess(d.max() - d.min(), 1e-9)
+
+    def test_nodata_is_bridged(self):
+        import numpy as np
+        h = np.linspace(100.0, 40.0, 100)
+        h[30:40] = np.nan
+        fit = fit_river_profile(h)
+        self.assertTrue(np.all(np.isfinite(fit)))
+
+    def test_too_few_samples(self):
+        import numpy as np
+        self.assertIsNone(fit_river_profile(np.array([1.0, np.nan, np.nan])))
+
+    def test_a_profile_writes_lvr5(self):
+        ring = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]
+        blob = encode_lvr([], [(None, ring, [], [(0.5, 0.5, 12.0), (0.6, 0.5, 11.0)])])
+        self.assertEqual(zlib.decompress(blob)[:4], LVR5_MAGIC)
+
+    def test_a_river_meets_the_lake_it_runs_through(self):
+        import numpy as np
+        fitted = np.linspace(31.0, 28.5, 100)
+        anchors = np.full(100, np.nan)
+        anchors[40:60] = 29.7
+        out = anchor_profile(fitted, anchors)
+        self.assertTrue(np.all(out[40:60] == 29.7))
+        self.assertTrue(np.all(np.diff(out) <= 1e-9))
+        self.assertLessEqual(out[39], 31.0)
+        self.assertGreaterEqual(out[39], 29.7)
+        self.assertLessEqual(out[99], 29.7)

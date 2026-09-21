@@ -18,6 +18,7 @@ export const LVR_MAGIC = 0x3152564c; // 'LVR1' little-endian
 export const LVR2_MAGIC = 0x3252564c; // 'LVR2' little-endian
 export const LVR3_MAGIC = 0x3352564c; // 'LVR3' little-endian
 export const LVR4_MAGIC = 0x3452564c; // 'LVR4' little-endian
+export const LVR5_MAGIC = 0x3552564c; // 'LVR5' little-endian
 
 /** No OSM landuse tag on this region — bare land, or water. */
 export const REGION_CLASS_NONE = 0xff;
@@ -46,6 +47,19 @@ export interface InlandBody {
     exterior: LonLat[];
     holes: LonLat[][];
     surfaceHeightM: number | undefined;
+    /**
+     * Surface height along the river through a flowing body, in lon/lat/metres.
+     * Set only on LVR5 tiles, and only where the bake could fit a descent to
+     * the DEM; a body without it follows the DEM per node.
+     */
+    profile?: RiverSample[];
+}
+
+/** One point of a river's fitted surface. */
+export interface RiverSample {
+    lon: number;
+    lat: number;
+    heightM: number;
 }
 
 /**
@@ -97,14 +111,15 @@ export function decodeLvr(bytes: ArrayBuffer | Uint8Array): CoastVectorTile {
     // 'LVR' plus a version digit means the payload arrived already inflated.
     const bare = raw.byteLength >= 4
         && raw[0] === 0x4c && raw[1] === 0x56 && raw[2] === 0x52
-        && (raw[3] === 0x31 || raw[3] === 0x32 || raw[3] === 0x33 || raw[3] === 0x34);
+        && (raw[3] >= 0x31 && raw[3] <= 0x35);
     const payload = bare ? raw : unzlibSync(raw);
     if (payload.byteLength < 6) {
         throw new Error(`LVR too short: ${payload.byteLength}`);
     }
     const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
     const magic = view.getUint32(0, true);
-    if (magic !== LVR_MAGIC && magic !== LVR2_MAGIC && magic !== LVR3_MAGIC && magic !== LVR4_MAGIC) {
+    if (magic !== LVR_MAGIC && magic !== LVR2_MAGIC && magic !== LVR3_MAGIC && magic !== LVR4_MAGIC
+        && magic !== LVR5_MAGIC) {
         throw new Error(`Bad LVR magic: 0x${magic.toString(16)}`);
     }
     let offset = 4;
@@ -149,7 +164,10 @@ export function decodeLvr(bytes: ArrayBuffer | Uint8Array): CoastVectorTile {
     }
 
     const inland: InlandBody[] = [];
-    if (magic === LVR2_MAGIC || magic === LVR3_MAGIC || magic === LVR4_MAGIC) {
+    // Index in the file, so the profile section (one entry per body as
+    // written) still lines up when a body with no rings is skipped.
+    const inlandByIndex: Array<InlandBody | undefined> = [];
+    if (magic >= LVR2_MAGIC && magic <= LVR5_MAGIC) {
         if (offset + 2 > payload.byteLength) {
             throw new Error('LVR2 truncated before the inland layer');
         }
@@ -163,19 +181,22 @@ export function decodeLvr(bytes: ArrayBuffer | Uint8Array): CoastVectorTile {
             offset += 4;
             const rings = readRings(`inland body ${b}`);
             if (rings.length === 0) {
+                inlandByIndex.push(undefined);
                 continue;
             }
-            inland.push({
+            const body: InlandBody = {
                 exterior: rings[0],
                 holes: rings.slice(1),
                 // NaN is the bake saying "no single height here, follow the DEM".
                 surfaceHeightM: Number.isNaN(height) ? undefined : height,
-            });
+            };
+            inland.push(body);
+            inlandByIndex.push(body);
         }
     }
 
     const watercourses: Watercourse[] = [];
-    if (magic === LVR3_MAGIC || magic === LVR4_MAGIC) {
+    if (magic >= LVR3_MAGIC && magic <= LVR5_MAGIC) {
         if (offset + 2 > payload.byteLength) {
             throw new Error('LVR3 truncated before the watercourse layer');
         }
@@ -209,7 +230,7 @@ export function decodeLvr(bytes: ArrayBuffer | Uint8Array): CoastVectorTile {
     }
 
     const regions: LanduseRegion[] = [];
-    if (magic === LVR4_MAGIC) {
+    if (magic >= LVR4_MAGIC && magic <= LVR5_MAGIC) {
         if (offset + 2 > payload.byteLength) {
             throw new Error('LVR4 truncated before the region layer');
         }
@@ -235,6 +256,31 @@ export function decodeLvr(bytes: ArrayBuffer | Uint8Array): CoastVectorTile {
         }
     }
 
+    if (magic === LVR5_MAGIC) {
+        for (const body of inlandByIndex) {
+            if (offset + 2 > payload.byteLength) {
+                throw new Error('LVR5 truncated before a river profile');
+            }
+            const count = view.getUint16(offset, true);
+            offset += 2;
+            if (offset + count * 12 > payload.byteLength) {
+                throw new Error('LVR5 truncated inside a river profile');
+            }
+            const samples: RiverSample[] = [];
+            for (let k = 0; k < count; k++) {
+                samples.push({
+                    lon: view.getFloat32(offset, true),
+                    lat: view.getFloat32(offset + 4, true),
+                    heightM: view.getFloat32(offset + 8, true),
+                });
+                offset += 12;
+            }
+            if (body !== undefined && samples.length > 0) {
+                body.profile = samples;
+            }
+        }
+    }
+
     return { polygons, inland, watercourses, regions };
 }
 
@@ -253,8 +299,10 @@ export function encodeLvrUncompressed(
             byteLen += 2 + ring.length * 8;
         }
     }
+    const profiled = inland.some(b => (b.profile?.length ?? 0) > 0);
     const layered = inland.length > 0 || watercourses.length > 0 || regions.length > 0;
-    const withLines = watercourses.length > 0 || regions.length > 0;
+    const withLines = watercourses.length > 0 || regions.length > 0 || profiled;
+    const withRegions = regions.length > 0 || profiled;
     if (layered) {
         byteLen += 2;
         for (const body of inland) {
@@ -270,7 +318,12 @@ export function encodeLvrUncompressed(
             byteLen += 4 + 2 + course.points.length * 8;
         }
     }
-    if (regions.length > 0) {
+    if (profiled) {
+        for (const body of inland) {
+            byteLen += 2 + (body.profile?.length ?? 0) * 12;
+        }
+    }
+    if (withRegions) {
         byteLen += 2;
         for (const region of regions) {
             byteLen += 2 + 2 + (1 + region.holes.length) * 2;
@@ -281,7 +334,7 @@ export function encodeLvrUncompressed(
     }
     const out = new Uint8Array(byteLen);
     const view = new DataView(out.buffer);
-    const magic = regions.length > 0
+    const magic = profiled ? LVR5_MAGIC : regions.length > 0
         ? LVR4_MAGIC
         : (watercourses.length > 0 ? LVR3_MAGIC : (layered ? LVR2_MAGIC : LVR_MAGIC));
     view.setUint32(0, magic, true);
@@ -334,7 +387,7 @@ export function encodeLvrUncompressed(
             }
         }
     }
-    if (regions.length > 0) {
+    if (withRegions) {
         view.setUint16(offset, regions.length, true);
         offset += 2;
         for (const region of regions) {
@@ -351,6 +404,19 @@ export function encodeLvrUncompressed(
                     view.setFloat32(offset + 4, pt.lat, true);
                     offset += 8;
                 }
+            }
+        }
+    }
+    if (profiled) {
+        for (const body of inland) {
+            const samples = body.profile ?? [];
+            view.setUint16(offset, samples.length, true);
+            offset += 2;
+            for (const smp of samples) {
+                view.setFloat32(offset, smp.lon, true);
+                view.setFloat32(offset + 4, smp.lat, true);
+                view.setFloat32(offset + 8, smp.heightM, true);
+                offset += 12;
             }
         }
     }

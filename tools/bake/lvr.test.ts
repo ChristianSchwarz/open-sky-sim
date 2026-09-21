@@ -133,3 +133,18 @@ describe('LVR decode', () => {
         });
     });
 });
+
+describe('LVR5 river profile', () => {
+    it('round-trips a profile and marks the tile LVR5', () => {
+        const withProfile: InlandBody = {
+            ...body(undefined),
+            profile: [{ lon: 0.25, lat: 0.25, heightM: 31.5 }, { lon: 0.375, lat: 0.375, heightM: 31.25 }],
+        };
+        const bytes = encodeLvrUncompressed([SQUARE], [body(12), withProfile]);
+        assert.equal(String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]), 'LVR5');
+        const tile = decodeLvr(bytes);
+        assert.equal(tile.inland.length, 2);
+        assert.equal(tile.inland[0].profile, undefined);
+        assert.deepEqual(tile.inland[1].profile, withProfile.profile);
+    });
+});

@@ -1081,6 +1081,13 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         return undefined;
     };
 
+    /** True where the inland water under a point takes its height from a river profile. */
+    const inlandSlopedAt = (gx: number, gy: number): boolean => {
+        const cx = Math.min(size - 1, Math.max(0, Math.round(gx)));
+        const cy = Math.min(size - 1, Math.max(0, Math.round(gy)));
+        return shoreline.inlandSloped[cy * size + cx] !== 0;
+    };
+
     /**
      * Merge class of a water facet, for the collapse pass: its tone, judged
      * at its centre, or -1 for a facet that touches the shore while its
@@ -1099,6 +1106,9 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     /** See CollapseInput.isFlatWater. */
     const isFlatWater = (t: GridTriangle): boolean => {
         const [p0, p1, p2] = t.pts;
+        if (inlandSlopedAt((p0.x + p1.x + p2.x) / 3, (p0.y + p1.y + p2.y) / 3)) {
+            return false;
+        }
         const surface = inlandSurfaceAt((p0.x + p1.x + p2.x) / 3, (p0.y + p1.y + p2.y) / 3);
         return surface === undefined || Number.isFinite(surface);
     };

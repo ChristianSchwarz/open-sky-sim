@@ -537,3 +537,37 @@ describe('edge slivers behind an inset land ring', () => {
     });
 });
 
+
+describe('river profile heights', () => {
+    it('gives each node the height of the nearest sample and marks it sloped', () => {
+        const { exterior } = ringFromGrid([[2, 8], [30, 8], [30, 16], [2, 16]]);
+        const at = (gx: number) => ({
+            lon: BOUNDS.west + (gx / (SIZE - 1)) * (BOUNDS.east - BOUNDS.west),
+            lat: BOUNDS.north - (12 / (SIZE - 1)) * (BOUNDS.north - BOUNDS.south),
+            heightM: 100 - gx,
+        });
+        const s = buildShoreline({
+            polygons: [],
+            inland: [{ exterior, holes: [], profile: [at(4), at(16), at(28)] }],
+            bounds: BOUNDS,
+            size: SIZE,
+        });
+        const row = 12 * SIZE;
+        assert.equal(s.inlandSloped[row + 5], 1);
+        assert.ok(s.inlandHeights[row + 5] > s.inlandHeights[row + 27], 'water must descend downstream');
+        assert.equal(s.inlandHeights[row + 5], 96);
+        assert.equal(s.inlandHeights[row + 27], 72);
+    });
+
+    it('lets a fixed height win over a profile', () => {
+        const { exterior } = ringFromGrid([[8, 8], [16, 8], [16, 16], [8, 16]]);
+        const s = buildShoreline({
+            polygons: [],
+            inland: [{ exterior, holes: [], surfaceHeightM: 50, profile: [{ lon: BOUNDS.west, lat: BOUNDS.north, heightM: 9 }] }],
+            bounds: BOUNDS,
+            size: SIZE,
+        });
+        assert.equal(s.inlandHeights[12 * SIZE + 12], 50);
+        assert.equal(s.inlandSloped[12 * SIZE + 12], 0);
+    });
+});

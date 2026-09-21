@@ -42,6 +42,12 @@ export interface InlandPolygon {
     exterior: LonLat[];
     holes: LonLat[][];
     surfaceHeightM?: number;
+    /**
+     * Fitted surface along the river through a flowing body. Where present the
+     * body's nodes take the height of the nearest sample instead of following
+     * the DEM, so the water descends smoothly down the valley.
+     */
+    profile?: Array<{ lon: number; lat: number; heightM: number }>;
 }
 
 export interface ShorelineInput {
@@ -86,6 +92,11 @@ export interface Shoreline {
      * Only meaningful where `inlandNodes` is 1.
      */
     inlandHeights: Float32Array;
+    /**
+     * 1 where an inland node's height comes from a river profile. Such water is
+     * finite but not level, so nothing may treat it as a flat sheet.
+     */
+    inlandSloped: Uint8Array;
     /** True when any node differs from any other. */
     mixed: boolean;
     /** Crossing parameter along a cell edge, or undefined if none recorded. */
@@ -378,6 +389,7 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
     // same at any vertex count.
     const inlandNodes = new Uint8Array(size * size);
     const inlandHeights = new Float32Array(size * size).fill(NaN);
+    const inlandSloped = new Uint8Array(size * size);
     const inlandRings: Ring[] = [];
     /**
      * Each body's rings kept together, with the grid-space box they occupy.
@@ -423,10 +435,37 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
         }
         inlandRegions.push({ rings: bodyRings, minX, minY, maxX, maxY });
         const surface = body.surfaceHeightM ?? NaN;
+        // A river profile only applies to a body with no height of its own.
+        const profile = Number.isNaN(surface) && body.profile !== undefined && body.profile.length > 0
+            ? body.profile : undefined;
+        let profileX: Float64Array | undefined;
+        let profileY: Float64Array | undefined;
+        if (profile !== undefined) {
+            profileX = new Float64Array(profile.length);
+            profileY = new Float64Array(profile.length);
+            for (let k = 0; k < profile.length; k++) {
+                profileX[k] = toGridX(profile[k].lon);
+                profileY[k] = toGridY(profile[k].lat);
+            }
+        }
         scanline(bodyRings, (row, from, to) => {
             for (let col = from; col <= to; col++) {
                 inlandNodes[row * size + col] = 1;
-                inlandHeights[row * size + col] = surface;
+                if (profile === undefined || profileX === undefined || profileY === undefined) {
+                    inlandHeights[row * size + col] = surface;
+                    continue;
+                }
+                let best = 0;
+                let bestD = Infinity;
+                for (let k = 0; k < profileX.length; k++) {
+                    const d = (profileX[k] - col) ** 2 + (profileY[k] - row) ** 2;
+                    if (d < bestD) {
+                        bestD = d;
+                        best = k;
+                    }
+                }
+                inlandHeights[row * size + col] = profile[best].heightM;
+                inlandSloped[row * size + col] = 1;
             }
         });
     }
@@ -481,6 +520,7 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
                     if (seed[j]) {
                         inlandNodes[i] = 1;
                         inlandHeights[i] = inlandHeights[j];
+                        inlandSloped[i] = inlandSloped[j];
                         dy = 2;
                         break;
                     }
@@ -743,7 +783,7 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
         return insideAt(px, py) && !insideInland(px, py);
     };
 
-    return { landNodes, inlandNodes, inlandHeights, mixed, edgeCrossing, centreIsLand };
+    return { landNodes, inlandNodes, inlandHeights, inlandSloped, mixed, edgeCrossing, centreIsLand };
 }
 
 export const __testing = { douglasPeucker, simplifyRing, pointSegDistance };
