@@ -240,12 +240,12 @@ const KUZ_DECK_MID_X = (KUZ_HULL.minX + KUZ_HULL.maxX) * 0.5;
 /** Approximate flat-deck height for approach altitude planning (m). */
 const CARRIER_DECK_Y = 14;
 /** Final approach distance to the carrier stern threshold (m). */
-const CARRIER_APPROACH_FINAL_DISTANCE_M = 2500;
+const CARRIER_APPROACH_FINAL_DISTANCE_M = 3500;
 /** Carrier final altitude (m); ~3° glide to the deck over {@link CARRIER_APPROACH_FINAL_DISTANCE_M}. */
-const CARRIER_APPROACH_ALTITUDE_M = CARRIER_DECK_Y + 130;
+const CARRIER_APPROACH_ALTITUDE_M = CARRIER_DECK_Y + 183;
 const PLAYER_STARTING_HEADING = 0;
 /** Land approach final distance — keep the airport in view at spawn. */
-const LAND_APPROACH_FINAL_M = 3500;
+const LAND_APPROACH_FINAL_M = 4500;
 /** Boot / respawn DEM + mesh preload radius around the plane (m). */
 const TERRAIN_PRELOAD_RADIUS_M = 30000;
 /** Radius of the fine DEM the sim worker is given around each aircraft (m). */
@@ -1480,7 +1480,7 @@ export class Game {
     private landApproachSpawnPosition(): THREE.Vector3 {
         const p = this.onRunwayAxis(LAND_APPROACH_FINAL_M);
         return new THREE.Vector3(
-            p.x, this.groundHeightAt(p.x, p.z) + APPROACH_ALTITUDE_M, p.z);
+            p.x, this.groundHeightAt(p.x, p.z) + LAND_APPROACH_FINAL_M * ILS_GLIDESLOPE_TAN, p.z);
     }
 
     /** Overhead the airbase at high altitude (10 km AGL). */
