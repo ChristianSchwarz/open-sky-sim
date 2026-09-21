@@ -1,0 +1,251 @@
+/**
+ * Where a bridge crosses another road, the smaller of the two gives way.
+ *
+ * The rule: the bigger road (lower class byte) is never changed at a
+ * crossing; the smaller one takes the difference, at no more than
+ * CROSSING_GRADE.
+ *
+ *  - The bridge is the smaller road (or they are equal): the deck is straight,
+ *    so it is lifted whole, and its approaches climb onto a fill, a Damm, so
+ *    the deck clears the road under it by CLEARANCE_M over its own thickness.
+ *    Ramps run outward from both abutments.
+ *  - The bridge is the bigger road: the road under it sinks into a cutting,
+ *    a Senke, so it passes beneath the deck with the same clearance.
+ *
+ * Both come out as roadbed lines (GradeLine, see roadGrade.ts) that the mesh
+ * bake lays into the height grid, exactly as a motorway's profile is. Pure
+ * planning: the ground and the height of the road at a point come in through
+ * `env`.
+ */
+
+import { CLEARANCE_M, DECK_THICKNESS_M, Structure } from './bridges';
+import { GRADE_STEP_M, GradeLine, GradePoint } from './roadGrade';
+import { LonLat } from './lvr';
+
+/** Grade of a motorway ramp or cutting. Under the 5 % limit. */
+export const CROSSING_GRADE_MOTORWAY = 0.045;
+/** Any other road may climb 12 degrees. */
+export const CROSSING_GRADE_OTHER = Math.tan((12 * Math.PI) / 180);
+/** The steepest grade a crossing ramp or cutting of a road of class `cls` may have. */
+export const crossingGrade = (cls: number): number => (cls === 0 ? CROSSING_GRADE_MOTORWAY : CROSSING_GRADE_OTHER);
+/** A road within this of a span's ends is its own junction with the ground, not something it crosses. */
+export const END_ZONE_M = 12;
+/** A crossing at less than this angle (sine) runs along the span: an approach, not a crossing. */
+export const MIN_CROSSING_SIN = 0.34;
+/** Deepest cut or highest fill worth building, metres. */
+export const MAX_CROSSING_WORK_M = 30;
+/** Longest ramp or cutting walked from a crossing, metres. */
+const MAX_WALK_M = 320;
+/** Approach road ends this close to a span's end are that span's approach, metres. */
+const APPROACH_JOIN_M = 4;
+/** A road that adds nothing is not written: heights within this of the ground. */
+const NEGLIGIBLE_M = 0.05;
+
+export interface RoadPiece {
+    cls: number;
+    halfM: number;
+    points: LonLat[];
+}
+
+export interface CrossingSpan {
+    structure: Structure;
+    points: LonLat[];
+}
+
+export interface CrossingEnv {
+    /** Natural ground at a point. */
+    ground(lon: number, lat: number): number;
+    /** Height of the road surface at a point: a motorway's design height, else the ground. */
+    roadH(lon: number, lat: number): number;
+}
+
+export interface CrossingStats {
+    crossings: number;
+    dips: number;
+    fills: number;
+    skipped: number;
+}
+
+interface Frame {
+    lon0: number;
+    lat0: number;
+    kx: number;
+    ky: number;
+}
+
+const frameAt = (lon0: number, lat0: number): Frame => ({
+    lon0, lat0, kx: 111320 * Math.cos((lat0 * Math.PI) / 180), ky: 111320,
+});
+const xy = (f: Frame, p: LonLat): { x: number; y: number } => ({ x: (p.lon - f.lon0) * f.kx, y: (p.lat - f.lat0) * f.ky });
+
+/** Cumulative length along a polyline, metres. */
+function cumulative(f: Frame, pts: readonly LonLat[]): number[] {
+    const s = [0];
+    for (let i = 1; i < pts.length; i++) {
+        const a = xy(f, pts[i - 1]), b = xy(f, pts[i]);
+        s.push(s[i - 1] + Math.hypot(b.x - a.x, b.y - a.y));
+    }
+    return s;
+}
+
+/** The point at distance `d` along a polyline (clamped). */
+function pointAt(pts: readonly LonLat[], s: readonly number[], d: number): LonLat {
+    if (d <= 0) return pts[0];
+    if (d >= s[s.length - 1]) return pts[pts.length - 1];
+    let i = 1;
+    while (s[i] < d) i++;
+    const t = (d - s[i - 1]) / Math.max(1e-9, s[i] - s[i - 1]);
+    return { lon: pts[i - 1].lon + (pts[i].lon - pts[i - 1].lon) * t, lat: pts[i - 1].lat + (pts[i].lat - pts[i - 1].lat) * t };
+}
+
+/** A polyline, oriented to start at its end `end`, with the road's own points. */
+function oriented(piece: RoadPiece, end: 0 | 1): LonLat[] {
+    return end === 0 ? piece.points : [...piece.points].reverse();
+}
+
+interface Approach {
+    piece: RoadPiece;
+    /** Which end of the piece meets the span. */
+    end: 0 | 1;
+}
+
+export function planCrossings(
+    spans: readonly CrossingSpan[], roads: readonly RoadPiece[], env: CrossingEnv, stats?: CrossingStats,
+): GradeLine[] {
+    const out: GradeLine[] = [];
+    const bbox = roads.map(r => {
+        let w = Infinity, e = -Infinity, s = Infinity, n = -Infinity;
+        for (const p of r.points) {
+            w = Math.min(w, p.lon); e = Math.max(e, p.lon); s = Math.min(s, p.lat); n = Math.max(n, p.lat);
+        }
+        return { w, e, s, n };
+    });
+
+    for (const span of spans) {
+        if (span.structure === 'tunnel' || span.points.length < 2) continue;
+        const f = frameAt(span.points[0].lon, span.points[0].lat);
+        const sp = span.points;
+        const cum = cumulative(f, sp);
+        const len = cum[cum.length - 1];
+        if (len < 2 * END_ZONE_M + 4) continue;
+        const thickness = DECK_THICKNESS_M[span.structure];
+        const first = sp[0], last = sp[sp.length - 1];
+        const g0 = env.roadH(first.lon, first.lat), g1 = env.roadH(last.lon, last.lat);
+        const deckAt = (along: number) => g0 + (g1 - g0) * (along / len);
+
+        // The roads that meet the span's ends, and the class the span itself is.
+        const approaches: [Approach[], Approach[]] = [[], []];
+        let classB = Infinity;
+        const near = (a: LonLat, b: LonLat) => {
+            const p = xy(f, a), q = xy(f, b);
+            return Math.hypot(p.x - q.x, p.y - q.y) <= APPROACH_JOIN_M;
+        };
+        for (const r of roads) {
+            for (const end of [0, 1] as const) {
+                const p = r.points[end === 0 ? 0 : r.points.length - 1];
+                if (near(p, first)) { approaches[0].push({ piece: r, end }); classB = Math.min(classB, r.cls); }
+                if (near(p, last)) { approaches[1].push({ piece: r, end }); classB = Math.min(classB, r.cls); }
+            }
+        }
+        if (!Number.isFinite(classB)) classB = 4;
+
+        const spanBox = {
+            w: Math.min(...sp.map(p => p.lon)), e: Math.max(...sp.map(p => p.lon)),
+            s: Math.min(...sp.map(p => p.lat)), n: Math.max(...sp.map(p => p.lat)),
+        };
+        const pad = 0.0006;
+        let shift = 0;
+
+        roads.forEach((r, ri) => {
+            const bb = bbox[ri];
+            if (bb.e < spanBox.w - pad || bb.w > spanBox.e + pad || bb.n < spanBox.s - pad || bb.s > spanBox.n + pad) return;
+            if (approaches[0].some(a => a.piece === r) || approaches[1].some(a => a.piece === r)) return;
+            const rs = cumulative(f, r.points);
+            for (let i = 0; i + 1 < r.points.length; i++) {
+                const c = xy(f, r.points[i]), d = xy(f, r.points[i + 1]);
+                for (let k = 0; k + 1 < sp.length; k++) {
+                    const a = xy(f, sp[k]), b = xy(f, sp[k + 1]);
+                    const ux = b.x - a.x, uy = b.y - a.y, vx = d.x - c.x, vy = d.y - c.y;
+                    const den = ux * vy - uy * vx;
+                    const lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
+                    if (lu < 1e-6 || lv < 1e-6 || Math.abs(den) / (lu * lv) < MIN_CROSSING_SIN) continue;
+                    const t = ((c.x - a.x) * vy - (c.y - a.y) * vx) / den;
+                    const u = ((c.x - a.x) * uy - (c.y - a.y) * ux) / den;
+                    if (t < 0 || t > 1 || u < 0 || u > 1) continue;
+                    const along = cum[k] + t * lu;
+                    if (along < END_ZONE_M || along > len - END_ZONE_M) continue;
+                    const hit = { lon: sp[k].lon + (sp[k + 1].lon - sp[k].lon) * t, lat: sp[k].lat + (sp[k + 1].lat - sp[k].lat) * t };
+                    const hR = env.roadH(hit.lon, hit.lat);
+                    const under = deckAt(along) - thickness;
+                    if (stats) stats.crossings++;
+                    if (under - hR >= CLEARANCE_M) continue;
+                    if (classB < r.cls) {
+                        // The bridge is the bigger road: the smaller one sinks.
+                        const cap = under - CLEARANCE_M;
+                        if (hR - cap > MAX_CROSSING_WORK_M) { if (stats) stats.skipped++; continue; }
+                        const line = senke(r, rs, i, u, cap, env);
+                        if (line) { out.push(line); if (stats) stats.dips++; }
+                    } else {
+                        shift = Math.max(shift, hR + CLEARANCE_M + thickness - deckAt(along));
+                    }
+                }
+            }
+        });
+
+        if (shift <= NEGLIGIBLE_M) continue;
+        // The smaller road rises: the deck is straight, so the whole line goes up
+        // by `shift` and each abutment stands that much higher. The approaches
+        // climb to it on a ramp out of each end.
+        for (const which of [0, 1] as const) {
+            for (const ap of approaches[which]) {
+                const poly = oriented(ap.piece, ap.end);
+                const ps = cumulative(f, poly);
+                const grade = crossingGrade(classB);
+                const endTop = (which === 0 ? g0 : g1) + shift;
+                const cone = (s: number) => endTop - grade * s;
+                const pts: GradePoint[] = [];
+                let settled = 0, worst = 0;
+                const total = Math.min(ps[ps.length - 1], MAX_WALK_M);
+                for (let s = 0; s <= total + 1e-6; s += GRADE_STEP_M) {
+                    const p = pointAt(poly, ps, s);
+                    const g = env.ground(p.lon, p.lat);
+                    const d = Math.max(g, cone(s));
+                    worst = Math.max(worst, d - g);
+                    pts.push({ lon: p.lon, lat: p.lat, h: d });
+                    if (d - g <= NEGLIGIBLE_M) { if (++settled >= 2) break; } else settled = 0;
+                }
+                if (worst > MAX_CROSSING_WORK_M) { if (stats) stats.skipped++; continue; }
+                if (worst > NEGLIGIBLE_M && pts.length >= 2) {
+                    out.push({ halfM: ap.piece.halfM, points: pts });
+                    if (stats) stats.fills++;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/** The cutting a smaller road sinks into under a bridge: ground, clipped by a cone at CROSSING_GRADE. */
+function senke(
+    road: RoadPiece, rs: readonly number[], seg: number, u: number, cap: number, env: CrossingEnv,
+): GradeLine | undefined {
+    const hitS = rs[seg] + u * (rs[seg + 1] - rs[seg]);
+    const hit = pointAt(road.points, rs, hitS);
+    const depth = env.ground(hit.lon, hit.lat) - cap;
+    if (depth <= NEGLIGIBLE_M) return undefined;
+    const grade = crossingGrade(road.cls);
+    const reach = Math.min(MAX_WALK_M, depth / grade + 60);
+    const from = Math.max(0, hitS - reach), to = Math.min(rs[rs.length - 1], hitS + reach);
+    const pts: GradePoint[] = [];
+    // The crossing itself is a sample, so the cutting's floor is exact.
+    const at: number[] = [];
+    for (let s = from; s <= to + 1e-6; s += GRADE_STEP_M) at.push(s);
+    at.push(hitS);
+    at.sort((a, b) => a - b);
+    for (const s of at) {
+        const p = pointAt(road.points, rs, s);
+        const g = env.ground(p.lon, p.lat);
+        pts.push({ lon: p.lon, lat: p.lat, h: Math.min(g, cap + grade * Math.abs(s - hitS)) });
+    }
+    return pts.length >= 2 ? { halfM: road.halfM, points: pts } : undefined;
+}

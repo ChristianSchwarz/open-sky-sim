@@ -20,7 +20,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { decodePdm } from '../src/script/terrain/demTile';
 import { tileAtLonLat, tileBounds } from '../src/script/terrain/tiling';
+import { decodeRbr } from './bake/rbr';
 import { decodeRvr } from './bake/rvr';
+import { CrossingEnv, CrossingStats, MAX_CROSSING_WORK_M, RoadPiece, planCrossings } from './bake/crossings';
 import {
     BATTER_REACH_M, GRADE_STEP_M, GradeLine, GradePoint, ROADBED_SHOULDER_M, encodeRgr, gradeProfile,
 } from './bake/roadGrade';
@@ -192,6 +194,68 @@ function median3(v: number[]): number[] {
     });
 }
 
+type TileLines = Map<string, GradeLine[]>;
+
+/** Every leaf tile a segment's reach touches gets that stretch whole. */
+function addToTiles(
+    perTile: TileLines, halfM: number, line: GradePoint[], workable: (i: number) => boolean,
+): void {
+    const reachM = halfM + ROADBED_SHOULDER_M + BATTER_REACH_M + 5;
+    const runs = new Map<string, number[]>();
+    for (let i = 0; i + 1 < line.length; i++) {
+        if (!workable(i) || !workable(i + 1)) continue;
+        const lat = (line[i].lat + line[i + 1].lat) / 2;
+        const rl = reachM / (METRES_PER_DEGREE * Math.cos((lat * Math.PI) / 180)), rt = reachM / METRES_PER_DEGREE;
+        const a = tileAtLonLat(LEAF_ZOOM, Math.min(line[i].lon, line[i + 1].lon) - rl, Math.max(line[i].lat, line[i + 1].lat) + rt);
+        const b = tileAtLonLat(LEAF_ZOOM, Math.max(line[i].lon, line[i + 1].lon) + rl, Math.min(line[i].lat, line[i + 1].lat) - rt);
+        for (let x = a.x; x <= b.x; x++) {
+            for (let y = a.y; y <= b.y; y++) {
+                const key = `${x}/${y}`;
+                (runs.get(key) ?? runs.set(key, []).get(key)!).push(i);
+            }
+        }
+    }
+    for (const [key, segs] of runs) {
+        let start = segs[0], prev = segs[0];
+        const flush = (from: number, to: number) => {
+            (perTile.get(key) ?? perTile.set(key, []).get(key)!).push({ halfM, points: line.slice(from, to + 2) });
+        };
+        for (let k = 1; k < segs.length; k++) {
+            if (segs[k] !== prev + 1) { flush(start, prev); start = segs[k]; }
+            prev = segs[k];
+        }
+        flush(start, prev);
+    }
+}
+
+/** Design height of the motorway nearest a point (within 25 m), or undefined. */
+function motorwayHeights(perTile: TileLines): (lon: number, lat: number) => number | undefined {
+    const CELL = 300;
+    const hash = new Map<string, GradePoint[]>();
+    for (const lines of perTile.values()) {
+        for (const l of lines) {
+            for (const p of l.points) {
+                const key = `${Math.floor(p.lon * CELL)},${Math.floor(p.lat * CELL)}`;
+                (hash.get(key) ?? hash.set(key, []).get(key)!).push(p);
+            }
+        }
+    }
+    return (lon, lat) => {
+        const kx = METRES_PER_DEGREE * Math.cos((lat * Math.PI) / 180);
+        let best: number | undefined, bestD = 25;
+        const cx = Math.floor(lon * CELL), cy = Math.floor(lat * CELL);
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                for (const p of hash.get(`${cx + dx},${cy + dy}`) ?? []) {
+                    const d = Math.hypot((p.lon - lon) * kx, (p.lat - lat) * METRES_PER_DEGREE);
+                    if (d < bestD) { bestD = d; best = p.h; }
+                }
+            }
+        }
+        return best;
+    };
+}
+
 function main(): void {
     const args = parseArgs(process.argv.slice(2));
     const t0 = Date.now();
@@ -203,9 +267,6 @@ function main(): void {
     const perTile = new Map<string, GradeLine[]>();
     let samples = 0, skipped = 0, worstCut = 0, worstFill = 0, steep = 0;
     const heavy: string[] = [];
-    const reachDeg = (lat: number, m: number) => ({
-        lon: m / (METRES_PER_DEGREE * Math.cos((lat * Math.PI) / 180)), lat: m / METRES_PER_DEGREE,
-    });
     for (const run of runs) {
         const pts = resample(run.pts);
         if (pts.length < 2) continue;
@@ -227,35 +288,47 @@ function main(): void {
             worstCut = Math.max(worstCut, ground[i] - design[i]);
             if (i > 0 && Math.abs(design[i] - design[i - 1]) / GRADE_STEP_M > 0.05) steep++;
         }
-        // Every leaf tile a segment's reach touches gets that stretch whole.
-        const reachM = run.halfM + ROADBED_SHOULDER_M + BATTER_REACH_M + 5;
-        const runs: Map<string, number[]> = new Map();
-        const workable = (i: number) => Math.abs(ground[i] - design[i]) <= MAX_EARTHWORK_M;
-        for (let i = 0; i + 1 < line.length; i++) {
-            if (!workable(i) || !workable(i + 1)) continue;
-            const r = reachDeg((line[i].lat + line[i + 1].lat) / 2, reachM);
-            const a = tileAtLonLat(LEAF_ZOOM, Math.min(line[i].lon, line[i + 1].lon) - r.lon, Math.max(line[i].lat, line[i + 1].lat) + r.lat);
-            const b = tileAtLonLat(LEAF_ZOOM, Math.max(line[i].lon, line[i + 1].lon) + r.lon, Math.min(line[i].lat, line[i + 1].lat) - r.lat);
-            for (let x = a.x; x <= b.x; x++) {
-                for (let y = a.y; y <= b.y; y++) {
-                    const key = `${x}/${y}`;
-                    (runs.get(key) ?? runs.set(key, []).get(key)!).push(i);
-                }
-            }
+        addToTiles(perTile, run.halfM, line, i => Math.abs(ground[i] - design[i]) <= MAX_EARTHWORK_M);
+    }
+
+    // Bridges over other streets: the smaller road ramps or sinks (crossings.ts).
+    const motorwayH = motorwayHeights(perTile);
+    const env: CrossingEnv = {
+        ground: (lon, lat) => sample(lon, lat),
+        roadH: (lon, lat) => motorwayH(lon, lat) ?? sample(lon, lat),
+    };
+    const cstat: CrossingStats = { crossings: 0, dips: 0, fills: 0, skipped: 0 };
+    const rbrRoot = path.join(args.src, String(LEAF_ZOOM));
+    const rvrCache = new Map<string, RoadPiece[]>();
+    const roadsOf = (x: number, y: number): RoadPiece[] => {
+        const key = `${x}/${y}`;
+        let roads = rvrCache.get(key);
+        if (roads === undefined) {
+            const p = path.join(rbrRoot, String(x), `${y}.rvr`);
+            roads = fs.existsSync(p)
+                ? decodeRvr(fs.readFileSync(p)).map(r => ({ cls: r.cls, halfM: r.widthM / 2, points: r.points }))
+                : [];
+            if (rvrCache.size > 48) rvrCache.clear();
+            rvrCache.set(key, roads);
         }
-        for (const [key, segs] of runs) {
-            let start = segs[0], prev = segs[0];
-            const flush = (from: number, to: number) => {
-                (perTile.get(key) ?? perTile.set(key, []).get(key)!)
-                    .push({ halfM: run.halfM, points: line.slice(from, to + 2) });
-            };
-            for (let k = 1; k < segs.length; k++) {
-                if (segs[k] !== prev + 1) { flush(start, prev); start = segs[k]; }
-                prev = segs[k];
+        return roads;
+    };
+    for (const xs of fs.existsSync(rbrRoot) ? fs.readdirSync(rbrRoot) : []) {
+        for (const f of fs.readdirSync(path.join(rbrRoot, xs))) {
+            if (!f.endsWith('.rbr')) continue;
+            const x = Number(xs), y = Number(f.slice(0, -4));
+            if (args.bbox) {
+                const b = tileBounds({ z: LEAF_ZOOM, x, y });
+                if (b.east <= args.bbox[0] || b.west >= args.bbox[2] || b.north <= args.bbox[1] || b.south >= args.bbox[3]) continue;
             }
-            flush(start, prev);
+            const spans = decodeRbr(fs.readFileSync(path.join(rbrRoot, xs, f)));
+            const roads: RoadPiece[] = [];
+            for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) roads.push(...roadsOf(x + dx, y + dy));
+            const lines = planCrossings(spans.map(r => ({ structure: r.structure, points: r.points })), roads, env, cstat);
+            for (const l of lines) addToTiles(perTile, l.halfM, l.points, () => true);
         }
     }
+    console.log(`crossings   ${cstat.crossings} bridge/road crossings: ${cstat.fills} approach fills, ${cstat.dips} cuttings, ${cstat.skipped} skipped (over ${MAX_CROSSING_WORK_M} m)`);
 
     const leafRoot = path.join(args.src, String(LEAF_ZOOM));
     let written = 0, bytes = 0, stale = 0;

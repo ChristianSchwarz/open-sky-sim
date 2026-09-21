@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-    BridgeGround, BridgeSpan, CLEARANCE_M, FOOTING_M, PIER_MIN_HEIGHT_M, PIER_SPACING_M, RIDE_CAP_M,
+    BridgeGround, BridgeSpan, CLEARANCE_M, FOOTING_M, PIER_MIN_HEIGHT_M, PIER_SPACING_M,
     WATER_FREEBOARD_M, WATER_PIER_DEPTH_M, planBridge,
 } from './bridges';
 
@@ -51,18 +51,10 @@ describe('planBridge', () => {
         }
     });
 
-    it('rides up over a small mound instead of sinking into it', () => {
-        assert.equal(planBridge(span('beam', 400), valley(400, 60))!.buried, 0);
-        const mound: BridgeGround = { groundY: (x) => (x > 150 && x < 250 ? 101 : 100) };
-        const plan = planBridge(span('beam', 400), mound)!;
-        assert.equal(plan.buried, 0);
-        assert.ok(plan.stations.some(s => Math.abs(s.deckY - 101) < 1e-9));
-    });
-
-    it('passes through a mound taller than the ride cap instead of following it up', () => {
+    it('does not ride over a mound: the deck stays straight and passes through it', () => {
         const hill: BridgeGround = { groundY: (x) => (x > 150 && x < 250 ? 110 : 100) };
         const plan = planBridge(span('beam', 400), hill)!;
-        assert.ok(Math.max(...plan.stations.map(s => s.deckY)) <= 100 + RIDE_CAP_M + 1e-9);
+        assert.ok(plan.stations.every(s => Math.abs(s.deckY - 100) < 1e-9));
         assert.ok(plan.buried > 0);
     });
 
@@ -121,7 +113,8 @@ describe('planBridge', () => {
         const plan = planBridge(span('beam', 200), ground)!;
         const over = plan.stations.find(s => s.inWater)!;
         assert.ok(Math.abs(over.deckY - (102 + WATER_FREEBOARD_M)) < 1e-9);
-        assert.deepEqual(plan.abutmentLiftM, [0, 0]);
+        // The whole straight deck moves up, so the ends stand on a fill.
+        assert.ok(plan.stations.every(s => Math.abs(s.deckY - (102 + WATER_FREEBOARD_M)) < 1e-9));
     });
 
     it('does not lift a deck over water that is below its line', () => {
@@ -140,6 +133,24 @@ describe('planBridge', () => {
         };
         const plan = planBridge(span('beam', 200), ground)!;
         assert.ok(Math.max(...plan.stations.map(s => s.deckY)) >= 100 + CLEARANCE_M - 1e-9);
+    });
+
+    it('lifts the whole straight deck for the clearance, ends included', () => {
+        const ground: BridgeGround = {
+            groundY: () => 100,
+            obstacleY: (x) => (x > 90 && x < 110 ? 100 : undefined),
+        };
+        const plan = planBridge(span('beam', 200), ground)!;
+        const under = plan.stations.filter(s => s.x > 90 && s.x < 110);
+        for (const s of under) {
+            assert.ok(s.deckY - plan.deckThicknessM >= 100 + CLEARANCE_M - 1e-9);
+        }
+        const a = plan.stations[0], b = plan.stations[plan.stations.length - 1];
+        assert.ok(Math.abs(a.deckY - b.deckY) < 1e-9);
+        for (const p of plan.stations) {
+            assert.ok(Math.abs(p.deckY - a.deckY) < 1e-9);
+        }
+        assert.ok(plan.abutmentLiftM[0] > 0);
     });
 
     it('stands piers in the water, down to the river bed', () => {

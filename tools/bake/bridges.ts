@@ -10,17 +10,16 @@
  * Rules, in the order they bind:
  *  1. The deck starts and ends at the ground height under its two end
  *     nodes - the height of the road that meets it - and runs between them
- *     in one straight grade. It adapts to those heights; nothing lifts it into
- *     a hump over water or drops it into a ramp.
- *  2. Where the ground stands above that line the deck rides up over it, but
- *     by no more than RIDE_CAP_M; a mound taller than that is passed through,
- *     as a road cuts through a dyke. If the two end heights disagree by more
- *     than a road could climb (a tile-edge skirt read as ground), the end
- *     farther from the span's median ground is taken as bad and follows the
- *     other. It never sits in water (WATER_FREEBOARD_M above the
- *     surface), and clears another road it crosses by CLEARANCE_M when the
- *     caller knows of one. `maxheight` is never used - it limits vehicles on
- *     the bridge, not the space under it.
+ *     in one straight grade, a fall at most. It adapts to those heights and
+ *     is never humped or ramped inside the span.
+ *  2. What the deck has to clear moves the whole line up in parallel, ends
+ *     included: open water (WATER_FREEBOARD_M above the surface) and another
+ *     road it crosses (CLEARANCE_M under the deck). Ground that stands above
+ *     the line is not ridden over: the deck passes through it, as a road cuts
+ *     through a dyke. If the two end heights disagree by more than a road
+ *     could climb (a tile-edge skirt read as ground), the end farther from the
+ *     span's median ground is taken as bad and follows the other. `maxheight`
+ *     is never used - it limits vehicles on the bridge, not the space under it.
  *  3. Piers stand about every PIER_SPACING_M along the span, evenly, on the
  *     ground or river bed under them - in the water where the span crosses
  *     it - except where the deck is on an embankment (under PIER_MIN_HEIGHT_M
@@ -91,12 +90,13 @@ export interface BridgePlan {
 
 /** Metres between profile stations. */
 export const STATION_STEP_M = 8;
-/** Clearance over another road or rail the caller says the deck crosses. */
-export const CLEARANCE_M = 5.5;
+/**
+ * Clear height, metres, between another road's surface and the underside of a
+ * deck that crosses it. The deck's own thickness comes on top of this.
+ */
+export const CLEARANCE_M = 4.5;
 /** How far above the water surface a deck is kept, so it never sits in the water sheet. */
 export const WATER_FREEBOARD_M = 0.3;
-/** Most a deck rises over its straight line to ride over a mound in the ground. */
-export const RIDE_CAP_M = 1.5;
 /**
  * Two end heights further apart than this grade over the span, plus the
  * slack, are not a road: one of them is a bad read.
@@ -111,7 +111,7 @@ export const FOOTING_M = 1.5;
 /** A pier in water stands at least this far below the surface, whatever the mesh's bed says. */
 export const WATER_PIER_DEPTH_M = 3;
 
-const DECK_THICKNESS_M: Record<Structure, number> = {
+export const DECK_THICKNESS_M: Record<Structure, number> = {
     slab: 0.6, beam: 1.4, arch: 1.0, truss: 2.5,
     cable_stayed: 1.8, suspension: 1.8, floating: 0.8, tunnel: 0,
 };
@@ -181,27 +181,27 @@ export function planBridge(span: BridgeSpan, ground: BridgeGround): BridgePlan |
             start = end;
         }
     }
-    const deck = new Array<number>(n);
-    deck[0] = start;
-    deck[n - 1] = end;
+    // A bridge is a straight deck, with at most a fall between its ends. What
+    // the deck has to clear - open water, a road it crosses - moves the whole
+    // line up in parallel, ends included (an abutment on a fill), never a
+    // hump in the middle. A mound in the ground is not ridden over: the deck
+    // passes through it.
+    const thickness = DECK_THICKNESS_M[span.structure];
+    let shift = 0;
     for (let i = 1; i < n - 1; i++) {
-        const t = total > 0 ? s[i] / total : 0;
-        const line = start + (end - start) * t;
-        // Rides a mound up to the cap, never in the water, and over a road it is told of.
-        let need = Math.min(Math.max(line, g[i]), line + RIDE_CAP_M);
+        const line = start + (end - start) * (total > 0 ? s[i] / total : 0);
         if (water[i] !== undefined) {
-            need = Math.max(need, water[i]! + WATER_FREEBOARD_M);
+            shift = Math.max(shift, water[i]! + WATER_FREEBOARD_M - line);
         }
         if (obstacle[i] !== undefined) {
-            need = Math.max(need, obstacle[i]! + CLEARANCE_M);
+            shift = Math.max(shift, obstacle[i]! + CLEARANCE_M + thickness - line);
         }
-        deck[i] = need;
     }
+    const deck = pts.map((_, i) => start + shift + (end - start) * (total > 0 ? s[i] / total : 0));
 
     const stations: Station[] = pts.map((p, i) => ({
         s: s[i], x: p.x, z: p.z, groundY: g[i], deckY: deck[i], inWater: water[i] !== undefined,
     }));
-    const thickness = DECK_THICKNESS_M[span.structure];
     let buried = 0;
     for (const st of stations) {
         if (st.deckY < st.groundY - 1e-6) {

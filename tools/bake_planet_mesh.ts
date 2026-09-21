@@ -36,7 +36,8 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as zlib from 'node:zlib';
 import { Worker } from 'node:worker_threads';
-import { decodePdm } from '../src/script/terrain/demTile';
+import { decodePdm, encodePdmUncompressed } from '../src/script/terrain/demTile';
+import { GradeLine, carveGrid, decodeRgr } from './bake/roadGrade';
 import { decodePtm } from '../src/script/terrain/ptm';
 import {
     HISTOGRAM_BINS, accumulateColors, luminanceWindow, medianCut, newColorHistogram,
@@ -240,7 +241,7 @@ function computePadHeight(
  * server turns into a 404 on the manifest.
  */
 function copyHeightTiles(
-    src: string, out: string, maxZoom: number,
+    src: string, out: string, maxZoom: number, seaLevel = 0,
 ): { bytes: number; copied: number; skipped: number } {
     let bytes = 0;
     let copied = 0;
@@ -263,6 +264,25 @@ function copyHeightTiles(
                 fs.mkdirSync(dstDir, { recursive: true });
                 const dst = path.join(dstDir, f);
                 const srcStat = fs.statSync(path.join(xDir, f));
+                // The physics reads this zoom, and the mesh over it has the
+                // motorway roadbeds laid in: give the CPU ground the same
+                // embankments and cuttings. The four child leaves' lines
+                // cover the tile and the reach beyond its edge.
+                if (z === maxZoom) {
+                    const lines = childGradeLines(src, z, Number(xs), Number(f.slice(0, -4)));
+                    if (lines.length > 0) {
+                        const dem = decodePdm(fs.readFileSync(path.join(xDir, f)));
+                        const b = tileBounds(z, Number(xs), Number(f.slice(0, -4)));
+                        carveGrid(dem.heights, dem.size, b, lines, seaLevel);
+                        const raw = encodePdmUncompressed(dem.heights, dem.size, dem.geometricErrorM);
+                        raw[6] = dem.flags;
+                        const gz = zlib.deflateSync(raw, { level: 9 });
+                        fs.writeFileSync(dst, gz);
+                        bytes += gz.byteLength;
+                        copied++;
+                        continue;
+                    }
+                }
                 const dstStat = fs.existsSync(dst) ? fs.statSync(dst) : undefined;
                 // Already there and no older than the source: nothing to do.
                 // A DEM bake rewrites its tiles, so a changed tile is newer.
@@ -284,6 +304,18 @@ function copyHeightTiles(
         bytes += fs.statSync(index).size;
     }
     return { bytes, copied, skipped };
+}
+
+/** Motorway roadbed lines of the four leaves under tile z/x/y, or none. */
+function childGradeLines(src: string, z: number, x: number, y: number): GradeLine[] {
+    const lines: GradeLine[] = [];
+    for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+        const p = path.join(src, String(z + 1), String(x * 2 + dx), `${y * 2 + dy}.rgr`);
+        if (fs.existsSync(p)) {
+            lines.push(...decodeRgr(fs.readFileSync(p)));
+        }
+    }
+    return lines;
 }
 
 function walkTiles(src: string, maxZoom: number): Array<{ z: number; x: number; y: number }> {
@@ -682,7 +714,7 @@ async function main(): Promise<void> {
 
     const heightMaxZoom = Math.min(11, src.maxZoom);
     const tCopy = Date.now();
-    const heights = copyHeightTiles(args.src, args.out, heightMaxZoom);
+    const heights = copyHeightTiles(args.src, args.out, heightMaxZoom, src.seaLevel ?? 0);
     console.log(`height tiles z0..${heightMaxZoom}: ${(heights.bytes / 1048576).toFixed(1)} MB, `
         + `${heights.copied} copied, ${heights.skipped} already current, `
         + `${((Date.now() - tCopy) / 1000).toFixed(1)}s`);

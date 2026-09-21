@@ -32,6 +32,7 @@ import { boundsOf } from './bake/coverTex';
 import { BridgeMesh, buildBridgeMesh } from './bake/bridgeMesh';
 import { BridgePlan, PIER_SPACING_M, planBridge } from './bake/bridges';
 import { decodeRbr } from './bake/rbr';
+import { decodeRvr } from './bake/rvr';
 import { LonLatBounds } from './bake/shoreline';
 import { tileSurface } from './bake/tileSurface';
 
@@ -41,6 +42,38 @@ import { tileSurface } from './bake/tileSurface';
  * block under the end hides; short slabs on 10-40% DEM slopes are most spans.
  */
 const TALL_ABUTMENT_M = 6;
+
+/** A road crossing at less than this angle to the span runs along it: an approach, not a crossing. */
+const MIN_CROSSING_SIN = 0.34;
+/** Roads this close to a span's ends are its own junction with the ground, not something it crosses. */
+const END_ZONE_M = 12;
+/** Spare width beyond a road's half width in which the deck counts as over it, metres. */
+const CROSS_MARGIN_M = 1.5;
+
+interface RoadSeg { ax: number; az: number; bx: number; bz: number; half: number }
+
+const rvrCache = new Map<string, ReturnType<typeof decodeRvr>>();
+
+/** Every road in the tile and its eight neighbours (a span is filed by midpoint, never clipped). */
+function nearbyRoads(src: string, k: TileKey): ReturnType<typeof decodeRvr> {
+    const out: ReturnType<typeof decodeRvr> = [];
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            const key = `${k.x + dx}/${k.y + dy}`;
+            let roads = rvrCache.get(key);
+            if (roads === undefined) {
+                const p = path.join(src, String(k.z), String(k.x + dx), `${k.y + dy}.rvr`);
+                roads = fs.existsSync(p) ? decodeRvr(fs.readFileSync(p)) : [];
+                if (rvrCache.size > 64) {
+                    rvrCache.clear();
+                }
+                rvrCache.set(key, roads);
+            }
+            out.push(...roads);
+        }
+    }
+    return out;
+}
 
 interface Args {
     dir: string;
@@ -171,10 +204,53 @@ function main(): void {
                         break;
                     }
                 }
+                // Roads the deck crosses, for its clearance: other streets near
+                // the span, at an angle to it, away from its own two ends.
+                const xs = points.map(p => p.x), zs = points.map(p => p.z);
+                const pad = 40;
+                const bx0 = Math.min(...xs) - pad, bx1 = Math.max(...xs) + pad;
+                const bz0 = Math.min(...zs) - pad, bz1 = Math.max(...zs) + pad;
+                const segs: RoadSeg[] = [];
+                for (const road of nearbyRoads(args.src, k)) {
+                    const half = road.widthM / 2;
+                    const xz = road.points.map(p => surface.toXZ(p.lon, p.lat));
+                    for (let i = 0; i + 1 < xz.length; i++) {
+                        const a = xz[i], b = xz[i + 1];
+                        if (Math.max(a.x, b.x) < bx0 || Math.min(a.x, b.x) > bx1
+                            || Math.max(a.z, b.z) < bz0 || Math.min(a.z, b.z) > bz1) continue;
+                        segs.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, half });
+                    }
+                }
+                const spanLen = points.reduce((n, p, i) => i === 0 ? 0 : n + Math.hypot(p.x - points[i - 1].x, p.z - points[i - 1].z), 0);
+                const obstacleY = segs.length === 0 ? undefined : (x: number, z: number): number | undefined => {
+                    // Along-span position and heading at this point.
+                    let bestD = Infinity, tx = 1, tz = 0, along = 0, run = 0;
+                    for (let i = 0; i + 1 < points.length; i++) {
+                        const a = points[i], b = points[i + 1];
+                        const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
+                        const l = Math.sqrt(l2);
+                        const t = l2 > 1e-12 ? Math.min(1, Math.max(0, ((x - a.x) * dx + (z - a.z) * dz) / l2)) : 0;
+                        const d = Math.hypot(x - a.x - dx * t, z - a.z - dz * t);
+                        if (d < bestD) { bestD = d; tx = dx / (l || 1); tz = dz / (l || 1); along = run + t * l; }
+                        run += l;
+                    }
+                    if (along < END_ZONE_M || along > spanLen - END_ZONE_M) return undefined;
+                    for (const g of segs) {
+                        const dx = g.bx - g.ax, dz = g.bz - g.az, l2 = dx * dx + dz * dz;
+                        const l = Math.sqrt(l2);
+                        if (l < 1e-6) continue;
+                        const t = Math.min(1, Math.max(0, ((x - g.ax) * dx + (z - g.az) * dz) / l2));
+                        if (Math.hypot(x - g.ax - dx * t, z - g.az - dz * t) > g.half + CROSS_MARGIN_M) continue;
+                        if (Math.abs(tx * dz - tz * dx) / l < MIN_CROSSING_SIN) continue;
+                        return surface.landH(x, z);
+                    }
+                    return undefined;
+                };
                 const plan = planBridge({
                     structure: rec.structure, deckWidthM: rec.deckWidthM, layer: rec.layer, points,
                 }, {
                     groundY,
+                    obstacleY,
                     // A river is water drawn above its own bed.
                     waterY: (x, z) => {
                         const w = surface.waterH(x, z);
@@ -293,7 +369,7 @@ function main(): void {
     // Stations where the straight deck passes through ground taller than RIDE_CAP_M:
     // a dyke or a hill the road cuts through, so not an error, but a rise here
     // would mean the ground read is wrong.
-    console.log(`cut through  ${stat.buried} stations  (deck passes through a mound taller than the ride cap)`);
+    console.log(`cut through  ${stat.buried} stations  (deck passes through a mound; deck is straight)`);
     console.log(`wrote ${written.length} bridge sidecars, ${(stat.gz / 1048576).toFixed(2)} MB in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 }
 
