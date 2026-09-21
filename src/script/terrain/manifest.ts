@@ -172,7 +172,11 @@ export interface TerrainManifest {
     bake?: { tool: string; version: string; utc: string };
 }
 
-export const DEFAULT_TERRAIN_URL = 'assets/terrain/manifest.json';
+/** Injected by webpack from TERRAIN_URL; undefined under tsx and in tests. */
+declare const __TERRAIN_URL__: string | undefined;
+
+export const DEFAULT_TERRAIN_URL: string =
+    (typeof __TERRAIN_URL__ !== 'undefined' && __TERRAIN_URL__) || 'assets/terrain/manifest.json';
 
 export async function loadTerrainManifest(
     url: string = DEFAULT_TERRAIN_URL,

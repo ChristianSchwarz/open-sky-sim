@@ -1,3 +1,4 @@
+const webpack = require('webpack');
 const { AngularWebpackPlugin } = require('@ngtools/webpack');
 const CopyPlugin = require('copy-webpack-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
@@ -84,6 +85,9 @@ module.exports = (_env, argv) => ({
             jitMode: false,
         }),
         new MiniCssExtractPlugin({ filename: 'bundle.css' }),
+        // TERRAIN_URL=https://host/v1/manifest.json points the game at terrain
+        // hosted elsewhere; see doc/terrain-hosting.md. Unset keeps assets/terrain.
+        new webpack.DefinePlugin({ __TERRAIN_URL__: JSON.stringify(process.env.TERRAIN_URL || '') }),
         new CopyPlugin({
             patterns: [
                 {
@@ -107,7 +111,7 @@ module.exports = (_env, argv) => ({
                 },
                 // Development serves assets/terrain from the repo; only a
                 // production build copies it into dist/ (see the note above).
-                ...(argv && argv.mode === 'production'
+                ...(argv && argv.mode === 'production' && !process.env.TERRAIN_URL
                     ? [{ from: 'assets/terrain', to: 'assets/terrain', noErrorOnMissing: true }]
                     : []),
             ]
