@@ -17,6 +17,7 @@ export const DepthFragProgram: string = `
   uniform float colorDither;
   uniform float overbright;
   uniform float uGrazingHighlight;
+  uniform vec3 uSunTint;
 
   varying vec3 vPosition;
   varying vec3 vNormalView;
@@ -26,8 +27,20 @@ ${DITHER_PARS_FRAGMENT}
   void main() {
     vec2 screen = gl_FragCoord.xy;
 
-    if (alphaDither > 0.001) {
-      float alpha = alphaDither + bayerThreshold(screen);
+    // A grazing view also thickens the dither, not just brightens it - real
+    // glass looks progressively more solid (not just whiter) the more
+    // edge-on it is, and a sparse dither at the rim undersells the effect.
+    float rim = 0.0;
+    if (uGrazingHighlight > 0.5) {
+      vec3 grazeNormal = normalize(vNormalView);
+      vec3 grazeView = normalize(vViewDir);
+      float facing = abs(dot(grazeNormal, grazeView));
+      rim = 1.0 - smoothstep(0.0, 0.65, facing);
+    }
+    float effectiveAlphaDither = alphaDither + rim * 0.55;
+
+    if (effectiveAlphaDither > 0.001) {
+      float alpha = effectiveAlphaDither + bayerThreshold(screen);
       if (alpha < 0.5) {
         discard;
       }
@@ -59,17 +72,14 @@ ${DITHER_PARS_FRAGMENT}
       diffuse = color;
     }
 
-    // Real glass gets noticeably more reflective (and so lighter) toward a
-    // grazing view - a canopy pane read as uniformly dark from every angle
-    // otherwise. Blends toward light grey as the surface turns edge-on to
-    // the camera; the dither above already thinned out most fragments, so
-    // this only has to shade the ones that survived.
-    if (uGrazingHighlight > 0.5) {
-      vec3 grazeNormal = normalize(vNormalView);
-      vec3 grazeView = normalize(vViewDir);
-      float facing = abs(dot(grazeNormal, grazeView));
-      float rim = 1.0 - smoothstep(0.0, 0.25, facing);
-      diffuse = mix(diffuse, vec3(0.75, 0.78, 0.82), rim);
+    // Real glass gets noticeably more reflective toward a grazing view - a
+    // canopy pane read as uniformly dark from every angle otherwise. Blends
+    // toward the sun's own colour (rim computed above, alongside the dither
+    // density boost) rather than a fixed white, the way a canopy actually
+    // glints with whatever light it's catching - amber at sunset, blue-white
+    // at noon - rather than a flat highlight that never changes with the sky.
+    if (rim > 0.001) {
+      diffuse = mix(diffuse, uSunTint, rim);
     }
 
     // Light sources first: a palette entry stops at white, which is nowhere
