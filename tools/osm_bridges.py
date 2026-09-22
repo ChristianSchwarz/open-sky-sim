@@ -19,7 +19,7 @@ import zlib
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from osm_common import nodes_map, tagged_width_m, ways_map
+from osm_common import nodes_map, road_class_byte, tagged_width_m, ways_map
 
 RBR_MAGIC = b'RBR1'
 
@@ -62,6 +62,11 @@ class Bridge:
     # ON the bridge, not the clearance under it, so the deck generator ignores
     # it; kept because a tunnel or a low truss portal is drawn from it.
     clearance_m: float
+    # The class byte (osm_common.ROAD_CLASSES) of the road the span itself
+    # carries - never guessed from a road that merely ends near an abutment,
+    # which can be an unrelated junction or slip road of a different class.
+    # 255 when the way carries no ordinary highway class (a rail bridge, say).
+    cls: int
     points: List[Tuple[float, float]]
 
     @property
@@ -150,23 +155,27 @@ def extract_bridges(data: dict) -> List[Bridge]:
         if len(pts) < 2:
             continue
         length = polyline_length_m(pts)
+        cls = road_class_byte(tags)
         out.append(Bridge(
             structure=classify_structure(tags, length),
             deck_width_m=deck_width_m(tags),
             layer=_layer(tags),
             clearance_m=_height_m(tags.get('maxheight')),
+            cls=cls if cls is not None else 255,
             points=[(float(lon), float(lat)) for lon, lat in pts],
         ))
     return out
 
 
 def encode_rbr(bridges: Sequence[Bridge]) -> bytes:
-    """RBR1: u16 count, per span u8 structure, i8 layer, f32 width, f32 clearance, u16 n, n x (f32 lon, f32 lat); zlib."""
+    """RBR1: u16 count, per span u8 structure, i8 layer, f32 width, f32 clearance,
+    u8 cls (255 = none), u16 n, n x (f32 lon, f32 lat); zlib."""
     payload = bytearray(RBR_MAGIC)
     payload += struct.pack('<H', len(bridges))
     for b in bridges:
-        payload += struct.pack('<Bbff H', b.structure, max(-128, min(127, b.layer)),
-                               float(b.deck_width_m), float(b.clearance_m), len(b.points))
+        payload += struct.pack('<Bbff', b.structure, max(-128, min(127, b.layer)),
+                               float(b.deck_width_m), float(b.clearance_m))
+        payload += struct.pack('<BH', b.cls & 0xFF, len(b.points))
         for lon, lat in b.points:
             payload += struct.pack('<ff', float(lon), float(lat))
     return zlib.compress(bytes(payload), 6)
@@ -178,14 +187,16 @@ def decode_rbr(blob: bytes) -> List[Bridge]:
         raise ValueError('bad RBR magic')
     (count,) = struct.unpack_from('<H', payload, 4)
     off = 6
-    head = struct.calcsize('<Bbff H')
+    head = struct.calcsize('<Bbff')
     out: List[Bridge] = []
     for _ in range(count):
-        structure, layer, width, clearance, n = struct.unpack_from('<Bbff H', payload, off)
+        structure, layer, width, clearance = struct.unpack_from('<Bbff', payload, off)
         off += head
+        cls, n = struct.unpack_from('<BH', payload, off)
+        off += 3
         pts = []
         for _p in range(n):
             pts.append(struct.unpack_from('<ff', payload, off))
             off += 8
-        out.append(Bridge(structure, width, layer, clearance, [(a, b) for a, b in pts]))
+        out.append(Bridge(structure, width, layer, clearance, cls, [(a, b) for a, b in pts]))
     return out

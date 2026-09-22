@@ -24,12 +24,10 @@ export interface Model {
 const LIB_PREFFIX = 'lib:';
 export type ModelLoadedListener = (url: string, model: Model) => void;
 
-// The GLASS material is drawn as a flat dark-grey surface with a light ordered
-// dither, so canopies read as tinted glass without a real alpha-blend pipeline.
-// alphaDither is roughly "fraction of pixels kept" (0.5 ≈ half see-through);
-// a higher value means a lighter, sparser dither. Both are easy to tweak.
+// An ordered dither over the GLASS fill so the canopy reads as tinted glass
+// rather than a hole. See bayerThreshold in depthFP.ts.
 const GLASS_COLOR = '#333333';
-const GLASS_ALPHA_DITHER = 0.65;
+const GLASS_ALPHA_DITHER = 0.35;
 // Legacy mod imports tagged glass as the default import_mod.py hex instead of GLASS.
 const LEGACY_GLASS_MATERIAL_NAMES = new Set(['GLASS', '#d1f7ff']);
 /** Reserved material token from import_mod.py for TCA collider meshes. */
@@ -263,7 +261,8 @@ export class ModelManager {
                             rawColor: GLASS_COLOR,
                             shaded: false,
                             alphaDither: GLASS_ALPHA_DITHER,
-                            depthWrite: !isFlat
+                            depthWrite: !isFlat,
+                            grazingHighlight: true,
                         });
                         (obj.material as THREE.ShaderMaterial).side = THREE.DoubleSide;
                     } else {

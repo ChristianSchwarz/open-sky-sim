@@ -51,6 +51,7 @@ import {
 import { CoverBinding, CoverTextures } from './coverTextures';
 import { BridgeMeshes } from './bridgeMeshes';
 import { RoadStrokes } from './roadStrokes';
+import { buildRoadExclusion } from './roadExclusion';
 import { OceanPatch, buildOceanPatch, disposeOceanPatch } from './oceanPatch';
 import { PtmTile, decodePtm } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
@@ -418,7 +419,8 @@ export class TerrainEntity implements Entity {
         const densityScale = this.treeScaleFor(tile);
         meshes.treesScale = densityScale;
         meshes.treesBusy = true;
-        const groups = scatterTreeSpecies(tile, densityScale);
+        const ptr = await this.roads.load(tile.id, 0);
+        const groups = scatterTreeSpecies(tile, densityScale, ptr ? buildRoadExclusion(ptr) : undefined);
         const treeMeshes = groups.length > 0
             ? await getTreeAtlas()
                 .then(atlas => [buildTreeMesh(groups, materials, atlas)])

@@ -293,6 +293,7 @@ function main(): void {
                 }
                 if (plan.abutmentLiftM[0] > TALL_ABUTMENT_M || plan.abutmentLiftM[1] > TALL_ABUTMENT_M) {
                     stat.liftedEnds++;
+                    if (process.env.DIAG_TALL) console.log(`tall end ${rec.points[0].lat.toFixed(5)},${rec.points[0].lon.toFixed(5)} -> ${rec.points[rec.points.length-1].lat.toFixed(5)},${rec.points[rec.points.length-1].lon.toFixed(5)} lift ${plan.abutmentLiftM.map(v=>v.toFixed(1))}`);
                 }
                 built.push({ mesh: buildBridgeMesh(plan, surface.frame), plan, lengthM: plan.lengthM });
             }

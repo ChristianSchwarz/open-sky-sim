@@ -253,6 +253,26 @@ function ancestorBorder(src: string, z: number, x: number, y: number, side: Side
     return out;
 }
 
+/** Nodes the road carve changed by more than a hand's breadth, and their neighbours. */
+function carvedNodes(before: Float32Array, after: Float32Array, size: number): Uint8Array | undefined {
+    const mask = new Uint8Array(size * size);
+    let any = false;
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            if (Math.abs(after[y * size + x] - before[y * size + x]) > 0.25) {
+                any = true;
+                for (let dy = -1; dy <= 1; dy++) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        const nx = x + dx, ny = y + dy;
+                        if (nx >= 0 && ny >= 0 && nx < size && ny < size) mask[ny * size + nx] = 1;
+                    }
+                }
+            }
+        }
+    }
+    return any ? mask : undefined;
+}
+
 /** Reads one tile's inputs, builds it and writes its `.ptm`. Returns undefined if there is no DEM tile. */
 export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessResult | undefined {
     const { z, x, y } = task;
@@ -270,9 +290,12 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
     // laid into the grid before anything is built from it. Leaf only: the
     // .rgr exists at the leaf level alone.
     const rgrPath = `${stem}.rgr`;
+    let roadMask: Uint8Array | undefined;
     if (fs.existsSync(rgrPath)) {
         const b = tileBounds(z, x, y);
+        const before = Float32Array.from(dem.heights);
         carveGrid(dem.heights, dem.size, b, decodeRgr(fs.readFileSync(rgrPath)), cfg.seaLevel);
+        roadMask = carvedNodes(before, dem.heights, dem.size);
     }
 
     let polygons: CoastPolygon[] | undefined;
@@ -350,6 +373,7 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         simplifyCells,
         triangleBudget: cfg.budget,
         pads: cfg.pads,
+        roadMask,
         cover,
         watercourses,
         regions,

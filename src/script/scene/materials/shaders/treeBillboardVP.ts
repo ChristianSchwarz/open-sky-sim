@@ -40,8 +40,17 @@ ${LOG_DEPTH_PARS_VERTEX}
     vec4 worldBase = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
     float s = length(instanceMatrix[0].xyz);
 
-    vec4 viewCenter = viewMatrix * worldBase;
-    viewCenter.xy += position.xy * s;
+    // Billboard about world up, not camera up: using the camera's view-space
+    // x/y directly would roll the quad with the aircraft's bank, tilting
+    // trees over whenever the plane banks. Instead build a right axis
+    // perpendicular to both world up and the line of sight, so the quad
+    // always stands vertical in world space regardless of camera roll.
+    vec3 toCamWorld = cameraPosition - worldBase.xyz;
+    vec3 worldUp = vec3(0.0, 1.0, 0.0);
+    vec3 rightW = normalize(cross(worldUp, normalize(vec3(toCamWorld.x, 0.0, toCamWorld.z))));
+    vec3 worldOffset = (rightW * position.x + worldUp * position.y) * s;
+
+    vec4 viewCenter = viewMatrix * (worldBase + vec4(worldOffset, 0.0));
     // The quad is screen-aligned, so looking steeply down its "up" runs along
     // the ground and the tree's top sits at the base's depth - inside any
     // terrain rising behind it, which slices the sprite away more and more
@@ -108,8 +117,8 @@ ${LOG_DEPTH_PARS_VERTEX}
     // each block holding the 2x2 view cells above - see treeAtlas.ts.
     float spCol = mod(instanceSpecies, 2.0);
     float spRow = floor(instanceSpecies * 0.5);
-    vec2 uvBase = uv * 0.25;
-    vUv = vec2(uvBase.x + spCol * 0.5 + col * 0.25, uvBase.y + spRow * 0.5 + row * 0.25);
+    vec2 uvBase = uv * vec2(0.25, 1.0 / 6.0);
+    vUv = vec2(uvBase.x + spCol * 0.5 + col * 0.25, uvBase.y + spRow / 3.0 + row / 6.0);
 
     vec4 pos = projectionMatrix * viewCenter;
     if (shadingType != 3) {

@@ -165,7 +165,7 @@ class BridgeOwnership(unittest.TestCase):
         from bake_osm_roads import bridges_by_tile, span_midpoint
         from osm_bridges import Bridge
         # z12 tiles are ~0.088 degrees wide; this span straddles the x=2048 border at lon 0.
-        span = Bridge(1, 9.0, 0, 0.0, [(-0.001, 0.05), (0.002, 0.05)])
+        span = Bridge(1, 9.0, 0, 0.0, 0, [(-0.001, 0.05), (0.002, 0.05)])
         got = bridges_by_tile([span], 12, Bounds(-1.0, -1.0, 1.0, 1.0))
         self.assertEqual(sum(len(v) for v in got.values()), 1)
         mid = span_midpoint(span.points)

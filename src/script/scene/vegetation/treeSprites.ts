@@ -65,9 +65,12 @@ export enum Species {
     PINE = 1,
     LINDEN = 2,
     FIR = 3,
+    SHRUB = 4,
 }
 
-export const SPECIES_COUNT = 4;
+export const SPECIES_COUNT = 5;
+/** Species picked at random for forest; the shrub is reserved for shrubland facets. */
+export const TREE_SPECIES_COUNT = 4;
 
 /**
  * How a crown's lobes are scattered within its (rx, ry) envelope:
@@ -111,6 +114,7 @@ export const SPECIES_SPECS: Record<Species, TreeSilhouetteSpec> = {
     [Species.PINE]: { name: 'pine', trunkColor: '#6b4226', heightScale: 1.25, sideRx: 0.26, sideRy: 0.32, topRadius: 0.26, trunkHeightFactor: 0.65, trunkWidthFactor: 0.04, crownShape: 'round', seed: 11 },
     [Species.LINDEN]: { name: 'linden', trunkColor: '#4d4a2c', heightScale: 1.05, sideRx: 0.38, sideRy: 0.38, topRadius: 0.4, trunkHeightFactor: 0.28, trunkWidthFactor: 0.085, crownShape: 'round', seed: 113 },
     [Species.FIR]: { name: 'fir', trunkColor: '#45482a', heightScale: 1.25, sideRx: 0.3, sideRy: 0.58, topRadius: 0.26, trunkHeightFactor: 0.05, trunkWidthFactor: 0.045, crownShape: 'conical', seed: 115 },
+    [Species.SHRUB]: { name: 'shrub', trunkColor: '#4d4a2c', heightScale: 1.0, sideRx: 0.42, sideRy: 0.3, topRadius: 0.42, trunkHeightFactor: 0, trunkWidthFactor: 0.03, crownShape: 'sparse', seed: 117 },
 };
 
 const FRAME = { w: 100, h: 150 };
@@ -259,7 +263,7 @@ function canopyPath(spec: TreeSilhouetteSpec, angleDeg: number): string {
     // (1 - t), which left it floating below the crown at 30/60 degrees); it
     // is only dropped once the view is straight down.
     const trunkHeight = Math.max(h * spec.trunkHeightFactor * (1 - t), FRAME.h - cy);
-    const trunk = t < 0.999 ? trunkPath(spec, trunkHeight) : '';
+    const trunk = t < 0.999 && spec.trunkHeightFactor > 0 ? trunkPath(spec, trunkHeight) : '';
 
     let canopy = '';
     for (const lobe of lobeLayout(spec.crownShape, spec.seed)) {

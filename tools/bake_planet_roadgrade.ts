@@ -1,14 +1,17 @@
 /**
- * Bake motorway grade sidecars (.rgr) into the planet pyramid.
+ * Bake road grade sidecars (.rgr) into the planet pyramid.
  *
  * Reads the leaf-level road vectors (.rvr) bake_osm_roads.py wrote, joins the
- * motorway pieces the tile borders cut apart, samples the DEM under each run,
- * fits a profile no steeper than 4.5 % to it (tools/bake/roadGrade.ts) and
- * writes, beside every leaf .pdm the road comes within reach of, the lines
- * with their design heights. The mesh bake reads those and lays the roadbed
- * into the height grid before meshing, so embankments and cuttings are ordinary
- * terrain. Run it before `npm run bake:mesh`; after it re-run bake:road-strokes
- * and bake:bridges, whose ground has moved.
+ * pieces of one class the tile borders cut apart, samples the DEM under each
+ * run, fits a profile to it - no steeper than 4.5 % for a motorway, 4 % for
+ * every other class (tools/bake/roadGrade.ts) - and writes, beside every leaf
+ * .pdm the road comes within reach of, the lines with their design heights.
+ * Ground too steep for that grade within MAX_EARTHWORK_M of the road (a
+ * mountain road, a hairpin) is left alone: the profile only straightens a
+ * road the terrain can actually carry flattened. The mesh bake reads those
+ * and lays the roadbed into the height grid before meshing, so embankments
+ * and cuttings are ordinary terrain. Run it before `npm run bake:mesh`; after
+ * it re-run bake:road-strokes and bake:bridges, whose ground has moved.
  *
  * Usage:
  *   node --import tsx tools/bake_planet_roadgrade.ts [--src DIR] [--bbox w,s,e,n]
@@ -24,7 +27,7 @@ import { decodeRbr } from './bake/rbr';
 import { decodeRvr } from './bake/rvr';
 import { CrossingEnv, CrossingStats, MAX_CROSSING_WORK_M, RoadPiece, planCrossings } from './bake/crossings';
 import {
-    BATTER_REACH_M, GRADE_STEP_M, GradeLine, GradePoint, ROADBED_SHOULDER_M, encodeRgr, gradeProfile,
+    BATTER_REACH_M, GRADE_STEP_M, GradeLine, GradePoint, ROAD_GRADE_MAX, ROADBED_SHOULDER_M, encodeRgr, gradeProfile,
 } from './bake/roadGrade';
 
 const LEAF_ZOOM = 12;
@@ -84,11 +87,12 @@ function makeSampler(src: string) {
     };
 }
 
-function readMotorways(src: string, bbox?: number[]): Piece[] {
-    const pieces: Piece[] = [];
+/** Every road, grouped by class - a run is only ever stitched within one class. */
+function readRoads(src: string, bbox?: number[]): Map<number, Piece[]> {
+    const byClass = new Map<number, Piece[]>();
     const root = path.join(src, String(LEAF_ZOOM));
     if (!fs.existsSync(root)) {
-        return pieces;
+        return byClass;
     }
     for (const xs of fs.readdirSync(root)) {
         for (const f of fs.readdirSync(path.join(root, xs))) {
@@ -98,13 +102,24 @@ function readMotorways(src: string, bbox?: number[]): Piece[] {
                 if (b.east <= bbox[0] || b.west >= bbox[2] || b.north <= bbox[1] || b.south >= bbox[3]) continue;
             }
             for (const r of decodeRvr(fs.readFileSync(path.join(root, xs, f)))) {
-                if (r.cls === MOTORWAY && r.points.length >= 2) {
-                    pieces.push({ halfM: r.widthM / 2, pts: r.points.map(p => ({ lon: p.lon, lat: p.lat })) });
-                }
+                if (r.points.length < 2) continue;
+                const list = byClass.get(r.cls) ?? byClass.set(r.cls, []).get(r.cls)!;
+                list.push({ halfM: r.widthM / 2, pts: r.points.map(p => ({ lon: p.lon, lat: p.lat })) });
             }
         }
     }
-    return pieces;
+    return byClass;
+}
+
+/**
+ * The grade a road of this class is held to. A motorway is built to 4.5 %;
+ * every other class - trunk down to residential - to 4 %. Ground steeper than
+ * MAX_EARTHWORK_M would let a segment reach is left alone whatever the class:
+ * a mountain road follows its hillside, because flattening it would mean an
+ * embankment or cutting nothing in the terrain data calls for.
+ */
+function maxGradeFor(cls: number): number {
+    return cls === MOTORWAY ? ROAD_GRADE_MAX : 0.04;
 }
 
 /** Join pieces whose ends meet at exactly one other piece's end. */
@@ -198,7 +213,7 @@ type TileLines = Map<string, GradeLine[]>;
 
 /** Every leaf tile a segment's reach touches gets that stretch whole. */
 function addToTiles(
-    perTile: TileLines, halfM: number, line: GradePoint[], workable: (i: number) => boolean,
+    perTile: TileLines, halfM: number, line: GradePoint[], workable: (i: number) => boolean, priority = 0,
 ): void {
     const reachM = halfM + ROADBED_SHOULDER_M + BATTER_REACH_M + 5;
     const runs = new Map<string, number[]>();
@@ -218,7 +233,7 @@ function addToTiles(
     for (const [key, segs] of runs) {
         let start = segs[0], prev = segs[0];
         const flush = (from: number, to: number) => {
-            (perTile.get(key) ?? perTile.set(key, []).get(key)!).push({ halfM, points: line.slice(from, to + 2) });
+            (perTile.get(key) ?? perTile.set(key, []).get(key)!).push({ halfM, priority, points: line.slice(from, to + 2) });
         };
         for (let k = 1; k < segs.length; k++) {
             if (segs[k] !== prev + 1) { flush(start, prev); start = segs[k]; }
@@ -229,7 +244,8 @@ function addToTiles(
 }
 
 /** Design height of the motorway nearest a point (within 25 m), or undefined. */
-function motorwayHeights(perTile: TileLines): (lon: number, lat: number) => number | undefined {
+/** The nearest baked road profile's design height near a point, or undefined off one. */
+function roadProfileHeights(perTile: TileLines): (lon: number, lat: number) => number | undefined {
     const CELL = 300;
     const hash = new Map<string, GradePoint[]>();
     for (const lines of perTile.values()) {
@@ -260,42 +276,60 @@ function main(): void {
     const args = parseArgs(process.argv.slice(2));
     const t0 = Date.now();
     const sample = makeSampler(args.src);
-    const pieces = readMotorways(args.src, args.bbox);
-    const runs = stitch(pieces);
-    console.log(`bake_planet_roadgrade: ${pieces.length} motorway pieces -> ${runs.length} runs`);
-
+    const byClass = readRoads(args.src, args.bbox);
     const perTile = new Map<string, GradeLine[]>();
+    let pieceCount = 0, runCount = 0;
     let samples = 0, skipped = 0, worstCut = 0, worstFill = 0, steep = 0;
     const heavy: string[] = [];
-    for (const run of runs) {
-        const pts = resample(run.pts);
-        if (pts.length < 2) continue;
-        let ground = pts.map(p => sample(p.lon, p.lat));
-        const valid = ground.filter(Number.isFinite).length;
-        if (valid < pts.length * 0.8) { skipped++; continue; }
-        // Holes take the nearest valid neighbour, then a median takes the
-        // buildings and single bad cells SRTM has out of the profile.
-        let last = ground.find(Number.isFinite)!;
-        ground = ground.map(g => (Number.isFinite(g) ? (last = g) : last));
-        ground = median3(median3(ground));
-        const design = gradeProfile(ground);
-        const line: GradePoint[] = pts.map((p, i) => ({ lon: p.lon, lat: p.lat, h: design[i] }));
-        samples += pts.length;
-        const dev = Math.max(...ground.map((g, i) => Math.abs(g - design[i])));
-        if (dev > 40) heavy.push(`${pts[0].lat.toFixed(4)},${pts[0].lon.toFixed(4)} ${(pts.length * GRADE_STEP_M / 1000).toFixed(1)} km dev ${dev.toFixed(0)} m`);
-        for (let i = 0; i < pts.length; i++) {
-            worstFill = Math.max(worstFill, design[i] - ground[i]);
-            worstCut = Math.max(worstCut, ground[i] - design[i]);
-            if (i > 0 && Math.abs(design[i] - design[i - 1]) / GRADE_STEP_M > 0.05) steep++;
+    for (const [cls, pieces] of byClass) {
+        const runs = stitch(pieces);
+        pieceCount += pieces.length;
+        runCount += runs.length;
+        const maxGrade = maxGradeFor(cls);
+        for (const run of runs) {
+            const pts = resample(run.pts);
+            if (pts.length < 2) continue;
+            let ground = pts.map(p => sample(p.lon, p.lat));
+            const valid = ground.filter(Number.isFinite).length;
+            if (valid < pts.length * 0.8) { skipped++; continue; }
+            // Holes take the nearest valid neighbour, then a median takes the
+            // buildings and single bad cells SRTM has out of the profile.
+            let last = ground.find(Number.isFinite)!;
+            ground = ground.map(g => (Number.isFinite(g) ? (last = g) : last));
+            ground = median3(median3(ground));
+            const design = gradeProfile(ground, maxGrade);
+            const line: GradePoint[] = pts.map((p, i) => ({ lon: p.lon, lat: p.lat, h: design[i] }));
+            samples += pts.length;
+            const dev = Math.max(...ground.map((g, i) => Math.abs(g - design[i])));
+            if (dev > 40) heavy.push(`${pts[0].lat.toFixed(4)},${pts[0].lon.toFixed(4)} ${(pts.length * GRADE_STEP_M / 1000).toFixed(1)} km dev ${dev.toFixed(0)} m`);
+            for (let i = 0; i < pts.length; i++) {
+                worstFill = Math.max(worstFill, design[i] - ground[i]);
+                worstCut = Math.max(worstCut, ground[i] - design[i]);
+                if (i > 0 && Math.abs(design[i] - design[i - 1]) / GRADE_STEP_M > maxGrade + 1e-6) steep++;
+            }
+            // Ground steeper than MAX_EARTHWORK_M lets a segment reach is a mountain
+            // road: left draped on the terrain, whatever class it is.
+            addToTiles(perTile, run.halfM, line, i => Math.abs(ground[i] - design[i]) <= MAX_EARTHWORK_M);
         }
-        addToTiles(perTile, run.halfM, line, i => Math.abs(ground[i] - design[i]) <= MAX_EARTHWORK_M);
     }
+    console.log(`bake_planet_roadgrade: ${pieceCount} road pieces -> ${runCount} runs, ${byClass.size} classes`);
 
     // Bridges over other streets: the smaller road ramps or sinks (crossings.ts).
-    const motorwayH = motorwayHeights(perTile);
+    //
+    // Both `ground` and `roadH` read the same function on purpose. A ramp
+    // tapers back to whatever height is already authoritative at a point - the
+    // general 4 % profile this loop just wrote for that road if it has one,
+    // raw terrain otherwise - not to the bare DEM regardless. Reading raw
+    // ground here while a road's own profile stands metres away from it (a
+    // profiled street on a hillside, say) split the carve between two
+    // disagreeing authorities for the same nodes and opened a seam exactly
+    // where the ramp handed off to the profile: the street stopping short of
+    // the bridge it was supposed to reach.
+    const roadH = roadProfileHeights(perTile);
+    const profileOrGround = (lon: number, lat: number) => roadH(lon, lat) ?? sample(lon, lat);
     const env: CrossingEnv = {
-        ground: (lon, lat) => sample(lon, lat),
-        roadH: (lon, lat) => motorwayH(lon, lat) ?? sample(lon, lat),
+        ground: profileOrGround,
+        roadH: profileOrGround,
     };
     const cstat: CrossingStats = { crossings: 0, dips: 0, fills: 0, skipped: 0 };
     const rbrRoot = path.join(args.src, String(LEAF_ZOOM));
@@ -325,7 +359,7 @@ function main(): void {
             const roads: RoadPiece[] = [];
             for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) roads.push(...roadsOf(x + dx, y + dy));
             const lines = planCrossings(spans.map(r => ({ structure: r.structure, points: r.points })), roads, env, cstat);
-            for (const l of lines) addToTiles(perTile, l.halfM, l.points, () => true);
+            for (const l of lines) addToTiles(perTile, l.halfM, l.points, () => true, l.priority ?? 1);
         }
     }
     console.log(`crossings   ${cstat.crossings} bridge/road crossings: ${cstat.fills} approach fills, ${cstat.dips} cuttings, ${cstat.skipped} skipped (over ${MAX_CROSSING_WORK_M} m)`);

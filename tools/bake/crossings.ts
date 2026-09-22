@@ -24,8 +24,8 @@ import { LonLat } from './lvr';
 
 /** Grade of a motorway ramp or cutting. Under the 5 % limit. */
 export const CROSSING_GRADE_MOTORWAY = 0.045;
-/** Any other road may climb 12 degrees. */
-export const CROSSING_GRADE_OTHER = Math.tan((12 * Math.PI) / 180);
+/** Any other road: 5 %. */
+export const CROSSING_GRADE_OTHER = 0.05;
 /** The steepest grade a crossing ramp or cutting of a road of class `cls` may have. */
 export const crossingGrade = (cls: number): number => (cls === 0 ? CROSSING_GRADE_MOTORWAY : CROSSING_GRADE_OTHER);
 /** A road within this of a span's ends is its own junction with the ground, not something it crosses. */
@@ -34,8 +34,15 @@ export const END_ZONE_M = 12;
 export const MIN_CROSSING_SIN = 0.34;
 /** Deepest cut or highest fill worth building, metres. */
 export const MAX_CROSSING_WORK_M = 30;
+/**
+ * How far a ramp or cutting stretches, metres: 500. A crossing changes the
+ * smaller road by a few metres, and it does that over half a kilometre, so it
+ * reads as a rise in the road and never as a wall. The grade limit only lengthens
+ * it, for a change too big for 500 m.
+ */
+export const RAMP_LENGTH_M = 200;
 /** Longest ramp or cutting walked from a crossing, metres. */
-const MAX_WALK_M = 320;
+const MAX_WALK_M = 1200;
 /** Approach road ends this close to a span's end are that span's approach, metres. */
 const APPROACH_JOIN_M = 4;
 /** A road that adds nothing is not written: heights within this of the ground. */
@@ -109,10 +116,71 @@ interface Approach {
     end: 0 | 1;
 }
 
+/** Ends this close (metres) are one node cut by a tile border. */
+const JOIN_M = 1.5;
+
+/**
+ * Roads of one class that meet end to end at exactly one other's end are one
+ * road: the leaf tiles cut every road at their borders, and a 500 m ramp
+ * has to run across them.
+ */
+export function mergeRoads(roads: readonly RoadPiece[]): RoadPiece[] {
+    const cell = (v: number) => Math.round(v * 1e5);
+    const endPt = (r: RoadPiece, end: 0 | 1) => r.points[end === 0 ? 0 : r.points.length - 1];
+    const ends = new Map<string, Array<{ i: number; end: 0 | 1 }>>();
+    roads.forEach((r, i) => ([0, 1] as const).forEach(end => {
+        const p = endPt(r, end);
+        const k = `${cell(p.lon)},${cell(p.lat)}`;
+        (ends.get(k) ?? ends.set(k, []).get(k)!).push({ i, end });
+    }));
+    const partner = new Map<string, { i: number; end: 0 | 1 }>();
+    roads.forEach((r, i) => ([0, 1] as const).forEach(end => {
+        const p = endPt(r, end);
+        const kx = 111320 * Math.cos((p.lat * Math.PI) / 180);
+        const found: Array<{ i: number; end: 0 | 1 }> = [];
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                for (const e of ends.get(`${cell(p.lon) + dx},${cell(p.lat) + dy}`) ?? []) {
+                    if (e.i === i && e.end === end) continue;
+                    const q = endPt(roads[e.i], e.end);
+                    if (Math.hypot((q.lon - p.lon) * kx, (q.lat - p.lat) * 111320) <= JOIN_M) found.push(e);
+                }
+            }
+        }
+        if (found.length === 1 && found[0].i !== i && roads[found[0].i].cls === r.cls) {
+            partner.set(`${i}:${end}`, found[0]);
+        }
+    }));
+    const used = new Uint8Array(roads.length);
+    const out: RoadPiece[] = [];
+    const walk = (start: number, startEnd: 0 | 1) => {
+        const pts: LonLat[] = [];
+        let half = 0, count = 0, i = start, entered: 0 | 1 = startEnd;
+        for (;;) {
+            used[i] = 1;
+            const seg = entered === 0 ? roads[i].points : [...roads[i].points].reverse();
+            pts.push(...(pts.length ? seg.slice(1) : seg));
+            half += roads[i].halfM; count++;
+            const nxt = partner.get(`${i}:${entered === 0 ? 1 : 0}`);
+            if (!nxt || used[nxt.i]) break;
+            i = nxt.i; entered = nxt.end;
+        }
+        out.push({ cls: roads[start].cls, halfM: half / count, points: pts });
+    };
+    roads.forEach((_, i) => {
+        if (used[i]) return;
+        if (!partner.has(`${i}:0`)) walk(i, 0);
+        else if (!partner.has(`${i}:1`)) walk(i, 1);
+    });
+    roads.forEach((_, i) => { if (!used[i]) walk(i, 0); });
+    return out;
+}
+
 export function planCrossings(
-    spans: readonly CrossingSpan[], roads: readonly RoadPiece[], env: CrossingEnv, stats?: CrossingStats,
+    spans: readonly CrossingSpan[], roadPieces: readonly RoadPiece[], env: CrossingEnv, stats?: CrossingStats,
 ): GradeLine[] {
     const out: GradeLine[] = [];
+    const roads = mergeRoads(roadPieces);
     const bbox = roads.map(r => {
         let w = Infinity, e = -Infinity, s = Infinity, n = -Infinity;
         for (const p of r.points) {
@@ -184,7 +252,7 @@ export function planCrossings(
                         const cap = under - CLEARANCE_M;
                         if (hR - cap > MAX_CROSSING_WORK_M) { if (stats) stats.skipped++; continue; }
                         const line = senke(r, rs, i, u, cap, env);
-                        if (line) { out.push(line); if (stats) stats.dips++; }
+                        if (line) { out.push({ ...line, priority: 1 }); if (stats) stats.dips++; }
                     } else {
                         shift = Math.max(shift, hR + CLEARANCE_M + thickness - deckAt(along));
                     }
@@ -200,8 +268,9 @@ export function planCrossings(
             for (const ap of approaches[which]) {
                 const poly = oriented(ap.piece, ap.end);
                 const ps = cumulative(f, poly);
-                const grade = crossingGrade(classB);
                 const endTop = (which === 0 ? g0 : g1) + shift;
+                const endGround = env.ground(poly[0].lon, poly[0].lat);
+                const grade = Math.min(crossingGrade(classB), Math.max(0, endTop - endGround) / RAMP_LENGTH_M);
                 const cone = (s: number) => endTop - grade * s;
                 const pts: GradePoint[] = [];
                 let settled = 0, worst = 0;
@@ -216,8 +285,18 @@ export function planCrossings(
                 }
                 if (worst > MAX_CROSSING_WORK_M) { if (stats) stats.skipped++; continue; }
                 if (worst > NEGLIGIBLE_M && pts.length >= 2) {
-                    out.push({ halfM: ap.piece.halfM, points: pts });
+                    out.push({ halfM: ap.piece.halfM, points: pts, priority: 1 });
                     if (stats) stats.fills++;
+                    // A street that joins the ramp partway up (a T-junction) is not
+                    // itself part of it - mergeRoads only fuses one class end to
+                    // end - but its own junction point now stands at the ramp's
+                    // height, so it needs the same climb, tapered back to ground
+                    // over its own RAMP_LENGTH_M.
+                    const rampLen = pts.length > 1
+                        ? Math.hypot(xy(f, pts[pts.length - 1]).x - xy(f, pts[0]).x, xy(f, pts[pts.length - 1]).y - xy(f, pts[0]).y)
+                        : 0;
+                    const rampHeightAt = (s: number) => Math.max(env.ground(pointAt(poly, ps, s).lon, pointAt(poly, ps, s).lat), cone(s));
+                    adjustJunctions(f, poly, ps, Math.min(total, rampLen), rampHeightAt, roads, ap.piece, env, out);
                 }
             }
         }
@@ -225,7 +304,72 @@ export function planCrossings(
     return out;
 }
 
-/** The cutting a smaller road sinks into under a bridge: ground, clipped by a cone at CROSSING_GRADE. */
+/** Streets that meet a ramp partway along it: lifted to the ramp's height there, tapered back to ground. */
+function adjustJunctions(
+    f: Frame, poly: readonly LonLat[], ps: readonly number[], rampLen: number, rampHeightAt: (s: number) => number,
+    roads: readonly RoadPiece[], rampPiece: RoadPiece, env: CrossingEnv, out: GradeLine[],
+): void {
+    for (const r2 of roads) {
+        if (r2 === rampPiece) continue;
+        for (const end of [0, 1] as const) {
+            const p = r2.points[end === 0 ? 0 : r2.points.length - 1];
+            const pxy = xy(f, p);
+            // Closest point of the endpoint's projection onto the ramp's own line.
+            let bestS = -1, bestD = APPROACH_JOIN_M;
+            for (let i = 0; i + 1 < poly.length; i++) {
+                const a = xy(f, poly[i]), b = xy(f, poly[i + 1]);
+                const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy;
+                const t = len2 > 1e-9 ? Math.min(1, Math.max(0, ((pxy.x - a.x) * dx + (pxy.y - a.y) * dy) / len2)) : 0;
+                const s = ps[i] + t * Math.sqrt(len2);
+                if (s > ps[ps.length - 1] || s > rampLen + 1e-6) continue;
+                const d = Math.hypot(a.x + dx * t - pxy.x, a.y + dy * t - pxy.y);
+                if (d < bestD) { bestD = d; bestS = s; }
+            }
+            // s = 0 is the bridge abutment itself, already the ramp's own end.
+            if (bestS <= NEGLIGIBLE_M) continue;
+            // An unmerged continuation of the ramp's own road (a piece
+            // mergeRoads missed - a class change, a stitch mergeRoads did not
+            // make) lands its endpoint right on the ramp's own line too, at
+            // zero angle. That is not a junction; it is the same road, which
+            // already has its own general profile and needs no lift here. A
+            // real side street crosses at an angle.
+            const dir2 = xy(f, r2.points[end === 0 ? 1 : r2.points.length - 2]);
+            const dx2 = dir2.x - pxy.x, dy2 = dir2.y - pxy.y;
+            const len2m = Math.hypot(dx2, dy2);
+            if (len2m > 1e-6) {
+                let i = 0;
+                while (i + 1 < poly.length && ps[i + 1] < bestS) i++;
+                const a = xy(f, poly[i]), b = xy(f, poly[Math.min(i + 1, poly.length - 1)]);
+                const rampLenXY = Math.hypot(b.x - a.x, b.y - a.y);
+                if (rampLenXY > 1e-6) {
+                    const sin = Math.abs((dx2 * (b.y - a.y) - dy2 * (b.x - a.x)) / (len2m * rampLenXY));
+                    if (sin < MIN_CROSSING_SIN) continue;
+                }
+            }
+            const junctionH = rampHeightAt(bestS);
+            const poly2 = oriented(r2, end);
+            const ps2 = cumulative(f, poly2);
+            const g0 = env.ground(poly2[0].lon, poly2[0].lat);
+            const total = Math.min(ps2[ps2.length - 1], MAX_WALK_M);
+            const grade = Math.min(crossingGrade(r2.cls), Math.max(0, junctionH - g0) / Math.min(RAMP_LENGTH_M, total));
+            const pts2: GradePoint[] = [];
+            let settled = 0, worst = 0;
+            for (let s = 0; s <= total + 1e-6; s += GRADE_STEP_M) {
+                const q = pointAt(poly2, ps2, s);
+                const g = env.ground(q.lon, q.lat);
+                const d = Math.max(g, junctionH - grade * s);
+                worst = Math.max(worst, d - g);
+                pts2.push({ lon: q.lon, lat: q.lat, h: d });
+                if (d - g <= NEGLIGIBLE_M) { if (++settled >= 2) break; } else settled = 0;
+            }
+            if (worst > NEGLIGIBLE_M && worst <= MAX_CROSSING_WORK_M && pts2.length >= 2) {
+                out.push({ halfM: r2.halfM, points: pts2, priority: 1 });
+            }
+        }
+    }
+}
+
+/** The cutting a smaller road sinks into under a bridge: ground, clipped by a cone stretched over RAMP_LENGTH_M. */
 function senke(
     road: RoadPiece, rs: readonly number[], seg: number, u: number, cap: number, env: CrossingEnv,
 ): GradeLine | undefined {
@@ -233,7 +377,7 @@ function senke(
     const hit = pointAt(road.points, rs, hitS);
     const depth = env.ground(hit.lon, hit.lat) - cap;
     if (depth <= NEGLIGIBLE_M) return undefined;
-    const grade = crossingGrade(road.cls);
+    const grade = Math.min(crossingGrade(road.cls), depth / RAMP_LENGTH_M);
     const reach = Math.min(MAX_WALK_M, depth / grade + 60);
     const from = Math.max(0, hitS - reach), to = Math.min(rs[rs.length - 1], hitS + reach);
     const pts: GradePoint[] = [];

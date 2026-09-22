@@ -121,6 +121,12 @@ type SceneMaterialMeshProperties = {
              * colour, which is the same light spread thinner.
              */
             overbright?: number;
+            /**
+             * Blend toward light grey as the surface turns edge-on to the
+             * camera, the way real glass gets more reflective at a grazing
+             * angle. Meant for the GLASS fill only - see depthFP.ts.
+             */
+            grazingHighlight?: boolean;
         }
     );
 
@@ -445,6 +451,12 @@ export class SceneMaterialManager implements KernelTask {
                     value: properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
                         ? (properties.overbright ?? 1)
                         : 1,
+                },
+                uGrazingHighlight: {
+                    value: properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
+                        && properties.grazingHighlight
+                        ? 1
+                        : 0,
                 },
                 // Fire renders as a steady two-tone ordered dither (orange/yellow)
                 // in every shading mode rather than a temporal colour flip.

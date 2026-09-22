@@ -90,6 +90,13 @@ export interface DecimateInput {
      * block there merges as freely as it ever did.
      */
     padHeights?: Float32Array;
+    /**
+     * Restricts the padHeights check to the nodes flagged here. A road corridor
+     * cut into the terrain (roadGrade.ts) is protected the same way an airfield
+     * pad is, but only along the road: checked tile-wide it would hold the whole
+     * tile to the pad's tolerance.
+     */
+    padMask?: Uint8Array;
     /** Tolerance (m) for {@link padHeights}. Never coarsened by the budget. */
     padErrorM?: number;
     /**
@@ -280,7 +287,7 @@ export function decimate(input: DecimateInput): DecimateResult {
 
     /** Max |height - bilinear(corners)| over the block, for one height field. */
     const blockError = (
-        field: Float32Array, bx: number, by: number, s: number,
+        field: Float32Array, bx: number, by: number, s: number, mask?: Uint8Array,
     ): number => {
         const at = (x: number, y: number) => field[y * size + x];
         const h00 = at(bx, by);
@@ -296,6 +303,9 @@ export function decimate(input: DecimateInput): DecimateResult {
                     + h10 * u * (1 - v)
                     + h01 * (1 - u) * v
                     + h11 * u * v;
+                if (mask !== undefined && mask[(by + y) * size + bx + x] === 0) {
+                    continue;
+                }
                 const d = Math.abs(at(bx + x, by + y) - bilinear);
                 if (d > worst) {
                     worst = d;
@@ -311,9 +321,10 @@ export function decimate(input: DecimateInput): DecimateResult {
 
     const padHeights = input.padHeights;
     const padErrorM = input.padErrorM ?? maxErrorM;
+    const padMask = input.padMask;
     /** The pad's own condition, which the triangle budget may not relax. */
     const padFits = (bx: number, by: number, s: number): boolean =>
-        padHeights === undefined || blockError(padHeights, bx, by, s) <= padErrorM;
+        padHeights === undefined || blockError(padHeights, bx, by, s, padMask) <= padErrorM;
 
     const defaultCrossing = () => undefined;
     const edgeCrossing = input.edgeCrossing ?? defaultCrossing;
@@ -468,7 +479,8 @@ export function decimate(input: DecimateInput): DecimateResult {
                         if (Math.abs(h0 * l0 + h1 * l1 + h2 * l2 - heights[y * size + x]) > maxErrorM) {
                             return undefined;
                         }
-                        if (padHeights && Math.abs(p0! * l0 + p1! * l1 + p2! * l2 - padHeights[y * size + x]) > padErrorM) {
+                        if (padHeights && (!padMask || padMask[y * size + x] !== 0)
+                            && Math.abs(p0! * l0 + p1! * l1 + p2! * l2 - padHeights[y * size + x]) > padErrorM) {
                             return undefined;
                         }
                     }

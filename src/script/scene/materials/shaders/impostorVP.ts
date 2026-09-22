@@ -14,6 +14,10 @@ export const ImpostorVertProgram: string = `
   uniform int shadingType;
 
   varying vec3 vPosition;
+  // Unused (uGrazingHighlight is always 0 here) but declared to match the
+  // varyings DepthFragProgram shares with the mesh vertex shaders.
+  varying vec3 vNormalView;
+  varying vec3 vViewDir;
 ${LOG_DEPTH_PARS_VERTEX}
   void main() {
     vec4 worldBase = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
@@ -23,6 +27,8 @@ ${LOG_DEPTH_PARS_VERTEX}
     viewCenter.xy += position.xy * s;
 
     vPosition = vec3(worldBase.x, 0.0, worldBase.z);
+    vNormalView = vec3(0.0, 0.0, 1.0);
+    vViewDir = vec3(0.0, 0.0, 1.0);
 
     vec4 pos = projectionMatrix * viewCenter;
     if (shadingType != 3) {

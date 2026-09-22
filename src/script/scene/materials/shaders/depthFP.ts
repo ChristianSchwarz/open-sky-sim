@@ -16,8 +16,11 @@ export const DepthFragProgram: string = `
   uniform float alphaDither;
   uniform float colorDither;
   uniform float overbright;
+  uniform float uGrazingHighlight;
 
   varying vec3 vPosition;
+  varying vec3 vNormalView;
+  varying vec3 vViewDir;
 ${LOG_DEPTH_PARS_FRAGMENT}
 ${DITHER_PARS_FRAGMENT}
   void main() {
@@ -54,6 +57,19 @@ ${DITHER_PARS_FRAGMENT}
       diffuse = dithering ? color : colorSecondary;
     } else {
       diffuse = color;
+    }
+
+    // Real glass gets noticeably more reflective (and so lighter) toward a
+    // grazing view - a canopy pane read as uniformly dark from every angle
+    // otherwise. Blends toward light grey as the surface turns edge-on to
+    // the camera; the dither above already thinned out most fragments, so
+    // this only has to shade the ones that survived.
+    if (uGrazingHighlight > 0.5) {
+      vec3 grazeNormal = normalize(vNormalView);
+      vec3 grazeView = normalize(vViewDir);
+      float facing = abs(dot(grazeNormal, grazeView));
+      float rim = 1.0 - smoothstep(0.0, 0.25, facing);
+      diffuse = mix(diffuse, vec3(0.75, 0.78, 0.82), rim);
     }
 
     // Light sources first: a palette entry stops at white, which is nowhere

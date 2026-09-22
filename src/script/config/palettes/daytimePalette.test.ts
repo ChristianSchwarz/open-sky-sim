@@ -3,7 +3,7 @@ import { afterEach, describe, it } from 'node:test';
 import { Rgb } from '../../scene/atmosphere/atmosphere';
 import { skyFor, SkySample } from '../../scene/atmosphere/skyModel';
 import { DEFAULT_SUN_HOURS, setSunTime } from '../../scene/materials/shaders/sun';
-import { blendPalettes, daytimePalette } from './daytimePalette';
+import { blendPalettes, daytimePalette, LAND_TERRAIN_CATEGORIES } from './daytimePalette';
 import { HDMidnightPalette } from './hd-midnight';
 import { HDNoonPalette } from './hd-noon';
 import { Palette, PaletteCategory, PaletteColor, PaletteTime } from './palette';
@@ -37,8 +37,10 @@ describe('blendPalettes', () => {
         const midnight = blendPalettes(HDNoonPalette, HDMidnightPalette, plainSky(1));
 
         for (const category of Object.values(PaletteCategory)) {
-            assert.deepStrictEqual(
-                lower(noon.colors[category]), lower(HDNoonPalette.colors[category]), category);
+            if (!LAND_TERRAIN_CATEGORIES.has(category)) {
+                assert.deepStrictEqual(
+                    lower(noon.colors[category]), lower(HDNoonPalette.colors[category]), category);
+            }
             assert.deepStrictEqual(
                 lower(midnight.colors[category]), lower(HDMidnightPalette.colors[category]), category);
         }
@@ -182,7 +184,7 @@ describe('daytimePalette', () => {
         // Noon is the elevation every gain is a ratio against, so it has to
         // come back untouched; deep night is past where any of them still bite.
         setSunTime(12);
-        for (const category of [PaletteCategory.SKY, PaletteCategory.FOG_SKY, PaletteCategory.TERRAIN_GRASS]) {
+        for (const category of [PaletteCategory.SKY, PaletteCategory.FOG_SKY]) {
             assert.strictEqual(
                 PaletteColor(daytimePalette(HDNoonPalette, HDMidnightPalette), category),
                 PaletteColor(HDNoonPalette, category).toLowerCase(), `noon ${category}`);

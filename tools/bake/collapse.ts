@@ -61,6 +61,8 @@ export interface CollapseInput {
     maxAngleDeg: number;
     /** See DecimateInput.padHeights / padErrorM. */
     padHeights?: Float32Array;
+    /** See DecimateInput.padMask. */
+    padMask?: Uint8Array;
     padErrorM?: number;
     /** See DecimateInput.coverClasses. */
     coverClasses?: Uint8Array;
@@ -135,6 +137,7 @@ export function collapse(input: CollapseInput): CollapseResult {
     const cells = size - 1;
     const cosMax = Math.cos(input.maxAngleDeg * Math.PI / 180);
     const padHeights = input.padHeights;
+    const padMask = input.padMask;
     const padErrorM = input.padErrorM ?? maxErrorM;
 
     // --- weld ---------------------------------------------------------------
@@ -391,7 +394,7 @@ export function collapse(input: CollapseInput): CollapseResult {
                                 break;
                             }
                             if (Math.abs(h - heights[y * size + x]) > tolM
-                                || (padHeights !== undefined
+                                || (padHeights !== undefined && (!padMask || padMask[y * size + x] !== 0)
                                     && Math.abs(padPlaneHeight(k.tri, x, y) - padHeights[y * size + x]) > padErrorM)) {
                                 ok = false;
                             }

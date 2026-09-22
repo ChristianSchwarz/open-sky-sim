@@ -51,6 +51,29 @@ enum SkySlot {
     GROUND = 'GROUND',
 }
 
+/**
+ * Land terrain categories that should read brighter under daylight. Water is
+ * excluded because it already gets its brightness from the sky's mirrored
+ * reflection, not from this ground gain.
+ */
+export const LAND_TERRAIN_CATEGORIES: ReadonlySet<PaletteCategory> = new Set([
+    PaletteCategory.TERRAIN_DEFAULT,
+    PaletteCategory.TERRAIN_SAND,
+    PaletteCategory.TERRAIN_BARE,
+    PaletteCategory.TERRAIN_GRASS,
+    PaletteCategory.TERRAIN_FOREST,
+    PaletteCategory.TERRAIN_SCRUB,
+    PaletteCategory.TERRAIN_CROP,
+    PaletteCategory.TERRAIN_URBAN,
+    PaletteCategory.TERRAIN_SNOW,
+    PaletteCategory.TERRAIN_WETLAND,
+    PaletteCategory.SCENERY_MOUNTAIN_GRASS,
+    PaletteCategory.SCENERY_MOUNTAIN_BARE,
+]);
+
+/** How much brighter land terrain is at full daylight; fades out with nightMix. */
+const DAYTIME_TERRAIN_BOOST = 0.2;
+
 const SLOT_BY_CATEGORY: ReadonlyMap<PaletteCategory, SkySlot> = new Map([
     [PaletteCategory.BACKGROUND, SkySlot.HORIZON],
     [PaletteCategory.FOG_SKY, SkySlot.HORIZON],
@@ -207,7 +230,11 @@ export function blendPalettes(day: Palette, night: Palette, sky: SkySample): Pal
             continue;
         }
 
-        const gain = gainForSlot(sky, SLOT_BY_CATEGORY.get(category) ?? SkySlot.GROUND);
+        let gain = gainForSlot(sky, SLOT_BY_CATEGORY.get(category) ?? SkySlot.GROUND);
+        if (LAND_TERRAIN_CATEGORIES.has(category)) {
+            const boost = 1 + DAYTIME_TERRAIN_BOOST * (1 - nightMix);
+            gain = [gain[0] * boost, gain[1] * boost, gain[2] * boost];
+        }
 
         if (typeof dayEntry === 'string' && typeof nightEntry === 'string') {
             colors[category] = blendColor(dayEntry, nightEntry, nightMix, gain);

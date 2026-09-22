@@ -423,23 +423,46 @@ export function encodeLvrUncompressed(
     return out;
 }
 
+/** True when (lon, lat) lies inside `exterior`, minus its holes. */
+function pointInPolygon(lon: number, lat: number, exterior: LonLat[], holes: LonLat[][]): boolean {
+    if (!pointInRing(lon, lat, exterior)) {
+        return false;
+    }
+    for (const hole of holes) {
+        if (pointInRing(lon, lat, hole)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /** True when (lon, lat) lies inside any land polygon (holes subtract). */
 export function isLandLonLat(lon: number, lat: number, tile: CoastVectorTile): boolean {
     for (const poly of tile.polygons) {
-        if (pointInRing(lon, lat, poly.exterior)) {
-            let inHole = false;
-            for (const hole of poly.holes) {
-                if (pointInRing(lon, lat, hole)) {
-                    inHole = true;
-                    break;
-                }
-            }
-            if (!inHole) {
-                return true;
-            }
+        if (pointInPolygon(lon, lat, poly.exterior, poly.holes)) {
+            return true;
         }
     }
     return false;
+}
+
+/**
+ * The water surface height at (lon, lat), or undefined on dry land.
+ *
+ * Checked against the same polygons the mesh itself is cut from: an inland
+ * body first (a lake's own `surfaceHeightM`, when the coast bake could fit
+ * one - a flowing body follows the DEM instead and is not "water" by this
+ * reading), then the coastline, at `seaLevel`.
+ */
+export function waterHeightLonLat(
+    lon: number, lat: number, tile: CoastVectorTile, seaLevel: number,
+): number | undefined {
+    for (const body of tile.inland) {
+        if (body.surfaceHeightM !== undefined && pointInPolygon(lon, lat, body.exterior, body.holes)) {
+            return body.surfaceHeightM;
+        }
+    }
+    return isLandLonLat(lon, lat, tile) ? undefined : seaLevel;
 }
 
 /** Ray-casting point-in-polygon on a lon/lat ring. */

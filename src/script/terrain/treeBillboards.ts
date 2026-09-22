@@ -18,13 +18,18 @@
 import * as THREE from 'three';
 import { PaletteCategory } from '../config/palettes/palette';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../scene/materials/materials';
-import { SPECIES_COUNT, Species } from '../scene/vegetation/treeSprites';
+import { TREE_SPECIES_COUNT, Species } from '../scene/vegetation/treeSprites';
 import { PtmTile } from './ptm';
 
 // TerrainClass.Tree spelled out: it is a `const enum`, and the tsx test
 // runner leaves an imported const-enum binding undefined (see tileMesh.ts's
 // GROUND_CLASS for the same workaround).
 const TREE_CLASS = 1;
+// TerrainClass.Shrub, same const-enum workaround.
+const SHRUB_CLASS = 2;
+/** Shrubland is denser than woodland but each plant is small. */
+const SHRUB_SPACING_M2 = 60;
+const SHRUB_SCALE = 0.22;
 
 /**
  * One tree per this many square metres of forest-classed triangle area,
@@ -153,7 +158,9 @@ export function clampTreeDensityMultiplier(value: number): number {
  * one entry per species actually present (never more than SPECIES_COUNT,
  * often fewer), or an empty array for a tile with no forest.
  */
-export function scatterTreeSpecies(tile: PtmTile, densityScale = 1): SpeciesGroup[] {
+export function scatterTreeSpecies(
+    tile: PtmTile, densityScale = 1, onRoad?: (x: number, z: number) => boolean,
+): SpeciesGroup[] {
     const triCount = tile.landAttrs.length / 4 / 3;
     const bySpecies = new Map<Species, SpeciesGroup>();
     let total = 0;
@@ -167,18 +174,19 @@ export function scatterTreeSpecies(tile: PtmTile, densityScale = 1): SpeciesGrou
     // trees on a thin rim of the wood and none in its interior.
     let expectedTotal = 0;
     for (let t = 0; t < triCount; t++) {
-        if (tile.landAttrs[(t * 3) * 4 + 3] !== TREE_CLASS) {
+        const c = tile.landAttrs[(t * 3) * 4 + 3];
+        if (c !== TREE_CLASS && c !== SHRUB_CLASS) {
             continue;
         }
         expectedTotal += triangleArea(readVert(tile, t, 0), readVert(tile, t, 1), readVert(tile, t, 2))
-            / TREE_SPACING_M2 * densityScale;
+            / (c === SHRUB_CLASS ? SHRUB_SPACING_M2 : TREE_SPACING_M2) * densityScale;
     }
     const capScale = expectedTotal > cap ? cap / expectedTotal : 1;
 
     outer:
     for (let t = 0; t < triCount; t++) {
         const cls = tile.landAttrs[(t * 3) * 4 + 3];
-        if (cls !== TREE_CLASS) {
+        if (cls !== TREE_CLASS && cls !== SHRUB_CLASS) {
             continue;
         }
         const v0 = readVert(tile, t, 0);
@@ -192,7 +200,7 @@ export function scatterTreeSpecies(tile: PtmTile, densityScale = 1): SpeciesGrou
         const nLen = Math.hypot(nx, ny, nz) || 1;
         const nSign = ny < 0 ? -1 / nLen : 1 / nLen;
         nx *= nSign; ny *= nSign; nz *= nSign;
-        const expected = (area / TREE_SPACING_M2) * densityScale * capScale;
+        const expected = (area / (cls === SHRUB_CLASS ? SHRUB_SPACING_M2 : TREE_SPACING_M2)) * densityScale * capScale;
         const seed = t * 97.13;
         const whole = Math.floor(expected);
         const count = whole + (hash01(seed) < expected - whole ? 1 : 0);
@@ -204,10 +212,13 @@ export function scatterTreeSpecies(tile: PtmTile, densityScale = 1): SpeciesGrou
             const r1 = hash01(seed + i * 2.371);
             const r2 = hash01(seed + i * 2.371 + 0.5);
             const point = pointInTriangle(v0, v1, v2, r1, r2);
-            const species = Math.min(
-                Math.floor(hash01(seed + i * 8.923) * SPECIES_COUNT),
-                SPECIES_COUNT - 1,
-            ) as Species;
+            if (onRoad && onRoad(point.x, point.z)) {
+                continue;
+            }
+            const species = (cls === SHRUB_CLASS ? Species.SHRUB : Math.min(
+                Math.floor(hash01(seed + i * 8.923) * TREE_SPECIES_COUNT),
+                TREE_SPECIES_COUNT - 1,
+            )) as Species;
 
             let group = bySpecies.get(species);
             if (!group) {
@@ -278,7 +289,8 @@ export function buildTreeMesh(
             const p = group.points[k];
             // A little per-instance scale jitter reads as size variation without
             // needing separate per-species geometry.
-            const scale = 0.85 + hash01(i * 5.113 + group.species * 13.1 + 1) * 0.3;
+            const scale = (0.85 + hash01(i * 5.113 + group.species * 13.1 + 1) * 0.3)
+                * (group.species === Species.SHRUB ? SHRUB_SCALE : 1);
             m.makeScale(scale, scale, scale);
             m.setPosition(p.x, p.y, p.z);
             mesh.setMatrixAt(i, m);

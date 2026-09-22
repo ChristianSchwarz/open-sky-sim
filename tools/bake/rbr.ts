@@ -5,7 +5,8 @@
  * the finished .pbr.
  *
  * Layout, zlib-compressed: 'RBR1', u16 count, then per span u8 structure,
- * i8 layer, f32 deckWidthM, f32 maxheightM, u16 n, n x (f32 lon, f32 lat).
+ * i8 layer, f32 deckWidthM, f32 maxheightM, u8 cls (255 = none), u16 n,
+ * n x (f32 lon, f32 lat).
  */
 
 import { unzlibSync } from 'fflate';
@@ -20,6 +21,13 @@ export interface BridgeRecord {
     deckWidthM: number;
     /** Tagged maxheight, 0 when untagged. Limit for vehicles ON the span. */
     maxHeightM: number;
+    /**
+     * The road class (RoadClass, tools/bake_osm_roads.py's ROAD_CLASSES) the
+     * span itself carries, undefined when the way had no ordinary highway
+     * class. The span's own tag, not a road that merely ends near an
+     * abutment - see crossings.ts.
+     */
+    cls?: number;
     points: LonLat[];
 }
 
@@ -39,7 +47,7 @@ export function decodeRbr(bytes: ArrayBuffer | Uint8Array): BridgeRecord[] {
     let off = 6;
     const out: BridgeRecord[] = [];
     for (let r = 0; r < count; r++) {
-        if (off + 12 > payload.byteLength) {
+        if (off + 15 > payload.byteLength) {
             throw new Error(`RBR truncated at span ${r}`);
         }
         const structure = STRUCTURES[view.getUint8(off)];
@@ -49,8 +57,9 @@ export function decodeRbr(bytes: ArrayBuffer | Uint8Array): BridgeRecord[] {
         const layer = view.getInt8(off + 1);
         const deckWidthM = view.getFloat32(off + 2, true);
         const maxHeightM = view.getFloat32(off + 6, true);
-        const n = view.getUint16(off + 10, true);
-        off += 12;
+        const clsByte = view.getUint8(off + 10);
+        const n = view.getUint16(off + 11, true);
+        off += 13;
         if (off + n * 8 > payload.byteLength) {
             throw new Error(`RBR truncated inside span ${r}`);
         }
@@ -59,7 +68,7 @@ export function decodeRbr(bytes: ArrayBuffer | Uint8Array): BridgeRecord[] {
             points[i] = { lon: view.getFloat32(off, true), lat: view.getFloat32(off + 4, true) };
             off += 8;
         }
-        out.push({ structure, layer, deckWidthM, maxHeightM, points });
+        out.push({ structure, layer, deckWidthM, maxHeightM, cls: clsByte === 255 ? undefined : clsByte, points });
     }
     return out;
 }

@@ -3,7 +3,7 @@ import { SPECIES_COUNT, Species, TREE_VIEWS, TreeView, generateTreeSprite } from
 
 /**
  * One shared CanvasTexture for every species, so a tile's whole forest is a
- * single instanced draw: a 2x2 grid of species blocks, each block a 2x2 grid
+ * single instanced draw: a 2-wide grid of species blocks, each block a 2x2 grid
  * of views (0deg/30deg top row, 60deg/90deg bottom row). `treeBillboardVP.ts` picks a quadrant per instance per frame from the
  * camera's elevation angle above the tree (0 = eye-level, 90 = straight
  * down), so the runtime only ever binds one texture per species no matter how
@@ -11,9 +11,10 @@ import { SPECIES_COUNT, Species, TREE_VIEWS, TreeView, generateTreeSprite } from
  */
 const CELL_SIZE = 128;
 const BLOCK_SIZE = CELL_SIZE * 2;
-const ATLAS_SIZE = BLOCK_SIZE * 2;
+const ATLAS_W = BLOCK_SIZE * 2;
+const ATLAS_H = BLOCK_SIZE * 3;
 
-/** (col, row) of a species' block within the 2x2 block grid - must match treeBillboardVP.ts (species % 2, floor(species / 2)). */
+/** (col, row) of a species' block within the 2-wide block grid - must match treeBillboardVP.ts (species % 2, floor(species / 2)). */
 function speciesBlock(species: Species): [number, number] {
     return [species % 2, Math.floor(species / 2)];
 }
@@ -39,8 +40,8 @@ function loadSvgImage(svg: string): Promise<HTMLImageElement> {
 
 async function buildAtlas(): Promise<THREE.CanvasTexture> {
     const canvas = document.createElement('canvas');
-    canvas.width = ATLAS_SIZE;
-    canvas.height = ATLAS_SIZE;
+    canvas.width = ATLAS_W;
+    canvas.height = ATLAS_H;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
         throw new Error('2D canvas context unavailable for tree atlas');

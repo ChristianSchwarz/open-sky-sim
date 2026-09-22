@@ -782,9 +782,13 @@ export class Game {
         await this.setupScene(settings.spawnMode);
         this.selectAircraftById(settings.aircraftId, 'f22');
         setBootProgress(90, 'Loading aircraft...');
+        // beginFlight's spawn overwrites this.cameraRoute with the spawn's
+        // own pose (see syncSpawnCameraUrl), so the URL's route has to be
+        // captured before that call to still know whether to boot into it.
+        const urlCameraRoute = this.cameraRoute;
         await this.beginFlight(settings.spawnMode);
-        if (this.cameraRoute) {
-            this.enterFixedCamera(this.cameraRoute);
+        if (urlCameraRoute) {
+            this.enterFixedCamera(urlCameraRoute);
         }
         await this.waitForRequiredTerrain(90, 99);
         setBootProgress(100, 'Ready');
@@ -2463,10 +2467,10 @@ export class Game {
             } else if (event.code === 'Numpad5') {
                 event.preventDefault();
                 this.resetOrbit();
-            } else if (event.code === 'NumpadMultiply' && this.isF2ExteriorView()) {
+            } else if (event.code === 'NumpadEnter' && this.isF2ExteriorView()) {
                 event.preventDefault();
                 this.toggleExteriorEnemyLock();
-            } else if (event.code === 'NumpadMultiply' && this.view === PlayerViewState.COCKPIT_FRONT) {
+            } else if (event.code === 'NumpadEnter' && this.view === PlayerViewState.COCKPIT_FRONT) {
                 event.preventDefault();
                 if (this.player.weaponsTarget) {
                     this.setCockpitPadlock(!this.cockpitPadlock);
@@ -2656,7 +2660,7 @@ export class Game {
         this.view = PlayerViewState.COCKPIT_FRONT;
         this.player.exteriorView = false;
         this.cameraUpdater = this.getCameraUpdater(this.view);
-        // Entering cockpit always starts unlocked; toggle padlock with F1 / Numpad*.
+        // Entering cockpit always starts unlocked; toggle padlock with F1 / Numpad Enter.
         this.setCockpitPadlock(false);
         for (let i = 0; i < this.cockpitEntities.length; i++) {
             this.cockpitEntities[i].enabled = true;
@@ -2840,6 +2844,23 @@ export class Game {
         writeCameraRouteToLocation(this.cameraRoute);
     }
 
+    /**
+     * Write the just-placed spawn's pose to the page URL, replacing whatever
+     * camera route brought us here: otherwise a reload or copied link right
+     * after spawning would drop the player back at that URL's area instead
+     * of the runway/carrier/approach they actually spawned into.
+     */
+    private syncSpawnCameraUrl(headingRad: number): void {
+        const p = this.player.position;
+        const g = worldToGeodetic(this.planetTerrain.basis, p.x, p.y, p.z);
+        // Player heading is a scene rotation (0 = +z); the URL/camera
+        // convention is heading from north = scene −z, i.e. +180°.
+        const headingDeg = (headingRad * 180 / Math.PI + 180 + 360) % 360;
+        this.cameraRoute = { lat: g.lat, lon: g.lon, altM: g.height, headingDeg, pitchDeg: 0 };
+        writeCameraRouteToLocation(this.cameraRoute);
+        this.flightCameraUrlAge = 0;
+    }
+
     /** Scene position of a URL camera: its altitude is metres above the ellipsoid. */
     private cameraRouteWorld(route: CameraRoute): THREE.Vector3 {
         return geodeticToWorld(this.planetTerrain.basis, route.lat, route.lon, route.altM);
@@ -2850,6 +2871,7 @@ export class Game {
      * the boot put it; the HUD and cockpit are off since nobody is in them.
      */
     private enterFixedCamera(route: CameraRoute) {
+        this.cameraRoute = route;
         this.state = GameState.FIXED_CAMERA;
         this.player.setSimulationPaused(true);
         this.spawnMenu.enabled = false;
@@ -2939,6 +2961,10 @@ export class Game {
         // final picked at another airfield was placed above whatever height
         // the coarse tier answered.
         place();
+        const spawnHeading = spawn === 'carrier' || spawn === 'carrierBarricade'
+            ? PLAYER_CARRIER_HEADING
+            : spawn === 'carrierTakeoff' ? PLAYER_CARRIER_TAKEOFF_HEADING : this.baseHeading;
+        this.syncSpawnCameraUrl(spawnHeading);
         this.player.setSimulationPaused(false);
 
         if (spawn === 'carrierBarricade') {

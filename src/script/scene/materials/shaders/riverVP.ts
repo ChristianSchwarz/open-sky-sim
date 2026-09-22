@@ -73,10 +73,16 @@ export const RiverVertProgram: string = `
   attribute float riverHalf;
 
   varying vec3 vPosition;
+  // Unused (uGrazingHighlight is always 0 here) but declared to match the
+  // varyings DepthFragProgram shares with the mesh vertex shaders.
+  varying vec3 vNormalView;
+  varying vec3 vViewDir;
 ${LOG_DEPTH_PARS_VERTEX}
   void main() {
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vPosition = vec3(worldPos.x, 0.0, worldPos.z);
+    vNormalView = vec3(0.0, 0.0, 1.0);
+    vViewDir = vec3(0.0, 0.0, 1.0);
 
     vec4 centreView = modelViewMatrix * vec4(position, 1.0);
     // The model matrix carries the tile's quantisation as a uniform scale, so

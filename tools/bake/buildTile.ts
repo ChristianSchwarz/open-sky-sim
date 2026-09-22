@@ -59,6 +59,8 @@ export const WATER_DEPTH_BIAS_M = 0.5;
  * taxiways; anything tighter buys nothing the runtime could see.
  */
 export const PAD_ERROR_M = 0.5;
+/** Vertical tolerance, metres, on the nodes of a road corridor cut into the terrain. */
+export const ROAD_ERROR_M = 1.0;
 
 /** Water within this distance of the shore is painted as the shallow tone. */
 export const SHALLOW_WATER_COAST_M = 80;
@@ -201,6 +203,12 @@ export interface TileCover {
 }
 
 export interface BuildTileInput {
+    /**
+     * Nodes a motorway roadbed or crossing ramp was cut into (meshTile.ts).
+     * The decimator holds the drawn surface to ROAD_ERROR_M there, so a 7 m
+     * embankment is not merged away into the hillside beside it.
+     */
+    roadMask?: Uint8Array;
     id: PtmTileId;
     /** Return the surface grid triangles too (diagnostics only). */
     keepGridTriangles?: boolean;
@@ -836,7 +844,13 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         return out;
     };
     const meshHeights = waterFlattened(heights);
-    const meshPadHeights = drawnHeights === heights ? undefined : waterFlattened(drawnHeights);
+    // Pads hold the whole tile to their tolerance; a road corridor only its own
+    // nodes, so it rides on the same mechanism with a mask.
+    const roadOnly = input.roadMask !== undefined && drawnHeights === heights;
+    const meshPadHeights = drawnHeights !== heights ? waterFlattened(drawnHeights)
+        : roadOnly ? meshHeights : undefined;
+    const meshPadMask = roadOnly ? input.roadMask : undefined;
+    const meshPadErrorM = roadOnly ? ROAD_ERROR_M : PAD_ERROR_M;
     let meshCoverClasses = coverClasses;
     if (coverClasses) {
         meshCoverClasses = new Uint8Array(coverClasses);
@@ -862,7 +876,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             size,
             heights: meshHeights,
             padHeights: meshPadHeights,
-            padErrorM: PAD_ERROR_M,
+            padMask: meshPadMask,
+            padErrorM: meshPadErrorM,
             regionNodes: regionField.regionNodes,
             coverClasses: meshCoverClasses,
             maxErrorM: err,
@@ -1143,7 +1158,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         maxAngleDeg: COLLAPSE_MAX_ANGLE_DEG,
         borderErrorM,
         padHeights: meshPadHeights,
-        padErrorM: PAD_ERROR_M,
+        padMask: meshPadMask,
+        padErrorM: meshPadErrorM,
         coverClasses: meshCoverClasses,
         isLandTriangle,
         waterClassOf,

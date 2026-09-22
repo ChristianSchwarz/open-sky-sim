@@ -92,6 +92,29 @@ _MIRROR_FAILURES: Dict[str, int] = {}
 # shared between threads.
 _MIRROR_LOCK = threading.Lock()
 
+# Road classes, most important first. The byte travels through the .rvr and
+# the .ptr into the runtime, which colours and gates by it, so the order is
+# part of the format: tools/bake/rvr.ts and src/script/terrain/ptr.ts hold
+# the same table. Shared here (not just in bake_osm_roads.py) because
+# osm_bridges.py needs it too, to know which road a bridge span itself is -
+# and osm_bridges is imported BY bake_osm_roads.py, so the table cannot live
+# there without a circular import.
+ROAD_CLASSES: Tuple[str, ...] = (
+    'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential',
+)
+CLASS_BYTE: Dict[str, int] = {name: i for i, name in enumerate(ROAD_CLASSES)}
+
+
+def road_class_byte(tags: dict) -> Optional[int]:
+    """The class byte of a highway way's own tags, links folded into their parent, or None."""
+    value = tags.get('highway', '')
+    if tags.get('area') == 'yes':
+        return None
+    if value.endswith('_link'):
+        value = value[:-5]
+    return CLASS_BYTE.get(value)
+
+
 
 def mirror_order(prefer: Optional[str] = None) -> List[str]:
     """Overpass mirrors, least-failing first; ties keep `OVERPASS_URLS` order.

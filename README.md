@@ -192,7 +192,8 @@ The system supports a single device connected only. If the device has less than 
 * `2`: Toggle exterior back/front
 * `3`: Toggle exterior left/right
 * `4`: Toggle to/from target
-* `Numpad *`: Toggle F1 padlock / F2 enemy lock
+* `Numpad Enter`: Toggle F1 padlock / F2 enemy lock
+* `Numpad *` / `Numpad /`: Zoom the orbit view in / out
 
 On reaching the limits of the baked terrain the player position is clamped.
 (It used to *wrap* to the opposite side, a leftover from the old tiled

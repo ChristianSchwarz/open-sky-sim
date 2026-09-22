@@ -42,6 +42,7 @@ except ImportError:
     raise
 
 from osm_common import (
+    CLASS_BYTE, ROAD_CLASSES, road_class_byte,
     OVERPASS_OUT,
     Bounds,
     glue_negative_bbox,
@@ -60,14 +61,9 @@ from osm_bridges import Bridge, encode_rbr, extract_bridges, is_span, polyline_l
 
 RVR_MAGIC = b'RVR1'
 
-# Road classes, most important first. The byte travels through the .rvr and
-# the .ptr into the runtime, which colours and gates by it, so the order is
-# part of the format: tools/bake/rvr.ts and src/script/terrain/ptr.ts hold
-# the same table.
-ROAD_CLASSES: Tuple[str, ...] = (
-    'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential',
-)
-CLASS_BYTE: Dict[str, int] = {name: i for i, name in enumerate(ROAD_CLASSES)}
+# ROAD_CLASSES / CLASS_BYTE now live in osm_common.py, shared with
+# osm_bridges.py; ROAD_CLASSES is re-exported here so the rest of this module
+# reads the same as before.
 
 # Carriageway width when OSM tags neither `width` nor `lanes`, which is most
 # ways. A lane is 3.5 m; these are the usual counts plus verges, and they are
@@ -130,13 +126,9 @@ def class_cut_for_zoom(z: int) -> Optional[int]:
 
 
 def road_class(tags: dict) -> Optional[str]:
-    """The base class of a highway way, links folded into their parent, or None."""
-    value = tags.get('highway', '')
-    if tags.get('area') == 'yes':
-        return None
-    if value.endswith('_link'):
-        value = value[:-5]
-    return value if value in CLASS_BYTE else None
+    """The base class name of a highway way, or None. See road_class_byte."""
+    byte = road_class_byte(tags)
+    return ROAD_CLASSES[byte] if byte is not None else None
 
 
 def road_width_m(tags: dict, cls: str) -> float:

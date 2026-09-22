@@ -96,19 +96,28 @@ describe('buildBridgeMesh', () => {
         assert.deepEqual(keptStations(flat, DECK_SIMPLIFY_TOLERANCE_M), [0, flat.stations.length - 1]);
     });
 
-    it('keeps the stations a deck needs where a hill forces it off its straight line', () => {
+    it('collapses to just the two ends when the deck is a straight line', () => {
+        // The deck's own line is never bumped any more (bridges.ts): a hill
+        // in the ground changes nothing about it, so every interior station
+        // sits exactly on the chord between the ends and none is kept.
         const hill: BridgeGround = { groundY: (x) => (x > 100 && x < 200 ? 106 : 100) };
-        const bumped = planBridge(span('beam', 300), hill)!;
-        const kept = keptStations(bumped, DECK_SIMPLIFY_TOLERANCE_M);
-        assert.ok(kept.length > 2 && kept.length < bumped.stations.length);
-        // Every dropped station stays within the tolerance of the deck actually built.
-        for (let k = 0; k + 1 < kept.length; k++) {
-            const a = bumped.stations[kept[k]], b = bumped.stations[kept[k + 1]];
-            for (let i = kept[k] + 1; i < kept[k + 1]; i++) {
-                const t = (bumped.stations[i].s - a.s) / (b.s - a.s);
-                close(bumped.stations[i].deckY, a.deckY + (b.deckY - a.deckY) * t, DECK_SIMPLIFY_TOLERANCE_M + 1e-6);
-            }
-        }
+        const plan = planBridge(span('beam', 300), hill)!;
+        const kept = keptStations(plan, DECK_SIMPLIFY_TOLERANCE_M);
+        assert.equal(kept.length, 2);
+        assert.equal(kept[0], 0);
+        assert.equal(kept[kept.length - 1], plan.stations.length - 1);
+    });
+
+    it('stays a straight chord even where a crossing lifts the deck', () => {
+        // obstacleY moves the whole straight line up in parallel (bridges.ts),
+        // never just the stations over it, so this still collapses to the ends.
+        const ground: BridgeGround = {
+            groundY: () => 100,
+            obstacleY: (x) => (x > 130 && x < 170 ? 100 : undefined),
+        };
+        const plan = planBridge(span('beam', 300), ground)!;
+        const kept = keptStations(plan, DECK_SIMPLIFY_TOLERANCE_M);
+        assert.equal(kept.length, 2);
     });
 
     it('costs fewer triangles than the undecimated deck, and never more', () => {
@@ -146,20 +155,22 @@ describe('PBR1', () => {
 
 describe('RBR1', () => {
     it('reads what the Python bake writes', () => {
-        // One span: structure 2 (arch), layer -1, width 14, maxheight 0, two points.
-        const payload = new Uint8Array(6 + 12 + 16);
+        // One span: structure 2 (arch), layer -1, width 14, maxheight 0, cls 1 (trunk), two points.
+        const payload = new Uint8Array(6 + 15 + 16);
         const v = new DataView(payload.buffer);
         v.setUint32(0, RBR_MAGIC, true);
         v.setUint16(4, 1, true);
         v.setUint8(6, 2); v.setInt8(7, -1); v.setFloat32(8, 14, true); v.setFloat32(12, 0, true);
-        v.setUint16(16, 2, true);
-        v.setFloat32(18, 13.4, true); v.setFloat32(22, 52.5, true);
-        v.setFloat32(26, 13.41, true); v.setFloat32(30, 52.51, true);
+        v.setUint8(16, 1);
+        v.setUint16(17, 2, true);
+        v.setFloat32(19, 13.4, true); v.setFloat32(23, 52.5, true);
+        v.setFloat32(27, 13.41, true); v.setFloat32(31, 52.51, true);
         const got = decodeRbr(zlibSync(payload));
         assert.equal(got.length, 1);
         assert.equal(got[0].structure, 'arch');
         assert.equal(got[0].layer, -1);
         assert.equal(got[0].deckWidthM, 14);
+        assert.equal(got[0].cls, 1);
         assert.equal(got[0].points.length, 2);
         close(got[0].points[1].lat, 52.51, 1e-4);
     });
