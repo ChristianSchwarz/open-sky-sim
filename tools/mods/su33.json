@@ -9,6 +9,7 @@
   "sourceMaterial": "Su-33 Mat",
   "includeMaterials": ["Su-33 Mat"],
   "includeRoots": [8973235991957018294],
+  "rescueGlassUnderRoot": true,
   "flyable": {
     "autoSurfaces": true,
     "autoGear": true
