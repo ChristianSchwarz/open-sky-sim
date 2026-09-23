@@ -20,6 +20,7 @@ import {
     KeyboardPitchStickMode,
 } from '../../input/devices/keyboardControlDevice';
 import { formatSunTime } from '../../scene/materials/shaders/sun';
+import { clearCameraRouteFromLocation } from '../../state/cameraRoute';
 import { AiPilotModels, FlightModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
 import { PLAY_ORIGIN } from '../../state/worldLayout';
 import {
@@ -844,6 +845,11 @@ export class SettingsDialog {
      */
     flyToArea() {
         updateSettings({ terrainArea: this.area() });
+        // A previous spawn or fixed-camera view may have left lat/lng in the
+        // URL; left alone it would out-rank this pick on boot (see
+        // clearCameraRouteFromLocation) and the reload would land back where
+        // it already was instead of the chosen area.
+        clearCameraRouteFromLocation();
         window.location.reload();
     }
 
