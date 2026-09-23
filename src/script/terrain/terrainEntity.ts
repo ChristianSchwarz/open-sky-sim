@@ -52,6 +52,8 @@ import { CoverBinding, CoverTextures } from './coverTextures';
 import { BridgeMeshes } from './bridgeMeshes';
 import { RoadStrokes } from './roadStrokes';
 import { buildRoadExclusion } from './roadExclusion';
+import { buildAirfieldExclusion, AirfieldExclusion } from './airfieldExclusion';
+import { Airfield } from './airfields';
 import { OceanPatch, buildOceanPatch, disposeOceanPatch } from './oceanPatch';
 import { PtmTile, decodePtm } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
@@ -255,6 +257,7 @@ export class TerrainEntity implements Entity {
     private readonly streamer: TileStreamer<PtmTile, TileMeshes>;
     private readonly cover: CoverTextures;
     private readonly roads: RoadStrokes;
+    private airfieldExclusion: AirfieldExclusion | undefined;
     private readonly bridges: BridgeMeshes;
     private readonly quadtree: Quadtree;
     private readonly oceans = new Map<string, OceanPatch>();
@@ -420,7 +423,12 @@ export class TerrainEntity implements Entity {
         meshes.treesScale = densityScale;
         meshes.treesBusy = true;
         const ptr = await this.roads.load(tile.id, 0);
-        const groups = scatterTreeSpecies(tile, densityScale, ptr ? buildRoadExclusion(ptr) : undefined);
+        const onRoad = ptr ? buildRoadExclusion(ptr) : undefined;
+        const onAirfield = this.airfieldExclusion;
+        const isExcluded = onRoad || onAirfield
+            ? (x: number, z: number) => (onRoad?.(x, z) ?? false) || (onAirfield?.(x, z) ?? false)
+            : undefined;
+        const groups = scatterTreeSpecies(tile, densityScale, isExcluded);
         const treeMeshes = groups.length > 0
             ? await getTreeAtlas()
                 .then(atlas => [buildTreeMesh(groups, materials, atlas)])
@@ -885,6 +893,20 @@ export class TerrainEntity implements Entity {
      * until something is about to draw an airfield. The URL is resolved here
      * because this is where the manifest and the base it came from both live.
      */
+    /**
+     * Give the terrain the airfields the caller has loaded (see
+     * game.ts's addOsmAirfields), so newly scattered trees keep clear of
+     * their runways, taxiways and aprons. Cheap to rebuild - called once per
+     * area, not per tile - so no incremental update path is needed.
+     */
+    setAirfieldExclusion(airfields: Airfield[]): void {
+        const toEnu = (lat: number, lon: number) => {
+            const enu = ecefToEnu(this.basis, geodeticToEcef(lat, lon, 0));
+            return { e: enu.e, n: enu.n };
+        };
+        this.airfieldExclusion = buildAirfieldExclusion(airfields, toEnu);
+    }
+
     async loadAirfields(): Promise<AirfieldsFile> {
         const pointer = this.manifest.airfields;
         if (pointer === undefined || this.manifestUrl === '') {
