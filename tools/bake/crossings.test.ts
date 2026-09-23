@@ -100,14 +100,6 @@ describe('planCrossings', () => {
         assert.equal(planCrossings([span], [approachW, approachE, along], flat).length, 0);
     });
 
-    it('does not lift an unmerged continuation of the ramp own road', () => {
-        // Same class and heading as approachW, but not touching its endpoint -
-        // an end mergeRoads missed, landing right on the ramp's own line.
-        const continuation: RoadPiece = { cls: 3, halfM: 4, points: [at(-40, 0), at(-300, 0)] };
-        const lines = planCrossings([span], [approachW, approachE, cross(1), continuation], flat);
-        assert.equal(lines.filter(l => l !== lines[0] && l !== lines[1]).length, 0);
-    });
-
     it('lifts a street that joins the ramp partway up, tapered back to ground', () => {
         // A side street T-joins the west approach 40 m out from the abutment.
         const side: RoadPiece = { cls: 6, halfM: 3, points: [at(-40, 0), at(-40, 150)] };

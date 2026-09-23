@@ -69,22 +69,6 @@ describe('carveGrid', () => {
         assert.equal(carveGrid(heights, size, bounds, [line(10)], 0), 0);
     });
 
-    it('lets a higher-priority line win even where a lower-priority one sits nearer', () => {
-        const heights = new Float32Array(size * size).fill(100);
-        // Both cross the same node; low is the exact centreline (distance 0),
-        // high is offset a couple of cells north (farther, but priority 1).
-        const low: GradeLine = { halfM: 10, priority: 0, points: line(105).points };
-        const high: GradeLine = {
-            halfM: 10, priority: 1,
-            points: [{ lon: 10.0, lat: 50.00531, h: 130 }, { lon: 10.01, lat: 50.00531, h: 130 }],
-        };
-        carveGrid(heights, size, bounds, [low, high], 0);
-        const mid = 16 * size + 16;
-        // The node sits just past high's core, so the batter takes a bite out
-        // of 130 - but it must still land well above low's own 105.
-        assert.ok(heights[mid] > 115, `expected the priority line to win, got ${heights[mid]}`);
-    });
-
     it('round-trips through RGR1', () => {
         const back = decodeRgr(encodeRgr([line(110)]));
         assert.equal(back.length, 1);

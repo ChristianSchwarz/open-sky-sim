@@ -8,7 +8,10 @@
  * .pdm the road comes within reach of, the lines with their design heights.
  * Ground too steep for that grade within MAX_EARTHWORK_M of the road (a
  * mountain road, a hairpin) is left alone: the profile only straightens a
- * road the terrain can actually carry flattened. The mesh bake reads those
+ * road the terrain can actually carry flattened - except where the road's
+ * surroundings are flat (FLAT_RADIUS_M, FLAT_RELIEF_M below), where a deep
+ * earthwork reading is a DEM glitch rather than real relief, and the profile
+ * is kept rather than dropping to raw, spiky ground. The mesh bake reads those
  * and lays the roadbed into the height grid before meshing, so embankments
  * and cuttings are ordinary terrain. Run it before `npm run bake:mesh`; after
  * it re-run bake:road-strokes and bake:bridges, whose ground has moved.
@@ -39,8 +42,18 @@ const JOIN_M = 1.5;
  * Deepest cut or highest fill, metres, the bake will build. Past it the road is
  * under a mountain or over a gorge the map has no tunnel or bridge for (the
  * Hai Van run is 475 m under its ridge), and digging it would carve a canyon.
+ *
+ * This only excuses genuine relief: FLAT_RADIUS_M below lifts the limit
+ * entirely where the ground around a point barely varies, because there a
+ * deep reading is a DEM glitch (a building, a bad cell), not a mountain, and
+ * leaving the point undraped just to honour a false spike drops a jagged
+ * artifact into otherwise flat, graded ground.
  */
 const MAX_EARTHWORK_M = 30;
+/** Radius, metres, a point's surroundings are read over to judge whether it is flat. */
+const FLAT_RADIUS_M = 1000;
+/** Relief within FLAT_RADIUS_M under this, metres, counts as flat: real hills clear it easily. */
+const FLAT_RELIEF_M = 15;
 
 interface Piece {
     halfM: number;
@@ -112,14 +125,19 @@ function readRoads(src: string, bbox?: number[]): Map<number, Piece[]> {
 }
 
 /**
- * The grade a road of this class is held to. A motorway is built to 4.5 %;
- * every other class - trunk down to residential - to 4 %. Ground steeper than
+ * The grade a road of this class is held to. A motorway is always built to
+ * 4.5 %. Every other class - trunk down to residential - is held to 4 %,
+ * except a run that lies entirely in flat surroundings (every sample clears
+ * `flatness` below), which gets the same 4.5 % a motorway does: nothing in a
+ * flat run calls for the tighter limit, and the extra half a percent is
+ * margin that keeps a minor stray bump from being fought down to 4 % only to
+ * open an earthwork deep enough to trip MAX_EARTHWORK_M. Ground steeper than
  * MAX_EARTHWORK_M would let a segment reach is left alone whatever the class:
  * a mountain road follows its hillside, because flattening it would mean an
  * embankment or cutting nothing in the terrain data calls for.
  */
-function maxGradeFor(cls: number): number {
-    return cls === MOTORWAY ? ROAD_GRADE_MAX : 0.04;
+function maxGradeFor(cls: number, flat: boolean): number {
+    return cls === MOTORWAY || flat ? ROAD_GRADE_MAX : 0.04;
 }
 
 /** Join pieces whose ends meet at exactly one other piece's end. */
@@ -202,6 +220,21 @@ function resample(pts: Piece['pts']): Array<{ lon: number; lat: number }> {
     return out;
 }
 
+/** Per-sample: is the ground within FLAT_RADIUS_M of this point flat (relief under FLAT_RELIEF_M)? */
+function flatness(ground: readonly number[]): boolean[] {
+    const w = Math.max(1, Math.round(FLAT_RADIUS_M / GRADE_STEP_M));
+    const out = new Array<boolean>(ground.length);
+    for (let i = 0; i < ground.length; i++) {
+        let lo = Infinity, hi = -Infinity;
+        for (let j = Math.max(0, i - w); j <= Math.min(ground.length - 1, i + w); j++) {
+            lo = Math.min(lo, ground[j]);
+            hi = Math.max(hi, ground[j]);
+        }
+        out[i] = hi - lo <= FLAT_RELIEF_M;
+    }
+    return out;
+}
+
 function median3(v: number[]): number[] {
     return v.map((_, i) => {
         const w = [v[Math.max(0, i - 1)], v[i], v[Math.min(v.length - 1, i + 1)]].sort((a, b) => a - b);
@@ -213,7 +246,7 @@ type TileLines = Map<string, GradeLine[]>;
 
 /** Every leaf tile a segment's reach touches gets that stretch whole. */
 function addToTiles(
-    perTile: TileLines, halfM: number, line: GradePoint[], workable: (i: number) => boolean, priority = 0,
+    perTile: TileLines, halfM: number, line: GradePoint[], workable: (i: number) => boolean,
 ): void {
     const reachM = halfM + ROADBED_SHOULDER_M + BATTER_REACH_M + 5;
     const runs = new Map<string, number[]>();
@@ -233,7 +266,7 @@ function addToTiles(
     for (const [key, segs] of runs) {
         let start = segs[0], prev = segs[0];
         const flush = (from: number, to: number) => {
-            (perTile.get(key) ?? perTile.set(key, []).get(key)!).push({ halfM, priority, points: line.slice(from, to + 2) });
+            (perTile.get(key) ?? perTile.set(key, []).get(key)!).push({ halfM, points: line.slice(from, to + 2) });
         };
         for (let k = 1; k < segs.length; k++) {
             if (segs[k] !== prev + 1) { flush(start, prev); start = segs[k]; }
@@ -285,7 +318,6 @@ function main(): void {
         const runs = stitch(pieces);
         pieceCount += pieces.length;
         runCount += runs.length;
-        const maxGrade = maxGradeFor(cls);
         for (const run of runs) {
             const pts = resample(run.pts);
             if (pts.length < 2) continue;
@@ -297,6 +329,12 @@ function main(): void {
             let last = ground.find(Number.isFinite)!;
             ground = ground.map(g => (Number.isFinite(g) ? (last = g) : last));
             ground = median3(median3(ground));
+            // Ground steeper than MAX_EARTHWORK_M lets a segment reach is a mountain
+            // road: left draped on the terrain, whatever class it is - unless the
+            // surroundings are flat, where that reading is trusted to be a glitch
+            // and the point stays graded rather than dropping to raw, spiky ground.
+            const flat = flatness(ground);
+            const maxGrade = maxGradeFor(cls, flat.every(f => f));
             const design = gradeProfile(ground, maxGrade);
             const line: GradePoint[] = pts.map((p, i) => ({ lon: p.lon, lat: p.lat, h: design[i] }));
             samples += pts.length;
@@ -307,9 +345,7 @@ function main(): void {
                 worstCut = Math.max(worstCut, ground[i] - design[i]);
                 if (i > 0 && Math.abs(design[i] - design[i - 1]) / GRADE_STEP_M > maxGrade + 1e-6) steep++;
             }
-            // Ground steeper than MAX_EARTHWORK_M lets a segment reach is a mountain
-            // road: left draped on the terrain, whatever class it is.
-            addToTiles(perTile, run.halfM, line, i => Math.abs(ground[i] - design[i]) <= MAX_EARTHWORK_M);
+            addToTiles(perTile, run.halfM, line, i => flat[i] || Math.abs(ground[i] - design[i]) <= MAX_EARTHWORK_M);
         }
     }
     console.log(`bake_planet_roadgrade: ${pieceCount} road pieces -> ${runCount} runs, ${byClass.size} classes`);
@@ -359,7 +395,7 @@ function main(): void {
             const roads: RoadPiece[] = [];
             for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) roads.push(...roadsOf(x + dx, y + dy));
             const lines = planCrossings(spans.map(r => ({ structure: r.structure, points: r.points })), roads, env, cstat);
-            for (const l of lines) addToTiles(perTile, l.halfM, l.points, () => true, l.priority ?? 1);
+            for (const l of lines) addToTiles(perTile, l.halfM, l.points, () => true);
         }
     }
     console.log(`crossings   ${cstat.crossings} bridge/road crossings: ${cstat.fills} approach fills, ${cstat.dips} cuttings, ${cstat.skipped} skipped (over ${MAX_CROSSING_WORK_M} m)`);

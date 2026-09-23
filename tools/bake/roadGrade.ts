@@ -57,19 +57,6 @@ export interface GradeLine {
     /** Half the carriageway width, metres. */
     halfM: number;
     points: GradePoint[];
-    /**
-     * Which authority wins where two lines both reach a node: higher first,
-     * nearest as the tie-break. Default 0, the general per-class profile. A
-     * crossing's fill, cutting or junction lift (crossings.ts) is 1: it
-     * exists only because a bridge somewhere on this road demands a specific
-     * height, and a general profile guessing at a flatter run of the same
-     * road must never be allowed to outvote it just for sitting closer to a
-     * particular node. Without the tier, carveGrid's plain nearest-wins let
-     * the two disagree from node to node along the same stretch of road -
-     * the ground flickering between two different authorities - which read
-     * as a street that never quite reached the bridge it was aimed at.
-     */
-    priority?: number;
 }
 
 /**
@@ -160,12 +147,10 @@ export function carveGrid(
     const cellX = ((bounds.east - bounds.west) * kx) / cells;
     const cellY = ((bounds.north - bounds.south) * ky) / cells;
     const bestDist = new Float32Array(size * size).fill(Infinity);
-    const bestPriority = new Int8Array(size * size).fill(-1);
     const bestH = new Float32Array(size * size);
     const bestHalf = new Float32Array(size * size);
 
     for (const line of lines) {
-        const priority = line.priority ?? 0;
         // At least three quarters of a cell either side: a roadbed narrower than
         // the grid can miss every node it crosses, and then it is not there.
         const core = Math.max(line.halfM + ROADBED_SHOULDER_M, 0.75 * Math.max(cellX, cellY));
@@ -188,14 +173,8 @@ export function carveGrid(
                         ? Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
                     const dist = Math.hypot(px - ax - dx * t, py - ay - dy * t);
                     const i = gy * size + gx;
-                    if (dist > reach) {
-                        continue;
-                    }
-                    const wins = priority > bestPriority[i]
-                        || (priority === bestPriority[i] && dist < bestDist[i]);
-                    if (wins) {
+                    if (dist < bestDist[i] && dist <= reach) {
                         bestDist[i] = dist;
-                        bestPriority[i] = priority;
                         bestH[i] = a.h + (b.h - a.h) * t;
                         bestHalf[i] = core;
                     }
@@ -228,29 +207,23 @@ export function carveGrid(
     return changed;
 }
 
-/**
- * RGR2: zlib of 'RGR2', u16 count, per line f32 halfM, u8 priority, u16 n,
- * n x (f32 lon, f32 lat, f32 h). RGR1 (no priority byte, implicitly all 0)
- * is still read, so an old bake keeps working until it is re-run.
- */
-const RGR2_MAGIC = 0x32524752;
-const RGR1_MAGIC = 0x31524752;
+/** RGR1: zlib of 'RGR1', u16 count, per line f32 halfM, u16 n, n x (f32 lon, f32 lat, f32 h). */
+const RGR_MAGIC = 0x31524752;
 
 export function encodeRgr(lines: readonly GradeLine[]): Uint8Array {
     let bytes = 6;
     for (const l of lines) {
-        bytes += 7 + l.points.length * 12;
+        bytes += 6 + l.points.length * 12;
     }
     const buf = new Uint8Array(bytes);
     const view = new DataView(buf.buffer);
-    view.setUint32(0, RGR2_MAGIC, true);
+    view.setUint32(0, RGR_MAGIC, true);
     view.setUint16(4, lines.length, true);
     let o = 6;
     for (const l of lines) {
         view.setFloat32(o, l.halfM, true);
-        view.setUint8(o + 4, l.priority ?? 0);
-        view.setUint16(o + 5, l.points.length, true);
-        o += 7;
+        view.setUint16(o + 4, l.points.length, true);
+        o += 6;
         for (const p of l.points) {
             view.setFloat32(o, p.lon, true);
             view.setFloat32(o + 4, p.lat, true);
@@ -264,12 +237,7 @@ export function encodeRgr(lines: readonly GradeLine[]): Uint8Array {
 export function decodeRgr(bytes: Uint8Array): GradeLine[] {
     const raw = unzlibSync(bytes);
     const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-    if (raw.byteLength < 6) {
-        throw new Error('Bad RGR magic');
-    }
-    const magic = view.getUint32(0, true);
-    const v2 = magic === RGR2_MAGIC;
-    if (!v2 && magic !== RGR1_MAGIC) {
+    if (raw.byteLength < 6 || view.getUint32(0, true) !== RGR_MAGIC) {
         throw new Error('Bad RGR magic');
     }
     const count = view.getUint16(4, true);
@@ -277,9 +245,8 @@ export function decodeRgr(bytes: Uint8Array): GradeLine[] {
     const out: GradeLine[] = [];
     for (let r = 0; r < count; r++) {
         const halfM = view.getFloat32(o, true);
-        const priority = v2 ? view.getUint8(o + 4) : 0;
-        const n = view.getUint16(o + (v2 ? 5 : 4), true);
-        o += v2 ? 7 : 6;
+        const n = view.getUint16(o + 4, true);
+        o += 6;
         const points: GradePoint[] = [];
         for (let i = 0; i < n; i++) {
             points.push({
@@ -287,7 +254,7 @@ export function decodeRgr(bytes: Uint8Array): GradeLine[] {
             });
             o += 12;
         }
-        out.push({ halfM, points, priority });
+        out.push({ halfM, points });
     }
     return out;
 }

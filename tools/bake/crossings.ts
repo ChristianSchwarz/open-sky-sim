@@ -252,7 +252,7 @@ export function planCrossings(
                         const cap = under - CLEARANCE_M;
                         if (hR - cap > MAX_CROSSING_WORK_M) { if (stats) stats.skipped++; continue; }
                         const line = senke(r, rs, i, u, cap, env);
-                        if (line) { out.push({ ...line, priority: 1 }); if (stats) stats.dips++; }
+                        if (line) { out.push(line); if (stats) stats.dips++; }
                     } else {
                         shift = Math.max(shift, hR + CLEARANCE_M + thickness - deckAt(along));
                     }
@@ -285,7 +285,7 @@ export function planCrossings(
                 }
                 if (worst > MAX_CROSSING_WORK_M) { if (stats) stats.skipped++; continue; }
                 if (worst > NEGLIGIBLE_M && pts.length >= 2) {
-                    out.push({ halfM: ap.piece.halfM, points: pts, priority: 1 });
+                    out.push({ halfM: ap.piece.halfM, points: pts });
                     if (stats) stats.fills++;
                     // A street that joins the ramp partway up (a T-junction) is not
                     // itself part of it - mergeRoads only fuses one class end to
@@ -327,25 +327,6 @@ function adjustJunctions(
             }
             // s = 0 is the bridge abutment itself, already the ramp's own end.
             if (bestS <= NEGLIGIBLE_M) continue;
-            // An unmerged continuation of the ramp's own road (a piece
-            // mergeRoads missed - a class change, a stitch mergeRoads did not
-            // make) lands its endpoint right on the ramp's own line too, at
-            // zero angle. That is not a junction; it is the same road, which
-            // already has its own general profile and needs no lift here. A
-            // real side street crosses at an angle.
-            const dir2 = xy(f, r2.points[end === 0 ? 1 : r2.points.length - 2]);
-            const dx2 = dir2.x - pxy.x, dy2 = dir2.y - pxy.y;
-            const len2m = Math.hypot(dx2, dy2);
-            if (len2m > 1e-6) {
-                let i = 0;
-                while (i + 1 < poly.length && ps[i + 1] < bestS) i++;
-                const a = xy(f, poly[i]), b = xy(f, poly[Math.min(i + 1, poly.length - 1)]);
-                const rampLenXY = Math.hypot(b.x - a.x, b.y - a.y);
-                if (rampLenXY > 1e-6) {
-                    const sin = Math.abs((dx2 * (b.y - a.y) - dy2 * (b.x - a.x)) / (len2m * rampLenXY));
-                    if (sin < MIN_CROSSING_SIN) continue;
-                }
-            }
             const junctionH = rampHeightAt(bestS);
             const poly2 = oriented(r2, end);
             const ps2 = cumulative(f, poly2);
@@ -363,7 +344,7 @@ function adjustJunctions(
                 if (d - g <= NEGLIGIBLE_M) { if (++settled >= 2) break; } else settled = 0;
             }
             if (worst > NEGLIGIBLE_M && worst <= MAX_CROSSING_WORK_M && pts2.length >= 2) {
-                out.push({ halfM: r2.halfM, points: pts2, priority: 1 });
+                out.push({ halfM: r2.halfM, points: pts2 });
             }
         }
     }
