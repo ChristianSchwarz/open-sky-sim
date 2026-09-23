@@ -116,3 +116,31 @@ export function cameraRouteFromLocation(): CameraRoute | undefined {
     }
     return parseCameraRoute(window.location.search, window.location.hash);
 }
+
+/**
+ * Drop the URL's camera route, if any.
+ *
+ * A previous spawn or fixed-camera view leaves `lat`/`lng`/etc in the URL so
+ * a reload or copied link lands back on it (see `writeCameraRouteToLocation`).
+ * That same stickiness fights the area picker: without this, choosing a new
+ * area and flying there would still boot into whatever area the leftover
+ * coordinates fall in, silently ignoring the pick.
+ */
+export function clearCameraRouteFromLocation(): void {
+    if (typeof window === 'undefined') {
+        return;
+    }
+    const { search, hash, pathname } = window.location;
+    const query = new URLSearchParams(search);
+    const fragment = new URLSearchParams(stripHash(hash));
+    for (const k of CAMERA_ROUTE_PARAMS) {
+        query.delete(k);
+        fragment.delete(k);
+    }
+    const nextSearch = query.toString();
+    const nextHash = fragment.toString();
+    window.history.replaceState(
+        window.history.state, '',
+        `${pathname}${nextSearch ? `?${nextSearch}` : ''}${nextHash ? `#${nextHash}` : ''}`,
+    );
+}

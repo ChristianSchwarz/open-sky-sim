@@ -3568,6 +3568,7 @@ export class Game {
         const here = airfieldsInArea(file, this.playArea.area.name);
         this.sceneRunways = sceneRunwaysOf(
             here, this.planetTerrain.basis, AIRFIELD_SURFACE_EPS_M);
+        this.planetTerrain.setAirfieldExclusion(here);
         this.homeRunway = pickStartRunway(this.sceneRunways);
         this.activeRunway = pickStartRunway(this.sceneRunways, this.preferredIcao);
         const homeField = this.homeRunway === undefined
