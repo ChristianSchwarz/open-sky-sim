@@ -24,7 +24,6 @@ import {
 } from '../../terrain/geodesy';
 import { toneCategoryOfClass } from '../../terrain/terrainEntity';
 import { TileCover } from '../../terrain/tileHeightIndex';
-import { TerrainClass } from '../../terrain/tones';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../materials/materials';
 import { Model } from '../models/models';
 import { updateUniforms } from '../utils';
@@ -91,7 +90,7 @@ const PAVED_CATEGORY: Partial<Record<RunwaySurface, PaletteCategory>> = {
  * A mown or rolled strip reads a shade paler than the field or scrub round
  * it, and that lift is all that marks it out: the hue is the ground's own.
  */
-export const GROUND_STRIP_LIGHTEN = 1.18;
+export const GROUND_STRIP_LIGHTEN = 1.1;
 
 /**
  * The tone an unpaved strip is drawn in until the terrain under it is on
@@ -101,6 +100,27 @@ const GROUND_STRIP_FALLBACK: Partial<Record<RunwaySurface, PaletteCategory>> = {
     grass: PaletteCategory.TERRAIN_GRASS,
     gravel: PaletteCategory.TERRAIN_BARE,
 };
+
+/**
+ * A grass/dirt runway this close to sea level (its own baked plane, not the
+ * ground - see below) is not trusted to read its own cover.
+ *
+ * The bake resolves any facet where the OSM coastline calls a spot land but
+ * the WorldCover raster calls it water by painting it Grass rather than sea
+ * (see tools/bake/buildTile.ts's own comment on that fallback) - reasonable
+ * for the usual sliver either source could have the shoreline off by, but a
+ * runway's own footprint is exactly where that sliver is widest: the pad cut
+ * for it is real land by construction, so the coast vector always calls it
+ * land, while a low-lying strip is exactly the kind of ground a coarse
+ * raster mismeasures as water. Reading that facet's colour back onto the
+ * runway would just be redrawing the bake's own guess in a brighter green.
+ *
+ * `airfield.plane.heightMsl` is what decides this, not the ground reading -
+ * it comes from the same OSM/SRTM elevation the bake trusted to cut the pad,
+ * so it says how high the real runway is regardless of what any one facet's
+ * disputed colour claims.
+ */
+const RUNWAY_SEA_LEVEL_GUARD_M = 2;
 
 /**
  * A colour to draw a part in: a palette tone, optionally lifted, and
@@ -130,17 +150,19 @@ function flatMaterial(materials: SceneMaterialManager, paint: Paint): THREE.Mate
 /**
  * The paint of an unpaved strip on ground of a given cover.
  *
- * The same rule the terrain shader applies to the facet: a landcover class
- * picks a palette tone, except unmapped ground on a land-use tile, whose
- * baked colour is already the blended regional mean and is painted as it
- * is. The strip follows either, a shade lighter.
+ * Always the observed colour, never a predefined palette tone: `cover.rgb` is
+ * the imagery-averaged colour the bake itself recorded for this facet (see
+ * groundColor.ts), the same one every land vertex carries regardless of its
+ * class, so an unpaved strip painted from it always matches the ground it
+ * sits in rather than a generic swatch for "grass" or "bare" that happens to
+ * look wrong against a particular facet's real colour. `category` is kept
+ * only to say how the paint fogs - it plays no part in the colour itself.
  */
 function groundPaint(cover: TileCover): Paint {
-    const ground = cover.cls === TerrainClass.Ground;
     return {
         category: toneCategoryOfClass(cover.cls),
         lighten: GROUND_STRIP_LIGHTEN,
-        rawColor: ground ? '#' + cover.rgb.toString(16).padStart(6, '0') : undefined,
+        rawColor: '#' + cover.rgb.toString(16).padStart(6, '0'),
     };
 }
 
@@ -401,12 +423,25 @@ export function buildAirfieldModel(
             return paved;
         }
         const centre = toEnu(runway.lat, runway.lon);
-        const cover = groundCoverAt?.(centre.e, centre.n);
+        // See RUNWAY_SEA_LEVEL_GUARD_M: a runway this low is exactly where the
+        // bake's own coast-vector-vs-raster fallback can hand back Grass for
+        // what is really still water, so its cover reading is not trusted.
+        const nearSeaLevel = Math.abs(airfield.plane.heightMsl) <= RUNWAY_SEA_LEVEL_GUARD_M;
+        const cover = nearSeaLevel ? undefined : groundCoverAt?.(centre.e, centre.n);
         const paint = cover !== undefined ? groundPaint(cover) : {
-            category: GROUND_STRIP_FALLBACK[runway.surface] ?? PaletteCategory.TERRAIN_GRASS,
+            // A guarded runway falls back to sand rather than its surface's
+            // usual stand-in: the usual fallback (grass for a grass runway)
+            // is the same wrong green the guard exists to avoid, and sand is
+            // what the bake itself paints the equivalent low-lying disputed
+            // ground beside the coast (see SHORE_SAND_M in buildTile.ts).
+            category: nearSeaLevel
+                ? PaletteCategory.TERRAIN_SAND
+                : GROUND_STRIP_FALLBACK[runway.surface] ?? PaletteCategory.TERRAIN_GRASS,
             lighten: GROUND_STRIP_LIGHTEN,
         };
-        unpaved.push({ runway, paint, zoom: cover?.zoom ?? -1 });
+        // A guarded strip is never repainted: its cover is never trusted, no
+        // matter how deep a tile eventually draws under it.
+        unpaved.push({ runway, paint, zoom: nearSeaLevel ? Infinity : cover?.zoom ?? -1 });
         return paint;
     };
     const paints = new Map(airfield.runways.map(r => [r, surfacePaint(r)]));

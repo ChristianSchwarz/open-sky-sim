@@ -539,9 +539,10 @@ describe('airfield model', () => {
                 'the taxiways stayed asphalt on a concrete field');
         });
 
-        it('lays an unpaved strip in the tone of the ground under it, lifted', () => {
+        it('lays an unpaved strip in the observed colour of the ground under it, lifted', () => {
             // Neither a field nor a road: the strip is the terrain it is cut
-            // into, a shade lighter, whatever that terrain turns out to be.
+            // into, a shade lighter, whatever that terrain turns out to be -
+            // its own observed colour, never a predefined palette swatch.
             const bare = { cls: 6 /* TerrainClass.Bare */, rgb: 0x807050, zoom: 12 };
             const built = buildAirfieldModel(gclp({
                 runways: [{ ...gclp().runways[0], surface: 'grass' }],
@@ -551,7 +552,7 @@ describe('airfield model', () => {
             const strip = materialOf(flats.find(o => materialOf(o).category === 'TERRAIN_BARE')!);
             assert.equal(strip.overbright, GROUND_STRIP_LIGHTEN,
                 'the strip is not lifted above the ground');
-            assert.equal(strip.rawColor, undefined, 'a classed facet is its palette tone');
+            assert.equal(strip.rawColor, '#807050', 'the strip is a palette tone, not the observed colour');
             assert.equal(built.groundStrips.length, 1, 'the strip is not handed back');
             assert.equal(built.groundStrips[0].paintedZoom, 12,
                 'the strip does not remember which tile painted it');
