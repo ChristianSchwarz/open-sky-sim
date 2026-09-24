@@ -32,3 +32,6 @@ dist
 
 # Global coarse DEM/imagery sources for the orbit view - see tools/prep_global_dem.py
 /data/global/
+
+# Scratch output of tools/rebake_all.mjs
+/rebake_all.log

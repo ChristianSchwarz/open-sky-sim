@@ -74,6 +74,19 @@ export const LAND_TERRAIN_CATEGORIES: ReadonlySet<PaletteCategory> = new Set([
 /** How much brighter land terrain is at full daylight; fades out with nightMix. */
 const DAYTIME_TERRAIN_BOOST = 0.2;
 
+/** How much more saturated land terrain is at full daylight; fades out with nightMix. */
+const DAYTIME_TERRAIN_SATURATION_BOOST = 0.1;
+
+/** Scales a linear-light colour's distance from its own luma, i.e. HSL saturation without the round trip. */
+function saturate(rgb: Rgb, factor: number): Rgb {
+    const l = luma(rgb);
+    return [
+        l + (rgb[0] - l) * factor,
+        l + (rgb[1] - l) * factor,
+        l + (rgb[2] - l) * factor,
+    ];
+}
+
 const SLOT_BY_CATEGORY: ReadonlyMap<PaletteCategory, SkySlot> = new Map([
     [PaletteCategory.BACKGROUND, SkySlot.HORIZON],
     [PaletteCategory.FOG_SKY, SkySlot.HORIZON],
@@ -209,9 +222,10 @@ function lightFor(day: Palette, night: Palette, sky: SkySample): Rgb {
     return [gain[0] * level, gain[1] * level, gain[2] * level];
 }
 
-function blendColor(dayCss: string, nightCss: string, nightMix: number, gain: Rgb): string {
+function blendColor(dayCss: string, nightCss: string, nightMix: number, gain: Rgb, satBoost: number = 1): string {
     const base = mix(linearOf(dayCss), linearOf(nightCss), nightMix);
-    return toHex(toSrgb([base[0] * gain[0], base[1] * gain[1], base[2] * gain[2]]));
+    const lit: Rgb = [base[0] * gain[0], base[1] * gain[1], base[2] * gain[2]];
+    return toHex(toSrgb(satBoost === 1 ? lit : saturate(lit, satBoost)));
 }
 
 /**
@@ -231,21 +245,23 @@ export function blendPalettes(day: Palette, night: Palette, sky: SkySample): Pal
         }
 
         let gain = gainForSlot(sky, SLOT_BY_CATEGORY.get(category) ?? SkySlot.GROUND);
+        let satBoost = 1;
         if (LAND_TERRAIN_CATEGORIES.has(category)) {
             const boost = 1 + DAYTIME_TERRAIN_BOOST * (1 - nightMix);
             gain = [gain[0] * boost, gain[1] * boost, gain[2] * boost];
+            satBoost = 1 + DAYTIME_TERRAIN_SATURATION_BOOST * (1 - nightMix);
         }
 
         if (typeof dayEntry === 'string' && typeof nightEntry === 'string') {
-            colors[category] = blendColor(dayEntry, nightEntry, nightMix, gain);
+            colors[category] = blendColor(dayEntry, nightEntry, nightMix, gain, satBoost);
         } else {
             // One of the two authored a dither pair; blend both tones, falling
             // back to the flat colour for whichever side has only one.
             const [dayA, dayB] = typeof dayEntry === 'string' ? [dayEntry, dayEntry] : dayEntry;
             const [nightA, nightB] = typeof nightEntry === 'string' ? [nightEntry, nightEntry] : nightEntry;
             colors[category] = [
-                blendColor(dayA, nightA, nightMix, gain),
-                blendColor(dayB, nightB, nightMix, gain),
+                blendColor(dayA, nightA, nightMix, gain, satBoost),
+                blendColor(dayB, nightB, nightMix, gain, satBoost),
             ];
         }
     }
