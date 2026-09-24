@@ -69,19 +69,21 @@ const DEGENERATE_SEGMENT_M = 0.01;
 const TAXIWAY_STEP_M = 20;
 
 /**
- * What each paved surface is made of.
+ * What each surface fogs as, and what it is drawn in before the terrain
+ * under it has streamed in (see {@link GroundStrip}).
  *
- * Concrete is its own tone rather than sharing asphalt's. A military field
- * laid in slabs — every Soviet-era one in the Crimea area — is markedly paler
- * than an asphalt civil field, and from the air that is most of what tells
- * them apart. OSM records which it is, so there is no reason to guess.
- *
- * Grass and gravel are not here: an unpaved strip is the ground it is cut
- * into, so it takes the tone of the terrain under it — see {@link GroundStrip}.
+ * Every runway surface - paved or not - is drawn in the observed colour of
+ * the ground it sits on (see {@link groundPaint}); this is only the tone
+ * used for fog and for the stand-in before that colour is known. Concrete
+ * gets its own stand-in rather than sharing asphalt's - a military field laid
+ * in slabs is markedly paler than an asphalt civil field, and OSM records
+ * which it is, so there is no reason to guess even for a placeholder.
  */
-const PAVED_CATEGORY: Partial<Record<RunwaySurface, PaletteCategory>> = {
+const RUNWAY_FALLBACK_CATEGORY: Record<RunwaySurface, PaletteCategory> = {
     asphalt: PaletteCategory.SCENERY_ROAD_SECONDARY,
     concrete: PaletteCategory.SCENERY_BASE_CONCRETE,
+    grass: PaletteCategory.TERRAIN_GRASS,
+    gravel: PaletteCategory.TERRAIN_BARE,
 };
 
 /**
@@ -89,21 +91,19 @@ const PAVED_CATEGORY: Partial<Record<RunwaySurface, PaletteCategory>> = {
  *
  * A mown or rolled strip reads a shade paler than the field or scrub round
  * it, and that lift is all that marks it out: the hue is the ground's own.
+ * Paved surfaces get none of this - asphalt and concrete are drawn at the
+ * ground's own observed brightness, not lifted above it.
  */
 export const GROUND_STRIP_LIGHTEN = 1.1;
 
-/**
- * The tone an unpaved strip is drawn in until the terrain under it is on
- * screen and can say what it actually is.
- */
-const GROUND_STRIP_FALLBACK: Partial<Record<RunwaySurface, PaletteCategory>> = {
-    grass: PaletteCategory.TERRAIN_GRASS,
-    gravel: PaletteCategory.TERRAIN_BARE,
-};
+/** How much a runway surface is lifted above the ground colour it samples. */
+function runwayLighten(surface: RunwaySurface): number {
+    return surface === 'asphalt' || surface === 'concrete' ? 1 : GROUND_STRIP_LIGHTEN;
+}
 
 /**
- * A grass/dirt runway this close to sea level (its own baked plane, not the
- * ground - see below) is not trusted to read its own cover.
+ * A runway this close to sea level (its own baked plane, not the ground -
+ * see below) is not trusted to read its own cover.
  *
  * The bake resolves any facet where the OSM coastline calls a spot land but
  * the WorldCover raster calls it water by painting it Grass rather than sea
@@ -148,22 +148,67 @@ function flatMaterial(materials: SceneMaterialManager, paint: Paint): THREE.Mate
 }
 
 /**
- * The paint of an unpaved strip on ground of a given cover.
+ * The paint of a runway strip on ground of a given cover.
  *
  * Always the observed colour, never a predefined palette tone: `cover.rgb` is
  * the imagery-averaged colour the bake itself recorded for this facet (see
  * groundColor.ts), the same one every land vertex carries regardless of its
- * class, so an unpaved strip painted from it always matches the ground it
- * sits in rather than a generic swatch for "grass" or "bare" that happens to
- * look wrong against a particular facet's real colour. `category` is kept
+ * class, so a strip painted from it always matches the ground it sits in
+ * rather than a generic swatch for "grass", "bare" or "asphalt" that happens
+ * to look wrong against a particular facet's real colour. `category` is kept
  * only to say how the paint fogs - it plays no part in the colour itself.
  */
-function groundPaint(cover: TileCover): Paint {
+function groundPaint(cover: TileCover, lighten: number): Paint {
     return {
         category: toneCategoryOfClass(cover.cls),
-        lighten: GROUND_STRIP_LIGHTEN,
+        lighten,
         rawColor: '#' + cover.rgb.toString(16).padStart(6, '0'),
     };
+}
+
+/**
+ * Where a runway's colour is sampled: its low threshold, its midpoint and its
+ * high threshold - not just the midpoint alone, since a long runway can cross
+ * more than one kind of ground (a 3 km strip is not one facet), and the
+ * midpoint by itself can just as easily land on the odd one out as on the
+ * typical one.
+ */
+function runwaySamplePoints(runway: AirfieldRunway): { lat: number; lon: number }[] {
+    const [low, high] = runway.thresholds;
+    return [
+        { lat: low[0], lon: low[1] },
+        { lat: runway.lat, lon: runway.lon },
+        { lat: high[0], lon: high[1] },
+    ];
+}
+
+/**
+ * One reading for several samples along a runway, or undefined where none of
+ * them has anything to say yet.
+ *
+ * The colour is the plain average of whichever samples have resolved -
+ * partial is still better than the single-point reading this replaced, and
+ * waiting for every last one would leave a runway on its stand-in tone for as
+ * long as its slowest-to-stream end. The zoom is the *worst* of them, though:
+ * repainting has to wait for every sample to reach a given depth before that
+ * depth's colour is trusted, or a runway would flicker between a fine answer
+ * at one end and a stale coarse one blended in from the other.
+ */
+export function combineCover(covers: readonly (TileCover | undefined)[]): TileCover | undefined {
+    const present = covers.filter((c): c is TileCover => c !== undefined);
+    if (present.length === 0) {
+        return undefined;
+    }
+    let r = 0, g = 0, b = 0, zoom = Infinity;
+    for (const c of present) {
+        r += (c.rgb >> 16) & 0xff;
+        g += (c.rgb >> 8) & 0xff;
+        b += c.rgb & 0xff;
+        zoom = Math.min(zoom, c.zoom);
+    }
+    const n = present.length;
+    const rgb = (Math.round(r / n) << 16) | (Math.round(g / n) << 8) | Math.round(b / n);
+    return { cls: present[0].cls, rgb, zoom };
 }
 
 /**
@@ -313,8 +358,8 @@ class MeshParts {
 }
 
 /**
- * An unpaved runway whose colour is not final yet, because the finest tile
- * of the terrain under it has not been drawn.
+ * A runway whose colour is not final yet, because the finest tile of the
+ * terrain under it has not been drawn.
  *
  * Airfields are built at boot, before the first frame has put a single tile
  * on screen, so for most of them the ground's own tone cannot be read then;
@@ -324,20 +369,31 @@ class MeshParts {
  * {@link repaintGroundStrip}, each time a deeper tile is drawn under it.
  */
 export interface GroundStrip {
-    /** Scene position of the strip's centre, where the cover is read. */
-    x: number;
-    z: number;
+    /** Scene positions to read the cover at: low threshold, midpoint, high threshold. */
+    samples: { x: number; z: number }[];
     /** Its pavement, one mesh per LOD level. */
     meshes: THREE.Mesh[];
-    /** Zoom of the tile it was last painted from; -1 for the stand-in. */
+    /** Worst zoom among the samples last painted from; -1 for the stand-in. */
     paintedZoom: number;
+    /** How far above the sampled ground colour this surface is lifted - see {@link runwayLighten}. */
+    lighten: number;
 }
 
-/** Repaint an unpaved strip in the colour of the ground under it. */
+/**
+ * The strip's current reading: one cover per sample point, averaged - see
+ * {@link combineCover} - or undefined where none of them has drawn ground yet.
+ */
+export function sampleGroundStrip(
+    strip: GroundStrip, coverAt: (x: number, z: number) => TileCover | undefined,
+): TileCover | undefined {
+    return combineCover(strip.samples.map(p => coverAt(p.x, p.z)));
+}
+
+/** Repaint a runway strip in the colour of the ground under it. */
 export function repaintGroundStrip(
     strip: GroundStrip, cover: TileCover, materials: SceneMaterialManager,
 ): void {
-    const material = flatMaterial(materials, groundPaint(cover));
+    const material = flatMaterial(materials, groundPaint(cover, strip.lighten));
     for (const mesh of strip.meshes) {
         mesh.material = material;
     }
@@ -348,7 +404,7 @@ export interface AirfieldModel {
     model: Model;
     /** Scene position the geometry is built around. */
     origin: THREE.Vector3;
-    /** Every unpaved runway, to be repainted as the ground under it is drawn. */
+    /** Every runway, to be repainted as the ground under it is drawn. */
     groundStrips: GroundStrip[];
 }
 
@@ -412,36 +468,34 @@ export function buildAirfieldModel(
         sceneAt(basis, e, n, (groundElevationAt?.(e, n) ?? elevationAt(e, n)) + lift)
             .sub(originScene);
 
-    // An unpaved strip is the ground it is cut into, a shade lighter. Read
-    // once per runway here from whatever is drawn, and handed back to be
-    // repainted as deeper tiles come in; until anything is drawn it is a
-    // stand-in tone for its surface.
-    const unpaved: { runway: AirfieldRunway; paint: Paint; zoom: number }[] = [];
+    // Every runway - paved or not - is the ground it is cut into, sampled at
+    // its two thresholds and its midpoint (see runwaySamplePoints) once per
+    // runway here from whatever is drawn, and handed back to be repainted as
+    // deeper tiles come in; until anything is drawn it is a stand-in tone for
+    // its surface.
+    const unpaved: { runway: AirfieldRunway; paint: Paint; zoom: number; points: { e: number; n: number }[] }[] = [];
     const surfacePaint = (runway: AirfieldRunway): Paint => {
-        const paved = PAVED_CATEGORY[runway.surface];
-        if (paved !== undefined) {
-            return paved;
-        }
-        const centre = toEnu(runway.lat, runway.lon);
+        const lighten = runwayLighten(runway.surface);
+        const points = runwaySamplePoints(runway).map(p => toEnu(p.lat, p.lon));
         // See RUNWAY_SEA_LEVEL_GUARD_M: a runway this low is exactly where the
         // bake's own coast-vector-vs-raster fallback can hand back Grass for
         // what is really still water, so its cover reading is not trusted.
         const nearSeaLevel = Math.abs(airfield.plane.heightMsl) <= RUNWAY_SEA_LEVEL_GUARD_M;
-        const cover = nearSeaLevel ? undefined : groundCoverAt?.(centre.e, centre.n);
-        const paint = cover !== undefined ? groundPaint(cover) : {
+        const cover = nearSeaLevel
+            ? undefined
+            : combineCover(points.map(p => groundCoverAt?.(p.e, p.n)));
+        const paint = cover !== undefined ? groundPaint(cover, lighten) : {
             // A guarded runway falls back to sand rather than its surface's
             // usual stand-in: the usual fallback (grass for a grass runway)
             // is the same wrong green the guard exists to avoid, and sand is
             // what the bake itself paints the equivalent low-lying disputed
             // ground beside the coast (see SHORE_SAND_M in buildTile.ts).
-            category: nearSeaLevel
-                ? PaletteCategory.TERRAIN_SAND
-                : GROUND_STRIP_FALLBACK[runway.surface] ?? PaletteCategory.TERRAIN_GRASS,
-            lighten: GROUND_STRIP_LIGHTEN,
+            category: nearSeaLevel ? PaletteCategory.TERRAIN_SAND : RUNWAY_FALLBACK_CATEGORY[runway.surface],
+            lighten,
         };
         // A guarded strip is never repainted: its cover is never trusted, no
         // matter how deep a tile eventually draws under it.
-        unpaved.push({ runway, paint, zoom: nearSeaLevel ? Infinity : cover?.zoom ?? -1 });
+        unpaved.push({ runway, paint, zoom: nearSeaLevel ? Infinity : cover?.zoom ?? -1, points });
         return paint;
     };
     const paints = new Map(airfield.runways.map(r => [r, surfacePaint(r)]));
@@ -468,18 +522,16 @@ export function buildAirfieldModel(
         }
         levels.push({ flats: parts.build(materials), volumes: solids.build(materials) });
     }
-    const groundStrips: GroundStrip[] = unpaved.map(({ runway, paint, zoom }) => {
-        const centre = toEnu(runway.lat, runway.lon);
-        const at = sceneAt(basis, centre.e, centre.n, elevationAt(centre.e, centre.n));
+    const groundStrips: GroundStrip[] = unpaved.map(({ runway, paint, zoom, points }) => {
         const key = paintKey(paint);
         return {
-            x: at.x,
-            z: at.z,
+            samples: points.map(p => sceneAt(basis, p.e, p.n, elevationAt(p.e, p.n))),
             meshes: flatsPerLevel.flatMap(parts => {
                 const mesh = parts.meshes.get(key);
                 return mesh === undefined ? [] : [mesh];
             }),
             paintedZoom: zoom,
+            lighten: runwayLighten(runway.surface),
         };
     });
     return {

@@ -1575,11 +1575,32 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             ? baseColor
             : [facet[1], facet[2], facet[3]];
         landColor.push(flat[0], flat[1], flat[2]);
+        // Tested once, at the facet's own centroid, not per vertex: a
+        // decimated facet's *vertices* can sit outside the pad's flattened
+        // core even while the facet itself - what actually gets drawn under
+        // the runway - sits inside it, and per-vertex would then still blend
+        // in the lattice colour at those corners. One flat colour for the
+        // whole facet also matches how paved ground is treated everywhere
+        // else here: it does not need to blend smoothly into the district
+        // around it the way natural ground does.
+        let paved3: readonly [number, number, number] | undefined;
+        if (ground && paved !== undefined) {
+            const mx = (a.e + b.e + c.e) / 3, mz = (a.n + b.n + c.n) / 3, mu = (a.u + b.u + c.u) / 3;
+            const ecef = enuToEcef(basis, { e: mx, n: mz, u: mu });
+            const geo = ecefToGeodetic(ecef.x, ecef.y, ecef.z);
+            if (paved(geo.lon, geo.lat)) {
+                paved3 = [facet[1], facet[2], facet[3]];
+            }
+        }
         for (const p of [a, b, c]) {
             let rgb = flat;
-            if (ground) {
+            if (paved3 !== undefined) {
+                rgb = paved3;
+            } else if (ground) {
                 const ecef = enuToEcef(basis, p);
                 const geo = ecefToGeodetic(ecef.x, ecef.y, ecef.z);
+                // Off a pad, the wide lattice mean is what untagged ground
+                // is meant to look like - see groundColor.ts.
                 rgb = input.groundColorAt!(geo.lon, geo.lat) ?? flat;
             }
             landVertColor.push(rgb[0], rgb[1], rgb[2]);

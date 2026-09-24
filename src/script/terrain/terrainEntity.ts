@@ -53,6 +53,7 @@ import { BridgeMeshes } from './bridgeMeshes';
 import { RoadStrokes } from './roadStrokes';
 import { buildRoadExclusion } from './roadExclusion';
 import { buildAirfieldExclusion, AirfieldExclusion } from './airfieldExclusion';
+import { coverInPtmTile } from './finestCover';
 import { Airfield } from './airfields';
 import { OceanPatch, buildOceanPatch, disposeOceanPatch } from './oceanPatch';
 import { PtmTile, decodePtm } from './ptm';
@@ -1068,6 +1069,40 @@ export class TerrainEntity implements Entity {
      */
     drawnCoverAtWorld(x: number, z: number): TileCover | undefined {
         return this.drawnIndexAt(x, z)?.coverAtWorld(x, z);
+    }
+
+    /**
+     * The observed satellite-imagery colour of the finest baked tile at a
+     * scene point, regardless of what LOD is currently drawn there.
+     *
+     * {@link drawnCoverAtWorld} only ever answers from whatever tile the
+     * camera's own distance-based LOD happens to have on screen, which for an
+     * area just streamed in - or never approached closely - can be many
+     * levels coarser than the pyramid actually has: its facet is a
+     * district-wide blend, not the true ground colour. This fetches (or
+     * reuses, if already cached) the one leaf tile at {@link maxZoom} that
+     * covers the point and reads its own facet directly, independent of the
+     * camera or the draw list - for the handful of one-off lookups, like an
+     * airfield's own runway thresholds, that need the real answer rather than
+     * whatever happens to be on screen.
+     */
+    async finestCoverAtWorld(x: number, z: number, priority = 0): Promise<TileCover | undefined> {
+        const zoom = this.maxZoom;
+        if (zoom < 0) {
+            return undefined;
+        }
+        const g = enuToGeodeticApprox(this.basis, x, northFromSceneZ(z), 0);
+        const id = tileAtLonLat(zoom, g.lon, g.lat);
+        if (this.meshStore.isAbsent(id)) {
+            return undefined;
+        }
+        const tile = this.meshStore.get(id) ?? await this.meshStore.request(id, priority).catch(() => null);
+        if (!tile) {
+            return undefined;
+        }
+        const origin = tileOriginWorld(id, tile.centerHeightM, this.basis);
+        return coverInPtmTile(
+            tile, (x - origin.x) / tile.quantScale, (z - origin.z) / tile.quantScale, zoom);
     }
 
     /** The index of the drawn land tile holding a scene point, if any. */

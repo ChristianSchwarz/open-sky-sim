@@ -558,6 +558,31 @@ describe('airfield model', () => {
                 'the strip does not remember which tile painted it');
         });
 
+        it('averages a runway\'s colour over its two thresholds and its midpoint', () => {
+            // A long runway is not one facet: reading only its midpoint can
+            // just as easily land on the odd patch of ground out as on the
+            // typical one, so the colour is the average of all three.
+            const covers = [
+                { cls: 4 /* TerrainClass.Crop */, rgb: 0x303030, zoom: 10 },
+                { cls: 4 /* TerrainClass.Crop */, rgb: 0x030303, zoom: 11 },
+                { cls: 4 /* TerrainClass.Crop */, rgb: 0x000000, zoom: 12 },
+            ];
+            let call = 0;
+            const built = buildAirfieldModel(gclp({
+                runways: [{ ...gclp().runways[0], surface: 'grass' }],
+            }), BASIS, MATERIALS, undefined, () => covers[call++])!;
+            assert.equal(call, 3, 'the runway was not sampled at all three points');
+            const strip = built.model.lod[0].flats.map(materialOf)
+                .find(m => m.rawColor !== undefined);
+            assert.ok(strip !== undefined, 'no part took the sampled colour');
+            // (0x30+0x03+0x00)/3 = 0x11 red; likewise the other channels.
+            assert.equal(strip.rawColor, '#111111');
+            // The worst (least refined) of the three decides the zoom it was
+            // painted at, not the best - a runway is not "finished" until
+            // every one of its samples has caught up.
+            assert.equal(built.groundStrips[0].paintedZoom, 10);
+        });
+
         it('paints a strip on unmapped ground in that ground\'s own baked colour', () => {
             // The terrain shader paints TerrainClass.Ground as its blended
             // regional colour, not a tone, so the strip has to as well or it

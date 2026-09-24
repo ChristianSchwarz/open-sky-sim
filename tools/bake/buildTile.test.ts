@@ -991,6 +991,36 @@ describe('buildTile regions', () => {
         assert.deepEqual([...cropColours], ['1,2,3']);
     });
 
+    it('prefers the facet\'s own sample over the lattice inside a pad\'s flattened core', () => {
+        // A runway is narrower than one lattice cell, so its own colour would
+        // otherwise vanish into the district-wide mean the lattice hands
+        // back for every point, paved or not.
+        const crop = regionAt(-1, -1, CELLS / 2, CELLS + 1, true, TerrainClass.Crop);
+        const pads = [{
+            centerX: 0, centerZ: 0, halfW: 2000, halfD: 4000, featherM: 80, heightMsl: 41.7,
+            basis: BASIS, lat: 28.0015, lon: -15.3937,
+        }];
+        const r = buildTile(base({
+            polygons: [coastAt(CELLS + 2)],
+            heights: heightsFrom(() => 50),
+            cover: uniformCover(TerrainClass.Bare, [200, 150, 100]),
+            regions: [crop],
+            pads,
+            skirtDepthM: 0,
+            groundColorAt: (_lon, _lat, cls) => (cls === undefined ? [1, 2, 3] : undefined),
+        }));
+        const tile = decodePtm(r.bytes);
+        const groundColours = new Set<string>();
+        for (let v = 0; v * 4 < tile.landAttrs.length; v++) {
+            const a = tile.landAttrs;
+            if (a[v * 4 + 3] === TerrainClass.Ground) {
+                groundColours.add(`${a[v * 4]},${a[v * 4 + 1]},${a[v * 4 + 2]}`);
+            }
+        }
+        // The facet's own cover sample, not the lattice's [1,2,3].
+        assert.deepEqual([...groundColours], ['200,150,100']);
+    });
+
     it('does not drop a landuse-only boundary down to sea level', () => {
         // The regression case for a real bug found while building this
         // feature: a crossing between two land regions was being tagged the

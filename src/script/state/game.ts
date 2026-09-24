@@ -37,7 +37,8 @@ import {
     SceneRunway, airfieldChoices, headingForward, pickStartRunway, sceneRunwaysOf,
 } from './activeAirfield';
 import {
-    AIRFIELD_SURFACE_EPS_M, GroundStrip, buildAirfieldModel, buildingHeightM, repaintGroundStrip,
+    AIRFIELD_SURFACE_EPS_M, GroundStrip, buildAirfieldModel, buildingHeightM, combineCover, repaintGroundStrip,
+    sampleGroundStrip,
 } from '../scene/airfield/airfieldModel';
 import { WGS84_A, WGS84_B, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, worldToGeodetic } from '../terrain/geodesy';
 import { openSettingsDialog } from '../ui/settings/settingsLauncher';
@@ -1803,11 +1804,14 @@ export class Game {
     }
 
     /**
-     * Give an unpaved strip the colour of the ground under it, as that
-     * ground is drawn: once per tile level, since a coarse tile's facet says
-     * "crop" over a district that is grass at the strip itself, and the
-     * finest tile has the last word. Cheap: a few triangle tests per strip
-     * still waiting, and none once every strip is final.
+     * Give a runway strip the colour of the ground under it, as that ground
+     * is drawn: once per tile level, since a coarse tile's facet says "crop"
+     * over a district that is grass at the strip itself, and the finest tile
+     * has the last word. The reading is averaged over the strip's own three
+     * sample points (see {@link sampleGroundStrip}), so its worst sample is
+     * what decides whether this level counts as an improvement. Cheap: a few
+     * triangle tests per strip still waiting, and none once every strip is
+     * final.
      */
     private paintGroundStrips(): void {
         if (this.pendingGroundStrips.length === 0) {
@@ -1815,7 +1819,14 @@ export class Game {
         }
         const finest = this.planetTerrain.maxZoom;
         this.pendingGroundStrips = this.pendingGroundStrips.filter(strip => {
-            const cover = this.planetTerrain.drawnCoverAtWorld(strip.x, strip.z);
+            // Finalized already, by the direct finest-tile fetch in
+            // finalizeGroundStrip - nothing this LOD-driven pass reads can
+            // improve on that, so it is done with this strip for good.
+            if (strip.paintedZoom === Infinity) {
+                return false;
+            }
+            const cover = sampleGroundStrip(
+                strip, (x, z) => this.planetTerrain.drawnCoverAtWorld(x, z));
             if (cover === undefined) {
                 return true;
             }
@@ -1824,6 +1835,31 @@ export class Game {
             }
             return cover.zoom < finest;
         });
+    }
+
+    /**
+     * Bypasses the draw list entirely: fetches the finest baked tile at each
+     * of a runway strip's three sample points directly (see
+     * `finestCoverAtWorld`) and repaints it once, from the real satellite-
+     * imagery colour rather than whatever LOD happens to be on screen.
+     *
+     * Fired once per strip, right when it is built, independent of the
+     * per-frame `paintGroundStrips` pass above - that pass gives a strip a
+     * decent interim colour the moment *something* streams in nearby; this
+     * gives it its final, authoritative one, however long the fetch takes.
+     */
+    private finalizeGroundStrip(strip: GroundStrip): void {
+        void Promise.all(strip.samples.map(
+            p => this.planetTerrain.finestCoverAtWorld(p.x, p.z)))
+            .then(covers => {
+                const cover = combineCover(covers);
+                if (cover === undefined) {
+                    return;
+                }
+                repaintGroundStrip(strip, cover, this.materials);
+                // Marks it done for paintGroundStrips above - see there.
+                strip.paintedZoom = Infinity;
+            });
     }
 
     update(delta: number) {
@@ -3605,6 +3641,14 @@ export class Game {
                 continue;
             }
             this.pendingGroundStrips.push(...built.groundStrips);
+            for (const strip of built.groundStrips) {
+                // Infinity already here means the sea-level guard built it
+                // (see RUNWAY_SEA_LEVEL_GUARD_M) - its cover is never
+                // trusted, at any zoom, so it must not be finalized either.
+                if (strip.paintedZoom !== Infinity) {
+                    this.finalizeGroundStrip(strip);
+                }
+            }
             // A weapons target rather than plain scenery: an airfield is what
             // the ILS needles guide to, and picking one as a target is how the
             // player asks for them.
