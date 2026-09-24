@@ -24,9 +24,11 @@ import { CanvasPainter } from '../render/screen/canvasPainter';
 import { updateUniforms } from '../scene/utils';
 import { attachToRenderList } from '../render/renderList';
 import { getTreeAtlas } from '../scene/textures/treeAtlas';
+import { getStoneAtlas } from '../scene/textures/stoneAtlas';
 import {
     TREE_DENSITY_MULTIPLIER_DEFAULT, buildTreeMesh, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
 } from './treeBillboards';
+import { CLUTTER_ELIGIBLE_CLASSES, buildStoneMesh, scatterGroundClutter } from './stones';
 import { sphereInFrustum } from './culling';
 import { DemTile, decodePdm } from './demTile';
 import {
@@ -123,6 +125,16 @@ const HYBRID_SHADE_FALLBACK = { mid: 0.5, spread: 0.2 };
  * of a per-frame loop, not out of the world.
  */
 const PAD_RELEVANCE_M = 400_000;
+
+/**
+ * Cap on how many tiles can get their first attachTrees() call in a single
+ * reconcile - see treeInitialAttachesThisFrame. Trees alone rarely made many
+ * tiles newly eligible in the same frame (most tiles have no forest), but
+ * open-ground clutter (see stones.ts) makes nearly every land tile eligible,
+ * so a camera move that suddenly makes a couple hundred leaf tiles resident
+ * needs this spread over several frames instead of firing all at once.
+ */
+const TREE_INITIAL_ATTACHES_PER_FRAME = 1;
 
 /** A tile's part in the leaf dissolve this pass; on its group's userData. */
 interface TileLodState {
@@ -411,6 +423,16 @@ export class TerrainEntity implements Entity {
 
     /** Tiles rescattered this frame, capped so a big camera move spreads the work over frames. */
     private treeRescattersThisFrame = 0;
+    /**
+     * Tiles given their first attachTrees() call this frame, capped the same
+     * way. Uncapped used to be fine when only forested tiles ever qualified
+     * (see treeSource's gate in the streamer's upload callback), but now
+     * that plain open ground (see stones.ts) qualifies too, a camera move
+     * that suddenly makes a couple hundred leaf tiles resident at once would
+     * otherwise fire that many synchronous scatter-and-build passes in a
+     * single frame - the multi-second stall this cap exists to prevent.
+     */
+    private treeInitialAttachesThisFrame = 0;
 
     private async attachTrees(tile: PtmTile, meshes: TileMeshes, materials: SceneMaterialManager): Promise<void> {
         // Thin out density with distance from whichever camera is currently
@@ -430,14 +452,26 @@ export class TerrainEntity implements Entity {
             ? (x: number, z: number) => (onRoad?.(x, z) ?? false) || (onAirfield?.(x, z) ?? false)
             : undefined;
         const groups = scatterTreeSpecies(tile, densityScale, isExcluded);
-        const treeMeshes = groups.length > 0
+        // Ground clutter (rocks + extra shrubs on open, non-forested ground -
+        // see stones.ts) shares the exact same exclusion mask and is folded
+        // into the same tree/shrub species groups and mesh group below,
+        // riding their existing streaming/visibility/disposal lifecycle
+        // instead of a parallel one.
+        const clutter = scatterGroundClutter(tile, densityScale, isExcluded);
+        const allTreeGroups = [...groups, ...clutter.vegetation];
+        const treeMeshes = allTreeGroups.length > 0
             ? await getTreeAtlas()
-                .then(atlas => [buildTreeMesh(groups, materials, atlas)])
+                .then(atlas => [buildTreeMesh(allTreeGroups, materials, atlas)])
                 .catch(() => {
                     // No atlas (e.g. a canvas-less test environment) - the tile
                     // still draws, it just grows no trees.
                     return undefined;
                 })
+            : undefined;
+        const stoneMeshes = clutter.rocks.length > 0
+            ? await getStoneAtlas()
+                .then(atlas => [buildStoneMesh(clutter.rocks, materials, atlas)])
+                .catch(() => undefined)
             : undefined;
         meshes.treesBusy = false;
         if (meshes.disposed) {
@@ -452,7 +486,8 @@ export class TerrainEntity implements Entity {
         }
         meshes.trees = undefined;
         meshes.treesGroup = undefined;
-        if (!treeMeshes || treeMeshes.length === 0) {
+        const allMeshes = [...(treeMeshes ?? []), ...(stoneMeshes ?? [])];
+        if (allMeshes.length === 0) {
             return;
         }
         // scatterTreeSpecies already turns quantised positions into metres
@@ -463,12 +498,12 @@ export class TerrainEntity implements Entity {
         // time and every tree would collapse toward the tile origin.
         const treesGroup = new THREE.Group();
         treesGroup.scale.setScalar(1 / tile.quantScale);
-        for (const trees of treeMeshes) {
+        for (const trees of allMeshes) {
             trees.onBeforeRender = tileBeforeRender;
             treesGroup.add(trees);
         }
         meshes.group.add(treesGroup);
-        meshes.trees = treeMeshes;
+        meshes.trees = allMeshes;
         meshes.treesGroup = treesGroup;
     }
 
@@ -765,11 +800,16 @@ export class TerrainEntity implements Entity {
                     this.bootstrapping ? TerrainShading.FACETED : this.landShading,
                     undefined, opts.manifest.mesh.maxZoom,
                 );
-                // Trees are attached lazily from the draw loop (see
-                // syncGroup), for the tiles actually being drawn - not here.
-                // Keep the source for that: the store may evict it first.
+                // Trees (and ground clutter - see stones.ts) are attached
+                // lazily from the draw loop (see syncGroup), for the tiles
+                // actually being drawn - not here. Keep the source for that:
+                // the store may evict it first. Class 1/2 = Tree/Shrub
+                // (attachTrees's own scatterTreeSpecies); the rest is
+                // whatever stones.ts also scatters onto - a tile with none
+                // of these has nothing for attachTrees() to do at all.
                 for (let i = 3; i < tile.landAttrs.length; i += 4) {
-                    if (tile.landAttrs[i] === 1) {
+                    const cls = tile.landAttrs[i];
+                    if (cls === 1 || cls === 2 || CLUTTER_ELIGIBLE_CLASSES.has(cls)) {
                         meshes.treeSource = tile;
                         break;
                     }
@@ -1479,6 +1519,7 @@ export class TerrainEntity implements Entity {
         this.group.clear();
         this.drawnTriangles = 0;
         this.treeRescattersThisFrame = 0;
+        this.treeInitialAttachesThisFrame = 0;
         this.triangleBudgetHit = false;
         this.pruneDrawnHeightIndices();
         // Nearest first: when the triangle budget below has to cut the list
@@ -1528,7 +1569,8 @@ export class TerrainEntity implements Entity {
                 }
                 if (!node.under && !meshes.treesRequested) {
                     const src = meshes.treeSource;
-                    if (src) {
+                    if (src && this.treeInitialAttachesThisFrame < TREE_INITIAL_ATTACHES_PER_FRAME) {
+                        this.treeInitialAttachesThisFrame++;
                         meshes.treesRequested = true;
                         void this.attachTrees(src, meshes, this.treeMaterials);
                     }
