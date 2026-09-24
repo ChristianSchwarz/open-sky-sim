@@ -66,10 +66,12 @@ export enum Species {
     LINDEN = 2,
     FIR = 3,
     SHRUB = 4,
+    /** A small multi-stemmed woody clump, between a shrub and a full tree - see stones.ts's greenSplit. */
+    BUSH = 5,
 }
 
-export const SPECIES_COUNT = 5;
-/** Species picked at random for forest; the shrub is reserved for shrubland facets. */
+export const SPECIES_COUNT = 6;
+/** Species picked at random for forest; the shrub and bush are reserved for shrubland/open-ground facets. */
 export const TREE_SPECIES_COUNT = 4;
 
 /**
@@ -100,6 +102,8 @@ export interface TreeSilhouetteSpec {
     /** Trunk height at side view, relative to tree height; 0 = no trunk (shrubs). */
     trunkHeightFactor: number;
     trunkWidthFactor: number;
+    /** Separate trunks fanning from one shared root instead of a single stem - a multi-stemmed clump (a bush), not one trunk. Omitted/1 = the usual single tapered trunk. */
+    stemCount?: number;
     crownShape: CrownShape;
     /** Deterministic seed so this species' lobe scatter is fixed, not re-randomised per generation. */
     seed: number;
@@ -115,6 +119,11 @@ export const SPECIES_SPECS: Record<Species, TreeSilhouetteSpec> = {
     [Species.LINDEN]: { name: 'linden', trunkColor: '#4d4a2c', heightScale: 1.05, sideRx: 0.38, sideRy: 0.38, topRadius: 0.4, trunkHeightFactor: 0.28, trunkWidthFactor: 0.085, crownShape: 'round', seed: 113 },
     [Species.FIR]: { name: 'fir', trunkColor: '#45482a', heightScale: 1.25, sideRx: 0.3, sideRy: 0.58, topRadius: 0.26, trunkHeightFactor: 0.05, trunkWidthFactor: 0.045, crownShape: 'conical', seed: 115 },
     [Species.SHRUB]: { name: 'shrub', trunkColor: '#4d4a2c', heightScale: 1.0, sideRx: 0.42, sideRy: 0.3, topRadius: 0.42, trunkHeightFactor: 0, trunkWidthFactor: 0.03, crownShape: 'sparse', seed: 117 },
+    // A small multi-stemmed clump: several thin trunks fanning from one
+    // shared root (see stemCount/multiTrunkPath), not one single tapered
+    // stem the way every other species here has - the giveaway that reads
+    // as "bush" rather than "young tree" even before the canopy shape does.
+    [Species.BUSH]: { name: 'bush', trunkColor: '#4d4a2c', heightScale: 0.9, sideRx: 0.4, sideRy: 0.36, topRadius: 0.4, trunkHeightFactor: 0.22, trunkWidthFactor: 0.05, stemCount: 4, crownShape: 'round', seed: 119 },
 };
 
 const FRAME = { w: 100, h: 150 };
@@ -150,6 +159,41 @@ function trunkPath(spec: TreeSilhouetteSpec, height: number): string {
         + `${(cx + topWidth / 2).toFixed(1)},${y1.toFixed(1)} `
         + `${(cx - topWidth / 2).toFixed(1)},${y1.toFixed(1)}`
         + `" fill="${spec.trunkColor}"/>`;
+}
+
+/**
+ * Several thin tapered stems fanning out from one shared root point, instead
+ * of trunkPath's single trunk - the "multiple trunks from one root" look of
+ * a real bush/shrub clump. Each stem gets its own small height/spread jitter
+ * (deterministic, from spec.seed) so the fan reads as an uneven natural
+ * clump rather than a symmetric fixed spray.
+ */
+function multiTrunkPath(spec: TreeSilhouetteSpec, height: number, stemCount: number): string {
+    const cx = FRAME.w / 2;
+    const y0 = FRAME.h;
+    // Per-stem width shrinks with stem count so the fan doesn't read wider
+    // at the root than a single trunk would.
+    const stemWidth = FRAME.w * spec.trunkWidthFactor / Math.sqrt(stemCount);
+    const rootSpread = stemWidth * 1.2;
+    const topSpread = FRAME.w * spec.sideRx * 0.5;
+    let out = '';
+    for (let i = 0; i < stemCount; i++) {
+        // -0.5..0.5 across the stems, plus jitter so they don't fan out in a
+        // perfectly even comb.
+        const u = (stemCount > 1 ? i / (stemCount - 1) - 0.5 : 0)
+            + (hash01(spec.seed + i * 7.3) - 0.5) * 0.3;
+        const stemHeight = height * (0.7 + hash01(spec.seed + i * 4.1 + 1) * 0.4);
+        const y1 = FRAME.h - stemHeight;
+        const rootX = cx + u * rootSpread;
+        const topX = cx + u * topSpread;
+        out += `<polygon points="`
+            + `${(rootX - stemWidth * 0.8).toFixed(1)},${y0.toFixed(1)} `
+            + `${(rootX + stemWidth * 0.8).toFixed(1)},${y0.toFixed(1)} `
+            + `${(topX + stemWidth * 0.35).toFixed(1)},${y1.toFixed(1)} `
+            + `${(topX - stemWidth * 0.35).toFixed(1)},${y1.toFixed(1)}`
+            + `" fill="${spec.trunkColor}"/>`;
+    }
+    return out;
 }
 
 interface Lobe {
@@ -263,7 +307,11 @@ function canopyPath(spec: TreeSilhouetteSpec, angleDeg: number): string {
     // (1 - t), which left it floating below the crown at 30/60 degrees); it
     // is only dropped once the view is straight down.
     const trunkHeight = Math.max(h * spec.trunkHeightFactor * (1 - t), FRAME.h - cy);
-    const trunk = t < 0.999 && spec.trunkHeightFactor > 0 ? trunkPath(spec, trunkHeight) : '';
+    const trunk = t < 0.999 && spec.trunkHeightFactor > 0
+        ? (spec.stemCount && spec.stemCount > 1
+            ? multiTrunkPath(spec, trunkHeight, spec.stemCount)
+            : trunkPath(spec, trunkHeight))
+        : '';
 
     let canopy = '';
     for (const lobe of lobeLayout(spec.crownShape, spec.seed)) {

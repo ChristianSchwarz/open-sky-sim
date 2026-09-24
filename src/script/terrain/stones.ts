@@ -1,22 +1,24 @@
 /**
- * Scatters small stone, shrub and tree billboards over a tile's already-baked
- * bare/open-ground facets - the same "no new bake stage" trick
+ * Scatters small stone, shrub, bush and tree billboards over a tile's
+ * already-baked bare/open-ground facets - the same "no new bake stage" trick
  * treeBillboards.ts uses: a tile that streams in with a natural,
  * non-forested ground class can be scattered the moment it decodes, entirely
  * at runtime, straight from PtmTile.landAttrs.
  *
- * Each candidate point picks rock, shrub or tree by how green the facet's
- * own baked ground colour is (see greenBias/greenSplit): a neutral/tan patch
+ * Each candidate point picks rock, shrub, bush or tree by how green the
+ * facet's own baked ground colour is (see greenSplit): a neutral/tan patch
  * stays all rock, a mildly green one grows mostly shrubs with the odd rock,
- * and once it leans green enough to read as proper grassland it starts
- * mixing in the occasional full tree too - the same per-triangle tint used
- * to tint every sprite kind once picked (see tints/groundRatio mixing,
- * shared with treeBillboards.ts). Shrubs and trees here reuse the exact same
- * Species sprites and buildTreeMesh path as treeBillboards.ts's own
- * forest/shrubland scatter (see scatterTreeSpecies's TREE_CLASS/SHRUB_CLASS)
- * - this is a second, independent source of vegetation instances for facets
- * landcover never classified as forest/shrubland in the first place, not a
- * replacement for it.
+ * a more solidly green patch starts mixing in bushes - a step up in size
+ * between a shrub and a full tree - and once it leans green enough to read
+ * as proper grassland it starts mixing in the occasional full tree too - the
+ * same per-triangle tint used to tint every sprite kind once picked (see
+ * tints/groundRatio mixing, shared with treeBillboards.ts). Shrubs, bushes
+ * and trees here reuse the exact same Species sprites and buildTreeMesh path
+ * as treeBillboards.ts's own forest/shrubland scatter (see
+ * scatterTreeSpecies's TREE_CLASS/SHRUB_CLASS) - this is a second,
+ * independent source of vegetation instances for facets landcover never
+ * classified as forest/shrubland in the first place, not a replacement for
+ * it.
  *
  * Deliberately excludes anything already classified as forest/shrubland (a
  * clearing inside a wood would double up with the canopy above it),
@@ -99,22 +101,30 @@ const STONE_HEIGHT_M = 0.7;
 const GREEN_BIAS_DIVISOR = 0.09;
 /** greenBias above which a shrub-worthy patch starts mixing in the odd full tree - grassland scattered with the occasional lone tree, not a shrub-only scrubland. */
 const GREEN_TREE_THRESHOLD = 0.45;
-/** Of the green portion at greenBias = 1, the largest share that goes to trees rather than shrubs - grassland stays shrub-dominant even at full green, it doesn't flip to forest. */
+/** Of the green portion at greenBias = 1, the largest share that goes to trees rather than shrub/bush - grassland stays shrub/bush-dominant even at full green, it doesn't flip to forest. */
 const GREEN_TREE_MAX_SHARE = 0.5;
+/** greenBias above which the remaining (non-tree) share starts mixing in bushes - lower than the tree threshold, so bushes are the mid-green step between plain shrub and full tree. */
+const GREEN_BUSH_THRESHOLD = 0.2;
+/** Of the non-tree portion at greenBias = 1, the largest share that goes to bushes rather than shrubs. */
+const GREEN_BUSH_MAX_SHARE = 0.45;
 
 interface GreenSplit {
     /** 0..1, this candidate's odds of growing anything at all (vs. staying a rock). */
     pGreen: number;
-    /** 0..1, given it grows something, its odds of being a tree rather than a shrub. */
+    /** 0..1, given it grows something, its odds of being a full tree. */
     pTreeGivenGreen: number;
+    /** 0..1, given it grows something and isn't a tree, its odds of being a bush rather than a plain shrub. */
+    pBushGivenNotTree: number;
 }
 
-/** How a facet's sampled ground colour splits a candidate point between rock, shrub and tree - see the constants above. */
+/** How a facet's sampled ground colour splits a candidate point between rock, shrub, bush and tree - see the constants above. */
 function greenSplit(r: number, g: number, b: number): GreenSplit {
     const pGreen = Math.min(Math.max((g - Math.max(r, b)) / GREEN_BIAS_DIVISOR, 0), 1);
     const pTreeGivenGreen = Math.min(Math.max(
         (pGreen - GREEN_TREE_THRESHOLD) / (1 - GREEN_TREE_THRESHOLD), 0), 1) * GREEN_TREE_MAX_SHARE;
-    return { pGreen, pTreeGivenGreen };
+    const pBushGivenNotTree = Math.min(Math.max(
+        (pGreen - GREEN_BUSH_THRESHOLD) / (1 - GREEN_BUSH_THRESHOLD), 0), 1) * GREEN_BUSH_MAX_SHARE;
+    return { pGreen, pTreeGivenGreen, pBushGivenNotTree };
 }
 
 function hash01(n: number): number {
@@ -232,7 +242,7 @@ export function scatterGroundClutter(
         const tintR = tile.landAttrs[a] / 255;
         const tintG = tile.landAttrs[a + 1] / 255;
         const tintB = tile.landAttrs[a + 2] / 255;
-        const { pGreen, pTreeGivenGreen } = greenSplit(tintR, tintG, tintB);
+        const { pGreen, pTreeGivenGreen, pBushGivenNotTree } = greenSplit(tintR, tintG, tintB);
         // A different seed offset from treeBillboards.ts's own per-triangle
         // hashing, so a facet that happens to sit at a tree/stone class
         // boundary doesn't scatter both from correlated randomness.
@@ -253,10 +263,18 @@ export function scatterGroundClutter(
             }
 
             if (hash01(seed + i * 4.633 + 0.17) < pGreen) {
-                // Grows something - tree or shrub, weighted by pTreeGivenGreen.
-                const species = hash01(seed + i * 3.109 + 0.41) < pTreeGivenGreen
-                    ? Math.min(Math.floor(hash01(seed + i * 8.923) * TREE_SPECIES_COUNT), TREE_SPECIES_COUNT - 1) as Species
-                    : Species.SHRUB;
+                // Grows something: a tree (weighted by pTreeGivenGreen), else
+                // a bush or plain shrub (weighted by pBushGivenNotTree) - the
+                // three-way split reads as a gradient from bare ground
+                // through scrub through the odd lone tree, not a hard switch.
+                let species: Species;
+                if (hash01(seed + i * 3.109 + 0.41) < pTreeGivenGreen) {
+                    species = Math.min(Math.floor(hash01(seed + i * 8.923) * TREE_SPECIES_COUNT), TREE_SPECIES_COUNT - 1) as Species;
+                } else if (hash01(seed + i * 6.827 + 0.63) < pBushGivenNotTree) {
+                    species = Species.BUSH;
+                } else {
+                    species = Species.SHRUB;
+                }
                 let group = bySpecies.get(species);
                 if (!group) {
                     group = { species, points: [], tints: [], normals: [] };

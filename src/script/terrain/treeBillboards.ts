@@ -30,6 +30,8 @@ const SHRUB_CLASS = 2;
 /** Shrubland is denser than woodland but each plant is small. */
 const SHRUB_SPACING_M2 = 60;
 const SHRUB_SCALE = 0.22;
+/** A bush reads as a small tree-like clump, between a shrub and a full tree - see stones.ts's greenSplit, the only place that scatters this species today. */
+const BUSH_SCALE = 0.5;
 
 /**
  * One tree per this many square metres of forest-classed triangle area,
@@ -290,7 +292,7 @@ export function buildTreeMesh(
             // A little per-instance scale jitter reads as size variation without
             // needing separate per-species geometry.
             const scale = (0.85 + hash01(i * 5.113 + group.species * 13.1 + 1) * 0.3)
-                * (group.species === Species.SHRUB ? SHRUB_SCALE : 1);
+                * (group.species === Species.SHRUB ? SHRUB_SCALE : group.species === Species.BUSH ? BUSH_SCALE : 1);
             m.makeScale(scale, scale, scale);
             m.setPosition(p.x, p.y, p.z);
             mesh.setMatrixAt(i, m);
