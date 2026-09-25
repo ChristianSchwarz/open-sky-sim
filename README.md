@@ -1,8 +1,9 @@
 # Open Sky Sim
 
-Pure polygonal flight sim in a late 90s style, no textures and realworld terrain. Inspired by Flanker 1.5, Falcon 3.0, LHX, GS-2000, Outerra and many more.
+Pure polygonal flight sim in a late 90s style, no textures and realworld terrain. Inspired by Flanker 1.5, Falcon 3.0, LHX, GS-2000, Outerra and many more. 
 
 ## Live demo
+<img width="200" height="200" alt="qrcode" src="https://github.com/user-attachments/assets/a5d8d3ad-e5af-468a-8519-d4e6d77d8abd" />
 
 [Open-Sky-Sim](https://christianschwarz.github.io/open-sky-sim/)
 
