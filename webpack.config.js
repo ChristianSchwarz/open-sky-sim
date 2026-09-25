@@ -31,7 +31,7 @@ module.exports = (_env, argv) => ({
     // ui.css is the settings dialog's Material theme and Tailwind utilities,
     // extracted next to the bundle as bundle.css.
     entry: ['./src/script/index.ts', './src/ui.css'],
-    devtool: 'inline-source-map',
+    devtool: argv && argv.mode === 'production' ? false : 'inline-source-map',
     output: {
         path: __dirname + '/dist',
         filename: 'bundle.js'
