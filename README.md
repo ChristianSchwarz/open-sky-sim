@@ -8,7 +8,8 @@ Pure polygonal flight sim in a late 90s style, no textures and realworld terrain
 
 <img width="3439" height="1305" alt="image" src="https://github.com/user-attachments/assets/393ce764-8ba2-4ead-83ec-9a29635c036f" />
 <img width="3439" height="1305" alt="image" src="https://github.com/user-attachments/assets/80f82dd5-201f-4d99-abf2-1dcf45131fe3" />
-<img width="3439" height="1305" alt="image" src="https://github.com/user-attachments/assets/4b0e9d01-77fe-41f7-a31f-529b50cb85c1" />
+<img width="3439" height="1305" alt="image" src="https://github.com/user-attachments/assets/a29e77ac-ba55-4eb4-a811-b3f632de66a1" />
+
 
 
 
