@@ -16,6 +16,7 @@ import {
     SurfaceGeometry,
 } from './fm2Constants';
 import { Fm2ForebodyAsymmetryConfig } from './forebodyAsymmetry';
+import type { Fm3Airframe } from '../fm3/fm3Airframe';
 import { F16_PROFILE } from '../f16Profile';
 import { PLANE_DISTANCE_TO_GROUND } from '../../defs';
 
@@ -24,7 +25,7 @@ const DEG = Math.PI / 180;
 export type { SurfaceGeometry, Fm2ForebodyAsymmetryConfig };
 
 /** Reference mass / planform geometry (SI). */
-export interface Fm2GeometryConfig {
+interface Fm2GeometryConfig {
     massKg: number;
     wingAreaM2: number;
     wingSpanM: number;
@@ -32,7 +33,7 @@ export interface Fm2GeometryConfig {
 }
 
 /** Principal moments of inertia in the sim body frame (kg·m²). */
-export interface Fm2InertiaConfig {
+interface Fm2InertiaConfig {
     pitch: number; // about +X (RIGHT)
     yaw: number;   // about +Y (UP)
     roll: number;  // about +Z (FORWARD)
@@ -64,13 +65,13 @@ export interface Fm2SurfaceSet {
     foreStrake?: SurfaceGeometry;
 }
 
-export interface Fm2FlapsConfig {
+interface Fm2FlapsConfig {
     aoaBiasRad: number;
     stallReductionRad: number;
     extraCd: number;
 }
 
-export interface Fm2WaveDragConfig {
+interface Fm2WaveDragConfig {
     machOnset: number;
     scale: number;
 }
@@ -79,17 +80,13 @@ export interface Fm2WaveDragConfig {
 export interface Fm2GearConfig {
     /** Contact points in the body frame (m); Y ≈ -PLANE_DISTANCE_TO_GROUND. */
     points: [number, number, number][];
-    /**
-     * Soft oleo travel (m) before the hard terrain lift. Static 1g sag should
-     * land around 30–45% of this stroke so landings and taxi settle visibly.
-     * Optional for older packs — FM2 falls back to 0.35 m.
-     */
-    maxStrokeM?: number;
     stiffness: number;   // N/m
     damping: number;     // N·s/m
     rollFriction: number;
     brakeFriction: number;
     sideFriction: number;
+    /** Max oleo compression before hard stop (m). Defaults to 0.35 in the FM. */
+    maxStrokeM?: number;
 }
 
 /** Body-frame altitude (m) when level on a flat runway: -min(gear Y). */
@@ -103,7 +100,7 @@ export function fm2GroundRestHeight(config: Fm2AircraftConfig): number {
  * schedule with the same ISA density lapse is applied and the throttle behaves
  * as a plain 0–100% lever.
  */
-export interface Fm2EngineConfig {
+interface Fm2EngineConfig {
     afterburner: boolean;
     idleThrustKn: number;
     milThrustKn: number;
@@ -156,7 +153,7 @@ export interface Fm2FcsConfig {
  * @deprecated Legacy tuning for the removed limiters-OFF direct pitch path.
  * Retained for aircraft-manifest compatibility only.
  */
-export interface Fm2HighAoaFcsConfig {
+interface Fm2HighAoaFcsConfig {
     /** Pitch / AoA-rate damping scale (legacy; unused by the limiter strategies). */
     directDampScale?: number;
 }
@@ -329,7 +326,7 @@ export interface Fm2RollLawConfig {
 }
 
 /** Yaw-axis control law tuning (shared by fly-by-wire and mechanical aircraft). */
-export interface Fm2YawLawConfig {
+interface Fm2YawLawConfig {
     /** Pedal authority scale. */
     maxRudderCmd: number;
     /** Washed-out yaw-rate damper gain. */
@@ -340,7 +337,7 @@ export interface Fm2YawLawConfig {
 }
 
 /** Speed / stall / touchdown envelope. */
-export interface Fm2EnvelopeConfig {
+interface Fm2EnvelopeConfig {
     stallAoaRad: number;
     minFlyingSpeedMps: number;
     /** Reference cruise condition used to normalize FBW dynamic-pressure fades. */
@@ -407,6 +404,12 @@ export interface Fm2AircraftConfig {
     forebodyAsymmetry?: Fm2ForebodyAsymmetryConfig;
     /** Optional transonic pitch-damping augmentation (see the interface). Absent ⇒ off. */
     transonicPitchDamp?: Fm2TransonicPitchDampConfig;
+    /**
+     * Geometry for the FM3 physical model. FM2 ignores it; FM3 flies the default
+     * F-16 airframe when it is absent, taking only gear, engine quadrant,
+     * envelope and hook from the fields above.
+     */
+    fm3?: Fm3Airframe;
 }
 
 /**
@@ -453,14 +456,12 @@ export const defaultFm2Config: Fm2AircraftConfig = {
             [-1.2, -PLANE_DISTANCE_TO_GROUND, -0.6], // left main
             [1.2, -PLANE_DISTANCE_TO_GROUND, -0.6],  // right main
         ],
-        // ~0.045 m static sag at 1g (~13% of stroke) with three equal springs;
-        // soft enough for visible oleo settle, stiff enough to absorb landings.
-        maxStrokeM: 0.35,
-        stiffness: 1.0e6,
-        damping: 1.5e5,
+        stiffness: 4.0e6,
+        damping: 1.6e5,
         rollFriction: 0.04,
         brakeFriction: 0.55,
         sideFriction: 0.8,
+        maxStrokeM: 0.35,
     },
     // Hook tip is resolved per airframe (fuselage aft) at spawn — see
     // arrestorHookPlacementForAircraft / flightConfigWithArrestorHook.

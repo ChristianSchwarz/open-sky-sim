@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { Faction } from '../../weapons/combatant';
 import { ForceVectorSample } from '../model/flightModel';
-import { KeyboardControlLayoutId } from '../../input/keyboardLayouts';
-import { SerializedWorld } from './serializedWorld';
+import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
+import { SerializedArrestorCables, SerializedWorld } from './serializedWorld';
+import { HeightTileUpdate, SerializedHeightField } from '../../terrain/heightMirror';
 import { AC_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
 import {
     createSimSharedState,
@@ -15,7 +16,7 @@ import {
 import { AiPilotOptions } from '../../ai/aiPilot';
 import {
     SimAircraftDesc, SimAircraftSpawn, SimControlInputs,
-    SimControlMode, SimHitEvent, SimToWorkerMessage, WorkerToSimMessage,
+    SimControlMode, SimFlightModelKind, SimHitEvent, SimToWorkerMessage, WorkerToSimMessage,
     AircraftCollisionMesh,
 } from './simTypes';
 
@@ -48,7 +49,6 @@ export class CombatSimClient {
 
     private busy = false;
     private pendingDelta = 0;
-    private lastDelta = 0;
 
     private readonly shared: SimSharedViews | undefined;
     private lastSharedSeq = 0;
@@ -72,11 +72,6 @@ export class CombatSimClient {
         this.worker.onmessage = (event: MessageEvent<WorkerToSimMessage>) => {
             const data = event.data;
             if (data.type === 'state') {
-                const workerStepMs = data.workerStepMs ?? -1;
-                // RTT includes main-thread scheduling; only warn on real worker compute cost.
-                if (workerStepMs > 20) {
-                    console.warn(`[siminstr] worker step compute ${workerStepMs.toFixed(1)}ms for delta=${(this.lastDelta * 1000).toFixed(1)}ms`);
-                }
                 if (data.shared) {
                     this.sharedIds = data.ids;
                     this.sharedForceVectors = data.forceVectors ?? {};
@@ -116,6 +111,39 @@ export class CombatSimClient {
         this.post({ type: 'setWorld', world });
     }
 
+    /** Sampler config for the mirrored DEM. Send before any tiles. */
+    setHeightField(config: SerializedHeightField): void {
+        this.post({ type: 'setHeightField', config });
+    }
+
+    /** Add/drop mirrored DEM tiles; height buffers are transferred, not copied. */
+    postHeightTiles(update: HeightTileUpdate): void {
+        this.worker.postMessage(
+            { type: 'heightTiles', update },
+            update.add.map(t => t.heights.buffer as ArrayBuffer),
+        );
+    }
+
+    setArrestorCables(cables: SerializedArrestorCables[]): void {
+        this.post({ type: 'setArrestorCables', cables });
+    }
+
+    /**
+     * The mesh the barricade webbing drapes over.
+     *
+     * Separate from {@link setCollision}, which is the coarse hitbox bullets and
+     * crashes use and wants to stay coarse. The webbing is *drawn* lying on the
+     * airframe, so it has to be solved against the airframe that is drawn —
+     * against the hitbox it reads as threaded through the wings.
+     */
+    setCarrierMeshOrigins(origins: { originX: number; originY: number; originZ: number }[]): void {
+        this.post({ type: 'setCarrierMeshOrigins', origins });
+    }
+
+    setCarrierVelocity(vx: number, vy: number, vz: number): void {
+        this.post({ type: 'setCarrierVelocity', velocity: [vx, vy, vz] });
+    }
+
     registerProxy(proxy: SimAircraftProxy): void {
         this.proxies.set(proxy.simId, proxy);
     }
@@ -140,6 +168,15 @@ export class CombatSimClient {
         this.post({ type: 'setTarget', id, targetId });
     }
 
+    setFormationLead(id: string, leadId: string | null): void {
+        this.post({ type: 'setFormationLead', id, leadId });
+    }
+
+    /** Engage every live aircraft of `faction`, re-picking as the fight develops. */
+    setTargetFaction(id: string, faction: Faction | null): void {
+        this.post({ type: 'setTargetFaction', id, faction });
+    }
+
     setPhase(id: string, phase: number): void {
         this.post({ type: 'setPhase', id, phase });
     }
@@ -158,18 +195,18 @@ export class CombatSimClient {
         return this.maneuverLabels[id];
     }
 
-    resetAircraft(id: string, position: THREE.Vector3, quaternion: THREE.Quaternion, velocity: THREE.Vector3, landed: boolean, throttle: number, kinematic: boolean): void {
+    resetAircraft(id: string, position: THREE.Vector3, quaternion: THREE.Quaternion, velocity: THREE.Vector3, landed: boolean, throttle: number, model: SimFlightModelKind): void {
         this.post({
             type: 'reset', id,
             position: position.toArray() as [number, number, number],
             quaternion: quaternion.toArray() as [number, number, number, number],
             velocity: velocity.toArray() as [number, number, number],
-            landed, throttle, kinematic,
+            landed, throttle, model,
         });
     }
 
-    setAircraftConfig(id: string, aircraftConfig: Fm2AircraftConfig, kinematic: boolean): void {
-        this.post({ type: 'setAircraftConfig', id, aircraftConfig, kinematic });
+    setAircraftConfig(id: string, aircraftConfig: Fm2AircraftConfig, model: SimFlightModelKind): void {
+        this.post({ type: 'setAircraftConfig', id, aircraftConfig, model });
     }
 
     setCollision(id: string, collision: AircraftCollisionMesh | undefined): void {
@@ -196,7 +233,7 @@ export class CombatSimClient {
         this.post({ type: 'snapPhysicsState', id });
     }
 
-    /** Inject an externally-simulated combatant (e.g. player on the JSBSim worker). */
+    /** Inject an externally-simulated combatant (e.g. a player model outside the sim worker). */
     setExternalState(id: string, faction: Faction, position: THREE.Vector3, velocity: THREE.Vector3, alive: boolean): void {
         this.post({
             type: 'setExternalState', id, enabled: true, faction,
@@ -225,6 +262,10 @@ export class CombatSimClient {
 
     setKeyboardLayout(layoutId: KeyboardControlLayoutId): void {
         this.post({ type: 'setKeyboardLayout', layoutId });
+    }
+
+    setKeyboardPitchStickMode(mode: KeyboardPitchStickMode): void {
+        this.post({ type: 'setKeyboardPitchStickMode', mode });
     }
 
     postGamepadAxes(id: string, pitch: number, roll: number, yaw: number, throttle: number, connected: boolean): void {
@@ -311,7 +352,6 @@ export class CombatSimClient {
         if (this.shared) {
             setSharedBusy(this.shared, true);
         }
-        this.lastDelta = delta;
         this.post({ type: 'step', delta, inputs });
     }
 

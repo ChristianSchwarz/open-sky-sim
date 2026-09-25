@@ -1,11 +1,7 @@
 import * as THREE from 'three';
 import { Palette } from '../config/palettes/palette';
 import { Model, ModelAnimation, modelHasAnim, modelMatchesPaletteTime } from '../scene/models/models';
-import { assertExpr, assertIsDefined } from '../utils/asserts';
-import { ParticleSystem } from '../physics/particles/particleSystem';
-import { lerp } from '../utils/math';
-import { PARTICLE_MESH_ATTR_COLOR, PARTICLE_MESH_ATTR_OFFSET, PARTICLE_MESH_ATTR_ROTATION, PARTICLE_MESH_ATTR_SCALE } from '../scene/models/lib/particleMeshModelBuilder';
-import { SceneMaterialData } from '../scene/materials/materials';
+import { assertIsDefined } from '../utils/asserts';
 import { attachToRenderList } from './renderList';
 
 
@@ -35,11 +31,30 @@ type LodAttachGroups = {
     groupAnim: THREE.Object3D;
     hasAnim: boolean;
     paletteTime: Palette['time'];
+    triangles: number;
 };
+
+/** Sums mesh triangle counts (incl. InstancedMesh) under an Object3D — used for the HUD's live triangle-count readout. */
+function countObjectTriangles(root: THREE.Object3D): number {
+    let total = 0;
+    root.traverse(child => {
+        const mesh = child as THREE.Mesh;
+        if (mesh.isMesh) {
+            const geometry = mesh.geometry;
+            const vertexCount = geometry.index ? geometry.index.count : geometry.attributes.position.count;
+            const instances = (mesh as THREE.InstancedMesh).isInstancedMesh ? (mesh as THREE.InstancedMesh).count : 1;
+            total += (vertexCount / 3) * instances;
+        }
+    });
+    return total;
+}
 
 export class LODHelper {
 
     private elapsed: number = 0;
+
+    /** Triangle count actually attached to the render lists by the last addToRenderList() call. */
+    lastTriangles: number = 0;
 
     // Built groups cached per LOD level so several render passes with different
     // cameras (main view, weapons-target MFD, map MFD) can each pick their own
@@ -143,6 +158,7 @@ export class LODHelper {
 
         const requestedLod = forceLodLevel !== undefined ? forceLodLevel : getLodLevel(position, scale, targetWidth, camera, this.model.maxSize, this.bias);
         const lodLevel = resolveLodLevel(this.model, requestedLod);
+        this.lastTriangles = 0;
         if (lodLevel < 0) return;
 
         if (hasFlats && this.model.lod[lodLevel].flats.length > 0) {
@@ -176,6 +192,7 @@ export class LODHelper {
                 groupAnim: new THREE.Object3D(),
                 hasAnim: false,
                 paletteTime: palette.time,
+                triangles: 0,
             };
             groups.set(lodLevel, entry);
             this.populateGroups(entry, collection, palette.time);
@@ -186,6 +203,7 @@ export class LODHelper {
             this.populateGroups(entry, collection, palette.time);
         }
 
+        this.lastTriangles += entry.triangles;
         const { group, groupAnim, hasAnim } = entry;
         group.position.copy(position);
         group.quaternion.copy(quaternion);
@@ -216,93 +234,10 @@ export class LODHelper {
                 }
             }
         }
+        entry.triangles = countObjectTriangles(entry.group) + countObjectTriangles(entry.groupAnim);
     }
 }
 
-export class ParticleSystemHelper {
-
-    private objVolumes: THREE.Object3D = new THREE.Object3D();
-
-    constructor(public model: Model, private bias: number = DEFAULT_LOD_BIAS) { }
-
-    updateAttributes(system: ParticleSystem) {
-        assertExpr(this.model.lod.length > 0 && this.model.lod[0].volumes.length > 0);
-
-        const mesh = this.model.lod[0].volumes[0] as THREE.Mesh<THREE.InstancedBufferGeometry, THREE.Material>;
-        const material = mesh.material;
-        const data = material.userData as SceneMaterialData
-        assertIsDefined(data.ramp);
-        const geometry = mesh.geometry;
-
-        const offsets = this.getAttribute(geometry, PARTICLE_MESH_ATTR_OFFSET);
-        const scales = this.getAttribute(geometry, PARTICLE_MESH_ATTR_SCALE);
-        const rotations = this.getAttribute(geometry, PARTICLE_MESH_ATTR_ROTATION);
-        const colors = this.getAttribute(geometry, PARTICLE_MESH_ATTR_COLOR);
-
-        for (let i = 0; i < system.particles.length; i++) {
-            const particle = system.particles[i];
-            if (!particle.isActive) {
-                scales.setX(i, 0.0);
-                continue;
-            }
-            const progress = particle.life / particle.lifespan;
-            const position = particle.position;
-            const colorIndex = Math.min(data.ramp.length - 1, Math.floor(data.ramp.length * progress));
-            const color = data.ramp[colorIndex];
-            offsets.setXYZ(i, position.x, position.y, position.z);
-            scales.setX(i, lerp(progress, particle.sizeStart, particle.sizeEnd));
-            rotations.setX(i, lerp(progress, particle.rotationStart, particle.rotationEnd));
-            colors.setXYZW(i, color.r, color.g, color.b, 1.0 - progress);
-        }
-        offsets.needsUpdate = true;
-        scales.needsUpdate = true;
-        rotations.needsUpdate = true;
-        colors.needsUpdate = true;
-    }
-
-    getAttribute(geometry: THREE.InstancedBufferGeometry, id: string): THREE.BufferAttribute | THREE.InterleavedBufferAttribute {
-        const attribute = geometry.attributes[id];
-        assertIsDefined(attribute, id);
-        return attribute;
-    }
-
-    addToRenderList(
-        position: THREE.Vector3, scale: THREE.Vector3,
-        targetWidth: number, camera: THREE.Camera, palette: Palette,
-        volumesId: string, lists: Map<string, THREE.Scene>,
-        forceLodLevel?: number) {
-
-        const hasVolumes = lists.has(volumesId);
-        if (!hasVolumes) return;
-
-        const requestedLod = forceLodLevel !== undefined ? forceLodLevel : getLodLevel(position, scale, targetWidth, camera, this.model.maxSize, this.bias);
-        const lodLevel = resolveLodLevel(this.model, requestedLod);
-        if (lodLevel < 0) return;
-
-        if (hasVolumes && this.model.lod[lodLevel].volumes.length > 0) {
-            this.subRender(position, scale, this.objVolumes, this.model.lod[lodLevel].volumes, volumesId, lists, palette);
-        }
-    }
-
-    private subRender(
-        position: THREE.Vector3, scale: THREE.Vector3,
-        dst: THREE.Object3D, collection: THREE.Object3D[], listId: string, lists: Map<string, THREE.Scene>,
-        palette: Palette) {
-
-        const list = lists.get(listId);
-        assertIsDefined(list);
-        dst.clear();
-        for (let i = 0; i < collection.length; i++) {
-            const m = collection[i];
-            if (modelMatchesPaletteTime(m, palette.time)) {
-                dst.add(m);
-            }
-        }
-        dst.position.copy(position);
-        dst.scale.copy(scale);
-        attachToRenderList(list, dst);
-    }
-}
 
 export function getLodLevel(position: THREE.Vector3, scale: THREE.Vector3, targetWidth: number, camera: THREE.Camera, modelMaxSize: number, bias: number = DEFAULT_LOD_BIAS): number {
     if ('isPerspectiveCamera' in camera === false || modelMaxSize === 0) {
@@ -321,13 +256,13 @@ export function getLodLevel(position: THREE.Vector3, scale: THREE.Vector3, targe
 }
 
 /** True when a LOD level carries at least one drawable mesh. */
-export function lodLevelHasGeometry(model: Model, lodLevel: number): boolean {
+function lodLevelHasGeometry(model: Model, lodLevel: number): boolean {
     const level = model.lod[lodLevel];
     return level !== undefined && (level.flats.length > 0 || level.volumes.length > 0);
 }
 
 /** Indices of LOD levels that contain at least one mesh, ascending. */
-export function populatedLodLevels(model: Model): number[] {
+function populatedLodLevels(model: Model): number[] {
     const levels: number[] = [];
     for (let i = 0; i < model.lod.length; i++) {
         if (lodLevelHasGeometry(model, i)) {

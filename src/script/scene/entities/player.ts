@@ -1,23 +1,26 @@
 import * as THREE from 'three';
 import { AudioClip } from '../../audio/audioSystem';
+import { isOverlayKeyEvent } from '../../input/overlayKeys';
 import { Palette } from "../../config/palettes/palette";
-import { AIRBASE_RUNWAY, PITCH_STICK_AFT_UNITS, PITCH_STICK_FWD_UNITS, PLANE_DISTANCE_TO_GROUND, RUNWAY_HALF_LENGTH_M } from '../../defs';
+import { PITCH_STICK_AFT_UNITS, PITCH_STICK_FWD_UNITS, PLANE_DISTANCE_TO_GROUND } from '../../defs';
 import { FlightModel } from '../../physics/model/flightModel';
 import { FcsPitchLimiter } from '../../physics/fm2/fcs';
-import { FlightSample } from '../../physics/flightRecorder';
 import { LODHelper, getLodLevel } from '../../render/helpers';
 import { CanvasPainter } from "../../render/screen/canvasPainter";
 import { HUDFocusMode } from '../../state/gameDefs';
 import { clamp, easeOutQuad, easeOutQuint, FORWARD, RIGHT, UP } from '../../utils/math';
 import { Entity, ENTITY_TAGS } from "../entity";
 import { SceneMaterialManager } from '../materials/materials';
-import { ModelManager } from '../models/models';
+import { ModelManager, Model } from '../models/models';
 import { Scene, SceneLayers } from "../scene";
 import { AircraftFx } from './aircraftFx';
 import { AircraftForceVectors } from './aircraftForceVectors';
 import { setAircraftShadowPose } from './aircraftShadow';
+import { trackAircraftMaterial, trackAircraftMesh } from './aircraftDebug';
+import { SUN_STATE } from '../materials/shaders/sun';
 import { WeaponsTarget } from './weaponsTarget';
-import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef } from './aircraftDef';
+import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef, SwingWingsConfig } from './aircraftDef';
+import { nextWingSweepMode, poseSurface, stepWingSweep, WingSweepMode, wingSweepTarget } from './wingSweep';
 import { Combatant, Faction } from '../../weapons/combatant';
 import { CombatSimClient } from '../../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../../physics/model/simProxyFlightModel';
@@ -25,6 +28,7 @@ import { PLAYER_SIM_ID } from '../../physics/sim/simIds';
 import {
     arrestorCableStartWorld,
     arrestorHookPlacementForAircraft,
+    ArrestorCarrierPose,
     DEFAULT_ARRESTOR_HOOK_BODY,
     DEFAULT_ARRESTOR_HOOK_HINGE,
     latchedHookTipWorld,
@@ -33,12 +37,11 @@ import {
 const ENGINE_LOWEST_VOLUME = 0.05; // [0,1]
 
 const LANDING_GEAR_ANIM_DURATION = 3; // Seconds
-/** Low-pass time constant for oleo visual compression (s). */
-const GEAR_COMPRESSION_SMOOTH_TAU_S = 0.08;
 
 const FLAPS_ANIM_DURATION = 2; // Seconds
 const FLAPS_EXTENDED_ANGLE = Math.PI / 5; // Radians
 const AIRBRAKE_ANIM_DURATION = 1.5; // Seconds
+const TAILHOOK_ANIM_DURATION = 1.5; // Seconds
 
 /**
  * Visible roll-deflection gains (fraction of a surface's hinge range at full
@@ -49,6 +52,10 @@ const AIRBRAKE_ANIM_DURATION = 1.5; // Seconds
  */
 const ROLL_VIS_TAILERON = 0.6;
 const ROLL_VIS_AILERON = 0.15;
+/** Horizontal radius (m) around Kuz origin to treat as on-deck for display ride. */
+const CARRIER_DISPLAY_RIDE_RADIUS_M = 200;
+/** Max ship-relative groundspeed (m/s) before frozen display glue engages. */
+const CARRIER_DISPLAY_PARK_REL_SPEED_MPS = 2.0;
 
 /** Slats begin deploying above this absolute AoA (rad). */
 const SLAT_AOA_ONSET_RAD = 10 * Math.PI / 180;
@@ -57,10 +64,14 @@ const SLAT_AOA_FULL_RAD = 18 * Math.PI / 180;
 
 interface ControlSurfaceDescriptor {
     model: LODHelper;
-    position: THREE.Vector3;
+    pivot: THREE.Vector3;
     axis: THREE.Vector3;
     value: () => number;
     range: number;
+    /** Index of the sweep surface this one rides on, or -1. */
+    parentIndex: number;
+    /** Current deflection (rad), refreshed each frame before posing. */
+    deflection: number;
 }
 
 export enum AircraftDeviceState {
@@ -84,13 +95,16 @@ export class PlayerEntity implements Entity {
     private modelShadow!: LODHelper;
     private modelLandingGear: LODHelper | undefined;
     private modelTailhook: LODHelper | undefined;
-    /** Prefetched invisible collider mesh (not drawn; combat uses baked triangles). */
-    private modelCollision: LODHelper | undefined;
     private shadowPosition = new THREE.Vector3();
     private shadowQuaternion = new THREE.Quaternion();
     private shadowScale = new THREE.Vector3();
     /** Solid-ground Y under the aircraft (flat datum, hills, decks). Defaults to water/flat Y=0. */
     private groundHeightAt: (x: number, z: number) => number = () => 0;
+    /**
+     * Scene position -> height above the ellipsoid. Identity until the terrain
+     * wires it, which is what a scene with no curved ground would want anyway.
+     */
+    private altitudeAt: (x: number, y: number, z: number) => number = (_x, y) => y;
 
     private controlSurfaceDescriptors: ControlSurfaceDescriptor[] = [];
     private cockpitOffset = new THREE.Vector3();
@@ -106,9 +120,6 @@ export class PlayerEntity implements Entity {
     private landingGearProgress = LANDING_GEAR_ANIM_DURATION;
     /** True when the gear model carries a retract clip (doors stay visible when up). */
     private gearAnimated = false;
-    /** Smoothed mean oleo compression for strut visual offset (m). */
-    private gearCompressionSmooth = 0;
-    private readonly gearDisplayPosition = new THREE.Vector3();
 
     private flapsState: AircraftDeviceState = AircraftDeviceState.EXTENDED;
     private flapsProgress = FLAPS_ANIM_DURATION;
@@ -116,6 +127,14 @@ export class PlayerEntity implements Entity {
     private airbrakesState: AircraftDeviceState = AircraftDeviceState.RETRACTED;
     private airbrakesProgress = 0;
     private airbrakesProgressUnit = 0;
+    /** Visual wing sweep [0,1] and the pilot's selection (render-only). */
+    private wingSweepUnit = 0;
+    private wingSweepMode = WingSweepMode.AUTO;
+    private swingWings: SwingWingsConfig | undefined;
+    /** Tailhook: sim owns the commanded state, this is the visible swing. */
+    private hookState: AircraftDeviceState = AircraftDeviceState.RETRACTED;
+    private hookProgress = 0;
+    private hookProgressUnit = 0;
 
     private readonly fx: AircraftFx;
     private forceVectors: AircraftForceVectors;
@@ -164,9 +183,19 @@ export class PlayerEntity implements Entity {
     private _q = new THREE.Quaternion();
     private readonly _hinge = new THREE.Vector3();
     private readonly _hookDir = new THREE.Vector3();
+    private readonly _hookStowedDir = new THREE.Vector3();
+    private readonly _qStowed = new THREE.Quaternion();
     private readonly _hookTip = new THREE.Vector3();
     private readonly _hookTipBody = new THREE.Vector3(...DEFAULT_ARRESTOR_HOOK_BODY);
+    /** Live carrier pose for latched-hook sheave aiming; falls back to default origin. */
+    private getArrestorCarrierPose: (() => ArrestorCarrierPose) | undefined;
     private readonly _hookHingeBody = new THREE.Vector3(...DEFAULT_ARRESTOR_HOOK_HINGE);
+    /**
+     * Visual ride with the steaming Kuznetsov: frozen ship-local offset captured
+     * once on park, then display = kuz.position + rideLocal every frame.
+     */
+    private carrierRideActive = false;
+    private readonly carrierRideLocal = new THREE.Vector3();
 
     readonly tags: string[] = [ENTITY_TAGS.AIRCRAFT];
 
@@ -214,13 +243,16 @@ export class PlayerEntity implements Entity {
             // this.modelBody has been reassigned, so this.modelBody would still be
             // the previous aircraft.
             this.fx.onBodyModelLoaded(model);
+            this.trackAircraftModel(model);
         }));
-        this.modelShadow = new LODHelper(this.models.getModel(def.shadow), 5);
+        const shadowModel = this.models.getModel(def.shadow);
+        this.modelShadow = new LODHelper(shadowModel, 5);
+        this.trackAircraftModel(shadowModel);
 
-        this.modelCollision = undefined;
         if (def.collision) {
             // Prefetch so the asset is resident; meshes stay visible=false in ModelManager.
-            this.modelCollision = new LODHelper(this.models.getModel(def.collision));
+            const collisionModel = this.models.getModel(def.collision);
+            this.trackAircraftModel(collisionModel);
         }
 
         this.modelLandingGear = undefined;
@@ -234,10 +266,13 @@ export class PlayerEntity implements Entity {
                     this.modelLandingGear.setPlaybackDuration(LANDING_GEAR_ANIM_DURATION);
                     this.modelLandingGear.setPlaybackPosition(1);
                 }
+                this.trackAircraftModel(model);
             });
         }
 
-        this.modelTailhook = new LODHelper(this.models.getModel('lib:tailhook'));
+        const tailhookModel = this.models.getModel('lib:tailhook');
+        this.modelTailhook = new LODHelper(tailhookModel);
+        this.trackAircraftModel(tailhookModel);
 
         const hook = arrestorHookPlacementForAircraft(def);
         this._hookTipBody.fromArray(hook.tip);
@@ -248,13 +283,60 @@ export class PlayerEntity implements Entity {
         // Anchor the thrust force arrow at the nozzle exit centroid when present.
         this.hasThrustOrigin = this.fx.getThrustOrigin(this.thrustOrigin) !== null;
 
-        this.controlSurfaceDescriptors = def.surfaces.map((s: ControlSurfaceConfig) => ({
-            model: new LODHelper(this.models.getModel(s.model)),
-            position: new THREE.Vector3().fromArray(s.pivot),
-            axis: new THREE.Vector3().fromArray(s.axis),
-            value: () => this.surfaceValue(s.control, s.sign),
-            range: s.rangeRad,
-        }));
+        this.controlSurfaceDescriptors = def.surfaces.map((s: ControlSurfaceConfig) => {
+            const surfaceModel = this.models.getModel(s.model);
+            this.trackAircraftModel(surfaceModel);
+            return {
+                model: new LODHelper(surfaceModel),
+                pivot: new THREE.Vector3().fromArray(s.pivot),
+                axis: new THREE.Vector3().fromArray(s.axis),
+                value: () => this.surfaceValue(s.control, s.sign),
+                range: s.rangeRad,
+                parentIndex: s.sweepParent ? def.surfaces.findIndex(o => o.role === s.sweepParent) : -1,
+                deflection: 0,
+            };
+        });
+        this.swingWings = def.swingWings;
+        this.fx.setWingSweepSource(() => this.wingSweepUnit);
+    }
+
+    private trackAircraftModel(model: Model): void {
+        for (const lod of model.lod) {
+            for (const obj of lod.flats) {
+                this.traverseAndTrackMeshes(obj);
+            }
+            for (const obj of lod.volumes) {
+                this.traverseAndTrackMeshes(obj);
+            }
+        }
+    }
+
+    private traverseAndTrackMeshes(obj: THREE.Object3D): void {
+        obj.traverse(child => {
+            if ((child as THREE.Mesh).isMesh) {
+                const mesh = child as THREE.Mesh;
+                const mat = mesh.material;
+                if (mat) {
+                    if (Array.isArray(mat)) {
+                        mat.forEach(m => trackAircraftMaterial(m));
+                    } else {
+                        trackAircraftMaterial(mat);
+                    }
+                }
+                trackAircraftMesh(mesh);
+            } else if ((child as THREE.LineSegments).isLineSegments) {
+                const mesh = child as THREE.LineSegments;
+                const mat = mesh.material;
+                if (mat) {
+                    if (Array.isArray(mat)) {
+                        mat.forEach(m => trackAircraftMaterial(m));
+                    } else {
+                        trackAircraftMaterial(mat);
+                    }
+                }
+                trackAircraftMesh(mesh);
+            }
+        });
     }
 
     /** Swap the visual aircraft at runtime (flight model swapped separately). */
@@ -297,6 +379,7 @@ export class PlayerEntity implements Entity {
             case 'flaps': return sign * this.flapsProgressUnit;
             case 'slats': return sign * this.slatDeploymentUnit();
             case 'airbrake': return sign * this.airbrakesProgressUnit;
+            case 'sweep': return sign * this.wingSweepUnit;
             // Flaperons: flap camber blended with the ailerons' SHARE of the roll.
             // Roll is tail-dominant (~20% aileron), so the flaperon shows only a
             // small roll deflection.
@@ -374,6 +457,10 @@ export class PlayerEntity implements Entity {
             if (airbrakes !== null) {
                 this.setAirbrakesExtended(airbrakes);
             }
+            const hook = this.flightModel.getSimHookDeployed();
+            if (hook !== null) {
+                this.setHookDeployed(hook);
+            }
         }
 
         this.obj.position.copy(this.flightModel.position);
@@ -382,6 +469,7 @@ export class PlayerEntity implements Entity {
 
         this.updateAudio();
         this.fx.ensureBound(this.modelBody.model);
+        this.syncCarrierDisplayRide();
         this.updateDisplayTransform();
         this.fx.update(
             this.throttleUnit,
@@ -395,37 +483,21 @@ export class PlayerEntity implements Entity {
             this.updateLandingGear(delta);
             this.updateFlaps(delta);
             this.updateAirbrakes(delta);
-            this.updateGearCompressionVisual(delta);
-        } else {
-            this.gearCompressionSmooth = 0;
+            this.updateTailhook(delta);
+            this.updateWingSweep(delta);
         }
     }
 
-    /** Low-pass mean oleo compression used to offset the gear mesh along body +Y. */
-    private updateGearCompressionVisual(delta: number): void {
-        const target = this.landingGearState === AircraftDeviceState.EXTENDED
-            ? this.flightModel.getGearCompressionMean()
-            : 0;
-        const alpha = 1 - Math.exp(-delta / GEAR_COMPRESSION_SMOOTH_TAU_S);
-        this.gearCompressionSmooth += (target - this.gearCompressionSmooth) * alpha;
-        if (this.gearCompressionSmooth < 1e-4) this.gearCompressionSmooth = 0;
+    private updateWingSweep(delta: number) {
+        const target = wingSweepTarget(
+            this.wingSweepMode, this.flightModel.velocityVector.length(), this.swingWings);
+        this.wingSweepUnit = stepWingSweep(this.wingSweepUnit, target, delta, this.swingWings);
     }
 
-    /**
-     * Gear render pose: body pose plus oleo offset along body +Y so tyres stay
-     * planted while the airframe settles into the spring stroke.
-     */
-    private gearRenderPosition(out: THREE.Vector3): THREE.Vector3 {
-        out.copy(this.displayPosition);
-        if (this.gearCompressionSmooth > 0
-            && this.landingGearState === AircraftDeviceState.EXTENDED
-            && !this._showcaseMode) {
-            out.addScaledVector(
-                this._v.copy(UP).applyQuaternion(this.displayQuaternion),
-                this.gearCompressionSmooth,
-            );
-        }
-        return out;
+    /** Cycle AUTO -> SPREAD -> SWEPT (N key); returns the new mode. */
+    cycleWingSweepMode(): WingSweepMode {
+        this.wingSweepMode = nextWingSweepMode(this.wingSweepMode);
+        return this.wingSweepMode;
     }
 
     private isWorkerControlled(): boolean {
@@ -446,6 +518,56 @@ export class PlayerEntity implements Entity {
         this.flightModel.getRenderPosition(this.displayPosition);
         this.flightModel.getRenderQuaternion(this.displayQuaternion);
         this.flightModel.getRenderVelocity(this.displayVelocity);
+        if (this.carrierRideActive && this.getArrestorCarrierPose) {
+            const pose = this.getArrestorCarrierPose();
+            this.displayPosition.set(
+                pose.position.x + this.carrierRideLocal.x,
+                pose.position.y + this.carrierRideLocal.y,
+                pose.position.z + this.carrierRideLocal.z,
+            );
+        }
+    }
+
+    /**
+     * Capture a frozen ship-local offset once when nearly stopped on deck.
+     * Do not engage during landing rollout — that felt like instant glue.
+     */
+    private syncCarrierDisplayRide(): void {
+        const poseFn = this.getArrestorCarrierPose;
+        if (!poseFn || !this.isLanded || this.throttleUnit > 0.05 || this.isCrashed) {
+            this.carrierRideActive = false;
+            return;
+        }
+        // While a cable is on the hook, follow physics display so the V-bend
+        // tracks the moving tip (frozen ride would desync during pull-out).
+        if (this.flightModel instanceof SimProxyFlightModel
+            && this.flightModel.getArrestorLatch() >= 0) {
+            this.carrierRideActive = false;
+            return;
+        }
+        const pose = poseFn();
+        const dx = this.obj.position.x - pose.position.x;
+        const dz = this.obj.position.z - pose.position.z;
+        if (dx * dx + dz * dz > CARRIER_DISPLAY_RIDE_RADIUS_M * CARRIER_DISPLAY_RIDE_RADIUS_M) {
+            this.carrierRideActive = false;
+            return;
+        }
+        const cv = pose.velocity;
+        const relSpd = cv
+            ? Math.hypot(this.velocity.x - cv.x, this.velocity.z - cv.z)
+            : Math.hypot(this.velocity.x, this.velocity.z);
+        if (relSpd > CARRIER_DISPLAY_PARK_REL_SPEED_MPS) {
+            this.carrierRideActive = false;
+            return;
+        }
+        if (!this.carrierRideActive) {
+            this.carrierRideLocal.set(
+                this.obj.position.x - pose.position.x,
+                this.obj.position.y - pose.position.y,
+                this.obj.position.z - pose.position.z,
+            );
+            this.carrierRideActive = true;
+        }
     }
 
     reset(position: THREE.Vector3, heading: number, spawn?: PlayerSpawnState) {
@@ -472,6 +594,7 @@ export class PlayerEntity implements Entity {
         this.wheelBrakes = false;
         this.limitersEnabled = true;
         this.pitchLimiterMode = FcsPitchLimiter.SOFT;
+        this.carrierRideActive = false;
         this.flightModel.setThrottle(this.throttle);
         if (airborne) {
             this.flightModel.syncEffectiveThrottle();
@@ -482,7 +605,6 @@ export class PlayerEntity implements Entity {
         this.landingGearState = AircraftDeviceState.EXTENDED;
         this.modelLandingGear?.setPlaybackPosition(1);
         this.landingGearProgress = LANDING_GEAR_ANIM_DURATION;
-        this.gearCompressionSmooth = 0;
 
         this.flapsState = AircraftDeviceState.EXTENDED;
         this.flapsProgress = FLAPS_ANIM_DURATION;
@@ -490,6 +612,11 @@ export class PlayerEntity implements Entity {
         this.airbrakesState = AircraftDeviceState.RETRACTED;
         this.airbrakesProgress = 0;
         this.airbrakesProgressUnit = 0;
+        this.wingSweepUnit = 0;
+        this.wingSweepMode = WingSweepMode.AUTO;
+        this.hookState = AircraftDeviceState.RETRACTED;
+        this.hookProgress = 0;
+        this.hookProgressUnit = 0;
 
         this.engineStarted = false;
 
@@ -539,6 +666,27 @@ export class PlayerEntity implements Entity {
         }
         if (this.airbrakesState === AircraftDeviceState.EXTENDING || this.airbrakesState === AircraftDeviceState.RETRACTING) {
             this.airbrakesProgressUnit = this.airbrakesProgress / AIRBRAKE_ANIM_DURATION;
+        }
+    }
+
+    private updateTailhook(delta: number) {
+        if (this.hookState === AircraftDeviceState.EXTENDING) {
+            this.hookProgress += delta;
+            if (this.hookProgress >= TAILHOOK_ANIM_DURATION) {
+                this.hookProgress = TAILHOOK_ANIM_DURATION;
+                this.hookProgressUnit = 1.0;
+                this.hookState = AircraftDeviceState.EXTENDED;
+            }
+        } else if (this.hookState === AircraftDeviceState.RETRACTING) {
+            this.hookProgress -= delta;
+            if (this.hookProgress <= 0) {
+                this.hookProgress = 0;
+                this.hookProgressUnit = 0;
+                this.hookState = AircraftDeviceState.RETRACTED;
+            }
+        }
+        if (this.hookState === AircraftDeviceState.EXTENDING || this.hookState === AircraftDeviceState.RETRACTING) {
+            this.hookProgressUnit = this.hookProgress / TAILHOOK_ANIM_DURATION;
         }
     }
 
@@ -664,11 +812,18 @@ export class PlayerEntity implements Entity {
         this.combatSim?.setForceVectorsRequested(PLAYER_SIM_ID, enabled);
     }
 
+    /** Get aircraft model node for debug manipulation. */
+    getModelNode(): LODHelper {
+        return this.modelBody;
+    }
+
     render3D(targetWidth: number, targetHeight: number, camera: THREE.Camera, lists: Map<string, THREE.Scene>, palette: Palette): void {
 
-        if (!this.isCrashed && !this._showcaseMode) {
+        // No planform silhouette once the sun is too low to cast one.
+        if (!this.isCrashed && !this._showcaseMode && SUN_STATE.shadowStrength > 0) {
             setAircraftShadowPose(
                 this.displayPosition, this.displayQuaternion, this.groundHeightAt,
+                0.5 * this.modelShadow.model.maxSize,
                 this.shadowPosition, this.shadowQuaternion, this.shadowScale, this._v);
             this.modelShadow.addToRenderList(
                 this.shadowPosition, this.shadowQuaternion, this.shadowScale,
@@ -722,24 +877,26 @@ export class PlayerEntity implements Entity {
                     || this.landingGearState !== AircraftDeviceState.RETRACTED;
                 if (showLandingGear) {
                     this.modelLandingGear?.addToRenderList(
-                        this.gearRenderPosition(this.gearDisplayPosition),
-                        this.displayQuaternion, this.obj.scale,
+                        this.displayPosition, this.displayQuaternion, this.obj.scale,
                         targetWidth, camera, palette,
                         SceneLayers.EntityFlats, SceneLayers.EntityVolumes, lists, 0);
                 }
-                // Tailhook only when gear is down (not while animated bay doors play retracted).
+                // Tailhook only once the pilot lowers it (H); hidden while stowed.
                 const showTailhook = this._showcaseMode
-                    || this.landingGearState !== AircraftDeviceState.RETRACTED;
+                    || this.hookState !== AircraftDeviceState.RETRACTED;
                 if (showTailhook && this.modelTailhook) {
                     this.renderTailhook(targetWidth, camera, palette, lists);
                 }
 
+                const still = this._showcaseMode || this.isCrashed;
+                for (const d of this.controlSurfaceDescriptors) {
+                    d.deflection = still ? 0 : d.value() * d.range;
+                }
                 for (let i = 0; i < this.controlSurfaceDescriptors.length; i++) {
                     const d = this.controlSurfaceDescriptors[i];
-                    const deflection = this._showcaseMode || this.isCrashed ? 0 : d.value() * d.range;
-
-                    this._q.setFromAxisAngle(this._v.copy(d.axis).applyQuaternion(this.displayQuaternion), deflection).multiply(this.displayQuaternion);
-                    this._v.copy(d.position).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
+                    poseSurface(
+                        d, d.parentIndex >= 0 ? this.controlSurfaceDescriptors[d.parentIndex] : undefined,
+                        this.displayPosition, this.displayQuaternion, this._v, this._q);
                     d.model.addToRenderList(
                         this._v, this._q, this.obj.scale,
                         targetWidth, camera, palette,
@@ -756,6 +913,7 @@ export class PlayerEntity implements Entity {
     /**
      * Place the tailhook at the belly hinge. Idle: points aft along the body
      * hinge→tip. Latched: tip on hinge→sheave ray so arm and cable leg align.
+     * Mid-swing it slerps between stowed (flush aft along the belly) and down.
      */
     private renderTailhook(
         targetWidth: number,
@@ -778,7 +936,11 @@ export class PlayerEntity implements Entity {
             // Shared tip with the bent wire: colinear hinge → tip → left sheave.
             this._hookTip.copy(this._hookTipBody).sub(this._hookHingeBody)
                 .applyQuaternion(this.displayQuaternion);
-            arrestorCableStartWorld(latch, undefined, this._v);
+            arrestorCableStartWorld(
+                latch,
+                this.getArrestorCarrierPose?.() ?? undefined,
+                this._v,
+            );
             latchedHookTipWorld(
                 this._hinge, this._v, this._v, this._hookDir, this._hookTip,
             );
@@ -788,6 +950,15 @@ export class PlayerEntity implements Entity {
             this._hookDir.normalize();
         }
         this._q.setFromUnitVectors(FORWARD, this._hookDir);
+
+        const deploy = this._showcaseMode ? 1 : this.hookProgressUnit;
+        if (deploy < 1) {
+            // Stowed arm lies flush aft along the belly; it swings down from there.
+            this._hookStowedDir.set(0, 0, -1).applyQuaternion(this.displayQuaternion);
+            this._qStowed.setFromUnitVectors(FORWARD, this._hookStowedDir);
+            this._qStowed.slerp(this._q, deploy);
+            this._q.copy(this._qStowed);
+        }
 
         this.modelTailhook.addToRenderList(
             this._hinge, this._q, this.obj.scale,
@@ -822,8 +993,7 @@ export class PlayerEntity implements Entity {
             || this.landingGearState !== AircraftDeviceState.RETRACTED;
         if (showLandingGear) {
             this.modelLandingGear?.addToRenderList(
-                this.gearRenderPosition(this.gearDisplayPosition),
-                this.displayQuaternion, this.obj.scale,
+                this.displayPosition, this.displayQuaternion, this.obj.scale,
                 targetWidth, camera, palette,
                 'showcasePickFlats', 'showcasePickVolumes', this.showcasePickLists, 0);
         }
@@ -831,7 +1001,7 @@ export class PlayerEntity implements Entity {
         for (let i = 0; i < this.controlSurfaceDescriptors.length; i++) {
             const d = this.controlSurfaceDescriptors[i];
             this._q.copy(this.displayQuaternion);
-            this._v.copy(d.position).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
+            this._v.copy(d.pivot).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
             d.model.addToRenderList(
                 this._v, this._q, this.obj.scale,
                 targetWidth, camera, palette,
@@ -984,14 +1154,46 @@ export class PlayerEntity implements Entity {
         }
     }
 
+    /** Drive the tailhook to a target state (sim-owned, toggled by the H key). */
+    setHookDeployed(deployed: boolean) {
+        const isDeployed = this.hookState === AircraftDeviceState.EXTENDED
+            || this.hookState === AircraftDeviceState.EXTENDING;
+        if (deployed !== isDeployed) {
+            this.toggleTailhook();
+        }
+    }
+
     /** Wire the shared combat sim client (physics/gun/autopilot run in its worker). */
     setCombatSimClient(client: CombatSimClient) {
         this.combatSim = client;
     }
 
-    /** Solid-ground sampler used to place the planform shadow (carrier/hills/flat). */
+    /**
+     * Solid-ground sampler used to place the planform shadow (carrier/hills/flat).
+     * Reads the terrain mesh on screen, not the DEM: the shadow has to land on
+     * the triangles the depth test compares it against. See drawnGroundHeightAt.
+     */
     setGroundHeightAt(fn: (x: number, z: number) => number): void {
         this.groundHeightAt = fn;
+    }
+
+    /**
+     * Scene Y -> altimeter altitude.
+     *
+     * The scene is a tangent plane at the play area's origin and the terrain is
+     * drawn curving away from it, so scene Y understates true altitude by more
+     * the further out you fly — ~1.8 km at the corner of a three-degree area,
+     * which is why an altimeter reading raw Y showed zero with the ground still
+     * a kilometre below. See `HeightSampler.geodeticAltitudeAtEnu`.
+     */
+    setAltitudeAt(fn: (x: number, y: number, z: number) => number): void {
+        this.altitudeAt = fn;
+    }
+
+    /** Height above the ellipsoid of the drawn aircraft, in metres. */
+    getDisplayAltitude(): number {
+        const p = this.displayPosition;
+        return this.altitudeAt(p.x, p.y, p.z);
     }
 
     /** Mark that this aircraft carries a gun (config lives in the sim descriptor). */
@@ -1096,6 +1298,32 @@ export class PlayerEntity implements Entity {
         return out.copy(this._hookHingeBody);
     }
 
+    /** World-space hook tip matching the rendered tailhook / cable V-mid. */
+    getArrestorHookTipWorld(out: THREE.Vector3): THREE.Vector3 {
+        return out.copy(this._hookTipBody)
+            .applyQuaternion(this.displayQuaternion)
+            .add(this.displayPosition);
+    }
+
+    /** Provide the live carrier pose so a latched hook aims at the moving sheave. */
+    setArrestorCarrierPoseProvider(getPose: () => ArrestorCarrierPose): void {
+        this.getArrestorCarrierPose = getPose;
+    }
+
+    private getBarricadeStatus: (() => string | undefined) | undefined;
+
+    /**
+     * Ship-side barricade status for the HUD device stack (undefined when the
+     * net is stowed). Provided by the game, which owns the carrier's systems.
+     */
+    setBarricadeStatusProvider(get: () => string | undefined): void {
+        this.getBarricadeStatus = get;
+    }
+
+    get barricadeStatus(): string | undefined {
+        return this.getBarricadeStatus?.();
+    }
+
     getDisplayVelocity(): THREE.Vector3 {
         return this.displayVelocity;
     }
@@ -1140,17 +1368,6 @@ export class PlayerEntity implements Entity {
             : this.pitch;
     }
 
-    get pitchStickUnitsValue(): number {
-        if (this.flightModel instanceof SimProxyFlightModel) {
-            return this.flightModel.getSimPitchStickUnits();
-        }
-        return this.pitchStickUnits;
-    }
-
-    get commandedElevator(): number {
-        return this.flightModel.getCommandedElevator();
-    }
-
     /** Max nose-up / nose-down elevator-command clamp bounds (same +nose-up
      *  polarity as the pitch input), ±1 with the FBW limiters OFF. */
     get elevatorLimitHigh(): number {
@@ -1181,6 +1398,9 @@ export class PlayerEntity implements Entity {
         return this.velocity;
     }
 
+    /** Scratch list reused by target cycling; never handed out. */
+    private readonly targetCandidates: WeaponsTarget[] = [];
+
     get weaponsTarget(): WeaponsTarget | undefined {
         return this.target;
     }
@@ -1202,38 +1422,8 @@ export class PlayerEntity implements Entity {
         return this.flightModel.getLoadFactorG();
     }
 
-    getAccelerationWorld(target: THREE.Vector3): THREE.Vector3 {
-        return this.flightModel.getAccelerationWorld(target);
-    }
-
     get engineThrustKn(): number {
         return this.flightModel.getEngineThrustKn();
-    }
-
-    /** Snapshot of pilot commands and rigid-body state for the flight recorder. */
-    captureFlightSample(): FlightSample {
-        return {
-            pitchCmd: this.pitchInput,
-            rollCmd: this.rollInput,
-            yawCmd: this.yawInput,
-            thrLever: this.throttleUnit,
-            gear: this.landingGearState === AircraftDeviceState.EXTENDED,
-            flaps: this.flapsState === AircraftDeviceState.EXTENDED,
-            brake: this.wheelBrakesApplied,
-            stabilizer: this.flightModel.getCommandedElevator(),
-            aileron: this.flightModel.getCommandedAileron(),
-            rudder: this.flightModel.getCommandedRudder(),
-            effThr: this.flightModel.getEffectiveThrottle(),
-            thrustKn: this.flightModel.getEngineThrustKn(),
-            position: this.flightModel.position,
-            velocity: this.flightModel.velocityVector,
-            quaternion: this.flightModel.quaternion,
-            aoaRad: this.flightModel.getAngleOfAttack(),
-            loadG: this.flightModel.getLoadFactorG(),
-            stall: this.flightModel.getStallStatus(),
-            landed: this.flightModel.isLanded(),
-            crashed: this.flightModel.isCrashed(),
-        };
     }
 
     get throttleHudText(): string {
@@ -1254,6 +1444,10 @@ export class PlayerEntity implements Entity {
 
     get airbrakes(): AircraftDeviceState {
         return this.airbrakesState;
+    }
+
+    get tailhook(): AircraftDeviceState {
+        return this.hookState;
     }
 
     get wheelBrakesApplied(): boolean {
@@ -1277,7 +1471,7 @@ export class PlayerEntity implements Entity {
 
     private setupInput() {
         document.addEventListener('keypress', (event: KeyboardEvent) => {
-            if (!this.isCrashed && this.controlsEnabled) {
+            if (!isOverlayKeyEvent(event) && !this.isCrashed && this.controlsEnabled) {
                 switch (event.key) {
                     case 't': {
                         this.pickTarget();
@@ -1287,7 +1481,7 @@ export class PlayerEntity implements Entity {
                         this._nightVision = !this._nightVision;
                         break;
                     }
-                    case 'h': {
+                    case 'u': {
                         this.hudFocus += 1;
                         this.hudFocus %= HUDFocusMode._LENGTH;
                         break;
@@ -1298,7 +1492,7 @@ export class PlayerEntity implements Entity {
     }
 
     private pickTarget() {
-        const candidates = this.collectTargets();
+        const candidates = this.collectWeaponsTargets(this.targetCandidates);
         if (candidates.length === 0) {
             this.target = undefined;
             return;
@@ -1310,15 +1504,17 @@ export class PlayerEntity implements Entity {
 
     /**
      * The designatable weapons targets, in cycling order: the fixed ground
-     * installations followed by any live airborne enemy aircraft.
+     * installations followed by any live airborne enemy aircraft. Fills and
+     * returns `out`, so callers that poll it (the tactical MFD) reuse one array
+     * instead of allocating per scan.
      */
-    private collectTargets(): WeaponsTarget[] {
-        const result: WeaponsTarget[] = [];
+    collectWeaponsTargets(out: WeaponsTarget[] = []): WeaponsTarget[] {
+        out.length = 0;
         if (!this.scene) {
-            return result;
+            return out;
         }
         for (const entity of this.scene.listByTag(ENTITY_TAGS.TARGET)) {
-            result.push(entity as unknown as WeaponsTarget);
+            out.push(entity as unknown as WeaponsTarget);
         }
         for (const entity of this.scene.listByTag(ENTITY_TAGS.AIRCRAFT)) {
             if (entity === this) {
@@ -1326,10 +1522,10 @@ export class PlayerEntity implements Entity {
             }
             const combatant = entity as unknown as Combatant;
             if (combatant.faction === Faction.ENEMY && combatant.isAlive()) {
-                result.push(entity as unknown as WeaponsTarget);
+                out.push(entity as unknown as WeaponsTarget);
             }
         }
-        return result;
+        return out;
     }
 
     private toggleFlaps() {
@@ -1345,6 +1541,14 @@ export class PlayerEntity implements Entity {
             this.airbrakesState = AircraftDeviceState.RETRACTING;
         } else {
             this.airbrakesState = AircraftDeviceState.EXTENDING;
+        }
+    }
+
+    private toggleTailhook() {
+        if (this.hookState === AircraftDeviceState.EXTENDED || this.hookState === AircraftDeviceState.EXTENDING) {
+            this.hookState = AircraftDeviceState.RETRACTING;
+        } else {
+            this.hookState = AircraftDeviceState.EXTENDING;
         }
     }
 

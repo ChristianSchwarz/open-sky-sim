@@ -77,7 +77,7 @@ const SMOOTH_SLEW_PER_S = 5.0;       // max elevator-target change per second (m
  * law. The peak rate (`maxRollRateDegS`) is scaled by a dynamic-pressure gain
  * schedule and faded by Mach, altitude, AoA and flap limiters.
  */
-export function computeCommandedRollRate(input: FcsInput, roll: Fm2RollLawConfig): number {
+function computeCommandedRollRate(input: FcsInput, roll: Fm2RollLawConfig): number {
     if (input.landed || Math.abs(input.rollStick) < 1e-6) {
         return 0;
     }

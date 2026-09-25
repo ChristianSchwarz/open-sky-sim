@@ -8,7 +8,7 @@
  * {@link FlyableAircraftDef} shape.
  */
 import { Fm2AircraftConfig, defaultFm2Config } from '../physics/fm2/fm2AircraftConfig';
-import { ControlSurfaceConfig, FlyableAircraftDef, AircraftCollisionMesh } from '../scene/entities/aircraftDef';
+import { ControlSurfaceConfig, FlyableAircraftDef, AircraftCollisionMesh, SwingWingsConfig } from '../scene/entities/aircraftDef';
 import { aircraftPackStore, toPackUrl } from './aircraftPack';
 
 const HINGE_RANGE = Math.PI / 6;
@@ -60,7 +60,7 @@ export function buildF22Def(): FlyableAircraftDef {
 }
 
 /** Raw shape of a packed `manifest.json` (subset the sim consumes). */
-export interface AircraftManifest {
+interface AircraftManifest {
     id?: string;
     name?: string;
     displayName?: string;
@@ -82,8 +82,9 @@ export interface AircraftManifest {
     surfaces: {
         role: string; path: string;
         pivot: [number, number, number]; axis: [number, number, number];
-        control: string; sign: number; rangeRad: number;
+        control: string; sign: number; rangeRad: number; sweepParent?: string;
     }[];
+    swingWings?: SwingWingsConfig | null;
     fx?: { wingtips?: [[number, number, number], [number, number, number]] | null; nozzles?: [number, number, number][] | null; nozzleRadius?: number | null };
     attachments?: { name: string; position: [number, number, number]; forward: [number, number, number] }[] | null;
     cockpitOffset?: [number, number, number];
@@ -160,7 +161,7 @@ export function groupAircraftByModel(defs: FlyableAircraftDef[]): AircraftModelG
     return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
-export function manifestToDef(id: string, m: AircraftManifest): FlyableAircraftDef {
+function manifestToDef(id: string, m: AircraftManifest): FlyableAircraftDef {
     return {
         id: m.id ?? id,
         name: m.displayName ?? m.name ?? id,
@@ -178,6 +179,7 @@ export function manifestToDef(id: string, m: AircraftManifest): FlyableAircraftD
         attachments: m.attachments ?? undefined,
         fx: { wingtips: m.fx?.wingtips ?? null, nozzles: m.fx?.nozzles ?? null, nozzleRadius: m.fx?.nozzleRadius ?? null },
         flight: m.flight ?? undefined,
+        swingWings: m.swingWings ?? undefined,
         surfaces: m.surfaces.map((s): ControlSurfaceConfig => {
             const role = s.role;
             // Older packs mapped speedbrakes to the flaps axis; drive them from airbrake.
@@ -192,6 +194,7 @@ export function manifestToDef(id: string, m: AircraftManifest): FlyableAircraftD
                 control,
                 sign: s.sign,
                 rangeRad: s.rangeRad,
+                sweepParent: s.sweepParent,
             };
         }),
     };

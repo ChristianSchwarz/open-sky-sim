@@ -43,6 +43,24 @@ function handleMessage(data: SimToWorkerMessage): void {
         case 'setWorld':
             sim.setWorld(data.world);
             break;
+        case 'setHeightField':
+            sim.setHeightField(data.config);
+            break;
+        case 'heightTiles':
+            sim.applyHeightTiles(data.update);
+            break;
+        case 'setArrestorCables':
+            sim.setArrestorCables(data.cables);
+            break;
+        case 'setBarricades':
+            sim.setBarricades(data.barricades);
+            break;
+        case 'setCarrierMeshOrigins':
+            sim.setCarrierMeshOrigins(data.origins);
+            break;
+        case 'setCarrierVelocity':
+            sim.setCarrierVelocity(data.velocity[0], data.velocity[1], data.velocity[2]);
+            break;
         case 'addAircraft':
             sim.addAircraft(data.desc);
             break;
@@ -57,6 +75,12 @@ function handleMessage(data: SimToWorkerMessage): void {
             break;
         case 'setTarget':
             sim.setTarget(data.id, data.targetId);
+            break;
+        case 'setFormationLead':
+            sim.setFormationLead(data.id, data.leadId);
+            break;
+        case 'setTargetFaction':
+            sim.setTargetFaction(data.id, data.faction);
             break;
         case 'setPhase':
             sim.setPhase(data.id, data.phase);
@@ -73,10 +97,10 @@ function handleMessage(data: SimToWorkerMessage): void {
                 v.fromArray(data.position),
                 q.fromArray(data.quaternion),
                 v2.fromArray(data.velocity),
-                data.landed, data.throttle, data.kinematic);
+                data.landed, data.throttle, data.model);
             break;
         case 'setAircraftConfig':
-            sim.setAircraftConfig(data.id, data.aircraftConfig, data.kinematic, data.collision);
+            sim.setAircraftConfig(data.id, data.aircraftConfig, data.model, data.collision);
             break;
         case 'setCollision':
             sim.setCollision(data.id, data.collision);
@@ -113,6 +137,9 @@ function handleMessage(data: SimToWorkerMessage): void {
         case 'setKeyboardLayout':
             sim.setKeyboardLayout(data.layoutId);
             break;
+        case 'setKeyboardPitchStickMode':
+            sim.setKeyboardPitchStickMode(data.mode);
+            break;
         case 'gamepadAxes':
             sim.gamepadAxes(data.id, data.pitch, data.roll, data.yaw, data.throttle, data.connected);
             break;
@@ -135,7 +162,9 @@ function handleMessage(data: SimToWorkerMessage): void {
                     aircraftBank(shared, back),
                     projectileBank(shared, back),
                 );
-                const seq = publishSharedBanks(shared, snapshot.ids.length, snapshot.projectileCount);
+                const seq = publishSharedBanks(
+                    shared, snapshot.ids.length, snapshot.projectileCount,
+                );
                 self.postMessage({
                     type: 'state',
                     shared: true,
@@ -150,7 +179,12 @@ function handleMessage(data: SimToWorkerMessage): void {
                 const snapshot = sim.encodeSnapshot();
                 self.postMessage(
                     { type: 'state', shared: false, ...snapshot, workerStepMs },
-                    { transfer: [snapshot.aircraft.buffer, snapshot.projectiles.buffer] as Transferable[] });
+                    {
+                        transfer: [
+                            snapshot.aircraft.buffer,
+                            snapshot.projectiles.buffer,
+                        ] as Transferable[],
+                    });
             }
             break;
         }

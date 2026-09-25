@@ -5,15 +5,16 @@ import { LODHelper, getLodLevel } from '../../render/helpers';
 import { SimProxyFlightModel } from '../../physics/model/simProxyFlightModel';
 import { CombatSimClient } from '../../physics/sim/combatSimClient';
 import { SimAircraftSpawn, SimGunConfig } from '../../physics/sim/simTypes';
-import { FlightSample } from '../../physics/flightRecorder';
 import { clamp, UP } from '../../utils/math';
 import { AiPilotOptions } from '../../ai/aiPilot';
 import { Combatant, Faction } from '../../weapons/combatant';
 import { Entity, ENTITY_TAGS } from '../entity';
 import { SceneMaterialManager } from '../materials/materials';
-import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef } from './aircraftDef';
+import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef, SwingWingsConfig } from './aircraftDef';
+import { poseSurface, stepWingSweep, WingSweepMode, wingSweepTarget } from './wingSweep';
 import { AircraftFx } from './aircraftFx';
 import { setAircraftShadowPose } from './aircraftShadow';
+import { SUN_STATE } from '../materials/shaders/sun';
 import { ModelManager } from '../models/models';
 import { Scene, SceneLayers } from '../scene';
 import { WeaponsTarget } from './weaponsTarget';
@@ -22,8 +23,6 @@ import { flightConfigWithArrestorHook } from './arrestorCables';
 /** Same hit sphere as the player — shared airframe, different input only. */
 const DEFAULT_HIT_RADIUS = 10;
 const LANDING_GEAR_ANIM_DURATION = 3; // Seconds — match PlayerEntity
-/** Low-pass time constant for oleo visual compression (s). */
-const GEAR_COMPRESSION_SMOOTH_TAU_S = 0.08;
 
 // Enemy aircraft are centred on their own origin when framed by the target camera.
 const AI_TARGET_LOCAL_CENTER = new THREE.Vector3(0, 0, 0);
@@ -44,6 +43,10 @@ interface AiControlSurface {
     control: ControlAxis;
     sign: number;
     range: number;
+    /** Index of the sweep surface this one rides on, or -1. */
+    parentIndex: number;
+    /** Current deflection (rad), refreshed each frame before posing. */
+    deflection: number;
 }
 
 export interface AiAircraftSpawn {
@@ -79,6 +82,7 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
     private gearAnimated = false;
     private gearAnimReady = false;
     private controlSurfaces: AiControlSurface[] = [];
+    private swingWings: SwingWingsConfig | undefined;
 
     private readonly obj = new THREE.Object3D();
     private readonly displayPosition = new THREE.Vector3();
@@ -99,9 +103,6 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
     private airbrakesExtended = false;
     private health = 100;
     private readonly maxHealth = 100;
-    /** Smoothed mean oleo compression for strut visual offset (m). */
-    private gearCompressionSmooth = 0;
-    private readonly gearDisplayPosition = new THREE.Vector3();
 
     constructor(
         models: ModelManager,
@@ -118,7 +119,7 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
         this.faction = faction;
         this.simId = simId;
         this.combatSim = combatSim;
-        this.flightModel = new SimProxyFlightModel(combatSim, simId, false);
+        this.flightModel = new SimProxyFlightModel(combatSim, simId, 'fm2');
         this.fx = new AircraftFx(materials);
 
         this.buildFromDef(def);
@@ -150,7 +151,11 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
         this.syncGearVisual(this.gearDeployed, false);
     }
 
-    /** Solid-ground sampler used to place the planform shadow (carrier/hills/flat). */
+    /**
+     * Solid-ground sampler used to place the planform shadow (carrier/hills/flat).
+     * Reads the terrain mesh on screen, not the DEM: the shadow has to land on
+     * the triangles the depth test compares it against. See drawnGroundHeightAt.
+     */
     setGroundHeightAt(fn: (x: number, z: number) => number): void {
         this.groundHeightAt = fn;
     }
@@ -200,7 +205,11 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             control: s.control,
             sign: s.sign,
             range: s.rangeRad,
+            parentIndex: s.sweepParent ? def.surfaces.findIndex(o => o.role === s.sweepParent) : -1,
+            deflection: 0,
         }));
+        this.swingWings = def.swingWings;
+        this.fx.setWingSweepSource(() => this.wingSweepUnit);
     }
 
     /** Snap or play the gear clip to match deployed/retracted (F-22: t=1 extended). */
@@ -271,6 +280,10 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
         if (airbrakes !== null) {
             this.airbrakesExtended = airbrakes;
         }
+        this.wingSweepUnit = stepWingSweep(
+            this.wingSweepUnit,
+            wingSweepTarget(WingSweepMode.AUTO, this.flightModel.velocityVector.length(), this.swingWings),
+            delta, this.swingWings);
         const health = this.flightModel.getSimHealth();
         if (health >= 0) {
             this.health = health;
@@ -280,13 +293,6 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
         }
         this.obj.position.copy(this.flightModel.position);
         this.obj.quaternion.copy(this.flightModel.quaternion);
-
-        const compressTarget = this.gearDeployed && !this.isCrashed()
-            ? this.flightModel.getGearCompressionMean()
-            : 0;
-        const compressAlpha = 1 - Math.exp(-delta / GEAR_COMPRESSION_SMOOTH_TAU_S);
-        this.gearCompressionSmooth += (compressTarget - this.gearCompressionSmooth) * compressAlpha;
-        if (this.gearCompressionSmooth < 1e-4) this.gearCompressionSmooth = 0;
 
         this.fx.ensureBound(this.modelBody.model);
         this.flightModel.getRenderPosition(this.displayPosition);
@@ -320,6 +326,9 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
         // No-op: authoritative health lives in the combat sim worker.
     }
 
+    /** Visual wing sweep [0,1], scheduled against airspeed. */
+    private wingSweepUnit = 0;
+
     private get flapsProgressUnit(): number {
         return this.flapsExtended ? 1 : 0;
     }
@@ -348,6 +357,7 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             case 'flaps': return sign * this.flapsProgressUnit;
             case 'slats': return sign * this.slatDeploymentUnit();
             case 'airbrake': return sign * this.airbrakesProgressUnit;
+            case 'sweep': return sign * this.wingSweepUnit;
             case 'flaperonLeft':
                 return this.flapsProgressUnit * -FLAPS_EXTENDED_ANGLE
                     - (1.0 - this.flapsProgressUnit * 0.5) * ROLL_VIS_AILERON * roll;
@@ -360,32 +370,6 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
                 return sign * (pitch + ROLL_VIS_TAILERON * roll);
             default: return 0;
         }
-    }
-
-    /** Telemetry snapshot in the same shape the flight recorder consumes for the player. */
-    captureFlightSample(): FlightSample {
-        return {
-            pitchCmd: this.flightModel.getCommandedElevator(),
-            rollCmd: this.flightModel.getCommandedAileron(),
-            yawCmd: this.flightModel.getCommandedRudder(),
-            thrLever: this.flightModel.getEffectiveThrottle(),
-            gear: this.gearDeployed,
-            flaps: this.flapsExtended,
-            brake: false,
-            stabilizer: this.flightModel.getCommandedElevator(),
-            aileron: this.flightModel.getCommandedAileron(),
-            rudder: this.flightModel.getCommandedRudder(),
-            effThr: this.flightModel.getEffectiveThrottle(),
-            thrustKn: this.flightModel.getEngineThrustKn(),
-            position: this.flightModel.position,
-            velocity: this.flightModel.velocityVector,
-            quaternion: this.flightModel.quaternion,
-            aoaRad: this.flightModel.getAngleOfAttack(),
-            loadG: this.flightModel.getLoadFactorG(),
-            stall: this.flightModel.getStallStatus(),
-            landed: this.flightModel.isLanded(),
-            crashed: this.flightModel.isCrashed(),
-        };
     }
 
     // --- WeaponsTarget: designation from the player's target MFD --------------
@@ -469,9 +453,11 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             this.displayVelocity,
         );
 
-        if (!this.isCrashed()) {
+        // No planform silhouette once the sun is too low to cast one.
+        if (!this.isCrashed() && SUN_STATE.shadowStrength > 0) {
             setAircraftShadowPose(
                 this.displayPosition, this.displayQuaternion, this.groundHeightAt,
+                0.5 * this.modelShadow.model.maxSize,
                 this.shadowPosition, this.shadowQuaternion, this.shadowScale, this._v);
             this.modelShadow.addToRenderList(
                 this.shadowPosition, this.shadowQuaternion, this.shadowScale,
@@ -500,26 +486,21 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             const showLandingGear = this.gearDeployed
                 || (this.gearAnimated && this.gearAnimReady);
             if (showLandingGear) {
-                this.gearDisplayPosition.copy(this.displayPosition);
-                if (this.gearCompressionSmooth > 0 && this.gearDeployed) {
-                    this.gearDisplayPosition.addScaledVector(
-                        this._v.copy(UP).applyQuaternion(this.displayQuaternion),
-                        this.gearCompressionSmooth,
-                    );
-                }
                 this.modelLandingGear?.addToRenderList(
-                    this.gearDisplayPosition, this.displayQuaternion, this.scale,
+                    this.displayPosition, this.displayQuaternion, this.scale,
                     targetWidth, camera, palette,
                     SceneLayers.EntityFlats, SceneLayers.EntityVolumes, lists, 0);
             }
 
+            const crashed = this.isCrashed();
+            for (const d of this.controlSurfaces) {
+                d.deflection = crashed ? 0 : this.surfaceValue(d.control, d.sign) * d.range;
+            }
             for (let i = 0; i < this.controlSurfaces.length; i++) {
                 const d = this.controlSurfaces[i];
-                const deflection = this.isCrashed() ? 0 : this.surfaceValue(d.control, d.sign) * d.range;
-                this._q
-                    .setFromAxisAngle(this._v.copy(d.axis).applyQuaternion(this.displayQuaternion), deflection)
-                    .multiply(this.displayQuaternion);
-                this._v.copy(d.pivot).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
+                poseSurface(
+                    d, d.parentIndex >= 0 ? this.controlSurfaces[d.parentIndex] : undefined,
+                    this.displayPosition, this.displayQuaternion, this._v, this._q);
                 d.model.addToRenderList(
                     this._v, this._q, this.scale,
                     targetWidth, camera, palette,

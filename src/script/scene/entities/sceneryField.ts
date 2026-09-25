@@ -20,6 +20,8 @@ export interface SceneryFieldSettings {
     cellsInTile: number; // Length of the tile in cells
     tileLength: number; // World units
     cellVariations: SceneryFieldCellVariation[];
+    /** When set, this field's per-frame rendered triangle count is published to globalThis.__fieldStats[statsKey] for the HUD. */
+    statsKey?: string;
 }
 
 export interface SceneryFieldCellVariation {
@@ -27,6 +29,14 @@ export interface SceneryFieldCellVariation {
     model: string;
     jitter: number; // [0,1] - 0 disabled, 1 cell edge. Applies a random offset to the item within its cell
     randomRotation: boolean;
+    /**
+     * Overrides SimpleEntity's DEFAULT_LOD_BIAS for this variation. Field
+     * scenery (cloud puffs, treetops, ...) is large, distant and rarely
+     * inspected up close, unlike aircraft/vehicles the default bias is tuned
+     * for — a lower (even negative) bias makes its LOD levels kick in at
+     * distances that actually occur within the field instead of never.
+     */
+    lodBias?: number;
 }
 
 export class SceneryField implements Entity {
@@ -34,6 +44,17 @@ export class SceneryField implements Entity {
     private tiles: FieldTile[];
     private paddedArea: THREE.Box2;
     private tmpVector2: THREE.Vector2 = new THREE.Vector2();
+    private tmpProjScreenMatrix: THREE.Matrix4 = new THREE.Matrix4();
+    private tmpFrustum: THREE.Frustum = new THREE.Frustum();
+    private tmpSphere: THREE.Sphere = new THREE.Sphere();
+    /**
+     * Bounding radius for the per-cell frustum test below — generous enough
+     * to cover a cell's largest model plus its jitter offset without a
+     * per-variation lookup: model instances are placed within one cell
+     * (±cellLength/2 jitter) and this field's models never span past a
+     * couple of cells, so cellLength comfortably bounds both.
+     */
+    private cullRadius: number;
 
     private tileMinIndex: number;
     private tileMaxIndex: number;
@@ -44,12 +65,18 @@ export class SceneryField implements Entity {
 
     enabled: boolean = true;
 
-    constructor(models: ModelManager, private area: THREE.Box2, private options: SceneryFieldSettings) {
+    constructor(
+        models: ModelManager,
+        private area: THREE.Box2,
+        private options: SceneryFieldSettings,
+        private heightAt: (x: number, z: number) => number = () => 0,
+    ) {
         this.tiles = Array(options.tilesInField * options.tilesInField);
         this.tileMinIndex = Math.ceil(-options.tilesInField / 2);
         this.tileMaxIndex = Math.ceil(options.tilesInField / 2);
         this.fieldLength = options.tilesInField * options.tileLength;
         this.cellLength = options.tileLength / options.cellsInTile;
+        this.cullRadius = this.cellLength;
 
         this.paddedArea = area.clone().expandByScalar(options.tileLength * 2);
 
@@ -71,6 +98,14 @@ export class SceneryField implements Entity {
         this.tmpVector2.set(camera.position.x, camera.position.z);
         if (!this.paddedArea.containsPoint(this.tmpVector2)) return;
 
+        // Built once per pass (not per cell): frustum-cull cells before
+        // paying their LOD-resolve/render-list-attach cost, instead of
+        // relying solely on Three's own per-mesh cull deep inside the
+        // render list build.
+        this.tmpProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        this.tmpFrustum.setFromProjectionMatrix(this.tmpProjScreenMatrix);
+
+        let triangles = 0;
         let idx = 0;
         for (let row = this.tileMinIndex; row < this.tileMaxIndex; row++) {
             const z = Math.floor((camera.position.z + row * this.options.tileLength) / this.fieldLength + 0.5) * this.fieldLength - row * this.options.tileLength;
@@ -79,12 +114,23 @@ export class SceneryField implements Entity {
                 const tile = this.tiles[idx++];
                 for (let i = 0; i < tile.length; i++) {
                     const item = tile[i];
-                    item.entity.position.set(x + item.offset.x, 0, z + item.offset.z);
+                    const wx = x + item.offset.x;
+                    const wz = z + item.offset.z;
+                    item.entity.position.set(wx, this.heightAt(wx, wz), wz);
                     this.tmpVector2.set(item.entity.position.x, item.entity.position.z);
                     if (!this.area.containsPoint(this.tmpVector2)) continue;
+                    this.tmpSphere.center.copy(item.entity.position);
+                    this.tmpSphere.radius = this.cullRadius;
+                    if (!this.tmpFrustum.intersectsSphere(this.tmpSphere)) continue;
                     item.entity.render3D(targetWidth, targetHeight, camera, layers, palette);
+                    if (this.options.statsKey !== undefined) triangles += item.entity.lastTriangles;
                 }
             }
+        }
+
+        if (this.options.statsKey !== undefined) {
+            const stats = ((globalThis as Record<string, unknown>).__fieldStats ??= {}) as Record<string, number>;
+            stats[this.options.statsKey] = triangles;
         }
     }
 
@@ -107,7 +153,7 @@ export class SceneryField implements Entity {
         const variation = this.pickRandomCellVariation();
         const offset = this.genElementOffset(row, col, variation.jitter);
         const model = models.getModel(variation.model);
-        const entity = new SimpleEntity(model, SceneLayers.EntityFlats, SceneLayers.EntityVolumes);
+        const entity = new SimpleEntity(model, SceneLayers.EntityFlats, SceneLayers.EntityVolumes, variation.lodBias);
         if (variation.randomRotation) {
             entity.quaternion.setFromAxisAngle(UP, Math.floor(Math.random() * 4) * 0.5 * Math.PI);
         }

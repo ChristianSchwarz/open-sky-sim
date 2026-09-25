@@ -1,4 +1,5 @@
 import { AiPilotModels } from '../state/gameDefs';
+import { AceAiPilot } from './ace/aceAiPilot';
 import { AggressiveAiPilot } from './aggressive/aggressiveAiPilot';
 import { AiPilot, AiPilotOptions } from './aiPilot';
 import { AiPilotController } from './aiPilotController';
@@ -21,6 +22,9 @@ export function createAiPilot(
     }
     if (model === AiPilotModels.AGGRESSIVE) {
         return new AggressiveAiPilot(aircraft, world, options);
+    }
+    if (model === AiPilotModels.ACE) {
+        return new AceAiPilot(aircraft, world, options);
     }
     return new AiPilot(aircraft, world, options);
 }

@@ -15,6 +15,12 @@ export class GroundTargetEntity implements Entity, WeaponsTarget {
 
     enabled: boolean = true;
 
+    /**
+     * The runway to fly down, on an airfield. Set after construction because
+     * the runway is chosen from the manifest, not from the model.
+     */
+    approachRunway: WeaponsTarget['approachRunway'];
+
     constructor(private model: Model, lodBias: number = DEFAULT_LOD_BIAS,
         private type: string, private location: string) {
 

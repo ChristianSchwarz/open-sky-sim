@@ -4,7 +4,7 @@ import { Palette, PaletteCategory, PaletteColor } from "../../../config/palettes
 import { COCKPIT_FOV, PITCH_STICK_AFT_UNITS, PITCH_STICK_FWD_UNITS } from '../../../defs';
 import { CanvasPainter } from "../../../render/screen/canvasPainter";
 import { Font, TextAlignment } from "../../../render/screen/text";
-import { HUDFocusMode, UnitSystems } from '../../../state/gameDefs';
+import { FlightModels, HUDFocusMode, UnitSystems } from '../../../state/gameDefs';
 import { calculatePitchRoll, clamp, FORWARD, toDegrees, toRadians, UP, vectorHeading } from '../../../utils/math';
 import { computeMachNumber } from '../../../physics/aeroUtils';
 import { FcsPitchLimiter } from '../../../physics/fm2/fcs';
@@ -17,7 +17,7 @@ import {
     GUN_AIM_DEFAULT_RANGE_M,
     GUN_MUZZLE_OFFSET,
 } from '../../../weapons/gunPipper';
-import { formatHeading, getOverlayLayout, getOverlayLogicalHeight, getOverlayTickStep, OverlayLayout, toFeet } from './overlayUtils';
+import { formatHeading, getOverlayLayout, getOverlayLogicalHeight, getOverlayTickStep, OverlayLayout } from './overlayUtils';
 import { DisplayUnits } from './displayUnits';
 import {
     aoaIndexerCue,
@@ -54,7 +54,6 @@ const LADDER_HALF_WIDTH = Math.floor(LADDER_WIDTH / 2);
 const LADDER_HALF_HEIGHT = Math.floor(LADDER_HEIGHT / 2);
 
 const TARGET_HALF_WIDTH = 8; // Pixels
-const TARGET_WIDTH = TARGET_HALF_WIDTH * 2 + 1;
 
 /** Matches player gun muzzle velocity in game.ts / combat sim. */
 const GUN_MUZZLE_VELOCITY_MPS = 1000;
@@ -76,17 +75,16 @@ export class HUDEntity implements Entity {
         this.displayUnits.setSystem(system);
     };
 
-    constructor(private actor: PlayerEntity, config: ConfigService) {
+    constructor(private actor: PlayerEntity, private readonly config: ConfigService) {
         this.displayUnits = new DisplayUnits(config.unitSystem.getActive());
         config.unitSystem.addChangeListener(this.onUnitSystemChange);
     }
 
     private heading: number = 0; // degrees, 0 is North, increases CW
     private altitude: number = 0; // display units (m or ft)
-    private altitudeMeters: number = 0; // raw sim altitude for debug
-    private engineThrustKn: number = 0;
+    /** The same altitude in metres, for the physics readouts that want SI. */
+    private altitudeM: number = 0;
     private renderFps: number = 0;
-    private throttle: number = 0; // Normalised percentage [0, 1]
     private speed: number = 0; // display units (km/h or kt)
     private verticalSpeed: number = 0; // m/s or ft/min
     private velocityDirection: THREE.Vector3 = new THREE.Vector3();
@@ -147,20 +145,22 @@ export class HUDEntity implements Entity {
     private refreshVisualState(): void {
         const now = performance.now();
         if (this.lastRenderTime > 0) {
-            const instantFps = 1000 / (now - this.lastRenderTime);
+            const frameDtMs = now - this.lastRenderTime;
+            const instantFps = 1000 / frameDtMs;
             this.renderFps = this.renderFps > 0
                 ? this.renderFps * 0.9 + instantFps * 0.1
                 : instantFps;
         }
         this.lastRenderTime = now;
 
-        const displayPos = this.actor.getDisplayPosition();
         const displayQuat = this.actor.getDisplayQuaternion();
         const displayVel = this.actor.getDisplayVelocity();
 
-        this.altitude = Math.round(this.displayUnits.altitudeFromMeters(displayPos.y) * 10) / 10;
-        this.altitudeMeters = displayPos.y;
-        this.engineThrustKn = this.actor.engineThrustKn;
+        // Height above the ellipsoid, not scene Y: the two only agree at the play
+        // area's origin, and diverge by over a kilometre at the edge of a large one.
+        this.altitudeM = this.actor.getDisplayAltitude();
+        this.altitude = Math.round(
+            this.displayUnits.altitudeFromMeters(this.altitudeM) * 10) / 10;
 
         this._v.copy(FORWARD)
             .applyQuaternion(displayQuat)
@@ -180,7 +180,7 @@ export class HUDEntity implements Entity {
             this.velocityDirection.copy(displayVel).normalize();
         }
 
-        this.machNumber = computeMachNumber(displayVel.length(), displayPos.y);
+        this.machNumber = computeMachNumber(displayVel.length(), this.altitudeM);
     }
 
     render3D(targetWidth: number, targetHeight: number, camera: THREE.Camera, lists: Map<string, THREE.Scene>, palette: Palette): void {
@@ -191,7 +191,6 @@ export class HUDEntity implements Entity {
         if (!lists.has(SceneLayers.Overlay)) return;
 
         this.refreshVisualState();
-        this.throttle = this.actor.throttleUnit;
 
         const layout = getOverlayLayout(targetWidth, targetHeight);
         const { detailScale, layoutScale } = layout;
@@ -294,7 +293,7 @@ export class HUDEntity implements Entity {
             this.renderVerticalVelocityIndicator(layout, tickStep, altitudeX, altitudeY, painter, hudColor, hudWarnColor);
         }
 
-        this.renderAltitudeDebug(targetWidth, layoutScale, dx, dy, painter, hudSecondaryColor, fontSmall);
+        this.renderPerfStats(targetWidth, layoutScale, dx, dy, painter, hudSecondaryColor, fontSmall);
     }
 
     /**
@@ -356,7 +355,14 @@ export class HUDEntity implements Entity {
         return result;
     }
 
-    private renderAltitudeDebug(
+    /**
+     * Live perf readout: FPS plus rendered-triangle counts split by category.
+     * Terrain and cloud/cirrus triangles are tracked at their own render
+     * sites (__terrainStats, __fieldStats); "objects" is the remainder of
+     * the exact GPU-reported scene total (__sceneTriangles) after
+     * subtracting those two, so the three numbers always add up.
+     */
+    private renderPerfStats(
         targetWidth: number,
         layoutScale: number,
         dx: number,
@@ -368,12 +374,18 @@ export class HUDEntity implements Entity {
         const margin = Math.max(4, Math.round(4 * layoutScale));
         const lineHeight = font.charHeight + font.charSpacing;
         const x = targetWidth - margin + dx;
-        const altitudeFeet = toFeet(this.altitudeMeters);
 
-        painter.text(font, x, margin + dy, `${this.altitudeMeters.toFixed(1)}M`, hudColor, TextAlignment.RIGHT);
-        painter.text(font, x, margin + dy + lineHeight, `${altitudeFeet.toFixed(0)}FT`, hudColor, TextAlignment.RIGHT);
-        painter.text(font, x, margin + dy + lineHeight * 2, `${this.engineThrustKn.toFixed(1)}KN`, hudColor, TextAlignment.RIGHT);
-        painter.text(font, x, margin + dy + lineHeight * 3, `${this.renderFps.toFixed(0)}FPS`, hudColor, TextAlignment.RIGHT);
+        const terrainStats = (globalThis as Record<string, unknown>).__terrainStats as { triangles: number } | undefined;
+        const terrainTriangles = terrainStats?.triangles ?? 0;
+        const fieldStats = (globalThis as Record<string, unknown>).__fieldStats as Record<string, number> | undefined;
+        const cloudTriangles = (fieldStats?.cloud ?? 0) + (fieldStats?.cirrus ?? 0);
+        const sceneTriangles = ((globalThis as Record<string, unknown>).__sceneTriangles as number | undefined) ?? 0;
+        const objectTriangles = Math.max(0, sceneTriangles - terrainTriangles - cloudTriangles);
+
+        painter.text(font, x, margin + dy, `${this.renderFps.toFixed(0)}FPS`, hudColor, TextAlignment.RIGHT);
+        painter.text(font, x, margin + dy + lineHeight, `OBJ ${(objectTriangles / 1000).toFixed(1)}K`, hudColor, TextAlignment.RIGHT);
+        painter.text(font, x, margin + dy + lineHeight * 2, `TER ${(terrainTriangles / 1000).toFixed(1)}K`, hudColor, TextAlignment.RIGHT);
+        painter.text(font, x, margin + dy + lineHeight * 3, `CLD ${(cloudTriangles / 1000).toFixed(1)}K`, hudColor, TextAlignment.RIGHT);
     }
 
     private renderFlightDataIndicators(
@@ -634,8 +646,10 @@ export class HUDEntity implements Entity {
         painter.hLine(throttleX - 1, throttleX + 1, throttleY);
 
         const limitersOn = this.actor.fcsLimitersEnabled;
+        // FM3 has one control law; the 1/2/3 limiter strategies are FM2's.
+        const fm3 = this.config.flightModels.getActiveKey() === FlightModels.FM3;
         const label = limitersOn
-            ? (FCS_MODE_LABELS[this.actor.fcsPitchLimiterMode] ?? '')
+            ? (fm3 ? 'FCS FM3' : (FCS_MODE_LABELS[this.actor.fcsPitchLimiterMode] ?? ''))
             : 'FCS OFF';
         const labelColor = limitersOn ? hudColor : hudLimitColor;
         const labelY = rudderY + gap + 2;
@@ -836,7 +850,12 @@ export class HUDEntity implements Entity {
         hudColor: string, hudSecondaryColor: string, palette: Palette,
     ) {
         if (!this.weaponsTarget) return;
-        const dev = computeIlsDeviation(this.actor.getDisplayPosition(), this.weaponsTarget.targetType);
+        const dev = computeIlsDeviation(
+            this.actor.getDisplayPosition(),
+            this.weaponsTarget.targetType,
+            this.weaponsTarget.targetType === 'Carrier' ? this.weaponsTarget.position : undefined,
+            this.weaponsTarget.approachRunway,
+        );
         if (!dev) return;
 
         const cx = Math.round(halfWidth + dx);

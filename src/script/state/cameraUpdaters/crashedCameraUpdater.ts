@@ -4,7 +4,6 @@ import { FORWARD, UP } from '../../utils/math';
 import { CameraUpdater } from "./cameraUpdater";
 
 
-const ROTATION_SPEED = 2; // RPM
 
 export class CrashedCameraUpdater extends CameraUpdater {
 

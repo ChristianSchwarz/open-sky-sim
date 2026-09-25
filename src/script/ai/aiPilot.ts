@@ -3,7 +3,7 @@ import { clamp, FORWARD, RIGHT, UP } from '../utils/math';
 import { AiPilotModels } from '../state/gameDefs';
 import { PilotableAircraft } from './aircraftControls';
 import { AiPilotController } from './aiPilotController';
-import { SceneWorldQuery, WorldQuery } from './worldQuery';
+import { Runway, SceneWorldQuery, WorldQuery } from './worldQuery';
 import { Combatant } from '../weapons/combatant';
 import { angleOff, ballisticAimPoint, closureRate, predictedMissDistance, specificEnergyHeight, trackingAngle } from './dogfightGeometry';
 
@@ -25,6 +25,17 @@ export enum AiFlightPhase {
     APPROACH,
     FLARE,
     ROLLOUT,
+    /**
+     * Fly formation on the lead set by {@link AiPilot.setFormationLead} — the
+     * wingman phase. Rejoins from any separation, holds a wing slot once
+     * settled, and peels off into {@link AiFlightPhase.ENGAGE} the moment a live
+     * target is assigned (returning here when that target is gone).
+     *
+     * Appended last on purpose: the phase crosses the worker boundary as a raw
+     * ordinal (`{ type: 'setPhase'; phase: number }`), so existing values must
+     * not shift.
+     */
+    FORMATION,
 }
 
 export interface AiPilotOptions {
@@ -219,9 +230,75 @@ const LAG_BLEND_MAX = 0.55;
 const EXTEND_MIN_DURATION = 2.0;             // s, avoids instantly flip-flopping back into a losing fight
 const EXTEND_RECOVER_MARGIN = 150;           // resume pursuit once within this much of the target's energy (m)
 
+// --- Formation (wingman) -------------------------------------------------------
+/**
+ * Echelon-right wing slot, measured in the lead's horizontal frame: aft, out to
+ * the side, and stacked slightly low so the wingman is visible from the lead's
+ * cockpit and its wake stays clear of the lead. Exported so a wingman can be
+ * *spawned* onto the same slot its pilot will then fly.
+ */
+export const FORMATION_SLOT = {
+    /** Metres behind the lead. */
+    trail: 70,
+    /** Metres to the lead's right. */
+    side: 45,
+    /** Metres above the lead (negative = stacked low). */
+    stack: -12,
+} as const;
+// Rejoin (fly *at* the slot) vs. station-keeping (fly the lead's heading and
+// trim out the residual offsets). Hysteresis, or the controller switches
+// steering law every frame while sitting on the boundary.
+const FORMATION_REJOIN_ENTER_M = 600;
+const FORMATION_REJOIN_RELEASE_M = 350;
+/** Overtake speed allowed while closing on the slot (m/s over the lead). */
+const FORMATION_REJOIN_OVERTAKE = 60;
+/** Cross-track error (m) -> heading offset from the lead's heading (rad/m). */
+const FORMATION_HEADING_PER_CROSS = 0.0016;
+const FORMATION_MAX_HEADING_OFFSET = 20 * Math.PI / 180;
+/**
+ * Along-track station keeping: proportional on the position error, damped by the
+ * closing rate. The damping term is not optional — the inner speed loop (throttle
+ * integrator + airframe) lags the position loop badly, and a P-only outer loop
+ * limit-cycles: it overshoots the slot, brakes, sinks, accelerates, climbs, and
+ * repeats with a ~45 s period that never settles.
+ */
+const FORMATION_SPEED_PER_ALONG = 0.20;
+const FORMATION_SPEED_PER_CLOSURE = 0.8;
+const FORMATION_SPEED_TRIM = 25;
+const FORMATION_MAX_BANK = 60 * Math.PI / 180;
+/**
+ * Below this lead speed (m/s) there is no formation to fly — the lead is parked
+ * or rolling out. Hold overhead instead of descending to sit on a stationary
+ * slot.
+ */
+const FORMATION_LEAD_MIN_SPEED = 50;
+/** Beyond this, holding overhead first closes the distance to the lead. */
+const FORMATION_HOLD_RECENTER_M = 2500;
+/**
+ * Speedbrake thresholds (m/s over the commanded speed) for station keeping.
+ * Idle thrust alone does not slow a clean airframe down at altitude — without
+ * the brake the wingman creeps forward past the slot, and once it is ahead the
+ * heading loop cannot recover the along-track error. Hysteresis so the boards
+ * don't cycle in and out every frame.
+ */
+const FORMATION_AIRBRAKE_ENTER = 8;
+const FORMATION_AIRBRAKE_RELEASE = 3;
+/**
+ * Integral trim (m) on the commanded slot altitude. The shared altitude hold
+ * ends in a proportional-only pitch-attitude loop, which droops: a standing
+ * climb demand settles with the nose short of the commanded angle and the
+ * aircraft stabilises ~150 m below its target. Every phase lives with that, but
+ * on a wing slot it reads as the wingman flying visibly low, so formation
+ * integrates the residual away. Bounded for anti-windup.
+ */
+const FORMATION_ALT_TRIM_RATE = 0.03;
+const FORMATION_ALT_TRIM_MAX = 400;
+
 export class AiPilot implements AiPilotController {
 
     private phase: AiFlightPhase = AiFlightPhase.NAVIGATE;
+    /** The runway this pilot committed to; see {@link homeRunway}. */
+    private runwayChoice: Runway | undefined;
     private target: Combatant | undefined;
 
     private readonly cruiseAltitude: number;
@@ -258,6 +335,16 @@ export class AiPilot implements AiPilotController {
     private straightHeading = 0;
     private straightHeadingLatched = false;
 
+    // --- Formation sub-state (FORMATION phase only) ---------------------------
+    /** Aircraft whose wing this pilot flies, when acting as a wingman. */
+    private formationLead: Combatant | undefined;
+    /** Latched rejoin/station-keeping mode (see FORMATION_REJOIN_* thresholds). */
+    private formationRejoining = true;
+    /** Latched speedbrake state while holding a slot (see FORMATION_AIRBRAKE_*). */
+    private formationAirbrakes = false;
+    /** Integral trim on the commanded slot altitude (see FORMATION_ALT_TRIM_*). */
+    private formationAltTrim = 0;
+
     // --- Dogfight sub-state (ENGAGE phase only) -------------------------------
     private dogfightMode: DogfightMode = DogfightMode.PURSUE;
     /** Seconds the target has had a sustained tracking angle on us. */
@@ -293,6 +380,12 @@ export class AiPilot implements AiPilotController {
     private readonly toPoint = new THREE.Vector3();
     private readonly bulletVel = new THREE.Vector3();
     private readonly aimDir = new THREE.Vector3();
+    private readonly lpos = new THREE.Vector3();
+    private readonly lvel = new THREE.Vector3();
+    private readonly slot = new THREE.Vector3();
+    private readonly leadFwd = new THREE.Vector3();
+    private readonly leadRight = new THREE.Vector3();
+    private readonly toSlot = new THREE.Vector3();
 
     constructor(
         private readonly aircraft: PilotableAircraft,
@@ -336,10 +429,26 @@ export class AiPilot implements AiPilotController {
         if (phase === AiFlightPhase.STRAIGHT) {
             this.straightHeadingLatched = false;
         }
+        if (phase === AiFlightPhase.RTB) {
+            // Turning for home is the moment to decide where home is: by now
+            // the aircraft may be a long way from where it took off, and the
+            // nearest field is the one it should be going to.
+            this.runwayChoice = undefined;
+        }
+        if (phase === AiFlightPhase.FORMATION) {
+            // Enter via the rejoin law: a fresh formation assignment is almost
+            // always from a separation, and it releases on its own once close.
+            this.formationRejoining = true;
+            this.formationAltTrim = 0;
+        }
     }
 
     setTarget(target: Combatant | undefined): void {
         this.target = target;
+    }
+
+    setFormationLead(lead: Combatant | undefined): void {
+        this.formationLead = lead;
     }
 
     /** True while a firing solution exists this frame (read after update). */
@@ -381,6 +490,7 @@ export class AiPilot implements AiPilotController {
             case AiFlightPhase.CLIMB_OUT: this.doClimbOut(delta); break;
             case AiFlightPhase.NAVIGATE: this.doNavigate(delta); break;
             case AiFlightPhase.STRAIGHT: this.doStraight(delta); break;
+            case AiFlightPhase.FORMATION: this.doFormation(delta); break;
             case AiFlightPhase.ENGAGE: this.doEngage(delta); break;
             case AiFlightPhase.RTB: this.doRtb(delta); break;
             case AiFlightPhase.APPROACH: this.doApproach(delta); break;
@@ -633,7 +743,6 @@ export class AiPilot implements AiPilotController {
      * true when the pull-up override is engaged this frame.
      */
     private updateTerrainAvoidance(delta: number): boolean {
-        const speed = Math.max(1, this.aircraft.getAirspeed());
         let minClearance = Infinity;
         // Probe points from now to the look-ahead horizon.
         for (let t = 0.5; t <= TERRAIN_LOOKAHEAD_S; t += 0.5) {
@@ -707,8 +816,27 @@ export class AiPilot implements AiPilotController {
         this.aircraft.setLandingGearDeployed(true);
     }
 
+    /**
+     * The runway this pilot is working, chosen once.
+     *
+     * Picked by proximity the first time it is asked for — which on the ground
+     * is the one under the aircraft, and airborne is the nearest field — and
+     * then held. Re-deciding per frame would hand an aircraft off to a
+     * different runway the moment one drifted closer, halfway down an approach
+     * to the first.
+     *
+     * Re-picked when the pilot turns for home, because by then it may be a
+     * long way from where it started and the nearest field is the right one.
+     */
+    private homeRunway(): Runway {
+        if (this.runwayChoice === undefined) {
+            this.runwayChoice = this.world.nearestRunway(this.pos.x, this.pos.z);
+        }
+        return this.runwayChoice;
+    }
+
     private doTakeoff(delta: number): void {
-        const rwy = this.world.runway();
+        const rwy = this.homeRunway();
         this.aircraft.setLandingGearDeployed(true);
         this.aircraft.setFlapsExtended(true);
         this.aircraft.setWheelBrakes(false);
@@ -737,7 +865,7 @@ export class AiPilot implements AiPilotController {
     }
 
     private doClimbOut(delta: number): void {
-        const rwy = this.world.runway();
+        const rwy = this.homeRunway();
         const agl = this.pos.y - this.world.groundHeightAt(this.pos.x, this.pos.z);
         const airspeed = this.aircraft.getAirspeed();
         this.aircraft.setLandingGearDeployed(agl < GEAR_UP_ALT);
@@ -780,9 +908,124 @@ export class AiPilot implements AiPilotController {
         this.commandSpeed(this.cruiseSpeed, delta);
     }
 
+    /**
+     * Wingman phase: fly the lead's wing, and hand off to ENGAGE the moment a
+     * live target is assigned. Two steering laws with hysteresis between them —
+     * rejoin (fly *at* the slot with overtake speed) and station-keeping (fly
+     * the lead's heading, trimming out the residual offsets). Flying at the slot
+     * the whole time would work at range but goes singular on top of it, where
+     * the bearing to a slot metres away swings wildly.
+     */
+    private doFormation(delta: number): void {
+        const lead = this.formationLead;
+        if (!lead || !lead.isAlive()) {
+            this.phase = AiFlightPhase.NAVIGATE;
+            return;
+        }
+        // A bandit outranks the rejoin: peel off and fight.
+        if (this.target && this.target.isAlive()) {
+            this.phase = AiFlightPhase.ENGAGE;
+            return;
+        }
+
+        this.aircraft.setLandingGearDeployed(false);
+        this.aircraft.setFlapsExtended(false);
+
+        lead.readPosition(this.lpos);
+        lead.readVelocity(this.lvel);
+        const leadSpeed = this.lvel.length();
+        if (leadSpeed < FORMATION_LEAD_MIN_SPEED) {
+            // Lead is parked or rolling out — there is no slot to fly. Wait
+            // overhead instead of descending onto a stationary point.
+            this.doHoldOverhead(delta);
+            return;
+        }
+
+        const leadHeading = Math.atan2(this.lvel.x, this.lvel.z);
+        this.leadFwd.set(Math.sin(leadHeading), 0, Math.cos(leadHeading));
+        this.leadRight.set(Math.cos(leadHeading), 0, -Math.sin(leadHeading));
+        this.slot.copy(this.lpos)
+            .addScaledVector(this.leadFwd, -FORMATION_SLOT.trail)
+            .addScaledVector(this.leadRight, FORMATION_SLOT.side);
+        this.slot.y += FORMATION_SLOT.stack;
+
+        this.toSlot.copy(this.slot).sub(this.pos);
+        const slotRange = this.toSlot.length();
+        if (this.formationRejoining) {
+            if (slotRange < FORMATION_REJOIN_RELEASE_M) this.formationRejoining = false;
+        } else if (slotRange > FORMATION_REJOIN_ENTER_M) {
+            this.formationRejoining = true;
+        }
+
+        if (this.formationRejoining) {
+            // No integral trim while closing: the altitude error here is the
+            // rejoin geometry, not loop droop, and integrating it would wind up.
+            this.formationAltTrim = 0;
+            const desiredHeading = Math.atan2(this.toSlot.x, this.toSlot.z);
+            this.commandHeading(this.avoidObstacles(desiredHeading), FORMATION_MAX_BANK);
+            this.commandAltitudeClamped(this.slot.y);
+            this.commandFormationSpeed(Math.min(this.maxSpeed, leadSpeed + FORMATION_REJOIN_OVERTAKE), delta);
+            return;
+        }
+
+        // Station keeping: hold the lead's heading, steering only by the
+        // cross-track error and trimming speed on the along-track error.
+        const alongErr = this.toSlot.dot(this.leadFwd);
+        const crossErr = this.toSlot.dot(this.leadRight);
+        // Closing rate along the lead's axis (+ = falling behind the slot).
+        this.toPoint.copy(this.lvel).sub(this.vel);
+        const alongRate = this.toPoint.dot(this.leadFwd);
+        const headingOffset = clamp(
+            crossErr * FORMATION_HEADING_PER_CROSS,
+            -FORMATION_MAX_HEADING_OFFSET, FORMATION_MAX_HEADING_OFFSET);
+        this.commandHeading(this.avoidObstacles(leadHeading + headingOffset), FORMATION_MAX_BANK);
+        this.formationAltTrim = clamp(
+            this.formationAltTrim + (this.slot.y - this.pos.y) * FORMATION_ALT_TRIM_RATE * delta,
+            -FORMATION_ALT_TRIM_MAX, FORMATION_ALT_TRIM_MAX);
+        this.commandAltitudeClamped(this.slot.y + this.formationAltTrim);
+        const speedTrim = clamp(
+            alongErr * FORMATION_SPEED_PER_ALONG + alongRate * FORMATION_SPEED_PER_CLOSURE,
+            -FORMATION_SPEED_TRIM, FORMATION_SPEED_TRIM);
+        this.commandFormationSpeed(leadSpeed + speedTrim, delta);
+    }
+
+    /**
+     * Speed hold with the speedbrake as the deceleration authority: the throttle
+     * integrator bottoms out at idle long before a clean airframe has actually
+     * slowed down, which is not enough to hold a slot behind a slower lead.
+     */
+    private commandFormationSpeed(desiredSpeed: number, delta: number): void {
+        const airspeed = this.aircraft.getAirspeed();
+        if (this.formationAirbrakes) {
+            if (airspeed < desiredSpeed + FORMATION_AIRBRAKE_RELEASE) this.formationAirbrakes = false;
+        } else if (airspeed > desiredSpeed + FORMATION_AIRBRAKE_ENTER) {
+            this.formationAirbrakes = true;
+        }
+        this.aircraft.setAirbrakesExtended(this.formationAirbrakes);
+        this.commandSpeed(desiredSpeed, delta);
+    }
+
+    /** Loiter at cruise altitude near the lead, closing back in if it drifts off. */
+    private doHoldOverhead(delta: number): void {
+        this.formationAltTrim = 0;
+        this.formationAirbrakes = false;
+        this.aircraft.setAirbrakesExtended(false);
+        this.toPoint.set(this.lpos.x - this.pos.x, 0, this.lpos.z - this.pos.z);
+        const desiredHeading = this.toPoint.length() > FORMATION_HOLD_RECENTER_M
+            ? Math.atan2(this.toPoint.x, this.toPoint.z)
+            : this.heading + 0.4;
+        this.commandHeading(this.avoidObstacles(desiredHeading), MAX_BANK_NAV);
+        this.commandAltitudeClamped(this.cruiseAltitude);
+        this.commandSpeed(this.cruiseSpeed, delta);
+    }
+
     private doEngage(delta: number): void {
         if (!this.target || !this.target.isAlive()) {
-            this.phase = AiFlightPhase.NAVIGATE;
+            // A wingman rejoins its lead when the fight is over; a lone fighter
+            // has nothing to rejoin and goes back to its patrol.
+            this.phase = this.formationLead && this.formationLead.isAlive()
+                ? AiFlightPhase.FORMATION
+                : AiFlightPhase.NAVIGATE;
             return;
         }
         this.aircraft.setLandingGearDeployed(false);
@@ -1135,7 +1378,7 @@ export class AiPilot implements AiPilotController {
     }
 
     private doRtb(delta: number): void {
-        const rwy = this.world.runway();
+        const rwy = this.homeRunway();
         // Fly to an initial approach fix on the extended centreline, then hand
         // off to the approach controller.
         const fwdX = Math.sin(rwy.heading);
@@ -1158,7 +1401,7 @@ export class AiPilot implements AiPilotController {
     }
 
     private doApproach(delta: number): void {
-        const rwy = this.world.runway();
+        const rwy = this.homeRunway();
         const fwdX = Math.sin(rwy.heading);
         const fwdZ = Math.cos(rwy.heading);
         const rightX = Math.cos(rwy.heading);
@@ -1215,7 +1458,7 @@ export class AiPilot implements AiPilotController {
     }
 
     private doRollout(): void {
-        const rwy = this.world.runway();
+        const rwy = this.homeRunway();
         this.aircraft.setThrottle(0);
         this.throttleCmd = 0;
         this.aircraft.setWheelBrakes(true);

@@ -4,7 +4,7 @@ import { COCKPIT_FOV, H_RES, V_RES } from '../../defs';
 
 export class SceneCamera {
     private backgroundSky: THREE.PerspectiveCamera = new THREE.PerspectiveCamera(COCKPIT_FOV, H_RES / V_RES, 5, 50000);
-    private backgroundGround: THREE.PerspectiveCamera = new THREE.PerspectiveCamera(COCKPIT_FOV, H_RES / V_RES, 100, 500000);
+    private backgroundGround: THREE.PerspectiveCamera = new THREE.PerspectiveCamera(COCKPIT_FOV, H_RES / V_RES, 100, 900000);
 
     constructor(private camera: THREE.PerspectiveCamera) {
         this.update();

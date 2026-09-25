@@ -30,6 +30,14 @@ function angularSpeed(a: THREE.Quaternion, b: THREE.Quaternion, dt: number): num
     return (2 * Math.acos(dot)) / dt;
 }
 
+/** A runway the stubbed world can hand back; the tests only need it to exist. */
+const RUNWAY = {
+    center: new THREE.Vector3(),
+    heading: 0,
+    halfLength: 1000,
+    halfWidth: 20,
+};
+
 describe('FM2 rigid-body flight model', () => {
     it('holds roughly level flight from a trimmed cruise', () => {
         const model = new Fm2FlightModel();
@@ -233,12 +241,9 @@ describe('FM2 rigid-body flight model', () => {
             groundHeightAt: () => plateau,
             isLand: () => true,
             obstacles: () => [],
-            runway: () => ({
-                center: new THREE.Vector3(),
-                heading: 0,
-                halfLength: 1000,
-                halfWidth: 20,
-            }),
+            runway: () => RUNWAY,
+            runways: () => [RUNWAY],
+            nearestRunway: () => RUNWAY,
         });
         model.reset();
         model.position.set(0, plateau + PLANE_DISTANCE_TO_GROUND, 0);
@@ -259,6 +264,30 @@ describe('FM2 rigid-body flight model', () => {
             `expected oleo sag on plateau, got ${model.getGearCompressionMean().toFixed(3)} m`);
     });
 
+    it('contact drag at a wingtip bleeds speed gently and yaws the airframe', () => {
+        const model = new Fm2FlightModel();
+        model.reset();
+        model.position.set(0, 1000, 0);
+        model.velocityVector.set(0, 0, 120);
+        model.setLanded(false);
+        model.snapPhysicsState();
+
+        const tip = new THREE.Vector3(5, 1000, 0);
+        const speedBefore = model.velocityVector.length();
+        // ~0.5 s of scrape at 120 Hz.
+        for (let i = 0; i < 60; i++) {
+            model.applyContactDragAt(tip, 1 / 120, 0.45, 0.12, 0.01);
+        }
+
+        const speedAfter = model.velocityVector.length();
+        assert.ok(speedAfter < speedBefore,
+            `expected some drag: ${speedBefore.toFixed(1)} → ${speedAfter.toFixed(1)} m/s`);
+        assert.ok(speedAfter > speedBefore * 0.9,
+            `drag too harsh: ${speedBefore.toFixed(1)} → ${speedAfter.toFixed(1)} m/s`);
+        assert.ok(model.velocityVector.z > 108,
+            `forward speed scrubbed: vz=${model.velocityVector.z.toFixed(1)}`);
+    });
+
     it('gear contacts stay on a rising ramp without tunnelling past stroke', () => {
         // 12° linear incline along +Z — same order as the carrier ski jump tip.
         const slope = Math.tan(12 * Math.PI / 180);
@@ -269,12 +298,9 @@ describe('FM2 rigid-body flight model', () => {
             groundHeightAt: groundAt,
             isLand: () => true,
             obstacles: () => [],
-            runway: () => ({
-                center: new THREE.Vector3(),
-                heading: 0,
-                halfLength: 1000,
-                halfWidth: 20,
-            }),
+            runway: () => RUNWAY,
+            runways: () => [RUNWAY],
+            nearestRunway: () => RUNWAY,
         });
         model.reset();
         model.position.set(0, PLANE_DISTANCE_TO_GROUND, 0);
@@ -928,5 +954,46 @@ describe('FM2 forebody vortex asymmetry (Ericsson nose slice / Reynolds coupling
         }
         assert.ok(maxLateral < 2,
             `subscale regime leaked into the normal envelope: max |velBody.x|=${maxLateral.toFixed(2)} m/s`);
+    });
+});
+
+describe('Fm2FlightModel atmosphere altitude', () => {
+
+    /** Thrust after one settled step at a given scene Y, with an optional frame. */
+    function thrustKn(altitudeAt?: (x: number, y: number, z: number) => number): number {
+        const model = new Fm2FlightModel();
+        if (altitudeAt) model.setAltitudeAt(altitudeAt);
+        airborne(model, 0, 300, 1.0);
+        model.update(1 / 120);
+        return model.getEngineThrustKn();
+    }
+
+    it('reads scene Y as the altitude when nothing wires a frame', () => {
+        const flat = thrustKn();
+        const identity = thrustKn((_x, y) => y);
+        assert.equal(flat, identity);
+    });
+
+    it('lapses thrust on the mapped altitude, not on scene Y', () => {
+        // Scene Y is 0 in both, but the second is told it is really at 10 km —
+        // the situation at the edge of a large play area, where the tangent
+        // plane sits kilometres above the ground it is drawn over.
+        const atSeaLevel = thrustKn();
+        const aloft = thrustKn((_x, y) => y + 10_000);
+        assert.ok(aloft < atSeaLevel * 0.9,
+            `mapped altitude ignored: ${aloft.toFixed(1)} kN at a mapped 10 km `
+            + `vs ${atSeaLevel.toFixed(1)} kN at sea level`);
+    });
+
+    it('matches an equal altitude reached through scene Y', () => {
+        // Flying at scene Y = 10 km and being told scene Y = 0 is really 10 km
+        // must produce the same atmosphere.
+        const model = new Fm2FlightModel();
+        airborne(model, 10_000, 300, 1.0);
+        model.update(1 / 120);
+        const direct = model.getEngineThrustKn();
+        const mapped = thrustKn((_x, y) => y + 10_000);
+        assert.ok(Math.abs(direct - mapped) < 1e-6,
+            `mapped ${mapped.toFixed(4)} kN vs direct ${direct.toFixed(4)} kN`);
     });
 });

@@ -12,7 +12,18 @@ export enum SceneLayers {
     EntityFlats = 'EntityFlats',
     EntityVolumes = 'EntityVolumes',
     /** Aircraft VFX (wingtip trails) drawn after terrain and solid meshes. */
-    EntityFX = 'EntityFX'
+    EntityFX = 'EntityFX',
+    /**
+     * Sky drawn *over* the scene rather than behind it: the sun's glare.
+     *
+     * Rides the same rotation-only background camera as {@link BackgroundSky},
+     * so it is still at infinity, but its pass runs last. Glare is light
+     * scattered by the air between the viewer and the sun, so it is in front of
+     * whatever else is out there: a ridge across the sun does not hide the
+     * aureole, it sits inside it. The disc stays in the background pass,
+     * because that genuinely is behind the ridge.
+     */
+    ForegroundSky = 'ForegroundSky'
 }
 
 export class Scene {
@@ -33,10 +44,18 @@ export class Scene {
         }
     }
 
-    buildRenderLists(targetWidth: number, targetHeight: number, camera: THREE.Camera, renderLists: Map<string, THREE.Scene>, palette: Palette) {
+    /**
+     * `extraFilter` is a one-off, per-call filter ANDed with the ambient one
+     * set via {@link setRenderFilter} — for excluding entities from a single
+     * render pass (e.g. a secondary camera) without disturbing the ambient
+     * filter other passes in the same frame rely on (showcase mode).
+     */
+    buildRenderLists(targetWidth: number, targetHeight: number, camera: THREE.Camera, renderLists: Map<string, THREE.Scene>, palette: Palette, extraFilter?: (entity: Entity) => boolean) {
         for (let i = 0; i < this.entities.length; i++) {
             const entity = this.entities[i];
-            if (entity.enabled && (!this.renderFilter || this.renderFilter(entity))) {
+            if (entity.enabled
+                && (!this.renderFilter || this.renderFilter(entity))
+                && (!extraFilter || extraFilter(entity))) {
                 entity.render3D(targetWidth, targetHeight, camera, renderLists, palette);
             }
         }

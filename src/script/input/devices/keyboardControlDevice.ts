@@ -1,8 +1,8 @@
 import { KernelTask } from "../../core/kernel";
+import { isOverlayKeyEvent } from "../overlayKeys";
 import { CombatSimClient } from "../../physics/sim/combatSimClient";
 import { SimProxyFlightModel } from "../../physics/model/simProxyFlightModel";
 import { PLAYER_SIM_ID } from "../../physics/sim/simIds";
-import { FlightModel } from "../../physics/model/flightModel";
 import {
     PITCH_STICK_BASE_UNIT_RATE,
     PITCH_STICK_MAX_UNIT_RATE,
@@ -14,7 +14,7 @@ import {
     KeyboardControlAction,
     KeyboardControlLayout,
     KeyboardControlLayoutId,
-    KeyboardControlLayouts,
+    KeyboardPitchStickMode,
     getKeyboardLayout,
 } from "../keyboardLayouts";
 
@@ -22,6 +22,7 @@ export {
     KeyboardControlAction,
     KeyboardControlLayoutId,
     KeyboardControlLayouts,
+    KeyboardPitchStickMode,
 } from "../keyboardLayouts";
 export type { KeyboardControlLayout } from "../keyboardLayouts";
 
@@ -36,7 +37,7 @@ enum Stick {
 /**
  * Captures keyboard events on the main thread and forwards them to the combat
  * sim worker. Stick/throttle integration runs in the worker; only raw key
- * down/up events cross the thread boundary (JSBSim mode keeps the legacy
+ * down/up events cross the thread boundary (non-worker models keep the legacy
  * main-thread stick path).
  */
 export class KeyboardControlDevice implements KernelTask {
@@ -49,6 +50,7 @@ export class KeyboardControlDevice implements KernelTask {
 
     private layout: KeyboardControlLayout = getKeyboardLayout(KeyboardControlLayoutId.ARROWS);
     private layoutId: KeyboardControlLayoutId = KeyboardControlLayoutId.ARROWS;
+    private pitchStickMode = KeyboardPitchStickMode.LAYOUT_DEFAULT;
     private pitchHoldSeconds = 0;
     private pitchUnitAccum = 0;
     private keysDown = new Set<string>();
@@ -65,7 +67,8 @@ export class KeyboardControlDevice implements KernelTask {
     }
 
     private usesSteppedPitchStick(): boolean {
-        return this.layoutId === KeyboardControlLayoutId.ARROWS;
+        return this.layoutId === KeyboardControlLayoutId.ARROWS
+            && this.pitchStickMode !== KeyboardPitchStickMode.HOLD;
     }
 
     update(delta: number) {
@@ -85,8 +88,24 @@ export class KeyboardControlDevice implements KernelTask {
         return this.layoutId;
     }
 
+    setKeyboardPitchStickMode(mode: KeyboardPitchStickMode) {
+        this.pitchStickMode = mode;
+        this.pitchState = Stick.IDLE;
+        if (!this.isWorkerControlled()) {
+            this.player.setPitch(0);
+        }
+        this.combatSim.setKeyboardPitchStickMode(mode);
+    }
+
+    getKeyboardPitchStickMode(): KeyboardPitchStickMode {
+        return this.pitchStickMode;
+    }
+
     private setupInput() {
         document.addEventListener('keydown', (event: KeyboardEvent) => {
+            if (isOverlayKeyEvent(event)) {
+                return;
+            }
             const key = normalizeControlKey(event);
             if (this.isLayoutKey(key) && (key.startsWith('arrow') || key.startsWith('numpad'))) {
                 event.preventDefault();
@@ -144,7 +163,7 @@ export class KeyboardControlDevice implements KernelTask {
         });
     }
 
-    /** Legacy main-thread stick integration for JSBSim and other non-worker models. */
+    /** Legacy main-thread stick integration for non-worker models. */
     private updateLegacyMainThread(delta: number) {
         if (!this.player.controlsEnabled || this.player.isAutopilotEnabled) {
             return;

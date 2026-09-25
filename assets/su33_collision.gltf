@@ -1,0 +1,150 @@
+{
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ],
+      "name": "0"
+    },
+    {
+      "name": "1",
+      "nodes": []
+    },
+    {
+      "name": "2",
+      "nodes": []
+    },
+    {
+      "name": "3",
+      "nodes": []
+    },
+    {
+      "name": "4",
+      "nodes": []
+    },
+    {
+      "name": "5",
+      "nodes": []
+    }
+  ],
+  "asset": {
+    "version": "2.0",
+    "generator": "https://github.com/mikedh/trimesh"
+  },
+  "accessors": [
+    {
+      "componentType": 5125,
+      "type": "SCALAR",
+      "bufferView": 0,
+      "count": 16386,
+      "max": [
+        16385
+      ],
+      "min": [
+        0
+      ]
+    },
+    {
+      "componentType": 5126,
+      "type": "VEC3",
+      "byteOffset": 0,
+      "bufferView": 1,
+      "count": 16386,
+      "max": [
+        6.990145683288574,
+        3.355198860168457,
+        10.554356575012207
+      ],
+      "min": [
+        -6.990146636962891,
+        -1.1056954860687256,
+        -10.32623291015625
+      ]
+    },
+    {
+      "componentType": 5126,
+      "count": 16386,
+      "type": "VEC3",
+      "byteOffset": 0,
+      "bufferView": 2,
+      "max": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "min": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    }
+  ],
+  "meshes": [
+    {
+      "name": "0_COLLISION",
+      "extras": {},
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 1,
+            "NORMAL": 2
+          },
+          "indices": 0,
+          "mode": 4,
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "COLLISION",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "name": "0_0_COLLISION",
+      "mesh": 0
+    }
+  ],
+  "buffers": [
+    {
+      "uri": "su33_collision_buffer_0.bin",
+      "byteLength": 65544
+    },
+    {
+      "uri": "su33_collision_buffer_1.bin",
+      "byteLength": 196632
+    },
+    {
+      "uri": "su33_collision_buffer_2.bin",
+      "byteLength": 196632
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 65544
+    },
+    {
+      "buffer": 1,
+      "byteOffset": 0,
+      "byteLength": 196632
+    },
+    {
+      "buffer": 2,
+      "byteOffset": 0,
+      "byteLength": 196632
+    }
+  ]
+}

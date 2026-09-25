@@ -6,7 +6,6 @@ const _q = new THREE.Quaternion();
 
 const EPSILON = 0.0001;
 
-export const ZERO = new THREE.Vector3(0, 0, 0);
 export const UP = new THREE.Vector3(0, 1, 0);
 export const FORWARD = new THREE.Vector3(0, 0, 1);
 export const RIGHT = new THREE.Vector3(1, 0, 0);
@@ -35,22 +34,7 @@ export function vectorHeading(v: THREE.Vector3): number {
     return bearing;
 }
 
-export function roundToZero(v: THREE.Vector3, epsilon: number = EPSILON): THREE.Vector3 {
-    if (equals(v.x, 0.0, epsilon)) {
-        v.x = 0;
-    }
-    if (equals(v.y, 0.0, epsilon)) {
-        v.y = 0;
-    }
-    if (equals(v.z, 0.0, epsilon)) {
-        v.z = 0;
-    }
-    return v;
-}
 
-export function easeOutCirc(x: number): number {
-    return Math.sqrt(1 - (x - 1) * (x - 1));
-}
 
 export function easeOutQuad(x: number) {
     return 1 - (1 - x) * (1 - x);
@@ -59,8 +43,8 @@ export function easeOutQuint(x: number) {
     return 1 - Math.pow(1 - x, 5);
 }
 
-export const PI_OVER_180 = Math.PI / 180.0;
-export const N180_OVER_PI = 180.0 / Math.PI;
+const PI_OVER_180 = Math.PI / 180.0;
+const N180_OVER_PI = 180.0 / Math.PI;
 
 export function toRadians(degrees: number): number {
     return PI_OVER_180 * degrees;

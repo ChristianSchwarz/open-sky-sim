@@ -7,7 +7,7 @@ import {
 } from '../f16Engine';
 import { FcsPitchLimiter } from '../fm2/fcs';
 import { CombatSimClient, SimAircraftProxy } from '../sim/combatSimClient';
-import { SimControlInputs } from '../sim/simTypes';
+import { SimControlInputs, SimFlightModelKind } from '../sim/simTypes';
 import { AC } from '../sim/simSnapshotCodec';
 import { ForceVectorSample } from './flightModel';
 
@@ -27,22 +27,22 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
     /** False until the first worker snapshot — defaults must not override spawn pose. */
     private simStateReady = false;
     private simAirbrakesExtended = false;
+    private simHookDeployed = false;
     private simFiring = false;
     private simHealth = 100;
     private simAmmo = 0;
     private simAutopilot = false;
-    private simPitchStickUnits = 0;
     private simWheelBrakes = false;
     private simLimitersEnabled = true;
     private simPitchLimiterMode = 0;
     private simArrestorLatch = -1;
     private readonly simArrestorHook = new THREE.Vector3();
-    private readonly simGearCompression = [0, 0, 0];
 
     constructor(
         private readonly client: CombatSimClient,
         readonly simId: string,
-        private readonly kinematicMode: boolean,
+        /** The physics the combat sim runs for this aircraft. */
+        readonly modelKind: SimFlightModelKind,
     ) {
         super();
         this.client.registerProxy(this);
@@ -64,6 +64,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
             landingGearDeployed: this.landingGearDeployed,
             flapsExtended: this.flapsExtended,
             airbrakesExtended: this.airbrakesExtended,
+            hookDeployed: this.simHookDeployed,
             wheelBrakesApplied: false,
             pitchLimiterMode: this.pitchLimiterMode,
             limitersEnabled: this.limitersEnabled,
@@ -93,6 +94,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
         this.simGearDeployed = buf[base + AC.gearDeployed] !== 0;
         this.simFlapsExtended = buf[base + AC.flapsExtended] !== 0;
         this.simAirbrakesExtended = buf[base + AC.airbrakesExtended] !== 0;
+        this.simHookDeployed = buf[base + AC.hookDeployed] !== 0;
         this.simStateReady = true;
         this.simFiring = buf[base + AC.firing] !== 0;
         this.simHealth = buf[base + AC.health];
@@ -102,7 +104,6 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
         this.roll = buf[base + AC.inRoll];
         this.yaw = buf[base + AC.inYaw];
         this.throttle = buf[base + AC.inThrottle];
-        this.simPitchStickUnits = buf[base + AC.pitchStickUnits];
         this.simWheelBrakes = buf[base + AC.wheelBrakes] !== 0;
         this.simLimitersEnabled = buf[base + AC.limitersEnabled] !== 0;
         this.simPitchLimiterMode = buf[base + AC.pitchLimiterMode];
@@ -116,9 +117,6 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
             buf[base + AC.hookY] ?? 0,
             buf[base + AC.hookZ] ?? 0,
         );
-        this.simGearCompression[0] = buf[base + AC.gearCompress0] ?? 0;
-        this.simGearCompression[1] = buf[base + AC.gearCompress1] ?? 0;
-        this.simGearCompression[2] = buf[base + AC.gearCompress2] ?? 0;
 
         // @ts-ignore - private on the base, written for render interpolation.
         this.prevPosition.set(buf[base + AC.ppX], buf[base + AC.ppY], buf[base + AC.ppZ]);
@@ -167,6 +165,10 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
         return this.simStateReady ? this.simAirbrakesExtended : null;
     }
 
+    getSimHookDeployed(): boolean | null {
+        return this.simStateReady ? this.simHookDeployed : null;
+    }
+
     /** Clear mirrored gear/flaps until the next worker snapshot (e.g. after respawn). */
     invalidateSimDeviceState(): void {
         this.simStateReady = false;
@@ -174,10 +176,6 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
 
     getSimAutopilot(): boolean {
         return this.simAutopilot;
-    }
-
-    getSimPitchStickUnits(): number {
-        return this.simPitchStickUnits;
     }
 
     getSimWheelBrakes(): boolean {
@@ -192,10 +190,6 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
     /** World-space hook position from the latest worker snapshot. */
     getArrestorHookWorld(out: THREE.Vector3): THREE.Vector3 {
         return out.copy(this.simArrestorHook);
-    }
-
-    getGearCompression(): ReadonlyArray<number> {
-        return this.simGearCompression;
     }
 
     // --- FlightModel overrides ------------------------------------------------
@@ -216,7 +210,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
         super.reset();
         this.client.resetAircraft(
             this.simId, this.obj.position, this.obj.quaternion, this.velocity,
-            this.landed, this.throttle, this.kinematicMode);
+            this.landed, this.throttle, this.modelKind);
     }
 
     syncEffectiveThrottle(): void {
@@ -258,7 +252,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
 
     setAircraft(config: Fm2AircraftConfig): void {
         this.fm2Afterburner = config.engine.afterburner;
-        this.client.setAircraftConfig(this.simId, config, this.kinematicMode);
+        this.client.setAircraftConfig(this.simId, config, this.modelKind);
     }
 
     private isAfterburner(): boolean {

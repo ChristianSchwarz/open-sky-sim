@@ -105,7 +105,7 @@ export function segmentHitsTriangleBody(
 }
 
 /** Transform a world-space segment into the aircraft body frame. */
-export function worldSegmentToBody(
+function worldSegmentToBody(
     worldStart: THREE.Vector3,
     worldEnd: THREE.Vector3,
     position: THREE.Vector3,
@@ -190,26 +190,84 @@ export function segmentHitsCollisionMesh(
     return true;
 }
 
-const AABB_CORNERS: ReadonlyArray<readonly [number, number, number]> = [
-    [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0],
-    [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1],
-];
+/** XZ cells the hull is sampled in; 8 gives ~2 m cells on a fighter. */
+const CONTACT_GRID = 8;
 
-/** Sample body AABB corners (and center) in world space; invoke visitor. */
-export function forEachAabbWorldSample(
+/** Points on the airframe used for solid contact, keyed by collision mesh. */
+interface ContactSamples {
+    /** Lowest hull vertex per XZ cell — what touches down first. */
+    lower: Float32Array;
+    /** Lowest and highest per cell, for volumes a wing can enter side-on. */
+    all: Float32Array;
+}
+
+const contactCache = new WeakMap<AircraftCollisionMesh, ContactSamples>();
+
+/**
+ * Contact points on the airframe: the lowest (and highest) hull vertex in each
+ * cell of an XZ grid over the collider.
+ *
+ * These used to be the eight corners of the body AABB, but the corner of a
+ * fighter's bounding box is eight metres of empty air out past the wingtip.
+ * Over sloping ground a phantom corner projects onto terrain metres higher than
+ * anything under the aircraft, so the wreck triggered while the airframe was
+ * still well clear — 8 m AGL on a 26 degree slope in a 20 degree bank. Real hull
+ * vertices cannot do that: if one is under the ground, the aircraft is in it.
+ */
+function collisionContactPoints(mesh: AircraftCollisionMesh): ContactSamples {
+    const cached = contactCache.get(mesh);
+    if (cached) {
+        return cached;
+    }
+    const { min, max } = mesh.aabb;
+    const spanX = Math.max(1e-6, max[0] - min[0]);
+    const spanZ = Math.max(1e-6, max[2] - min[2]);
+    const lo = new Map<number, [number, number, number]>();
+    const hi = new Map<number, [number, number, number]>();
+    const t = mesh.triangles;
+    for (let i = 0; i + 2 < t.length; i += 3) {
+        const x = t[i];
+        const y = t[i + 1];
+        const z = t[i + 2];
+        const cx = Math.min(CONTACT_GRID - 1, Math.max(0,
+            Math.floor((x - min[0]) / spanX * CONTACT_GRID)));
+        const cz = Math.min(CONTACT_GRID - 1, Math.max(0,
+            Math.floor((z - min[2]) / spanZ * CONTACT_GRID)));
+        const key = cz * CONTACT_GRID + cx;
+        const l = lo.get(key);
+        if (!l || y < l[1]) lo.set(key, [x, y, z]);
+        const h = hi.get(key);
+        if (!h || y > h[1]) hi.set(key, [x, y, z]);
+    }
+    const lower = new Float32Array(lo.size * 3);
+    let n = 0;
+    for (const p of lo.values()) {
+        lower[n++] = p[0]; lower[n++] = p[1]; lower[n++] = p[2];
+    }
+    const extra: number[] = [];
+    for (const [key, p] of hi) {
+        const l = lo.get(key)!;
+        if (p[0] !== l[0] || p[1] !== l[1] || p[2] !== l[2]) {
+            extra.push(p[0], p[1], p[2]);
+        }
+    }
+    const all = new Float32Array(lower.length + extra.length);
+    all.set(lower);
+    all.set(extra, lower.length);
+    const samples: ContactSamples = { lower, all };
+    contactCache.set(mesh, samples);
+    return samples;
+}
+
+/** Sample body-frame contact points (and the origin) in world space. */
+function forEachContactWorldSample(
     position: THREE.Vector3,
     quaternion: THREE.Quaternion,
-    aabb: AircraftCollisionMesh['aabb'],
+    points: Float32Array,
     visit: (world: THREE.Vector3) => boolean | void,
 ): boolean {
-    const { min, max } = aabb;
-    for (let i = 0; i < AABB_CORNERS.length; i++) {
-        const c = AABB_CORNERS[i];
-        _corner.set(
-            c[0] ? max[0] : min[0],
-            c[1] ? max[1] : min[1],
-            c[2] ? max[2] : min[2],
-        );
+    for (let i = 0; i + 2 < points.length; i += 3) {
+        _corner.set(points[i], points[i + 1], points[i + 2]);
         _world.copy(_corner).applyQuaternion(quaternion).add(position);
         if (visit(_world) === true) return true;
     }
@@ -218,8 +276,8 @@ export function forEachAabbWorldSample(
 }
 
 /**
- * True when any AABB sample is below local terrain by more than `margin` metres.
- * `groundHeightAt` returns solid ground Y (flat datum and hills).
+ * True when any hull contact point is below local terrain by more than
+ * `margin` metres. `groundHeightAt` returns solid ground Y (flat datum and hills).
  */
 export function collisionMeshHitsTerrain(
     position: THREE.Vector3,
@@ -234,7 +292,7 @@ export function collisionMeshHitsTerrain(
 }
 
 /**
- * Deepest terrain penetration of the collision AABB, or null if clear.
+ * Deepest terrain penetration of the airframe, or null if clear.
  * Writes into `outPoint` / `outNormal` (heightfield normal) when contacting.
  */
 export function findCollisionMeshTerrainContact(
@@ -249,7 +307,7 @@ export function findCollisionMeshTerrainContact(
     let bestPen = 0;
     let bestX = 0;
     let bestZ = 0;
-    forEachAabbWorldSample(position, quaternion, mesh.aabb, (w) => {
+    forEachContactWorldSample(position, quaternion, collisionContactPoints(mesh).lower, (w) => {
         const gy = groundHeightAt(w.x, w.z);
         const pen = (gy - margin) - w.y;
         if (pen > bestPen) {
@@ -272,7 +330,7 @@ export function findCollisionMeshTerrainContact(
     return { point: outPoint, normal: outNormal, penetration: bestPen };
 }
 
-/** True when any AABB sample lies inside an upright obstacle cylinder. */
+/** True when any hull contact point lies inside an upright obstacle cylinder. */
 export function collisionMeshHitsObstacle(
     position: THREE.Vector3,
     quaternion: THREE.Quaternion,
@@ -285,7 +343,7 @@ export function collisionMeshHitsObstacle(
 }
 
 /**
- * Deepest cylinder penetration of the collision AABB, or null if clear.
+ * Deepest cylinder penetration of the airframe, or null if clear.
  * Side hits use a horizontal outward normal; roof hits use +Y.
  */
 export function findCollisionMeshObstacleContact(
@@ -311,7 +369,7 @@ export function findCollisionMeshObstacleContact(
         return null;
     }
     let bestPen = 0;
-    forEachAabbWorldSample(position, quaternion, mesh.aabb, (w) => {
+    forEachContactWorldSample(position, quaternion, collisionContactPoints(mesh).all, (w) => {
         if (w.y < oy || w.y > top) return;
         const dx = w.x - ox;
         const dz = w.z - oz;

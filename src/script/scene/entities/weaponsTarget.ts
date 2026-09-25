@@ -38,4 +38,18 @@ export interface WeaponsTarget {
     readonly targetThrottle?: number;
     /** Current AI maneuver / phase label (e.g. PURSUE, SHAW:HIGH_YO_YO). */
     readonly targetManeuver?: string;
+    /**
+     * The runway to fly down, for a target the ILS can guide to.
+     *
+     * Present on airfields, which no longer all point the same way: the sim
+     * used to have one runway on heading 0, and the needles could be derived
+     * from a position alone. Absent leaves the legacy geometry, which is what
+     * the authored airbase still uses.
+     */
+    readonly approachRunway?: {
+        readonly center: THREE.Vector3;
+        /** Scene heading (rad) landing on this runway; 0 faces +Z. */
+        readonly heading: number;
+        readonly halfLength: number;
+    };
 }

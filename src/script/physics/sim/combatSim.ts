@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Fm2FlightModel } from '../model/fm2FlightModel';
+import { createSimFlightModel, modelKindFromDesc, SimFlightModel, SimFlightModelKind } from './simFlightModel';
 import { AiFlightPhase, AiPilotOptions } from '../../ai/aiPilot';
 import { AiPilotController } from '../../ai/aiPilotController';
 import { createAiPilot } from '../../ai/createAiPilot';
@@ -7,13 +7,21 @@ import { PilotableAircraft } from '../../ai/aircraftControls';
 import { SceneWorldQuery } from '../../ai/worldQuery';
 import { Combatant, Faction } from '../../weapons/combatant';
 import { Gun, GunConfig, ProjectileSink } from '../../weapons/gun';
-import { FORWARD } from '../../utils/math';
-import { PLANE_DISTANCE_TO_GROUND, TERRAIN_MODEL_SIZE, TERRAIN_SCALE } from '../../defs';
-import { KeyboardControlLayoutId } from '../../input/keyboardLayouts';
+import { clamp, FORWARD } from '../../utils/math';
+import { PLANE_DISTANCE_TO_GROUND } from '../../defs';
+import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
 import { FcsPitchLimiter } from '../fm2/fcs';
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { ForceVectorSample } from '../model/flightModel';
-import { deserializeWorldQuery, deserializeArrestorCables, SerializedWorld } from './serializedWorld';
+import {
+    deserializeWorldQuery,
+    deserializeArrestorCables,
+    SerializedArrestorCables,
+    SerializedWorld,
+} from './serializedWorld';
+import {
+    HeightTileUpdate, MirroredHeightField, SerializedHeightField,
+} from '../../terrain/heightMirror';
 import {
     applyArrestorVelocity,
     ArrestorCableField,
@@ -23,6 +31,8 @@ import {
     hookWorldPos,
     trySnag,
 } from '../../scene/entities/arrestorCables';
+// Barricade imports removed
+
 import { AC, AC_STRIDE, PROJ_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
 import {
     AircraftCollisionMesh,
@@ -39,6 +49,8 @@ import { fm2UsesAfterburner, SimPlayerInput, SimPlayerInputSink } from './simPla
 
 /** Seconds a tracer lives before self-destructing (mirrors WeaponsField). */
 const PROJECTILE_LIFESPAN = 2.5;
+/** Max ship-relative groundspeed (m/s) before kinematic deck park engages. */
+const CARRIER_PARK_REL_SPEED_MPS = 2.0;
 const PROJECTILE_GRAVITY = 9.80665;
 const PROJECTILE_POOL_SIZE = 480;
 /** Allow this much mesh–terrain overlap (m) when gear is down (spring travel). */
@@ -49,23 +61,44 @@ const BELLY_TERRAIN_MARGIN_M = 0.05;
 const SOLID_CRASH_IMPACT_MPS = 55;
 /** Penetration past the margin that forces a wreck (m). */
 const SOLID_CRASH_PENETRATION_M = 3.5;
-/** Bounce coefficient along the contact normal. */
-const SOLID_RESTITUTION = 0.18;
-/** Fraction of tangential speed removed on scrape. */
-const SOLID_TANGENT_FRICTION = 0.4;
+
+// --- Faction target selection --------------------------------------------------
+/** Seconds between full re-scans for aircraft engaging a whole faction. */
+const TARGET_SCAN_INTERVAL = 0.5;
+/**
+ * A challenger must beat the incumbent's score by this factor to steal the
+ * fight. Without the margin, two enemies at similar range make the AI swap back
+ * and forth every scan instead of committing to one of them.
+ */
+const TARGET_SWITCH_MARGIN = 0.75;
+/**
+ * How hard a target off the nose is penalised, as a fraction of its range at
+ * 180 degrees off. Picking purely by range would have the AI turn its back on
+ * the aircraft it is already pointing at for one barely closer behind it.
+ */
+const TARGET_ATA_WEIGHT = 1.0;
 /** Minimum inward speed (m/s) before scrape FX / damage. */
 const SOLID_SCRAPE_FX_MPS = 6;
 /** Health lost per (m/s) of inward impact on a non-fatal scrape. */
 const SOLID_SCRAPE_DAMAGE_PER_MPS = 0.35;
 /** Min seconds between scrape FX bursts per aircraft. */
 const SOLID_SCRAPE_FX_COOLDOWN_S = 0.1;
-/** Extra separation along the normal after resolving penetration (m). */
+/** Extra separation after resolving penetration (m). */
 const SOLID_SLOP_M = 0.05;
+/**
+ * Contact-point drag rate (1/s) while the collider scrapes a solid.
+ * Mild on purpose — only bleeds speed at the hit part (with torque), no bounce.
+ */
+const SOLID_CONTACT_DRAG_PER_S = 0.45;
+/** Fraction of aircraft mass used when converting contact drag to an impulse. */
+const SOLID_CONTACT_DRAG_MASS_FRAC = 0.12;
+/** Cap on per-step contact-velocity bleed (keeps scrapes from slamming the brakes). */
+const SOLID_CONTACT_DRAG_MAX_FRAC = 0.01;
 
 const NEUTRAL_INPUTS: SimControlInputs = {
     pitch: 0, roll: 0, yaw: 0, throttle: 0,
     landingGearDeployed: true, flapsExtended: true, airbrakesExtended: false,
-    wheelBrakesApplied: false,
+    hookDeployed: false, wheelBrakesApplied: false,
     pitchLimiterMode: FcsPitchLimiter.SOFT, limitersEnabled: true,
     wantForceVectors: false, firing: false,
 };
@@ -81,7 +114,7 @@ interface ProjectileSlot {
 }
 
 /**
- * One simulated aircraft: an {@link Fm2FlightModel} plus its command buffer, an
+ * One simulated aircraft: a {@link SimFlightModel} (FM2 or FM3) plus its command buffer, an
  * optional in-worker {@link AiPilotController} and gun. Implements {@link PilotableAircraft}
  * (so a pilot can fly it) and {@link Combatant} (so it can be targeted/hit).
  */
@@ -91,9 +124,9 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     readonly faction: Faction;
     control: SimControlMode;
     enabled: boolean;
-    kinematic: boolean;
+    modelKind: SimFlightModelKind;
 
-    model: Fm2FlightModel;
+    model: SimFlightModel;
     pilot: AiPilotController | undefined;
     gun: Gun | undefined;
 
@@ -106,6 +139,16 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     /** Firing decision resolved this frame (pilot solution or external trigger). */
     firing = false;
 
+    /**
+     * When set, this aircraft engages *any* live combatant of this faction and
+     * the sim re-picks the best one as the fight develops (see
+     * {@link CombatSim.selectTargetFor}). Mutually exclusive with an explicit
+     * {@link CombatSim.setTarget}, which clears it.
+     */
+    targetFaction: Faction | undefined;
+    /** Id of the auto-selected target, so a re-scan can score the incumbent. */
+    autoTargetId: string | undefined;
+
     /** Seconds since last solid-world scrape FX (smoke/sparks). */
     scrapeFxCooldown = 0;
 
@@ -117,10 +160,23 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     arrestorSnagAlong = 0;
     /** True after pull-out finished; cable stays bent until the plane taxis away. */
     arrestorHeld = false;
+    /** Sticky: stay on-deck until gear up / leave carrier height / not landed. */
+    carrierDeckSticky = false;
+    /** Ship-local XZ park offset valid while kinematically locked to the deck. */
+    carrierParkLocalValid = false;
+    carrierParkLocalX = 0;
+    carrierParkLocalZ = 0;
+    /** Ship-local XZ offset for a wreck riding the moving deck (see setCrashed handling). */
+    crashedCarrierLocalValid = false;
+    crashedCarrierLocalX = 0;
+    crashedCarrierLocalZ = 0;
     readonly hookBody = new THREE.Vector3();
     readonly prevHook = new THREE.Vector3();
     hasPrevHook = false;
     readonly hookNow = new THREE.Vector3();
+    /** Previous-step CG, for the barricade's plane-crossing test. */
+    readonly prevPos = new THREE.Vector3();
+    hasPrevPos = false;
 
     // Normalized command buffer, written by the pilot (ai) or the client (external).
     private inPitch = 0;
@@ -130,6 +186,8 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     private inGear = true;
     private inFlaps = true;
     private inAirbrakes = false;
+    /** Tailhook lowered (player 'H'); AI pilots auto-hook with the gear. */
+    private inHook = false;
     private inBrakes = false;
     private inLimiterMode = FcsPitchLimiter.SOFT;
     private inLimiters = true;
@@ -143,7 +201,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.faction = desc.faction as Faction;
         this.control = desc.control;
         this.enabled = desc.enabled;
-        this.kinematic = desc.kinematic;
+        this.modelKind = modelKindFromDesc(desc);
         this.hitRadius = desc.hitRadius;
         this.collision = desc.collision;
         this.maxHealth = desc.maxHealth;
@@ -151,7 +209,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.afterburner = fm2UsesAfterburner(desc.aircraftConfig);
         const hook = desc.aircraftConfig?.hook ?? DEFAULT_ARRESTOR_HOOK_BODY;
         this.hookBody.set(hook[0], hook[1], hook[2]);
-        this.model = new Fm2FlightModel(desc.aircraftConfig, { kinematic: desc.kinematic });
+        this.model = createSimFlightModel(this.modelKind, desc.aircraftConfig);
         this.bindWorld(world);
         if (desc.gun) {
             const cfg: GunConfig = {
@@ -200,7 +258,11 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.arrestorFieldIndex = -1;
         this.arrestorSnagAlong = 0;
         this.arrestorHeld = false;
+        this.carrierDeckSticky = false;
+        this.carrierParkLocalValid = false;
+        this.crashedCarrierLocalValid = false;
         this.hasPrevHook = false;
+        this.hasPrevPos = false;
         this.model.position = this.tmp.fromArray(spawn.position);
         this.model.quaternion = new THREE.Quaternion().fromArray(spawn.quaternion);
         if (spawn.velocity) {
@@ -212,6 +274,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.inGear = !spawn.airborne;
         this.inFlaps = !spawn.airborne;
         this.inAirbrakes = false;
+        this.inHook = false;
         if (spawn.airborne) {
             this.model.syncEffectiveThrottle();
             this.model.snapPhysicsState();
@@ -224,6 +287,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.inPitch = this.inRoll = this.inYaw = 0;
         this.inBrakes = false;
         this.inAirbrakes = false;
+        this.inHook = false;
         this.gun?.reset();
         this.applySpawn(spawn);
         this.enabled = true;
@@ -241,6 +305,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.inGear = inputs.landingGearDeployed;
         this.inFlaps = inputs.flapsExtended;
         this.inAirbrakes = inputs.airbrakesExtended;
+        this.inHook = inputs.hookDeployed;
         this.inBrakes = inputs.wheelBrakesApplied;
         this.inLimiterMode = inputs.pitchLimiterMode;
         this.inLimiters = inputs.limitersEnabled;
@@ -319,6 +384,14 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.inAirbrakes = !this.inAirbrakes;
     }
 
+    toggleHook(): void {
+        this.inHook = !this.inHook;
+    }
+
+    setHookDeployed(deployed: boolean): void {
+        this.inHook = deployed;
+    }
+
     toggleAutopilot(): void {
         this.control = this.control === 'ai' ? 'external' : 'ai';
     }
@@ -346,6 +419,8 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     isGearDeployed(): boolean { return this.inGear; }
     isFlapsExtended(): boolean { return this.inFlaps; }
     isAirbrakesExtended(): boolean { return this.inAirbrakes; }
+    /** AI pilots have no hook control of their own: theirs follows the gear. */
+    isHookDeployed(): boolean { return this.control === 'ai' ? this.inGear : this.inHook; }
 
     // --- Combatant -----------------------------------------------------------
 
@@ -404,6 +479,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         out[base + AC.gearDeployed] = this.inGear ? 1 : 0;
         out[base + AC.flapsExtended] = this.inFlaps ? 1 : 0;
         out[base + AC.airbrakesExtended] = this.inAirbrakes ? 1 : 0;
+        out[base + AC.hookDeployed] = this.isHookDeployed() ? 1 : 0;
         out[base + AC.firing] = this.firing ? 1 : 0;
         out[base + AC.health] = this.health;
         out[base + AC.ammo] = this.gun?.ammoRemaining ?? 0;
@@ -428,16 +504,12 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         out[base + AC.hookX] = this.hookNow.x;
         out[base + AC.hookY] = this.hookNow.y;
         out[base + AC.hookZ] = this.hookNow.z;
-        const gearCompress = this.model.getGearCompression();
-        out[base + AC.gearCompress0] = gearCompress[0] ?? 0;
-        out[base + AC.gearCompress1] = gearCompress[1] ?? 0;
-        out[base + AC.gearCompress2] = gearCompress[2] ?? 0;
     }
 }
 
 /**
  * A combatant whose kinematic state is injected from the main thread (e.g. the
- * player while flying the separate JSBSim worker). AI pilots can target it, and
+ * player flying a model outside the sim worker). AI pilots can target it, and
  * projectiles can hit it, without it being simulated here.
  */
 class ExternalCombatant implements Combatant {
@@ -471,13 +543,15 @@ export class CombatSim implements ProjectileSink {
 
     private world: SceneWorldQuery | undefined;
     private arrestorFields: ArrestorCableField[] = [];
+    /** World velocity of the moving carrier (m/s); trap scrub is relative to this. */
+    private readonly carrierVel = new THREE.Vector3();
     private readonly aircraft = new Map<string, SimAircraft>();
     private readonly order: string[] = [];
     private readonly external = new Map<string, ExternalCombatant>();
     /** Worker-side keyboard/gamepad handlers for externally-controlled aircraft. */
     private readonly playerInputs = new Map<string, SimPlayerInput>();
-
-    private readonly terrainHalfSize = 2.5 * TERRAIN_SCALE * TERRAIN_MODEL_SIZE;
+    private keyboardLayoutId = KeyboardControlLayoutId.ARROWS;
+    private keyboardPitchStickMode = KeyboardPitchStickMode.LAYOUT_DEFAULT;
 
     private readonly projectiles: ProjectileSlot[] = [];
     private readonly hits: SimHitEvent[] = [];
@@ -486,6 +560,7 @@ export class CombatSim implements ProjectileSink {
     private readonly seg = new THREE.Vector3();
     private readonly toCenter = new THREE.Vector3();
     private readonly closest = new THREE.Vector3();
+    private readonly carrierOriginScratch = { x: 0, y: 0, z: 0 };
     private readonly cPos = new THREE.Vector3();
     private readonly cVel = new THREE.Vector3();
     private readonly bodyStart = new THREE.Vector3();
@@ -494,7 +569,28 @@ export class CombatSim implements ProjectileSink {
     private readonly cQuat = new THREE.Quaternion();
     private readonly contactPoint = new THREE.Vector3();
     private readonly contactNormal = new THREE.Vector3();
-    private readonly scrapeTangent = new THREE.Vector3();
+
+    // Scratch + timing for faction target selection.
+    private targetScanTimer = 0;
+    private readonly selfPos = new THREE.Vector3();
+    private readonly selfFwd = new THREE.Vector3();
+    private readonly losTmp = new THREE.Vector3();
+    private readonly candidatePos = new THREE.Vector3();
+    /** Reused candidate-id set — {@link selectTargetFor} runs inside the step loop. */
+    private readonly candidateIds = new Set<string>();
+
+    /** The DEM, mirrored tile by tile from the render thread. */
+    private readonly heightField = new MirroredHeightField();
+
+    /**
+     * Scene Y -> true altitude, handed to every flight model this sim owns.
+     *
+     * Bound once and shared: it reads the mirrored DEM's frame live, so a model
+     * created before the height field arrives simply gets scene Y back until it
+     * does. See `MirroredHeightField.geodeticAltitudeAtWorld`.
+     */
+    private readonly altitudeAt = (x: number, y: number, z: number): number =>
+        this.heightField.geodeticAltitudeAtWorld(x, y, z);
 
     constructor() {
         for (let i = 0; i < PROJECTILE_POOL_SIZE; i++) {
@@ -506,8 +602,20 @@ export class CombatSim implements ProjectileSink {
         }
     }
 
+    /** Sampler config for the mirrored DEM (basis, sea level, zooms, pads). */
+    setHeightField(config: SerializedHeightField): void {
+        this.heightField.configure(config);
+    }
+
+    /** Add/drop mirrored DEM tiles. */
+    applyHeightTiles(update: HeightTileUpdate): void {
+        this.heightField.applyTiles(update);
+    }
+
     setWorld(world: SerializedWorld): void {
-        this.world = deserializeWorldQuery(world);
+        this.world = deserializeWorldQuery(
+            world, (x, z) => this.heightField.heightAtWorld(x, z),
+        );
         this.arrestorFields = deserializeArrestorCables(world);
         // Any aircraft added before the world arrived can now get its pilot + terrain.
         for (const a of this.aircraft.values()) {
@@ -516,16 +624,42 @@ export class CombatSim implements ProjectileSink {
         }
     }
 
+    /** Barricade functionality has been removed. */
+    setBarricades(_barricades: any[]): void {
+        // No-op: barricade system has been removed
+    }
+
+
+
+    setArrestorCables(cables: SerializedArrestorCables[]): void {
+        this.arrestorFields = deserializeArrestorCables({ arrestorCables: cables } as SerializedWorld);
+    }
+
+    /** Update carrier mesh origins for ground contact when the ship moves. */
+    setCarrierMeshOrigins(origins: { originX: number; originY: number; originZ: number }[]): void {
+        this.world?.setCarrierMeshOrigins(origins);
+    }
+
+    /** World-frame carrier velocity for ship-relative arrestor scrub. */
+    setCarrierVelocity(vx: number, vy: number, vz: number): void {
+        this.carrierVel.set(vx, vy, vz);
+    }
+
     addAircraft(desc: SimAircraftDesc): void {
         if (this.aircraft.has(desc.id)) {
             this.aircraft.delete(desc.id);
         } else {
             this.order.push(desc.id);
         }
-        this.aircraft.set(desc.id, new SimAircraft(desc, this.world, this));
+        const added = new SimAircraft(desc, this.world, this);
+        added.model.setAltitudeAt(this.altitudeAt);
+        this.aircraft.set(desc.id, added);
         if (desc.control === 'external') {
-            this.playerInputs.set(desc.id, new SimPlayerInput());
-            this.playerInputs.get(desc.id)!.syncThrottle(desc.spawn.throttle);
+            const input = new SimPlayerInput();
+            input.setKeyboardLayout(this.keyboardLayoutId);
+            input.setKeyboardPitchStickMode(this.keyboardPitchStickMode);
+            input.syncThrottle(desc.spawn.throttle);
+            this.playerInputs.set(desc.id, input);
         }
     }
 
@@ -564,8 +698,16 @@ export class CombatSim implements ProjectileSink {
     }
 
     setKeyboardLayout(layoutId: KeyboardControlLayoutId): void {
+        this.keyboardLayoutId = layoutId;
         for (const input of this.playerInputs.values()) {
             input.setKeyboardLayout(layoutId);
+        }
+    }
+
+    setKeyboardPitchStickMode(mode: KeyboardPitchStickMode): void {
+        this.keyboardPitchStickMode = mode;
+        for (const input of this.playerInputs.values()) {
+            input.setKeyboardPitchStickMode(mode);
         }
     }
 
@@ -589,7 +731,34 @@ export class CombatSim implements ProjectileSink {
         const a = this.aircraft.get(id);
         if (!a) return;
         a.buildPilot(undefined, this.world);
+        // An explicit target wins over — and cancels — faction auto-selection.
+        a.targetFaction = undefined;
+        a.autoTargetId = undefined;
         a.pilot?.setTarget(targetId ? this.resolveCombatant(targetId) : undefined);
+    }
+
+    /**
+     * Engage a whole faction rather than one named aircraft: the sim picks the
+     * best live target of `faction` now and re-picks as the fight develops, so
+     * an opponent fights every hostile in the air instead of tunnelling on the
+     * one aircraft it was handed at spawn. Pass null to stop auto-selecting.
+     */
+    setTargetFaction(id: string, faction: Faction | null): void {
+        const a = this.aircraft.get(id);
+        if (!a) return;
+        a.buildPilot(undefined, this.world);
+        a.autoTargetId = undefined;
+        a.targetFaction = faction ?? undefined;
+        if (faction === null) return;
+        this.selectTargetFor(a, true);
+    }
+
+    /** Assign the aircraft whose wing this pilot flies in the FORMATION phase. */
+    setFormationLead(id: string, leadId: string | null): void {
+        const a = this.aircraft.get(id);
+        if (!a) return;
+        a.buildPilot(undefined, this.world);
+        a.pilot?.setFormationLead(leadId ? this.resolveCombatant(leadId) : undefined);
     }
 
     setPhase(id: string, phase: number): void {
@@ -610,14 +779,16 @@ export class CombatSim implements ProjectileSink {
         this.aircraft.get(id)?.respawn(spawn);
     }
 
-    resetAircraft(id: string, position: THREE.Vector3, quaternion: THREE.Quaternion, velocity: THREE.Vector3, landed: boolean, throttle: number, kinematic: boolean): void {
+    resetAircraft(id: string, position: THREE.Vector3, quaternion: THREE.Quaternion, velocity: THREE.Vector3, landed: boolean, throttle: number, model: SimFlightModelKind): void {
         const a = this.aircraft.get(id);
         if (!a) return;
-        this.rebuildIfKinematicChanged(a, kinematic);
+        this.rebuildIfModelChanged(a, model);
         a.arrestorLatch = -1;
         a.arrestorFieldIndex = -1;
         a.arrestorSnagAlong = 0;
         a.arrestorHeld = false;
+        a.carrierDeckSticky = false;
+        a.carrierParkLocalValid = false;
         a.hasPrevHook = false;
         a.model.reset();
         a.model.position = position;
@@ -625,9 +796,11 @@ export class CombatSim implements ProjectileSink {
         a.model.velocityVector = velocity;
         a.model.setLanded(landed);
         a.model.setThrottle(throttle);
-        // Match PlayerEntity.reset: gear/flaps down on every spawn/teleport.
+        // Match PlayerEntity.reset: gear/flaps down, hook stowed, on every
+        // spawn/teleport.
         a.setLandingGearDeployed(true);
         a.setFlapsExtended(true);
+        a.setHookDeployed(false);
         a.health = a.maxHealth;
         a.resetGun();
         this.playerInputs.get(id)?.syncThrottle(throttle);
@@ -636,13 +809,14 @@ export class CombatSim implements ProjectileSink {
     setAircraftConfig(
         id: string,
         config: Fm2AircraftConfig,
-        kinematic: boolean,
+        model: SimFlightModelKind,
         collision?: AircraftCollisionMesh,
     ): void {
         const a = this.aircraft.get(id);
         if (!a) return;
         // Carry over the live rigid-body state across the model swap.
-        const next = new Fm2FlightModel(config, { kinematic });
+        const next = createSimFlightModel(model, config);
+        next.setAltitudeAt(this.altitudeAt);
         next.reset();
         next.setCrashed(a.model.isCrashed());
         next.setLanded(a.model.isLanded());
@@ -650,7 +824,7 @@ export class CombatSim implements ProjectileSink {
         next.quaternion = a.model.quaternion;
         next.velocityVector = a.model.velocityVector;
         a.model = next;
-        a.kinematic = kinematic;
+        a.modelKind = model;
         a.collision = collision;
         a.setAfterburnerFromConfig(config);
         const hook = config.hook ?? DEFAULT_ARRESTOR_HOOK_BODY;
@@ -658,21 +832,30 @@ export class CombatSim implements ProjectileSink {
         a.bindWorld(this.world);
     }
 
+    /**
+     * The mesh the barricade webbing drapes over, if the caller has one.
+     *
+     * The webbing is drawn lying on the airframe, so it is solved against the
+     * airframe that is drawn rather than the coarse hitbox {@link setCollision}
+     * carries — that one is right for bullets and crashes and wrong here, and
+     * against it the net reads as threaded through the wings.
+     */
     setCollision(id: string, collision: AircraftCollisionMesh | undefined): void {
         const a = this.aircraft.get(id);
         if (a) a.collision = collision;
     }
 
-    private rebuildIfKinematicChanged(a: SimAircraft, kinematic: boolean): void {
-        if (a.kinematic === kinematic) return;
-        const next = new Fm2FlightModel(undefined, { kinematic });
+    private rebuildIfModelChanged(a: SimAircraft, model: SimFlightModelKind): void {
+        if (a.modelKind === model) return;
+        const next = createSimFlightModel(model);
+        next.setAltitudeAt(this.altitudeAt);
         next.setCrashed(a.model.isCrashed());
         next.setLanded(a.model.isLanded());
         next.position = a.model.position;
         next.quaternion = a.model.quaternion;
         next.velocityVector = a.model.velocityVector;
         a.model = next;
-        a.kinematic = kinematic;
+        a.modelKind = model;
         a.bindWorld(this.world);
     }
 
@@ -719,6 +902,92 @@ export class CombatSim implements ProjectileSink {
         this.external.delete(id);
     }
 
+    /**
+     * Refresh auto-selected targets. A full re-scan runs on
+     * {@link TARGET_SCAN_INTERVAL}; a target that has died or gone away is
+     * replaced immediately, because waiting for the next scan would drop the
+     * pilot out of ENGAGE (and, for a wingman, back into formation) for up to
+     * half a second.
+     */
+    private updateAutoTargets(delta: number): void {
+        this.targetScanTimer -= delta;
+        const rescan = this.targetScanTimer <= 0;
+        if (rescan) {
+            this.targetScanTimer = TARGET_SCAN_INTERVAL;
+        }
+        for (const a of this.aircraft.values()) {
+            if (a.targetFaction === undefined || !a.enabled || !a.pilot) continue;
+            // Only the *loss* of a target forces an off-schedule scan. Having no
+            // target at all must not, or an aircraft with nothing to fight would
+            // re-scan every single step.
+            const current = a.autoTargetId === undefined
+                ? undefined
+                : this.resolveCombatant(a.autoTargetId);
+            const lost = a.autoTargetId !== undefined && (current === undefined || !current.isAlive());
+            if (rescan || lost) {
+                this.selectTargetFor(a, false);
+            }
+        }
+    }
+
+    /**
+     * Pick the best live target of `a.targetFaction`: nearest, penalised by how
+     * far off the nose it is, with {@link TARGET_SWITCH_MARGIN} hysteresis in
+     * favour of the fight already in progress. `force` assigns even when the
+     * winner is unchanged (used when the mode is first switched on).
+     */
+    private selectTargetFor(a: SimAircraft, force: boolean): void {
+        const faction = a.targetFaction;
+        if (faction === undefined) return;
+
+        a.readPosition(this.selfPos);
+        this.selfFwd.copy(FORWARD).applyQuaternion(a.model.quaternion);
+
+        let bestId: string | undefined;
+        let bestScore = Infinity;
+        for (const id of this.combatantIds()) {
+            if (id === a.id) continue;
+            const c = this.resolveCombatant(id);
+            // resolveCombatant falls back to a disabled aircraft when nothing
+            // else stands in for it; those are not in the air to be shot at.
+            if (!c || !c.isAlive() || c.faction !== faction) continue;
+            if (c instanceof SimAircraft && !c.enabled) continue;
+
+            c.readPosition(this.candidatePos);
+            this.losTmp.copy(this.candidatePos).sub(this.selfPos);
+            const range = this.losTmp.length();
+            if (range < 1e-3) continue;
+            const ata = Math.acos(clamp(this.losTmp.dot(this.selfFwd) / range, -1, 1));
+            let score = range * (1 + TARGET_ATA_WEIGHT * ata / Math.PI);
+            if (id === a.autoTargetId) {
+                score *= TARGET_SWITCH_MARGIN;
+            }
+            if (score < bestScore) {
+                bestScore = score;
+                bestId = id;
+            }
+        }
+
+        if (!force && bestId === a.autoTargetId) return;
+        a.autoTargetId = bestId;
+        a.pilot?.setTarget(bestId ? this.resolveCombatant(bestId) : undefined);
+    }
+
+    /**
+     * Every id that can resolve to a combatant: sim aircraft plus external
+     * mirrors, deduped. Returns a reused set — consume it before calling again.
+     */
+    private combatantIds(): Iterable<string> {
+        this.candidateIds.clear();
+        for (const id of this.aircraft.keys()) {
+            this.candidateIds.add(id);
+        }
+        for (const id of this.external.keys()) {
+            this.candidateIds.add(id);
+        }
+        return this.candidateIds;
+    }
+
     private resolveCombatant(id: string): Combatant | undefined {
         const a = this.aircraft.get(id);
         if (a && a.enabled) return a;
@@ -740,7 +1009,9 @@ export class CombatSim implements ProjectileSink {
                 a.setExternalInputs(inputs[a.id] ?? NEUTRAL_INPUTS);
             }
         }
-        // 2. Run AI pilots, reading the previous step's world positions.
+        // 2. Re-pick faction targets before the pilots read them.
+        this.updateAutoTargets(delta);
+        // 3. Run AI pilots, reading the previous step's world positions.
         for (const a of this.aircraft.values()) {
             if (!a.enabled || a.control !== 'ai' || !a.pilot) continue;
             if (a.health <= 0) {
@@ -753,20 +1024,34 @@ export class CombatSim implements ProjectileSink {
             }
             a.pilot.update(delta);
         }
-        // 3. Advance every model from the now-consistent command buffers.
+        // 4. Advance every model from the now-consistent command buffers.
         for (const a of this.aircraft.values()) {
             if (!a.enabled) continue;
             if (a.scrapeFxCooldown > 0) {
                 a.scrapeFxCooldown = Math.max(0, a.scrapeFxCooldown - delta);
             }
             a.applyInputsToModel();
-            a.model.update(delta);
-            this.resolveSolidWorldContact(a);
+            if (a.model.isCrashed()) {
+                // FlightModel.step() no-ops once crashed, which would otherwise
+                // freeze the wreck in world space while the carrier sails on
+                // underneath it. Ride the deck kinematically instead.
+                this.applyCrashedCarrierRide(a);
+                a.resolveFiring();
+                continue;
+            }
+            const parked = this.applyKinematicCarrierPark(a);
+            if (!parked) {
+                const onCarrierFrame = this.beginCarrierRelativeFrame(a);
+                a.model.update(delta);
+                this.endCarrierRelativeFrame(a, delta, onCarrierFrame);
+            }
+            if (!parked) {
+                this.resolveSolidWorldContact(a, delta);
+            }
             this.resolveArrestor(a, delta);
             a.resolveFiring();
-            this.wrapBounds(a);
         }
-        // 4. Guns + projectiles (hits already cleared; scrapes may have appended).
+        // 5. Guns + projectiles (hits already cleared; scrapes may have appended).
         for (const a of this.aircraft.values()) {
             if (!a.enabled || !a.gun) continue;
             a.gun.update(delta);
@@ -775,29 +1060,6 @@ export class CombatSim implements ProjectileSink {
             }
         }
         this.updateProjectiles(delta);
-    }
-
-    /** Wrap aircraft that fly past the terrain edge (mirrors former main-thread logic). */
-    private wrapBounds(a: SimAircraft): void {
-        const pos = a.model.position;
-        let wrapped = false;
-        if (pos.x > this.terrainHalfSize) {
-            pos.x = -this.terrainHalfSize;
-            wrapped = true;
-        } else if (pos.x < -this.terrainHalfSize) {
-            pos.x = this.terrainHalfSize;
-            wrapped = true;
-        }
-        if (pos.z > this.terrainHalfSize) {
-            pos.z = -this.terrainHalfSize;
-            wrapped = true;
-        } else if (pos.z < -this.terrainHalfSize) {
-            pos.z = this.terrainHalfSize;
-            wrapped = true;
-        }
-        if (wrapped) {
-            a.model.snapPhysicsState();
-        }
     }
 
     /** {@link ProjectileSink} — guns push rounds here. */
@@ -836,18 +1098,19 @@ export class CombatSim implements ProjectileSink {
      * the airframe. Soft gear-down scrapes defer to gear springs so taxi/landing
      * is not scrubbed to a halt by the collision mesh.
      */
-    private resolveSolidWorldContact(a: SimAircraft): void {
+    private resolveSolidWorldContact(a: SimAircraft, delta: number): void {
         if (a.model.isCrashed() || !this.world) return;
 
         const contact = this.findSolidWorldContact(a);
         if (!contact) return;
 
-        this.applySolidWorldResponse(a, contact);
+        this.applySolidWorldResponse(a, contact, delta);
     }
 
     /**
-     * Arrestor-cable snag + deck-axis deceleration. Auto-hook when gear is down;
-     * once latched, scrub along-deck speed to stop over {@link ARRESTOR_PULL_OUT_M}.
+     * Arrestor-cable snag + deck-axis deceleration. Snags only with the hook
+     * down; once latched, scrub along-deck speed to stop over
+     * {@link ARRESTOR_PULL_OUT_M}.
      * After stop the cable stays bent until the aircraft taxis away.
      */
     private resolveArrestor(a: SimAircraft, delta: number): void {
@@ -863,7 +1126,7 @@ export class CombatSim implements ProjectileSink {
                     a.hasPrevHook ? a.prevHook : null,
                     a.model.velocityVector,
                     field,
-                    a.isGearDeployed(),
+                    a.isHookDeployed(),
                 );
                 if (idx >= 0) {
                     a.arrestorLatch = idx;
@@ -878,19 +1141,28 @@ export class CombatSim implements ProjectileSink {
         if (a.arrestorLatch >= 0 && a.arrestorFieldIndex >= 0) {
             const field = this.arrestorFields[a.arrestorFieldIndex];
             const vel = a.model.velocityVector;
+            const shipAlong = this.carrierVel.dot(field.deckAxis);
             if (!a.arrestorHeld) {
                 const traveled = a.hookNow.dot(field.deckAxis) - a.arrestorSnagAlong;
                 const remaining = ARRESTOR_PULL_OUT_M - traveled;
-                const stillPulling = applyArrestorVelocity(vel, field.deckAxis, delta, remaining);
+                const stillPulling = applyArrestorVelocity(
+                    vel, field.deckAxis, delta, remaining, shipAlong,
+                );
                 a.model.snapPhysicsState();
                 if (!stillPulling) {
                     a.model.setLanded(true);
                     a.arrestorHeld = true;
                 }
             } else {
-                // Cable stays on the hook while parked; release once taxiing.
-                const groundSpeed = Math.hypot(vel.x, vel.z);
-                if (groundSpeed > ARRESTOR_RELEASE_SPEED_MPS || !a.isGearDeployed()) {
+                // Ride with the ship along-deck; taxi relative speed can release.
+                const along = vel.dot(field.deckAxis);
+                vel.addScaledVector(field.deckAxis, shipAlong - along);
+                a.model.snapPhysicsState();
+                const relSpeed = Math.hypot(
+                    vel.x - this.carrierVel.x,
+                    vel.z - this.carrierVel.z,
+                );
+                if (relSpeed > ARRESTOR_RELEASE_SPEED_MPS || !a.isHookDeployed()) {
                     a.arrestorLatch = -1;
                     a.arrestorFieldIndex = -1;
                     a.arrestorHeld = false;
@@ -902,6 +1174,147 @@ export class CombatSim implements ProjectileSink {
         a.hasPrevHook = true;
     }
 
+    /**
+     * Emergency barricade: the webbing catches the *wings*, so there is no hook
+     * test — any airframe that crosses a raised net inside the stanchion span
+    }
+
+    /**
+     * Idle on-deck: lock XZ to ship-local offset, match carrier velocity, skip FM2
+     * so gear springs cannot bob the airframe. Mid-arrestor pull keeps dynamic FM2.
+     */
+    private applyKinematicCarrierPark(a: SimAircraft): boolean {
+        this.updateCarrierDeckSticky(a);
+        if (!a.carrierDeckSticky || !a.isLanded() || !a.isGearDeployed()) {
+            a.carrierParkLocalValid = false;
+            return false;
+        }
+        if (a.getThrottle() > 0.05) {
+            a.carrierParkLocalValid = false;
+            return false;
+        }
+        // Still pulling out — do not freeze pose.
+        if (a.arrestorLatch >= 0 && !a.arrestorHeld) {
+            a.carrierParkLocalValid = false;
+            return false;
+        }
+        // Rollout / landing: keep FM2 until nearly stopped relative to the deck.
+        const vel = a.model.velocityVector;
+        const relSpd = Math.hypot(vel.x - this.carrierVel.x, vel.z - this.carrierVel.z);
+        if (relSpd > CARRIER_PARK_REL_SPEED_MPS) {
+            a.carrierParkLocalValid = false;
+            return false;
+        }
+        if (!this.world?.carrierOrigin(this.carrierOriginScratch)) {
+            a.carrierParkLocalValid = false;
+            return false;
+        }
+        const origin = this.carrierOriginScratch;
+        const pos = a.model.position;
+        if (!a.carrierParkLocalValid) {
+            a.carrierParkLocalX = pos.x - origin.x;
+            a.carrierParkLocalZ = pos.z - origin.z;
+            a.carrierParkLocalValid = true;
+        }
+        pos.x = origin.x + a.carrierParkLocalX;
+        pos.z = origin.z + a.carrierParkLocalZ;
+        vel.x = this.carrierVel.x;
+        vel.y = 0;
+        vel.z = this.carrierVel.z;
+        a.model.clearAngularVelocity();
+        a.model.snapPhysicsState();
+        return true;
+    }
+
+    /**
+     * A wreck goes fully kinematic the moment it's marked crashed (see
+     * FlightModel.step) — fine on static terrain, but on deck the carrier
+     * sails on and leaves it floating over open water. Anchor its ship-local
+     * XZ offset once it settles on deck and keep riding the carrier's pose so
+     * it stays put instead. A wreck that isn't on the deck (open terrain, or
+     * knocked into the sea) is left exactly where it froze, as before.
+     */
+    private applyCrashedCarrierRide(a: SimAircraft): void {
+        if (!this.world || !this.isOnCarrierDeck(a) || !this.world.carrierOrigin(this.carrierOriginScratch)) {
+            a.crashedCarrierLocalValid = false;
+            return;
+        }
+        const origin = this.carrierOriginScratch;
+        const pos = a.model.position;
+        if (!a.crashedCarrierLocalValid) {
+            a.crashedCarrierLocalX = pos.x - origin.x;
+            a.crashedCarrierLocalZ = pos.z - origin.z;
+            a.crashedCarrierLocalValid = true;
+        }
+        pos.x = origin.x + a.crashedCarrierLocalX;
+        pos.z = origin.z + a.crashedCarrierLocalZ;
+        const vel = a.model.velocityVector;
+        vel.x = this.carrierVel.x;
+        vel.y = 0;
+        vel.z = this.carrierVel.z;
+        a.model.snapPhysicsState();
+    }
+
+    private updateCarrierDeckSticky(a: SimAircraft): void {
+        if (!this.world || a.model.isCrashed() || !a.isGearDeployed() || !a.isLanded()) {
+            a.carrierDeckSticky = false;
+            return;
+        }
+        const pos = a.model.position;
+        // Finite means a deck triangle covers this point. Testing `> 0` instead
+        // assumed a deck sits above the tangent plane, which is only true near
+        // the play area's origin.
+        const carrierY = this.world.carrierHeightAt(pos.x, pos.z);
+        if (!Number.isFinite(carrierY)) {
+            a.carrierDeckSticky = false;
+            return;
+        }
+        if (this.isOnCarrierDeck(a)) {
+            a.carrierDeckSticky = true;
+        }
+    }
+
+    /**
+     * Run FM2 in the carrier's horizontal frame so gear friction sees deck-relative
+     * speed (not ship cruise). Used for taxi / takeoff roll / arrestor pull.
+     */
+    private beginCarrierRelativeFrame(a: SimAircraft): boolean {
+        if (!this.shouldUseCarrierRelativeFrame(a)) return false;
+        const vel = a.model.velocityVector;
+        vel.x -= this.carrierVel.x;
+        vel.z -= this.carrierVel.z;
+        a.model.snapPhysicsState();
+        return true;
+    }
+
+    private endCarrierRelativeFrame(a: SimAircraft, delta: number, active: boolean): void {
+        if (!active) return;
+        const pos = a.model.position;
+        const vel = a.model.velocityVector;
+        pos.x += this.carrierVel.x * delta;
+        pos.z += this.carrierVel.z * delta;
+        vel.x += this.carrierVel.x;
+        vel.z += this.carrierVel.z;
+        a.model.snapPhysicsState();
+    }
+
+    private shouldUseCarrierRelativeFrame(a: SimAircraft): boolean {
+        if (!this.world || a.model.isCrashed() || !a.isGearDeployed()) return false;
+        this.updateCarrierDeckSticky(a);
+        if (!a.carrierDeckSticky && !this.isOnCarrierDeck(a)) return false;
+        if (a.isLanded() || a.arrestorLatch >= 0) return true;
+        return a.model.getGearCompressionMean() > 0.005;
+    }
+
+    /** True when gear contact height matches the carrier mesh (not plain terrain). */
+    private isOnCarrierDeck(a: SimAircraft): boolean {
+        const pos = a.model.position;
+        const carrierY = this.world!.carrierHeightAt(pos.x, pos.z);
+        if (!Number.isFinite(carrierY)) return false;
+        const groundY = this.world!.groundHeightAt(pos.x, pos.z);
+        return Math.abs(carrierY - groundY) < 0.15;
+    }
+
     private findSolidWorldContact(a: SimAircraft): SolidWorldContact | null {
         const pos = a.model.position;
         const quat = a.model.quaternion;
@@ -910,10 +1323,14 @@ export class CombatSim implements ProjectileSink {
 
         if (a.collision) {
             const terrainMargin = gearDown ? GEAR_TERRAIN_MARGIN_M : BELLY_TERRAIN_MARGIN_M;
-            return findCollisionMeshTerrainContact(
+            const contact = findCollisionMeshTerrainContact(
                 pos, quat, a.collision, groundAt, terrainMargin,
                 this.contactPoint, this.contactNormal,
             );
+            if (contact && this.isUnresolvedTerrain(contact.point.x, contact.point.z)) {
+                return null;
+            }
+            return contact;
         }
 
         // No baked mesh: CG belly vs terrain only.
@@ -921,7 +1338,7 @@ export class CombatSim implements ProjectileSink {
         const margin = gearDown ? GEAR_TERRAIN_MARGIN_M : BELLY_TERRAIN_MARGIN_M;
         const bellyY = pos.y - (gearDown ? PLANE_DISTANCE_TO_GROUND : a.hitRadius * 0.35);
         const terrainPen = (groundY - margin) - bellyY;
-        if (terrainPen <= 0) {
+        if (terrainPen <= 0 || this.isUnresolvedTerrain(pos.x, pos.z)) {
             return null;
         }
         this.contactPoint.set(pos.x, bellyY, pos.z);
@@ -933,29 +1350,51 @@ export class CombatSim implements ProjectileSink {
         };
     }
 
-    private applySolidWorldResponse(a: SimAircraft, contact: SolidWorldContact): void {
+    /**
+     * True when the solid here is DEM relief we only know at the coarse tier.
+     * Coarse is a ~600 m lattice over 3.7 km of relief: an aircraft must not be
+     * wrecked against a surface that inaccurate, so it flies through instead
+     * until the fine tiles for that spot have been mirrored — or until the
+     * render thread says there are none, in which case coarse is what everyone
+     * has and it stands. Water is exempt (sea level is exact at every tier), as
+     * is anything standing on the DEM (pads, decks, scenery): those are
+     * authored, not sampled.
+     */
+    private isUnresolvedTerrain(x: number, z: number): boolean {
+        if (!this.world || this.heightField.isAuthoritativeAt(x, z)) {
+            return false;
+        }
+        if (!this.heightField.isLandAtWorld(x, z)) {
+            return false;
+        }
+        const demY = this.heightField.heightAtWorld(x, z);
+        return Math.abs(this.world.groundHeightAt(x, z) - demY) < 0.01;
+    }
+
+    private applySolidWorldResponse(a: SimAircraft, contact: SolidWorldContact, delta: number): void {
         const n = contact.normal;
         const pos = a.model.position;
-        const vel = a.model.velocityVector;
 
-        const vn = vel.dot(n);
-        const impactSpeed = vn < 0 ? -vn : 0;
+        // Contact-point speed into the surface (CG + spin), for FX / fatality.
+        const impactSpeed = a.model.contactSpeedIntoNormal(contact.point, n);
 
         // Soft rolling contact: gear springs own the vertical constraint — do not
-        // push the body or scrub groundspeed (that used to freeze taxi on deck).
+        // push the body or apply scrapes that fight taxi on deck.
         if (a.isGearDeployed() && impactSpeed < SOLID_SCRAPE_FX_MPS && contact.penetration < 0.35) {
             return;
         }
 
-        // Separate so the collider sits just outside the solid.
-        pos.addScaledVector(n, contact.penetration + SOLID_SLOP_M);
+        // Heightfield penetration is vertical depth — lift in Y only.
+        pos.y += contact.penetration + SOLID_SLOP_M;
 
-        if (vn < 0) {
-            // Bounce along the normal, then scrub sliding speed.
-            vel.addScaledVector(n, -vn * (1 + SOLID_RESTITUTION));
-            this.scrapeTangent.copy(vel).addScaledVector(n, -vel.dot(n));
-            vel.addScaledVector(this.scrapeTangent, -SOLID_TANGENT_FRICTION);
-        }
+        // Mild drag at the hit point (linear + torque). No bounce / no velocity dump.
+        a.model.applyContactDragAt(
+            contact.point,
+            delta,
+            SOLID_CONTACT_DRAG_PER_S,
+            SOLID_CONTACT_DRAG_MASS_FRAC,
+            SOLID_CONTACT_DRAG_MAX_FRAC,
+        );
         a.model.snapPhysicsState();
 
         const fatal = impactSpeed >= SOLID_CRASH_IMPACT_MPS
@@ -975,7 +1414,6 @@ export class CombatSim implements ProjectileSink {
             }
             this.emitScrapeFx(a, contact.point, false);
         } else if (contact.penetration > 0.15) {
-            // Slow grind / wingtip drag — sparks without big damage.
             this.emitScrapeFx(a, contact.point, false);
         }
     }
@@ -989,6 +1427,7 @@ export class CombatSim implements ProjectileSink {
             velocity: [vel.x, vel.y, vel.z],
             targetId: a.id,
             damage: force ? 50 : 5,
+            source: 'scrape',
         });
     }
 
@@ -1067,6 +1506,7 @@ export class CombatSim implements ProjectileSink {
     encodeSnapshotInto(
         aircraftBank: Float32Array | undefined,
         projectileBank: Float32Array | undefined,
+        barricadeBank?: Float32Array,
     ): SnapshotBuffers {
         const ids: string[] = [];
         for (const id of this.order) {
@@ -1115,7 +1555,11 @@ export class CombatSim implements ProjectileSink {
             k += PROJ_STRIDE;
         }
 
-        return { ids, aircraft, forceVectors, maneuverLabels, projectiles, projectileCount, hits: this.hits.slice() };
+        return {
+            ids, aircraft, forceVectors, maneuverLabels,
+            projectiles, projectileCount,
+            hits: this.hits.slice(),
+        };
     }
 
     private readonly qScratch = new THREE.Quaternion();

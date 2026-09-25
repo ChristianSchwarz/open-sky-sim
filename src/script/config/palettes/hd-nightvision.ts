@@ -18,11 +18,19 @@ const colors: PaletteColors = {
     [PaletteCategory.FOG_LIGHT]: '#181818',
 
     [PaletteCategory.SKY]: '#282828',
+    [PaletteCategory.SKY_CLOUD]: ['#484848', '#282828'],
+    [PaletteCategory.SKY_SUN]: '#e0e0e0',
 
     [PaletteCategory.TERRAIN_DEFAULT]: '#404040',
     [PaletteCategory.TERRAIN_SAND]: '#404040',
-    [PaletteCategory.TERRAIN_BARE]: '#404040',
+    [PaletteCategory.TERRAIN_BARE]: '#343434',
     [PaletteCategory.TERRAIN_GRASS]: '#404040',
+    [PaletteCategory.TERRAIN_FOREST]: '#3a3a3a',
+    [PaletteCategory.TERRAIN_SCRUB]: '#404040',
+    [PaletteCategory.TERRAIN_CROP]: '#464646',
+    [PaletteCategory.TERRAIN_URBAN]: '#4e4e4e',
+    [PaletteCategory.TERRAIN_SNOW]: '#5a5a5a',
+    [PaletteCategory.TERRAIN_WETLAND]: '#383838',
     [PaletteCategory.TERRAIN_WATER]: '#282828',
     [PaletteCategory.TERRAIN_SHALLOW_WATER]: '#282828',
     [PaletteCategory.SCENERY_MOUNTAIN_GRASS]: ['#404040', '#505050'],
@@ -74,6 +82,7 @@ const colors: PaletteColors = {
 
     [PaletteCategory.SCENERY_BASE_RUNWAY_LINES]: '#737373',
     [PaletteCategory.SCENERY_BASE_RUNWAY_THRESHOLD]: '#737373',
+    [PaletteCategory.SCENERY_BASE_CONCRETE]: '#585858',
 
     [PaletteCategory.FX_FIRE]: '#f4f4f4',
     [PaletteCategory.FX_FIRE__B]: '#d8d8d8',

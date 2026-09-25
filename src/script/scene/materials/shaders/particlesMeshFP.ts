@@ -1,5 +1,10 @@
+import { DITHER_PARS_FRAGMENT } from './dither';
+import { LOG_DEPTH_FRAGMENT, LOG_DEPTH_PARS_FRAGMENT } from './logDepth';
+
 export const ParticleMeshFragProgram: string = `
 precision highp float;
+// Must match ParticleMeshVertProgram — see the note there.
+precision highp int;
 
 uniform vec3 vCameraPos;
 uniform vec3 vCameraNormal;
@@ -13,29 +18,15 @@ uniform vec3 fogColor;
 
 varying vec3 vPosition;
 varying vec4 vColor;
-
+${LOG_DEPTH_PARS_FRAGMENT}
+${DITHER_PARS_FRAGMENT}
 void main() {
-  mat4 bayesian = mat4(
-    0.0, 12.0,  3.0, 15.0,
-    8.0,  4.0, 11.0,  7.0,
-    2.0, 14.0,  1.0, 13.0,
-   10.0,  6.0,  9.0,  5.0
-  ) * (1.0 / 16.0) - 0.5;
-
   vec2 screen = gl_FragCoord.xy;
 
   if (shadingType != 3) {
-    int modX = int(mod(screen.x,4.0));
-    int modY = int(mod(screen.y,4.0));
-    for (int x = 0; x < 4; x++) {
-      for (int y = 0; y < 4; y++) {
-        if (x == modX && y == modY) {
-          float alpha = vColor.a + bayesian[x][y];
-          if (alpha < 0.5) {
-            discard;
-          }
-        }
-      }
+    float alpha = vColor.a + bayerThreshold(screen);
+    if (alpha < 0.5) {
+      discard;
     }
   }
 
@@ -65,5 +56,6 @@ void main() {
   }
 
   gl_FragColor = mix(vec4(diffuse, 1.0), vec4(fogColor, 1.0), fogFactor * 0.92);
+${LOG_DEPTH_FRAGMENT}
 }
 `;

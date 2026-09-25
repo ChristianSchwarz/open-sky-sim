@@ -50,6 +50,11 @@ export class SimpleEntity implements Entity {
         return this.obj.scale;
     }
 
+    /** Triangle count attached to the render lists by the last render3D() call. */
+    get lastTriangles(): number {
+        return this.lodHelper.lastTriangles;
+    }
+
     init(scene: Scene): void {
         //
     }

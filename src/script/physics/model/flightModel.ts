@@ -3,7 +3,7 @@ import { UP } from '../../utils/math';
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { FcsPitchLimiter } from '../fm2/fcs';
 
-export const SIM_FPS = 120;
+const SIM_FPS = 120;
 const SIM_DELTA = 1.0 / SIM_FPS;
 
 const EMPTY_GEAR_COMPRESSION: ReadonlyArray<number> = Object.freeze([]);
@@ -91,6 +91,20 @@ export abstract class FlightModel {
     /** Whether the debug force-vector snapshot should be produced each step. */
     protected forceVectorsRequested: boolean = false;
 
+    /**
+     * Scene position -> height above the ellipsoid, for the atmosphere.
+     *
+     * The scene is a tangent plane at the play area's origin and the terrain is
+     * drawn curving away from it, so a position's Y is not its altitude except
+     * near that origin: at the edge of a three-degree area sea level sits some
+     * 1.8 km below Y = 0. Feeding raw Y to the ISA model therefore flies the
+     * aircraft through air that is far too dense out there.
+     *
+     * Identity until something wires the terrain in, which is also the right
+     * answer for a flat world — see `HeightSampler.geodeticAltitudeAtEnu`.
+     */
+    private altitudeAt: (x: number, y: number, z: number) => number = (_x, y) => y;
+
     private prevPosition = new THREE.Vector3();
     private prevQuaternion = new THREE.Quaternion();
     private prevVelocity = new THREE.Vector3();
@@ -128,6 +142,9 @@ export abstract class FlightModel {
 
     /** Sim-owned airbrake state, or null when this model is not sim-owned. */
     getSimAirbrakesExtended(): boolean | null { return null; }
+
+    /** Sim-owned tailhook state, or null when this model is not sim-owned. */
+    getSimHookDeployed(): boolean | null { return null; }
 
     reset() {
         this.obj.position.set(0, 0, 0);
@@ -230,6 +247,17 @@ export abstract class FlightModel {
      */
     setAircraft(_config: Fm2AircraftConfig): void {
         // No-op by default.
+    }
+
+    /** Wire scene Y -> true altitude. See {@link atmosphereAltitudeM}. */
+    setAltitudeAt(fn: (x: number, y: number, z: number) => number): void {
+        this.altitudeAt = fn;
+    }
+
+    /** Height above the ellipsoid of this aircraft — what the atmosphere sees. */
+    protected get atmosphereAltitudeM(): number {
+        const p = this.obj.position;
+        return this.altitudeAt(p.x, p.y, p.z);
     }
 
     setLandingGearDeployed(deployed: boolean) {
@@ -372,6 +400,22 @@ export abstract class FlightModel {
 
     getAccelerationWorld(target: THREE.Vector3 = this.accelWorld): THREE.Vector3 {
         return target.copy(this.accelWorld);
+    }
+
+    /**
+     * Apply an external wrench to the airframe: a linear impulse (N·s, world)
+     * through the centre of gravity and an angular impulse (N·m·s, world).
+     *
+     * For loads the flight model has no way of knowing about — something has
+     * hold of the aircraft rather than air flowing over it. The two halves are
+     * given separately rather than as a force at a point, because a grab is not
+     * generally reducible to one: webbing pulling on both wings at once is a
+     * couple, and the single point that would reproduce it does not exist.
+     *
+     * Models that carry no rigid body ignore it.
+     */
+    applyExternalWrench(_impulseWorld: THREE.Vector3, _angularImpulseWorld: THREE.Vector3): void {
+        //
     }
 
     getEngineThrustKn(): number {

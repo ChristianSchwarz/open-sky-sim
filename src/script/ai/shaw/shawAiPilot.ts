@@ -92,6 +92,11 @@ export class ShawAiPilot implements AiPilotController {
         this.classic.setTarget(target);
     }
 
+    setFormationLead(lead: Combatant | undefined): void {
+        // Formation is a non-ENGAGE phase, flown by the delegated classic pilot.
+        this.classic.setFormationLead(lead);
+    }
+
     get isFiring(): boolean {
         return this.firing;
     }

@@ -86,16 +86,42 @@ export class Kernel {
         this.runRenders();
     }
 
+    /**
+     * EMA'd wall-clock split between game logic and rendering, published
+     * alongside the renderer's own __drawStats/__gpuStats: a GPU pass timer
+     * only accounts for GPU execution time, not the CPU time spent building
+     * and issuing the draw calls in the first place (matrix updates, state
+     * diffing, three.js's own submission overhead) or anything outside
+     * rendering altogether (physics, AI, terrain streaming). This is the
+     * top-level split that says which side of that line is worth chasing.
+     */
+    private updateEmaMs = 0;
+    private renderEmaMs = 0;
+    private static readonly STATS_EMA_ALPHA = 0.1;
+
     private runUpdates(delta: number) {
+        const start = performance.now();
         for (let i = 0; i < this.updateTasks.length; i++) {
             this.updateTasks[i].update(delta);
         }
+        this.updateEmaMs += (performance.now() - start - this.updateEmaMs) * Kernel.STATS_EMA_ALPHA;
+        this.publishStats();
     }
 
     private runRenders() {
+        const start = performance.now();
         for (let i = 0; i < this.renderTasks.length; i++) {
             this.renderTasks[i].render();
         }
+        this.renderEmaMs += (performance.now() - start - this.renderEmaMs) * Kernel.STATS_EMA_ALPHA;
+        this.publishStats();
+    }
+
+    private publishStats(): void {
+        (globalThis as Record<string, unknown>).__kernelStats = {
+            updateMs: this.updateEmaMs,
+            renderMs: this.renderEmaMs,
+        };
     }
 
     private updateDeltas(): number {

@@ -45,11 +45,10 @@ export class ExteriorDataEntity implements Entity {
     }
 
     private refreshVisualState(): void {
-        const displayPos = this.actor.getDisplayPosition();
         const displayQuat = this.actor.getDisplayQuaternion();
         const displayVel = this.actor.getDisplayVelocity();
 
-        this.altitude = this.displayUnits.altitudeFromMeters(displayPos.y);
+        this.altitude = this.displayUnits.altitudeFromMeters(this.actor.getDisplayAltitude());
 
         this.tmpVector.copy(FORWARD)
             .applyQuaternion(displayQuat)

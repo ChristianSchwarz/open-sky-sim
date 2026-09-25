@@ -9,9 +9,88 @@ import { Entity } from "../../entity";
 import { Scene, SceneLayers } from "../../scene";
 import { updateTargetCamera } from '../../utils';
 import { WeaponsTarget } from '../weaponsTarget';
-import { AircraftDeviceState, PlayerEntity } from "../player";
+import { PlayerEntity } from "../player";
 import { formatHeading, getAircraftDeviceStatusPosition, getOverlayLayout, renderAircraftDeviceStatus } from './overlayUtils';
+import { EnuBasis, worldToGeodetic } from '../../../terrain/geodesy';
+import { MapTileSource, MovingMapRenderer } from './movingMap';
 
+/** Where the moving map reads its chart from: the terrain's frame and its cover rasters. */
+export interface MovingMapSource {
+    basis: EnuBasis;
+    coverTextures: MapTileSource;
+}
+
+
+
+/**
+ * MFD1 is the tactical display: a heading-up radar scope centred on the
+ * aircraft that plots every designatable target -- the same list, in the same
+ * order, that the target-cycling key walks. A blip straight above the ownship
+ * marker is dead ahead, and the designated target is boxed.
+ */
+
+/** Scope range ladder (Km); the smallest ring holding the lock is used. */
+const TACTICAL_RANGES_KM = [5, 10, 20, 40, 80];
+
+/** Scope range (Km) used while nothing is designated. */
+export const TACTICAL_DEFAULT_RANGE_KM = 20;
+
+/**
+ * Seconds between rescans of the scene for designatable targets. Contact
+ * positions are read every frame; only the list itself is rebuilt on this
+ * interval, since scanning the scene by tag walks every entity.
+ */
+const TACTICAL_SCAN_INTERVAL = 0.5;
+
+/** Where a contact sits on the scope, in pixels from its centre. */
+export interface TacticalPlot {
+    x: number;
+    y: number;
+    /** The contact is past the outer ring, and pinned to the rim. */
+    offScope: boolean;
+}
+
+/** Smallest ladder range that holds a lock at `lockRangeKm` (Km). */
+export function tacticalScopeRange(lockRangeKm: number | undefined): number {
+    if (lockRangeKm === undefined) {
+        return TACTICAL_DEFAULT_RANGE_KM;
+    }
+    for (const range of TACTICAL_RANGES_KM) {
+        if (lockRangeKm <= range) {
+            return range;
+        }
+    }
+    return TACTICAL_RANGES_KM[TACTICAL_RANGES_KM.length - 1];
+}
+
+/**
+ * Plots a contact on the heading-up scope. `dx` / `dz` are the world offsets
+ * from the aircraft in metres, `headingDeg` is the aircraft heading, and
+ * `radius` the outer ring in pixels. Ahead of the aircraft plots up the screen,
+ * so screen Y grows downwards as in the rest of the overlay.
+ */
+export function plotTacticalContact(dx: number, dz: number, headingDeg: number,
+    rangeKm: number, radius: number): TacticalPlot {
+
+    const heading = headingDeg * Math.PI / 180;
+    const sinH = Math.sin(heading);
+    const cosH = Math.cos(heading);
+    // World (x east, -z north) into the scope frame: ahead is up, right is right.
+    const ahead = dx * sinH - dz * cosH;
+    const right = dx * cosH + dz * sinH;
+    const distance = Math.hypot(right, ahead);
+    if (distance < 1) {
+        return { x: 0, y: 0, offScope: false };
+    }
+    const scopeDistance = distance * radius / (rangeKm * 1000);
+    const offScope = scopeDistance > radius;
+    const plotted = offScope ? radius : scopeDistance;
+    return {
+        x: right / distance * plotted,
+        y: -ahead / distance * plotted,
+        offScope,
+    };
+}
 
 // Pixels
 export function CockpitMFDSize(height: number, width?: number): number {
@@ -49,14 +128,39 @@ export class CockpitEntity implements Entity {
     constructor(private actor: PlayerEntity,
         private camera: THREE.PerspectiveCamera,
         private targetCamera: THREE.PerspectiveCamera,
-        private mapCamera: THREE.OrthographicCamera) { }
+        private readonly mapSource?: MovingMapSource) {
+        this.movingMap = mapSource === undefined ? undefined : new MovingMapRenderer(mapSource.coverTextures);
+    }
+
+    private readonly movingMap: MovingMapRenderer | undefined;
+    /** The tactical display draws the moving map under its scope. */
+    private movingMapShown: boolean = false;
+
+    /** Whether the aircraft carries a chart to show at all. */
+    get movingMapAvailable(): boolean {
+        if (this.movingMap === undefined || this.mapSource === undefined) {
+            return false;
+        }
+        const range = this.mapSource.coverTextures.zoomRange;
+        return range.max >= range.min;
+    }
+
+    get movingMapEnabled(): boolean {
+        return this.movingMapShown && this.movingMapAvailable;
+    }
+
+    /** The MFD's map option; a no-op without a chart to show. */
+    setMovingMapEnabled(on: boolean): void {
+        this.movingMapShown = on && this.movingMapAvailable;
+    }
 
     private aiPitch: number = 0;
     private aiRoll: number = 0;
 
-    private landingGear: AircraftDeviceState = AircraftDeviceState.EXTENDED;
-    private flaps: AircraftDeviceState = AircraftDeviceState.EXTENDED;
-    private mapPlaneMarkerHeading: number = 0;
+    private ownHeading: number = 0;
+    /** Designatable targets plotted on the tactical display. */
+    private readonly contacts: WeaponsTarget[] = [];
+    private contactScanTimer: number = 0;
     private weaponsTarget: WeaponsTarget | undefined;
     private weaponsTargetRange: number = 0; // Km
     private weaponsTargetBearing: number = 0; // degrees, 0 is North, increases CW
@@ -88,8 +192,12 @@ export class CockpitEntity implements Entity {
 
     update(delta: number): void {
         this.weaponsTarget = this.actor.weaponsTarget;
-        this.flaps = this.actor.flaps;
-        this.landingGear = this.actor.landingGear;
+
+        this.contactScanTimer -= delta;
+        if (this.contactScanTimer <= 0) {
+            this.contactScanTimer = TACTICAL_SCAN_INTERVAL;
+            this.actor.collectWeaponsTargets(this.contacts);
+        }
     }
 
     private refreshVisualState(): void {
@@ -100,14 +208,12 @@ export class CockpitEntity implements Entity {
             .getDisplayWorldDirection(this._v)
             .setY(0)
             .normalize();
-        this.mapPlaneMarkerHeading = vectorHeading(prjForward);
+        this.ownHeading = vectorHeading(prjForward);
 
         [this.aiPitch, this.aiRoll] = calculatePitchRoll({
             quaternion: displayQuat,
             getWorldDirection: (v) => this.actor.getDisplayWorldDirection(v),
         });
-
-        this.mapCamera.position.copy(displayPos).setY(500);
 
         if (this.weaponsTarget !== undefined) {
             this.weaponsTargetAirborne = this.weaponsTarget.airborne;
@@ -171,7 +277,7 @@ export class CockpitEntity implements Entity {
         this.renderMFD1(
             CockpitMFD1X(targetWidth, targetHeight, MFDSize),
             CockpitMFD1Y(targetWidth, targetHeight, MFDSize),
-            MFDSize, painter, hudColor);
+            MFDSize, painter, palette, font, hudColor);
         this.renderMFD2(
             CockpitMFD2X(targetWidth, targetHeight, MFDSize),
             CockpitMFD2Y(targetWidth, targetHeight, MFDSize),
@@ -265,92 +371,167 @@ export class CockpitEntity implements Entity {
             .commit();
     }
 
-    private renderMFD1(x: number, y: number, size: number, painter: CanvasPainter, hudColor: string) {
+    /**
+     * The tactical display: ownship at the centre of a heading-up scope, range
+     * rings on the ladder range that holds the lock, and one blip per
+     * designatable target. Contacts past the scope range are drawn as ticks on
+     * the rim, so they still read as "out there, that way".
+     */
+    private renderMFD1(x: number, y: number, size: number, painter: CanvasPainter, palette: Palette, font: Font, hudColor: string) {
         painter.setColor(hudColor);
         painter.rectangle(x - 1, y - 1, size + 2, size + 2);
-        painter.clear(x, y, size, size);
+        painter.setBackground(PaletteColor(palette, PaletteCategory.COCKPIT_MFD_BACKGROUND));
+        painter.rectangle(x, y, size, size, true);
 
-        this.renderPlaneMarker(x, y, size, painter);
+        const secondary = PaletteColor(palette, PaletteCategory.HUD_TEXT_SECONDARY);
+        const pad = font.charSpacing;
+        const line = font.charHeight + font.charSpacing;
+        // The bottom band carries the scale and the contact count; the scope
+        // gets the rest of the square.
+        const radius = Math.max(4, Math.floor((size - line - pad) / 2) - 1);
+        const centerX = x + Math.floor(size / 2);
+        const centerY = y + pad + radius;
+        const rangeKm = tacticalScopeRange(
+            this.weaponsTarget !== undefined ? this.weaponsTargetRange : undefined);
+
+        if (this.movingMapEnabled) {
+            this.renderMovingMap(x, y, size, centerX, centerY, radius, rangeKm, painter, palette);
+            painter.text(font, x + size - pad, y + pad, 'MAP', secondary, TextAlignment.RIGHT);
+        }
+        this.renderTacticalScope(centerX, centerY, radius, painter, font, hudColor, secondary);
+        this.renderTacticalContacts(centerX, centerY, radius, rangeKm, size, painter, hudColor, secondary);
+        this.renderTacticalOwnship(centerX, centerY, size, painter, hudColor);
+
+        const textY = y + size - font.charHeight - pad;
+        painter.text(font, x + pad, textY, `${rangeKm} KM`, hudColor);
+        painter.text(font, x + size - pad, textY,
+            `${this.contacts.length} TGT`, secondary, TextAlignment.RIGHT);
     }
 
-    private renderPlaneMarker(x: number, y: number, size: number, painter: CanvasPainter) {
-        let aligned = true;
-        let flipX = 1;
-        let flipY = 1;
-        if (this.mapPlaneMarkerHeading >= (360 - 22) && this.mapPlaneMarkerHeading <= (0 + 23)) {
-            aligned = true;
-            flipX = 1;
-            flipY = 1;
-        } else if (this.mapPlaneMarkerHeading >= (45 - 22) && this.mapPlaneMarkerHeading <= (45 + 23)) {
-            aligned = false;
-            flipX = 1;
-            flipY = 1;
-        } else if (this.mapPlaneMarkerHeading >= (90 - 22) && this.mapPlaneMarkerHeading <= (90 + 23)) {
-            aligned = true;
-            flipX = -1;
-            flipY = 1;
-        } else if (this.mapPlaneMarkerHeading >= (135 - 22) && this.mapPlaneMarkerHeading <= (135 + 23)) {
-            aligned = false;
-            flipX = 1;
-            flipY = -1;
-        } else if (this.mapPlaneMarkerHeading >= (180 - 22) && this.mapPlaneMarkerHeading <= (180 + 23)) {
-            aligned = true;
-            flipX = 1;
-            flipY = -1;
-        } else if (this.mapPlaneMarkerHeading >= (225 - 22) && this.mapPlaneMarkerHeading <= (225 + 23)) {
-            aligned = false;
-            flipX = -1;
-            flipY = -1;
-        } else if (this.mapPlaneMarkerHeading >= (270 - 22) && this.mapPlaneMarkerHeading <= (270 + 23)) {
-            aligned = true;
-            flipX = -1;
-            flipY = -1;
-        } else if (this.mapPlaneMarkerHeading >= (315 - 22) && this.mapPlaneMarkerHeading <= (315 + 23)) {
-            aligned = false;
-            flipX = -1;
-            flipY = 1;
-        }
+    /**
+     * The chart under the scope: heading-up, the ownship at the scope centre,
+     * the outer ring at the scope range. Clipped to the MFD face so the
+     * rotated tiles never spill past its bezel.
+     */
+    private renderMovingMap(x: number, y: number, size: number, centerX: number, centerY: number,
+        radius: number, rangeKm: number, painter: CanvasPainter, palette: Palette) {
 
-        if (aligned) {
-            this.renderAlignedPlaneMarker(x, y, size, painter, flipX, flipY);
-        } else {
-            this.renderAngledPlaneMarker(x, y, size, painter, flipX, flipY);
+        if (this.movingMap === undefined || this.mapSource === undefined) {
+            return;
         }
+        const p = this.actor.getDisplayPosition();
+        const here = worldToGeodetic(this.mapSource.basis, p.x, p.y, p.z);
+        const clip = painter.clip().rectangle(x, y, size + 1, size + 1).clip();
+        this.movingMap.render(painter, {
+            centerX,
+            centerY,
+            pixelsPerMetre: radius / (rangeKm * 1000),
+            halfExtentPx: Math.max(centerX - x, centerY - y, x + size - centerX, y + size - centerY),
+            latDeg: here.lat,
+            lonDeg: here.lon,
+            headingDeg: this.ownHeading,
+            waterColor: PaletteColor(palette, PaletteCategory.TERRAIN_WATER),
+        });
+        clip.clear();
     }
 
-    private renderAlignedPlaneMarker(x: number, y: number, size: number, painter: CanvasPainter, flipX: number, flipY: number) {
-        const bottomLeft = flipX > 0 ?
-            { x: -1, y: 1 * flipY } :
-            { x: -1 * flipY, y: -1 };
-        const bottomRight = flipX > 0 ?
-            { x: 1, y: 1 * flipY } :
-            { x: -1 * flipY, y: 1 };
-        const top = flipX > 0 ?
-            { x: 0, y: -1 * flipY } :
-            { x: 1 * flipY, y: 0 };
-        const COCKPIT_MFD_SIZE_HALF = Math.floor(size / 2);
-        const baseX = x + COCKPIT_MFD_SIZE_HALF;
-        const baseY = y + COCKPIT_MFD_SIZE_HALF;
+    /** Range rings, boresight cross, and the north index. */
+    private renderTacticalScope(centerX: number, centerY: number, radius: number,
+        painter: CanvasPainter, font: Font, hudColor: string, secondary: string) {
 
+        painter.setColor(secondary);
+        painter.circle(centerX, centerY, radius);
+        painter.circle(centerX, centerY, Math.floor(radius / 2));
         painter.batch()
-            .line(baseX + bottomLeft.x, baseY + bottomLeft.y, baseX, baseY)
-            .line(baseX + bottomRight.x, baseY + bottomRight.y, baseX, baseY)
-            .line(baseX + top.x, baseY + top.y, baseX, baseY)
+            .vLine(centerX, centerY - radius, centerY + radius)
+            .hLine(centerX - radius, centerX + radius, centerY)
             .commit();
+
+        // The scope is heading-up, so north swings around with the aircraft.
+        const heading = this.ownHeading * Math.PI / 180;
+        const northX = -Math.sin(heading);
+        const northY = -Math.cos(heading);
+        const tick = Math.max(2, Math.round(radius * 0.16));
+        painter.setColor(hudColor);
+        painter.line(
+            Math.round(centerX + northX * (radius - tick)),
+            Math.round(centerY + northY * (radius - tick)),
+            Math.round(centerX + northX * radius),
+            Math.round(centerY + northY * radius));
+        const labelRadius = radius - tick - font.charHeight;
+        painter.text(font,
+            Math.round(centerX + northX * labelRadius),
+            Math.round(centerY + northY * labelRadius - font.charHeight / 2),
+            'N', hudColor, TextAlignment.CENTER);
     }
 
-    private renderAngledPlaneMarker(x: number, y: number, size: number, painter: CanvasPainter, flipX: number, flipY: number) {
-        const left = { x: -1 * flipX, y: 0 * flipY };
-        const bottom = { x: 0 * flipX, y: 1 * flipY };
-        const topRight = { x: 1 * flipX, y: -1 * flipY };
-        const COCKPIT_MFD_SIZE_HALF = Math.floor(size / 2);
-        const baseX = x + COCKPIT_MFD_SIZE_HALF;
-        const baseY = y + COCKPIT_MFD_SIZE_HALF;
+    /** One blip per designatable target, plotted in the heading-up scope frame. */
+    private renderTacticalContacts(centerX: number, centerY: number, radius: number, rangeKm: number,
+        size: number, painter: CanvasPainter, hudColor: string, secondary: string) {
 
+        const origin = this.actor.getDisplayPosition();
+        const blipSize = Math.max(2, Math.min(8, Math.round(size * 0.05)));
+        const tick = Math.max(2, Math.round(radius * 0.1));
+
+        for (const contact of this.contacts) {
+            const plot = plotTacticalContact(
+                contact.position.x - origin.x,
+                contact.position.z - origin.z,
+                this.ownHeading, rangeKm, radius);
+            const selected = contact === this.weaponsTarget;
+            const color = selected ? hudColor : secondary;
+
+            if (plot.offScope) {
+                // Pinned to the rim: a radial tick on the contact's bearing.
+                const inner = (radius - tick) / radius;
+                painter.setColor(color);
+                painter.line(
+                    Math.round(centerX + plot.x * inner),
+                    Math.round(centerY + plot.y * inner),
+                    Math.round(centerX + plot.x),
+                    Math.round(centerY + plot.y));
+                continue;
+            }
+
+            this.renderTacticalBlip(
+                Math.round(centerX + plot.x),
+                Math.round(centerY + plot.y),
+                blipSize, contact.airborne, selected, painter, color);
+        }
+    }
+
+    /** Airborne contacts are diamonds, ground installations squares. */
+    private renderTacticalBlip(px: number, py: number, blipSize: number, airborne: boolean,
+        selected: boolean, painter: CanvasPainter, color: string) {
+
+        const half = Math.max(1, Math.floor(blipSize / 2));
+        painter.setColor(color);
+        if (airborne) {
+            painter.batch()
+                .line(px, py - half, px + half, py)
+                .line(px + half, py, px, py + half)
+                .line(px, py + half, px - half, py)
+                .line(px - half, py, px, py - half)
+                .commit();
+        } else {
+            painter.rectangle(px - half, py - half, half * 2 + 1, half * 2 + 1);
+        }
+        if (selected) {
+            const box = half + 2;
+            painter.rectangle(px - box, py - box, box * 2 + 1, box * 2 + 1);
+        }
+    }
+
+    /** Fixed nose-up ownship marker at the centre of the heading-up scope. */
+    private renderTacticalOwnship(centerX: number, centerY: number, size: number,
+        painter: CanvasPainter, hudColor: string) {
+
+        const arm = Math.max(2, Math.min(6, Math.round(size * 0.05)));
+        painter.setColor(hudColor);
         painter.batch()
-            .line(baseX + left.x, baseY + left.y, baseX, baseY)
-            .line(baseX + bottom.x, baseY + bottom.y, baseX, baseY)
-            .line(baseX + topRight.x, baseY + topRight.y, baseX, baseY)
+            .line(centerX, centerY - arm, centerX - arm, centerY + arm)
+            .line(centerX, centerY - arm, centerX + arm, centerY + arm)
+            .line(centerX - arm, centerY + arm, centerX + arm, centerY + arm)
             .commit();
     }
 

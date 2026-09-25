@@ -18,6 +18,13 @@ const DEBRIS_MAX_HITS_PER_FRAME = 6;
 /** Inherit only a fraction of target velocity so chips visibly peel off. */
 const DEBRIS_VELOCITY_INHERIT = 0.2;
 
+const SPARK_COUNT = 48;
+const SPARKS_PER_SCRAPE = 10;
+const SPARK_MAX_SCRAPES_PER_FRAME = 6;
+/** Short streak length along travel (local +Z), metres. */
+const SPARK_LENGTH_M = 0.55;
+const SPARK_WIDTH_M = 0.06;
+
 /** Gray / brown palette picks for metal and dirt chips. */
 const DEBRIS_COLORS: PaletteCategory[] = [
     PaletteCategory.VEHICLE_PLANE_GREY,
@@ -28,7 +35,7 @@ const DEBRIS_COLORS: PaletteCategory[] = [
     PaletteCategory.SCENERY_ROAD_SECONDARY,
 ];
 
-/** Hot sparks for airframe scrapes against terrain/buildings. */
+/** Hot glowing sparks for ground scrapes. */
 const SPARK_COLORS: PaletteCategory[] = [
     PaletteCategory.FX_FIRE,
     PaletteCategory.FX_FIRE__B,
@@ -37,8 +44,7 @@ const SPARK_COLORS: PaletteCategory[] = [
 ];
 
 /**
- * Hit debris: small flat gray/brown plates that tumble as they fly.
- * Uses the same mesh material path as scenery (not the fire particle shader).
+ * Hit debris (gun chips) plus short glowing scrape sparks at ground impacts.
  */
 export class DebrisField implements Entity {
 
@@ -50,10 +56,16 @@ export class DebrisField implements Entity {
     private readonly chips: THREE.Mesh[] = [];
     /** Per-chip tumble axis (unit vectors). */
     private readonly spinAxes: THREE.Vector3[] = [];
+
+    private readonly sparkSystem: ParticleSystem;
+    private readonly sparkEmitter: SphereEmitter;
+    private readonly sparks: THREE.Mesh[] = [];
+
     private readonly root = new THREE.Object3D();
     private readonly hitPos = new THREE.Vector3();
     private readonly hitVel = new THREE.Vector3();
     private readonly tmpQuat = new THREE.Quaternion();
+    private readonly tmpFwd = new THREE.Vector3();
 
     constructor(materials: SceneMaterialManager) {
         // Tight shell + low kick so chips peel off the hull instead of exploding out.
@@ -65,65 +77,124 @@ export class DebrisField implements Entity {
                 emitterSpawnRatePerSecond: 0,
                 particleLifeMin: 2.5,
                 particleLifeMax: 4.5,
-                // Metres — small shards, still readable at dogfight range.
                 particleSizeStartMin: 0.6,
                 particleSizeStartMax: 1.4,
                 particleSizeEndMin: 0.3,
                 particleSizeEndMax: 0.8,
                 particleRotationStartMin: 0,
                 particleRotationStartMax: Math.PI * 2,
-                // Several full tumbles over the chip's life.
                 particleRotationEndMin: Math.PI * 4,
                 particleRotationEndMax: Math.PI * 10,
             },
             this.emitter,
         );
         this.system.addForce(new ConstantForce(new THREE.Vector3(0, -9.80665, 0)));
-        // ~0.55 /s → terminal freefall ≈ 18 m/s; sheds inherited aircraft speed in ~2–3 s.
         this.system.addForce(new LinearDragForce(0.55));
 
-        const chipColors = [...DEBRIS_COLORS, ...SPARK_COLORS];
-        const geo = new THREE.PlaneGeometry(1, 1);
+        const chipGeo = new THREE.PlaneGeometry(1, 1);
         for (let i = 0; i < DEBRIS_PARTICLE_COUNT; i++) {
             const mat = materials.build({
                 type: SceneMaterialPrimitiveType.MESH,
-                category: chipColors[i % chipColors.length],
+                category: DEBRIS_COLORS[i % DEBRIS_COLORS.length],
                 depthWrite: false,
                 shaded: false,
             });
             mat.side = THREE.DoubleSide;
-            const mesh = new THREE.Mesh(geo, mat);
+            const mesh = new THREE.Mesh(chipGeo, mat);
             mesh.frustumCulled = false;
             mesh.visible = false;
             mesh.onBeforeRender = updateUniforms;
             this.chips.push(mesh);
             this.root.add(mesh);
-            // Random tumble axis so chips don't all spin the same way.
             this.spinAxes.push(new THREE.Vector3(
                 Math.random() * 2 - 1,
                 Math.random() * 2 - 1,
                 Math.random() * 2 - 1,
             ).normalize());
         }
+
+        // Short bright streaks kicked up from the ground contact.
+        this.sparkEmitter = new SphereEmitter(0.05, 0.25, 8, 22);
+        this.sparkSystem = new ParticleSystem(
+            {
+                systemMaxParticles: SPARK_COUNT,
+                systemReSpawn: true,
+                emitterSpawnRatePerSecond: 0,
+                particleLifeMin: 0.12,
+                particleLifeMax: 0.35,
+                particleSizeStartMin: 0.7,
+                particleSizeStartMax: 1.2,
+                particleSizeEndMin: 0.15,
+                particleSizeEndMax: 0.4,
+                particleRotationStartMin: 0,
+                particleRotationStartMax: 0,
+                particleRotationEndMin: 0,
+                particleRotationEndMax: 0,
+            },
+            this.sparkEmitter,
+        );
+        this.sparkSystem.addForce(new ConstantForce(new THREE.Vector3(0, -18, 0)));
+        this.sparkSystem.addForce(new LinearDragForce(1.2));
+
+        const sparkGeo = new THREE.BoxGeometry(SPARK_WIDTH_M, SPARK_WIDTH_M, SPARK_LENGTH_M);
+        for (let i = 0; i < SPARK_COUNT; i++) {
+            const mat = materials.build({
+                type: SceneMaterialPrimitiveType.MESH,
+                category: SPARK_COLORS[i % SPARK_COLORS.length],
+                depthWrite: false,
+                shaded: false,
+            });
+            const mesh = new THREE.Mesh(sparkGeo, mat);
+            mesh.frustumCulled = false;
+            mesh.visible = false;
+            mesh.onBeforeRender = updateUniforms;
+            this.sparks.push(mesh);
+            this.root.add(mesh);
+        }
     }
 
-    /** Spawn a short burst at each hit. Caps work per frame under heavy fire. */
+    /** Spawn a short burst at each gun hit. Caps work per frame under heavy fire. */
     spawnFromHits(hits: SimHitEvent[]): void {
         const n = Math.min(hits.length, DEBRIS_MAX_HITS_PER_FRAME);
         for (let i = 0; i < n; i++) {
             const hit = hits[i];
+            if (hit.source === 'scrape') {
+                continue;
+            }
             this.hitPos.set(hit.position[0], hit.position[1], hit.position[2]);
-            // Scrapes (low damage) kick sparks upward; gun hits peel sideways.
-            const scrape = hit.damage > 0 && hit.damage < 20;
-            const inherit = scrape ? 0.12 : DEBRIS_VELOCITY_INHERIT;
             this.hitVel.set(
-                hit.velocity[0] * inherit,
-                hit.velocity[1] * inherit + (scrape ? 8 : 0),
-                hit.velocity[2] * inherit,
+                hit.velocity[0] * DEBRIS_VELOCITY_INHERIT,
+                hit.velocity[1] * DEBRIS_VELOCITY_INHERIT,
+                hit.velocity[2] * DEBRIS_VELOCITY_INHERIT,
             );
-            this.burstAt(this.hitPos, this.hitVel, scrape ? DEBRIS_PER_HIT + 4 : DEBRIS_PER_HIT);
+            this.burstDebrisAt(this.hitPos, this.hitVel);
         }
-        this.syncMeshes();
+        this.syncDebrisMeshes();
+    }
+
+    /**
+     * Short glowing streaks at terrain scrape points (with ground smoke elsewhere).
+     * Bias kicks sparks along the aircraft motion and slightly upward.
+     */
+    spawnGroundScrapes(hits: SimHitEvent[]): void {
+        let spawned = 0;
+        for (let i = 0; i < hits.length && spawned < SPARK_MAX_SCRAPES_PER_FRAME; i++) {
+            const hit = hits[i];
+            if (hit.source !== 'scrape') {
+                continue;
+            }
+            this.hitPos.set(hit.position[0], hit.position[1], hit.position[2]);
+            this.hitVel.set(
+                hit.velocity[0] * 0.15,
+                hit.velocity[1] * 0.15 + 6,
+                hit.velocity[2] * 0.15,
+            );
+            this.sparkEmitter.setVelocityBias(this.hitVel);
+            this.sparkSystem.position = this.hitPos;
+            this.sparkSystem.burst(SPARKS_PER_SCRAPE, true);
+            spawned++;
+        }
+        this.syncSparkMeshes();
     }
 
     /** Debug helper: emit one burst at a world position (e.g. Tab key). */
@@ -133,17 +204,17 @@ export class DebrisField implements Entity {
         } else {
             this.hitVel.set(0, 0, 0);
         }
-        this.burstAt(position, this.hitVel);
-        this.syncMeshes();
+        this.burstDebrisAt(position, this.hitVel);
+        this.syncDebrisMeshes();
     }
 
-    private burstAt(position: THREE.Vector3, velocityBias: THREE.Vector3, count = DEBRIS_PER_HIT): void {
+    private burstDebrisAt(position: THREE.Vector3, velocityBias: THREE.Vector3, count = DEBRIS_PER_HIT): void {
         this.emitter.setVelocityBias(velocityBias);
         this.system.position = position;
         this.system.burst(count, true);
     }
 
-    private syncMeshes(): void {
+    private syncDebrisMeshes(): void {
         for (let i = 0; i < this.chips.length; i++) {
             const p = this.system.particles[i];
             const mesh = this.chips[i];
@@ -156,9 +227,33 @@ export class DebrisField implements Entity {
             const angle = p.rotationStart + (p.rotationEnd - p.rotationStart) * progress;
             mesh.visible = true;
             mesh.position.copy(p.position);
-            // Flat plate: thin in Z so it reads as a shard when tumbling.
             mesh.scale.set(size, size * (0.55 + (i % 3) * 0.15), 1);
             this.tmpQuat.setFromAxisAngle(this.spinAxes[i], angle);
+            mesh.quaternion.copy(this.tmpQuat);
+        }
+    }
+
+    private syncSparkMeshes(): void {
+        for (let i = 0; i < this.sparks.length; i++) {
+            const p = this.sparkSystem.particles[i];
+            const mesh = this.sparks[i];
+            if (!p.isActive) {
+                mesh.visible = false;
+                continue;
+            }
+            const progress = p.life / p.lifespan;
+            const lenScale = p.sizeStart + (p.sizeEnd - p.sizeStart) * progress;
+            mesh.visible = true;
+            mesh.position.copy(p.position);
+            // Thin streak: shrink width as it dies, keep some length along velocity.
+            mesh.scale.set(0.7 + (1 - progress) * 0.5, 0.7 + (1 - progress) * 0.5, lenScale);
+            this.tmpFwd.copy(p.velocity);
+            if (this.tmpFwd.lengthSq() < 1e-6) {
+                this.tmpFwd.set(0, 1, 0);
+            } else {
+                this.tmpFwd.normalize();
+            }
+            this.tmpQuat.setFromUnitVectors(FORWARD_Z, this.tmpFwd);
             mesh.quaternion.copy(this.tmpQuat);
         }
     }
@@ -169,7 +264,9 @@ export class DebrisField implements Entity {
 
     update(delta: number): void {
         this.system.update(delta);
-        this.syncMeshes();
+        this.sparkSystem.update(delta);
+        this.syncDebrisMeshes();
+        this.syncSparkMeshes();
     }
 
     render3D(_targetWidth: number, _targetHeight: number, _camera: THREE.Camera, lists: Map<string, THREE.Scene>, _palette: Palette): void {
@@ -184,3 +281,5 @@ export class DebrisField implements Entity {
         //
     }
 }
+
+const FORWARD_Z = new THREE.Vector3(0, 0, 1);

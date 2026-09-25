@@ -1409,6 +1409,74 @@ def _scan_aircraft2_animated_parts(bundle_path: str) -> list[tuple[str, list[str
     return out
 
 
+_AIRCRAFT2_BLOCKS_CACHE: dict[str, list[tuple[str, list[str], dict]]] = {}
+
+
+def _scan_aircraft2_blocks(bundle_path: str) -> list[tuple[str, list[str], dict]]:
+    """Return [(zipEntry, nameCandidates, {SwingWings, WingTrails}), ...] per Aircraft2 JSON."""
+    out: list[tuple[str, list[str], dict]] = []
+    try:
+        with zipfile.ZipFile(bundle_path) as z:
+            for name in z.namelist():
+                norm = name.replace(chr(92), '/')
+                if '/Aircraft2/' not in norm or not norm.lower().endswith('.json'):
+                    continue
+                if '/campaign/' in norm.lower():
+                    continue
+                try:
+                    text = z.read(name).decode('utf-8', errors='ignore')
+                    data = json.loads(_strip_json_trailing_commas(text))
+                except Exception:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                blocks = {'SwingWings': data.get('SwingWings'), 'WingTrails': data.get('WingTrails')}
+                candidates = [
+                    str(data.get('Name') or ''),
+                    str(data.get('DisplayName') or ''),
+                    os.path.splitext(os.path.basename(norm))[0],
+                ]
+                out.append((norm, candidates, blocks))
+    except Exception:
+        return []
+    return out
+
+
+def _load_aircraft2_block(bundle_path: str, hints: list[str], key: str):
+    """One block (`key`) of the Aircraft2 JSON that best matches this aircraft."""
+    if not bundle_path or not str(bundle_path).lower().endswith('.zip'):
+        return None
+    if not os.path.isfile(bundle_path):
+        return None
+    cache_key = f'{os.path.abspath(bundle_path)}:{os.path.getmtime(bundle_path)}'
+    if cache_key not in _AIRCRAFT2_BLOCKS_CACHE:
+        _AIRCRAFT2_BLOCKS_CACHE[cache_key] = _scan_aircraft2_blocks(bundle_path)
+    hint_tokens = {_normalize_aircraft_token(h) for h in hints if h}
+    hint_tokens = {t for t in hint_tokens if len(t) >= 3}
+    # Score against EVERY Aircraft2 file, not just those carrying the block, so a
+    # fixed-wing sibling never inherits another plane's swing wings.
+    best, best_score = None, -1
+    for _norm, candidates, blocks in _AIRCRAFT2_BLOCKS_CACHE[cache_key]:
+        score = _aircraft2_hint_score(candidates, hint_tokens)
+        if score < 3 and hint_tokens:
+            continue
+        if score > best_score:
+            best, best_score = blocks.get(key), score
+    return best
+
+
+def load_aircraft2_swing_wings(bundle_path: str, hints: list[str]) -> dict | None:
+    """The `SwingWings` block (variable-geometry wings) of this aircraft's Aircraft2 JSON."""
+    block = _load_aircraft2_block(bundle_path, hints, 'SwingWings')
+    return block if isinstance(block, dict) and block.get('Parts') else None
+
+
+def load_aircraft2_wing_trails(bundle_path: str, hints: list[str]) -> list[str]:
+    """Names of the mod's wingtip-trail nodes (`WingTrails`), e.g. TrailL / TrailR."""
+    block = _load_aircraft2_block(bundle_path, hints, 'WingTrails')
+    return [str(n) for n in block] if isinstance(block, list) else []
+
+
 def _curve_range_sign(curve) -> tuple[float, int]:
     """Max |degrees| → (rangeRad, sign) from a TCA AngleBy* keyframe list."""
     if not isinstance(curve, list) or not curve:
@@ -1621,6 +1689,43 @@ def _transform_pid_of(go, bundle: Bundle) -> int | None:
     return None
 
 
+def find_node_pid(bundle: Bundle, part_name: str, root_pid: int | None = None) -> int | None:
+    """Transform path_id of the GameObject called `part_name`.
+
+    A bundle can pack several aircraft sharing node names, so with `root_pid` the
+    node under that aircraft's transform root wins; otherwise the first match.
+    """
+    matches: list[int] = []
+    for o in bundle.env.objects:
+        if o.type.name != 'GameObject':
+            continue
+        go = o.read()
+        if go.m_Name != part_name:
+            continue
+        tp = _transform_pid_of(go, bundle)
+        if tp is not None:
+            matches.append(tp)
+    if not matches:
+        return None
+    if root_pid is not None:
+        for tp in matches:
+            if transform_root(tp, bundle.transforms) == root_pid:
+                return tp
+    return matches[0]
+
+
+def transform_is_under(bundle: Bundle, tpid: int, ancestor: int) -> bool:
+    """True when `tpid` is `ancestor` or one of its descendants."""
+    seen: set[int] = set()
+    cur = tpid
+    while cur and cur in bundle.transforms and cur not in seen:
+        if cur == ancestor:
+            return True
+        seen.add(cur)
+        cur = bundle.transforms[cur].m_Father.path_id
+    return False
+
+
 def hinge_frame_from_part(
     bundle: Bundle,
     part_name: str,
@@ -1647,27 +1752,9 @@ def hinge_frame_from_part(
     gets *its own* plane's hinge, not the first identically-named bone in the
     bundle. Falls back to the first name match if none share the root.
     """
-    matches: list[int] = []
-    for o in bundle.env.objects:
-        if o.type.name != 'GameObject':
-            continue
-        go = o.read()
-        if go.m_Name != part_name:
-            continue
-        tp = _transform_pid_of(go, bundle)
-        if tp is not None:
-            matches.append(tp)
-    if not matches:
-        return None
-
-    transform_pid = None
-    if root_pid is not None:
-        for tp in matches:
-            if transform_root(tp, bundle.transforms) == root_pid:
-                transform_pid = tp
-                break
+    transform_pid = find_node_pid(bundle, part_name, root_pid)
     if transform_pid is None:
-        transform_pid = matches[0]
+        return None
 
     wm = _FLIP_X @ world_matrix(transform_pid, bundle.transforms, world_cache) @ _FLIP_X
     hinge_world = wm[:3, 3] * scale
@@ -2692,6 +2779,115 @@ def import_mod(cfg: dict, bundle: Bundle | None = None) -> int:
             gear_names = detected_gear
             print(f'Auto-detected {len(gear_names)} gear/door part(s)')
 
+    # ---- Variable-geometry wings: the mod's `SwingWings` block names transform
+    # nodes (WingLRoot/WingRRoot, gloves) that the game rotates about a local
+    # axis by up to MaxAngle. Everything parented under such a node sweeps with
+    # it, so each node becomes one `sweep` surface; surfaces already split out of
+    # its subtree (flaps, spoilers) stay separate but record it as `sweepParent`.
+    swing_manifest = None
+    swing = None
+    aircraft2_hints = [
+        cfg.get('canonicalName'),
+        cfg.get('displayName'),
+        cfg.get('name'),
+        cfg.get('id'),
+        *sorted(aircraft_roots),
+    ]
+    if flyable.get('autoSwingWings', True) is not False:
+        swing = load_aircraft2_swing_wings(bundle_path, aircraft2_hints)
+    if swing:
+        max_deg = float(swing.get('MaxAngle', 0.0))
+        plane_roots = {_root_of(p['tpid']) for p in visual_parts if p.get('tpid') is not None}
+        wing_entries: list[dict] = []
+        for entry in swing.get('Parts', []):
+            mesh = str(entry.get('Mesh') or '')
+            try:
+                local_axis = np.asarray(entry.get('Axis'), dtype=np.float64)
+            except (TypeError, ValueError):
+                continue
+            mag = float(np.linalg.norm(local_axis)) if local_axis.shape == (3,) else 0.0
+            node = None
+            for root_pid in plane_roots or {None}:
+                node = find_node_pid(bundle, mesh, root_pid)
+                if node is not None and (root_pid is None
+                                         or transform_root(node, bundle.transforms) == root_pid):
+                    break
+                node = None
+            if node is None or mag < 1e-6 or abs(max_deg) < 1e-3:
+                print(f'  swing wing node "{mesh}" not found on this aircraft; skipping.')
+                continue
+            wm = _FLIP_X @ world_matrix(node, bundle.transforms, world_cache) @ _FLIP_X
+            world_axis = wm[:3, :3] @ (local_axis / mag)
+            world_axis = world_axis / max(float(np.linalg.norm(world_axis)), 1e-9)
+            if abs(world_axis[1]) < 0.7:
+                # Only vertical-axis (planform) sweep is rendered; e.g. F-15 intake
+                # ramps rotate about a spanwise axis and are left in the body.
+                print(f'  swing part "{mesh}" is not a vertical-axis sweep; skipping.')
+                continue
+            members = [p for p in visual_parts
+                       if p.get('tpid') is not None and p['name'] not in gear_names
+                       and transform_is_under(bundle, p['tpid'], node)]
+            if not members:
+                print(f'  swing wing node "{mesh}" has no meshes under it; skipping.')
+                continue
+            wing_entries.append({
+                'mesh': mesh, 'node': node, 'mag': mag, 'members': members,
+                'pivot': wm[:3, 3] * scale, 'world_axis': world_axis,
+            })
+
+        # Handedness: Unity's rotation convention vs ours is fixed per aircraft, so
+        # calibrate it on the full-strength wing nodes -- the tip must move aft (-Z).
+        handedness = None
+        for w in wing_entries:
+            if w['mag'] < 0.9:
+                continue
+            v = np.vstack([p['world_v'] for p in w['members']]) - w['pivot']
+            tip = v[int(np.argmax(v[:, 0] ** 2 + v[:, 2] ** 2))]
+            up = w['world_axis'] * (1.0 if w['world_axis'][1] > 0 else -1.0)
+            aft_sign = 1 if float(np.cross(up, tip)[2]) < 0.0 else -1
+            handedness = aft_sign * (1 if w['world_axis'][1] > 0 else -1)
+            break
+
+        swing_defs: list[dict] = []
+        for w in wing_entries:
+            if handedness is None:
+                print('  swing wings: no full-strength wing node to calibrate on; skipping.')
+                break
+            up_sign = 1 if w['world_axis'][1] > 0 else -1
+            role = f'{w["mesh"]}_sweep'
+            names = []
+            for p in w['members']:
+                if p['name'] not in names:
+                    names.append(p['name'])
+            claimed: set[str] = set()
+            for sd in surface_defs:
+                if any(pn in names for pn in sd.get('parts', [])):
+                    sd['sweepParent'] = role
+                    claimed.update(sd.get('parts', []))
+            own = [n for n in names if n not in claimed]
+            if not own:
+                continue
+            up = w['world_axis'] * up_sign
+            swing_defs.append({
+                'role': role,
+                'parts': own,
+                'control': 'sweep',
+                'hingePart': w['mesh'],
+                'axis': [float(x) for x in up],
+                'sign': handedness * up_sign,
+                'rangeRad': float(np.radians(abs(max_deg))) * w['mag'],
+            })
+        if swing_defs:
+            surface_defs = list(surface_defs) + swing_defs
+            swing_manifest = {
+                'minKias': float(swing.get('MinKIAS', 0.0)),
+                'maxKias': float(swing.get('MaxKIAS', 0.0)),
+                'travelSeconds': round(abs(max_deg) / max(float(swing.get('SweepSpeed', 1.0)), 1e-3), 3),
+            }
+            print(f'Swing wings: {len(swing_defs)} sweep surface(s) '
+                  f'({", ".join(sd["role"] for sd in swing_defs)}), '
+                  f'{swing_manifest["minKias"]:.0f}-{swing_manifest["maxKias"]:.0f} KIAS')
+
     surface_of_part: dict[str, int] = {}
     for si, sd in enumerate(surface_defs):
         for pn in sd.get('parts', []):
@@ -2823,6 +3019,7 @@ def import_mod(cfg: dict, bundle: Bundle | None = None) -> int:
             'control': control,
             'sign': sd.get('sign', 1),
             'rangeRad': sd.get('rangeRad', float(np.pi / 6)),
+            **({'sweepParent': sd['sweepParent']} if sd.get('sweepParent') else {}),
         })
         print(f'Wrote {surf_path} (pivot={pivot_local.round(2).tolist()} axis={axis.round(2).tolist()})')
 
@@ -3027,6 +3224,35 @@ def import_mod(cfg: dict, bundle: Bundle | None = None) -> int:
             [round(float(right[0]), 4), round(float(right[1]), 4), round(float(right[2]), 4)],
         ], 'body-extreme'
 
+    def trail_node_origins(translate) -> tuple[list | None, str | None]:
+        """Wingtip trail origins from the mod's own `WingTrails` nodes (TrailL/TrailR).
+
+        These sit on the real wingtips, unlike a hull-extreme guess -- which, on a
+        swing-wing aircraft whose wings are split out of the body, would land on the
+        fuselage. Spread-wing positions; the runtime carries them round the sweep.
+        """
+        names = load_aircraft2_wing_trails(bundle_path, aircraft2_hints)
+        roots = {_root_of(p['tpid']) for p in visual_parts if p.get('tpid') is not None}
+        tips: list[np.ndarray] = []
+        for name in names:
+            node = None
+            for root_pid in roots or {None}:
+                node = find_node_pid(bundle, name, root_pid)
+                if node is not None and (root_pid is None
+                                         or transform_root(node, bundle.transforms) == root_pid):
+                    break
+                node = None
+            if node is not None:
+                tips.append(_transform_origin(node) + np.asarray(translate, dtype=np.float64))
+        if len(tips) < 2:
+            return None, None
+        left = max(tips, key=lambda t: float(t[0]))
+        right = min(tips, key=lambda t: float(t[0]))
+        if float(left[0] - right[0]) < 0.6:
+            return None, None
+        return [[round(float(c), 4) for c in left],
+                [round(float(c), 4) for c in right]], 'wing-trail-nodes'
+
     attachments: list[dict] = []
     gt = np.asarray(ground_translate)
     for o in bundle.env.objects:
@@ -3084,8 +3310,10 @@ def import_mod(cfg: dict, bundle: Bundle | None = None) -> int:
     fx.setdefault('nozzles', None)
     fx.setdefault('nozzleRadius', None)
     if fx.get('wingtips') is None:
-        auto_wingtips, wingtip_src = wingtip_trail_origins(
-            body_parts, np.asarray(ground_translate))
+        auto_wingtips, wingtip_src = trail_node_origins(np.asarray(ground_translate))
+        if not auto_wingtips:
+            auto_wingtips, wingtip_src = wingtip_trail_origins(
+                body_parts, np.asarray(ground_translate))
         if auto_wingtips:
             fx['wingtips'] = auto_wingtips
             print(f'Wingtip trails ({wingtip_src}): {auto_wingtips}')
@@ -3145,6 +3373,7 @@ def import_mod(cfg: dict, bundle: Bundle | None = None) -> int:
         'collision': collision_gltf,
         'collisionMesh': collision_mesh,
         'surfaces': surfaces_manifest,
+        'swingWings': swing_manifest,
         'fx': fx,
         'attachments': attachments or None,
         'cockpitOffset': cockpit_offset,

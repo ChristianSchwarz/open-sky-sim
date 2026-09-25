@@ -6,7 +6,7 @@ import * as THREE from 'three';
  * surfaces directly (see {@link AircraftObservation} for the matching state
  * source). Both the player's plane and a spawned opponent implement it.
  */
-export interface AircraftControlChannel {
+interface AircraftControlChannel {
     /** [-1, 1], +1 = nose up (aft stick). */
     setPitch(pitch: number): void;
     /** [-1, 1], +1 = roll right. */
@@ -26,7 +26,7 @@ export interface AircraftControlChannel {
  * are live references owned by the aircraft; the pilot reads them within the same
  * frame it writes commands and must not retain them.
  */
-export interface AircraftObservation {
+interface AircraftObservation {
     /** World position (m). */
     getPosition(): THREE.Vector3;
     /** World velocity (m/s). */

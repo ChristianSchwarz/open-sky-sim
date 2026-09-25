@@ -1,0 +1,16 @@
+/*
+ * Styles for the Angular Material settings dialog: the Material theme and
+ * Tailwind's utilities, and nothing hand-written. Components style themselves
+ * with Tailwind classes in their templates; Material is adjusted only through
+ * its documented --mat-* tokens.
+ *
+ * Tailwind's preflight is left out on purpose: it resets every element on the
+ * page, and the game's own overlays (spawn menu, boot screen) are hand-styled
+ * in style.css against browser defaults.
+ */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "@angular/material/prebuilt-themes/cyan-orange.css";
+
+@source "./script/ui";

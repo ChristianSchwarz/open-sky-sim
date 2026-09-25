@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 /** Matches combat-sim projectile gravity. */
-export const GUN_PROJECTILE_GRAVITY = 9.80665;
+const GUN_PROJECTILE_GRAVITY = 9.80665;
 
 /** When no weapons target is locked, pipper uses this reference range (m). */
 export const GUN_AIM_DEFAULT_RANGE_M = 500;

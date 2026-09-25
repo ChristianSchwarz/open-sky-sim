@@ -18,13 +18,21 @@ const colors: PaletteColors = {
     [PaletteCategory.FOG_LIGHT]: '#c8e4f8',
 
     [PaletteCategory.SKY]: '#7aa3c4',
+    [PaletteCategory.SKY_CLOUD]: ['#ffffff', '#d0dce6'],
+    [PaletteCategory.SKY_SUN]: '#fff4d8',
 
     [PaletteCategory.TERRAIN_DEFAULT]: '#4a7a52',
-    [PaletteCategory.TERRAIN_SAND]: '#4a7a52',
-    [PaletteCategory.TERRAIN_BARE]: '#4a7a52',
+    [PaletteCategory.TERRAIN_SAND]: '#b09a63',
     [PaletteCategory.TERRAIN_GRASS]: '#4a7a52',
-    [PaletteCategory.TERRAIN_WATER]: '#1f6a78',
-    [PaletteCategory.TERRAIN_SHALLOW_WATER]: '#1e7888',
+    [PaletteCategory.TERRAIN_BARE]: '#7d5f45',
+    [PaletteCategory.TERRAIN_FOREST]: '#2f6b3c',
+    [PaletteCategory.TERRAIN_SCRUB]: '#6a7742',
+    [PaletteCategory.TERRAIN_CROP]: '#7f8f3c',
+    [PaletteCategory.TERRAIN_URBAN]: '#7d7a76',
+    [PaletteCategory.TERRAIN_SNOW]: '#d8dde2',
+    [PaletteCategory.TERRAIN_WETLAND]: '#3f7357',
+    [PaletteCategory.TERRAIN_WATER]: '#16355e',
+    [PaletteCategory.TERRAIN_SHALLOW_WATER]: '#153c6a',
     [PaletteCategory.SCENERY_MOUNTAIN_GRASS]: ['#24401f', '#4a7a52'],
     [PaletteCategory.SCENERY_MOUNTAIN_BARE]: ['#24401f', '#4a7a52'],
 
@@ -74,6 +82,7 @@ const colors: PaletteColors = {
 
     [PaletteCategory.SCENERY_BASE_RUNWAY_LINES]: '#d0d0d0',
     [PaletteCategory.SCENERY_BASE_RUNWAY_THRESHOLD]: '#d0d0d0',
+    [PaletteCategory.SCENERY_BASE_CONCRETE]: '#8a8a8a',
 
     [PaletteCategory.FX_FIRE]: '#ff9922',
     [PaletteCategory.FX_FIRE__B]: '#ffff22',
@@ -85,8 +94,8 @@ const colors: PaletteColors = {
 
 const values: PaletteValues = {
     [PaletteCategory.FOG_SKY]: 0.003,
-    [PaletteCategory.FOG_TERRAIN]: 0.000035,
-    [PaletteCategory.FOG_LIGHT]: 0.00002,
+    [PaletteCategory.FOG_TERRAIN]: 0.000005,
+    [PaletteCategory.FOG_LIGHT]: 0.000004,
     [PaletteCategory.FOG_SPECKLE]: 0.0005
 };
 

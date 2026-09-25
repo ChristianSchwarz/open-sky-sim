@@ -4,16 +4,22 @@
         "moduleResolution": "bundler",
         "ignoreDeprecations": "6.0",
         "rootDir": "./src",
-        "target": "ES6",
+        "target": "ES2022",
+        "useDefineForClassFields": false,
+        "experimentalDecorators": true,
         "lib": [
             "dom",
-            "es2019"
+            "es2022"
         ],
         "outDir": "./dist/",
         "sourceMap": true,
         "strict": true,
         "removeComments": true,
         "preserveConstEnums": true
+    },
+    "angularCompilerOptions": {
+        "strictTemplates": true,
+        "strictInjectionParameters": true
     },
     "include": [
         "src/**/*"

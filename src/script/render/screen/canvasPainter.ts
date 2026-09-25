@@ -190,6 +190,11 @@ export class CanvasPainter {
         this.ctx.clearRect(x || 0, y || 0, width || this.ctx.canvas.width, height || this.ctx.canvas.height);
     }
 
+    /** Fill a rectangle with the current background colour. */
+    fillRect(x: number, y: number, width: number, height: number): void {
+        this.ctx.fillRect(x, y, width, height);
+    }
+
     hLine(x0: number, x1: number, y: number) {
         this.batch()
             .hLine(x0, x1, y)
@@ -234,6 +239,32 @@ export class CanvasPainter {
 
     text(font: Font, x: number, y: number, text: string, color?: string, alignment: TextAlignment = TextAlignment.LEFT) {
         this.textRenderer.text(font,x, y, text, color, alignment, this.textEffect, this.textEffectColor);
+    }
+
+    /**
+     * Draw a raster with its top-left at (x, y), stretched to `width` by
+     * `height`, in whatever frame {@link pushTransform} has set. Sampling is
+     * nearest: a texel is a texel, like a facet.
+     */
+    image(image: CanvasImageSource, x: number, y: number, width: number, height: number) {
+        this.ctx.imageSmoothingEnabled = false;
+        this.ctx.drawImage(image, x, y, width, height);
+    }
+
+    /**
+     * Enter a frame whose origin is the pixel (originX, originY), rotated by
+     * `rotation` radians (clockwise on screen) and scaled by `scale`. Every
+     * draw until {@link popTransform} is in that frame's units.
+     */
+    pushTransform(originX: number, originY: number, rotation: number, scale: number) {
+        this.ctx.save();
+        this.ctx.translate(originX, originY);
+        this.ctx.rotate(rotation);
+        this.ctx.scale(scale, scale);
+    }
+
+    popTransform() {
+        this.ctx.restore();
     }
 
     batch(): BatchCanvasPainter {

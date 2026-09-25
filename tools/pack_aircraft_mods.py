@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import zipfile
@@ -128,6 +129,44 @@ def rewrite_manifest(manifest: dict, mod_id: str, files: set[str]) -> dict:
     return out
 
 
+def compute_input_hash(manifest_path: Path, files: set[str], base_dir: Path) -> str:
+    """Compute a hash of all input files to detect changes."""
+    hasher = hashlib.sha256()
+    hasher.update(manifest_path.read_bytes())
+    for rel in sorted(files):
+        file_path = base_dir / rel
+        if file_path.exists():
+            hasher.update(file_path.read_bytes())
+    return hasher.hexdigest()
+
+
+def should_rebuild_pack(mod_id: str, manifest_path: Path, files: set[str], base_dir: Path) -> bool:
+    """Check if the pack needs rebuilding by comparing input hash."""
+    pack_path = DIST_ASSETS / f'{mod_id}.aircraft.pack'
+    if not pack_path.exists():
+        return True
+
+    current_hash = compute_input_hash(manifest_path, files, base_dir)
+    hash_file = DIST_ASSETS / f'{mod_id}.aircraft.pack.hash'
+
+    if hash_file.exists():
+        try:
+            prev_hash = hash_file.read_text().strip()
+            if prev_hash == current_hash:
+                return False
+        except Exception:
+            pass
+
+    return True
+
+
+def save_input_hash(mod_id: str, manifest_path: Path, files: set[str], base_dir: Path) -> None:
+    """Save the input hash for future comparison."""
+    current_hash = compute_input_hash(manifest_path, files, base_dir)
+    hash_file = DIST_ASSETS / f'{mod_id}.aircraft.pack.hash'
+    hash_file.write_text(current_hash)
+
+
 def cleanup_loose_mod_files(mod_id: str) -> None:
     if not DIST_ASSETS.exists():
         return
@@ -137,13 +176,21 @@ def cleanup_loose_mod_files(mod_id: str) -> None:
             continue
         if name == f'{mod_id}.aircraft.pack':
             continue
+        if name == f'{mod_id}.aircraft.pack.hash':
+            continue
         if name == f'{mod_id}.aircraft.json' or name.startswith(f'{mod_id}_'):
             path.unlink()
 
 
-def pack_mod(manifest_path: Path) -> None:
+def pack_mod(manifest_path: Path) -> bool:
+    """Pack a mod and return True if rebuilt, False if skipped."""
     base_dir = manifest_path.parent
     files, manifest, mod_id = collect_files(manifest_path)
+
+    if not should_rebuild_pack(mod_id, manifest_path, files, base_dir):
+        print(f'Skipped {mod_id} (no changes)')
+        return False
+
     pack_manifest = rewrite_manifest(manifest, mod_id, files)
 
     DIST_ASSETS.mkdir(parents=True, exist_ok=True)
@@ -156,7 +203,9 @@ def pack_mod(manifest_path: Path) -> None:
 
     size = out_path.stat().st_size
     cleanup_loose_mod_files(mod_id)
+    save_input_hash(mod_id, manifest_path, files, base_dir)
     print(f'Wrote {out_path} ({len(files) + 1} entries, {size:,} bytes)')
+    return True
 
 
 def find_manifests() -> list[Path]:
@@ -191,8 +240,17 @@ def main() -> int:
     if not manifests:
         print('No aircraft manifests found')
         return 0
+
+    rebuilt = 0
+    skipped = 0
     for manifest_path in manifests:
-        pack_mod(manifest_path)
+        if pack_mod(manifest_path):
+            rebuilt += 1
+        else:
+            skipped += 1
+
+    if rebuilt > 0 or skipped > 0:
+        print(f'Summary: rebuilt {rebuilt}, skipped {skipped}')
     return 0
 
 

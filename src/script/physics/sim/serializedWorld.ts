@@ -3,24 +3,27 @@ import { Obstacle, Runway, SceneWorldQuery } from '../../ai/worldQuery';
 import { CarrierMeshCollider } from '../../scene/entities/carrierDeck';
 import {
     ArrestorCableField,
-    ArrestorCableLocal,
-    arrestorCableLocals,
     buildArrestorCableField,
 } from '../../scene/entities/arrestorCables';
 import { HillCollider } from '../../scene/entities/hillCollider';
+import { SurfacePadCollider } from '../../scene/entities/surfacePad';
 import { SkiJumpCollider } from '../../scene/entities/skiJump';
 
 /**
  * Plain, structured-clone-safe views of the static world the AI pilots need
- * (terrain hills, ski jumps, carrier meshes, static obstacles, the runway).
+ * (terrain hills, ski jumps, carrier meshes, static obstacles, the runways).
  * These are posted once to the combat sim worker so it can rebuild a
  * {@link SceneWorldQuery} on its side.
  *
  * `isLand` is deliberately not serialized: the {@link import('../../ai/aiPilot').AiPilot}
- * never calls it (only groundHeightAt / obstacles / runway), so the worker-side
+ * never calls it (only groundHeightAt / obstacles / runways), so the worker-side
  * query stubs it to `true`.
+ *
+ * The DEM is *not* serialized here either. It is mirrored tile by tile as the
+ * aircraft move (see {@link import('../../terrain/heightMirror')}) rather than
+ * frozen into a lattice at boot.
  */
-export interface SerializedHill {
+interface SerializedHill {
     worldToLocal: number[];
     localToWorld: number[];
     baseRadius: number;
@@ -30,21 +33,22 @@ export interface SerializedHill {
     worldReach: number;
 }
 
-export interface SerializedObstacle {
+interface SerializedObstacle {
     position: [number, number, number];
     radius: number;
     height: number;
 }
 
-export interface SerializedRunway {
+interface SerializedRunway {
     center: [number, number, number];
     heading: number;
     halfLength: number;
     halfWidth: number;
 }
 
-export interface SerializedSkiJump {
+interface SerializedSkiJump {
     originX: number;
+    originY: number;
     originZ: number;
     heading: number;
     length: number;
@@ -52,7 +56,7 @@ export interface SerializedSkiJump {
     halfWidth: number;
 }
 
-export interface SerializedCarrierMesh {
+interface SerializedCarrierMesh {
     originX: number;
     originY: number;
     originZ: number;
@@ -71,22 +75,65 @@ export interface SerializedArrestorCables {
     segmentsLocal: [number, number, number, number, number, number][];
 }
 
+/** Structured-clone-safe barricade state (one carrier). */
+export interface SerializedBarricade {
+    originX: number;
+    originY: number;
+    originZ: number;
+    /** Unit landing/roll-out direction. */
+    deckAxis: [number, number, number];
+    /** Unit deck +X (stanchion to stanchion). */
+    lateralAxis: [number, number, number];
+    /** World centre of the webbing at the stanchion feet. */
+    center: [number, number, number];
+    halfSpan: number;
+    height: number;
+    /** 0 = folded flush, 1 = fully upright. */
+    deploy: number;
+    /** Carrier attitude as [x, y, z, w]. */
+    quaternion: [number, number, number, number];
+    /**
+     * The rig as actually fitted to the deck, in carrier-local coordinates.
+     *
+     * Only what the sim needs to lace the same net the main thread drew: the
+     * stanchion stations and the deck they are bolted to. How much of that span
+     * is webbing rather than bare wire is the rig's own business, and both ends
+     * work it out the same way from these.
+     */
+    rigLeftX: number;
+    rigRightX: number;
+    rigDeckY: number;
+    /** Bumped when a fresh webbing assembly goes up; the sim re-laces on it. */
+    rigGeneration: number;
+}
+
 export interface SerializedWorld {
     hills: SerializedHill[];
     obstacles: SerializedObstacle[];
-    runway: SerializedRunway;
+    /**
+     * Every runway in the play area, longest first. Named plural since the
+     * world stopped having exactly one airfield in it.
+     */
+    runways: SerializedRunway[];
     skiJumps?: SerializedSkiJump[];
     carrierMeshes?: SerializedCarrierMesh[];
     arrestorCables?: SerializedArrestorCables[];
+    barricades?: SerializedBarricade[];
+    /** Flat solid surfaces — runway strip, pavement pads (already structured-clone-safe). */
+    surfacePads?: SurfacePadCollider[];
+    /** Static scenery collision soups — hangars, towers, depots (same layout as carrier meshes). */
+    sceneryMeshes?: SerializedCarrierMesh[];
 }
 
 export function serializeWorld(
     hills: HillCollider[],
     obstacles: Obstacle[],
-    runway: Runway,
+    runways: readonly Runway[],
     skiJumps: readonly SkiJumpCollider[] = [],
     carrierMeshes: readonly CarrierMeshCollider[] = [],
     arrestorCables: readonly ArrestorCableField[] = [],
+    surfacePads: readonly SurfacePadCollider[] = [],
+    sceneryMeshes: readonly CarrierMeshCollider[] = [],
 ): SerializedWorld {
     return {
         hills: hills.map(h => ({
@@ -103,14 +150,15 @@ export function serializeWorld(
             radius: o.radius,
             height: o.height,
         })),
-        runway: {
-            center: [runway.center.x, runway.center.y, runway.center.z],
-            heading: runway.heading,
-            halfLength: runway.halfLength,
-            halfWidth: runway.halfWidth,
-        },
+        runways: runways.map(r => ({
+            center: [r.center.x, r.center.y, r.center.z] as [number, number, number],
+            heading: r.heading,
+            halfLength: r.halfLength,
+            halfWidth: r.halfWidth,
+        })),
         skiJumps: skiJumps.map(r => ({
             originX: r.originX,
+            originY: r.originY,
             originZ: r.originZ,
             heading: r.heading,
             length: r.length,
@@ -134,11 +182,27 @@ export function serializeWorld(
                 s.b.x - f.originX, s.b.y - f.originY, s.b.z - f.originZ,
             ] as [number, number, number, number, number, number]),
         })),
+        barricades: [],
+        surfacePads: surfacePads.map(p => ({ ...p })),
+        sceneryMeshes: sceneryMeshes.map(c => ({
+            originX: c.originX,
+            originY: c.originY,
+            originZ: c.originZ,
+            triangles: c.triangles,
+            aabb: c.aabb,
+        })),
     };
 }
 
-/** Rebuild a {@link SceneWorldQuery} in the worker from serialized world data. */
-export function deserializeWorldQuery(world: SerializedWorld): SceneWorldQuery {
+/**
+ * Rebuild a {@link SceneWorldQuery} in the worker from serialized world data.
+ * `baseHeightAt` is the DEM under everything: pass the worker's mirrored height
+ * field so the sim's terrain is the terrain the renderer draws.
+ */
+export function deserializeWorldQuery(
+    world: SerializedWorld,
+    baseHeightAt: (x: number, z: number) => number = () => 0,
+): SceneWorldQuery {
     const hills: HillCollider[] = world.hills.map(h => ({
         worldToLocal: new THREE.Matrix4().fromArray(h.worldToLocal),
         localToWorld: new THREE.Matrix4().fromArray(h.localToWorld),
@@ -153,14 +217,15 @@ export function deserializeWorldQuery(world: SerializedWorld): SceneWorldQuery {
         radius: o.radius,
         height: o.height,
     }));
-    const runway: Runway = {
-        center: new THREE.Vector3(world.runway.center[0], world.runway.center[1], world.runway.center[2]),
-        heading: world.runway.heading,
-        halfLength: world.runway.halfLength,
-        halfWidth: world.runway.halfWidth,
-    };
+    const runways: Runway[] = (world.runways ?? []).map(r => ({
+        center: new THREE.Vector3(r.center[0], r.center[1], r.center[2]),
+        heading: r.heading,
+        halfLength: r.halfLength,
+        halfWidth: r.halfWidth,
+    }));
     const skiJumps: SkiJumpCollider[] = (world.skiJumps ?? []).map(r => ({
         originX: r.originX,
+        originY: r.originY ?? 0,
         originZ: r.originZ,
         heading: r.heading,
         length: r.length,
@@ -175,7 +240,17 @@ export function deserializeWorldQuery(world: SerializedWorld): SceneWorldQuery {
         aabb: c.aabb,
     }));
     // isLand is unused by the AI pilot; stub to land everywhere.
-    return new SceneWorldQuery(hills, () => true, obstacles, runway, skiJumps, carrierMeshes);
+    const sceneryMeshes: CarrierMeshCollider[] = (world.sceneryMeshes ?? []).map(c => ({
+        originX: c.originX,
+        originY: c.originY,
+        originZ: c.originZ,
+        triangles: c.triangles,
+        aabb: c.aabb,
+    }));
+    return new SceneWorldQuery(
+        hills, () => true, obstacles, runways, skiJumps, carrierMeshes, baseHeightAt,
+        world.surfacePads ?? [], sceneryMeshes,
+    );
 }
 
 /** Rebuild arrestor cable fields for combat-sim trap physics. */
@@ -205,11 +280,8 @@ export function defaultArrestorCableField(
     originX: number,
     originY: number,
     originZ: number,
+    orientation?: THREE.Quaternion,
 ): ArrestorCableField {
-    return buildArrestorCableField(originX, originY, originZ);
+    return buildArrestorCableField(originX, originY, originZ, undefined, orientation);
 }
 
-/** Expose locals for callers that need to inspect layout without THREE world build. */
-export function defaultArrestorLocals(): ArrestorCableLocal[] {
-    return arrestorCableLocals();
-}

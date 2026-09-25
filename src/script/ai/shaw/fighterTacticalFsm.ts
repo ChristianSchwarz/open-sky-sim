@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { clamp } from '../../utils/math';
 import { computeTacticalGeometry } from './shawGeometry';
 import {
     AircraftSnapshot, FlightCommand, ManeuverType, TacticalGeometry, TacticalState,
@@ -225,6 +224,3 @@ export function classifyTacticalState(geom: TacticalGeometry): TacticalState {
     return 'NEUTRAL';
 }
 
-export function clampSpeed(speed: number, max: number): number {
-    return clamp(speed, 40, max);
-}

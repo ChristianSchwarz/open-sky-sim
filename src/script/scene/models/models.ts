@@ -6,6 +6,7 @@ import { isZero } from '../../utils/math';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../materials/materials';
 import { updateUniforms } from '../utils';
 import { aircraftPackStore, isPackUrl, parsePackUrl } from '../../state/aircraftPack';
+import { SHADOW_ALPHA_DITHER } from '../entities/aircraftShadow';
 
 
 export interface ModelLodLevel {
@@ -20,17 +21,13 @@ export interface Model {
     center: THREE.Vector3;
 }
 
-export const LIB_PREFFIX = 'lib:';
+const LIB_PREFFIX = 'lib:';
 export type ModelLoadedListener = (url: string, model: Model) => void;
 
-// The GLASS material is drawn as a flat dark-grey surface with a light ordered
-// dither, so canopies read as tinted glass without a real alpha-blend pipeline.
-// alphaDither is roughly "fraction of pixels kept" (0.5 ≈ half see-through);
-// a higher value means a lighter, sparser dither. Both are easy to tweak.
+// An ordered dither over the GLASS fill so the canopy reads as tinted glass
+// rather than a hole. See bayerThreshold in depthFP.ts.
 const GLASS_COLOR = '#333333';
-const GLASS_ALPHA_DITHER = 0.65;
-/** Ground-shadow opacity via screen-space stipple (higher = denser / more opaque). */
-const SHADOW_ALPHA_DITHER = 0.4;
+const GLASS_ALPHA_DITHER = 0.35;
 // Legacy mod imports tagged glass as the default import_mod.py hex instead of GLASS.
 const LEGACY_GLASS_MATERIAL_NAMES = new Set(['GLASS', '#d1f7ff']);
 /** Reserved material token from import_mod.py for TCA collider meshes. */
@@ -42,6 +39,15 @@ function isGlassMaterialName(matName: string): boolean {
 
 function isCollisionMaterialName(matName: string): boolean {
     return matName === COLLISION_MATERIAL;
+}
+
+/** Land/water flats must write depth so entities under the ground are occluded. */
+function isTerrainCategory(category: PaletteCategory): boolean {
+    return (category as string).startsWith('TERRAIN_');
+}
+
+function shouldDepthWrite(isFlat: boolean, category: PaletteCategory): boolean {
+    return !isFlat || isTerrainCategory(category);
 }
 
 export interface ModelLibBuilder {
@@ -184,6 +190,7 @@ export class ModelManager {
         const AABBox = new THREE.Box3();
         const worldAABB = new THREE.Box3();
         const isShadowModel = ModelManager.isShadowModelUrl(url);
+        const isKuzModel = ModelManager.isKuzModelUrl(url);
         model.lod = scenes.map(scene => {
             const level: ModelLodLevel = {
                 flats: [],
@@ -208,6 +215,10 @@ export class ModelManager {
                     // Keep the mesh in the loaded graph for debugging, but never draw it.
                     obj.visible = false;
                     return;
+                }
+
+                if ('isMesh' in obj) {
+                    obj.geometry = ModelManager.withFaceNormals(obj.geometry);
                 }
 
                 obj.matrix.copy(obj.matrixWorld);
@@ -250,20 +261,28 @@ export class ModelManager {
                             rawColor: GLASS_COLOR,
                             shaded: false,
                             alphaDither: GLASS_ALPHA_DITHER,
-                            depthWrite: !isFlat
+                            depthWrite: !isFlat,
+                            grazingHighlight: true,
                         });
                         (obj.material as THREE.ShaderMaterial).side = THREE.DoubleSide;
                     } else {
                         const rawColor = ModelManager.rawColorFor(matName);
-                        const category = rawColor
+                        let category = rawColor
                             ? PaletteCategory.VEHICLE_PLANE_GREY
                             : ModelManager.paletteCategoryOrFallback(matName);
+                        // Kuz hull exports as building metal (light grey); use navy
+                        // engine charcoal so the carrier reads darker at sea.
+                        if (isKuzModel && category === PaletteCategory.SCENERY_BUILDING_METAL) {
+                            category = PaletteCategory.VEHICLE_PLANE_ENGINE;
+                        }
                         obj.material = this.materials.build({
                             type: SceneMaterialPrimitiveType.MESH,
                             category,
                             rawColor,
                             shaded: !isFlat,
-                            depthWrite: !isFlat
+                            depthWrite: shouldDepthWrite(isFlat, category),
+                            // Hide kuz hull below sea level (opaque water alone cannot occlude it).
+                            ...(isKuzModel && !isFlat ? { clipBelowY: 0.05 } : {}),
                         });
                         // Mod imports and textured scenery often need both sides
                         // (original glTF doubleSided, or #rrggbb raw-color meshes).
@@ -272,22 +291,24 @@ export class ModelManager {
                         }
                     }
                 } else if ('isLineSegments' in child) {
+                    const lineCategory = isShadowModel
+                        ? PaletteCategory.SCENERY_TREE_SHADOW
+                        : ModelManager.paletteCategoryOrFallback(
+                            (obj.material as THREE.LineBasicMaterial).name);
                     obj.material = this.materials.build({
                         type: SceneMaterialPrimitiveType.LINE,
-                        category: isShadowModel
-                            ? PaletteCategory.SCENERY_TREE_SHADOW
-                            : ModelManager.paletteCategoryOrFallback(
-                                (obj.material as THREE.LineBasicMaterial).name),
-                        depthWrite: !isFlat
+                        category: lineCategory,
+                        depthWrite: shouldDepthWrite(isFlat, lineCategory)
                     });
                 } else if ('isPoints' in child) {
+                    const pointCategory = isShadowModel
+                        ? PaletteCategory.SCENERY_TREE_SHADOW
+                        : ModelManager.paletteCategoryOrFallback(
+                            (obj.material as THREE.PointsMaterial).name);
                     obj.material = this.materials.build({
                         type: SceneMaterialPrimitiveType.POINT,
-                        category: isShadowModel
-                            ? PaletteCategory.SCENERY_TREE_SHADOW
-                            : ModelManager.paletteCategoryOrFallback(
-                                (obj.material as THREE.PointsMaterial).name),
-                        depthWrite: !isFlat
+                        category: pointCategory,
+                        depthWrite: shouldDepthWrite(isFlat, pointCategory)
                     });
                 }
             });
@@ -302,10 +323,36 @@ export class ModelManager {
         return model;
     }
 
+    /**
+     * Mod imports export every vertex normal as straight up, which lights all
+     * faces alike. Where that is the case, give each face its own normal.
+     */
+    private static withFaceNormals(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
+        const normal = geometry.getAttribute('normal');
+        if (normal) {
+            let allUp = true;
+            for (let i = 0; i < normal.count && allUp; i++) {
+                allUp = Math.abs(normal.getX(i)) < 1e-3 && normal.getY(i) > 0.999 && Math.abs(normal.getZ(i)) < 1e-3;
+            }
+            if (!allUp) {
+                return geometry;
+            }
+        }
+        const flat = geometry.index ? geometry.toNonIndexed() : geometry;
+        flat.computeVertexNormals();
+        return flat;
+    }
+
     /** True for flyable-aircraft ground-shadow assets (`*_shadow.gltf` / `.glb`). */
     private static isShadowModelUrl(url: string): boolean {
         const path = isPackUrl(url) ? parsePackUrl(url).path : url;
         return /_shadow\.(gltf|glb)(\?|#|$)/i.test(path);
+    }
+
+    /** True for the Kuznetsov carrier hull (`kuz.glb`). */
+    private static isKuzModelUrl(url: string): boolean {
+        const path = isPackUrl(url) ? parsePackUrl(url).path : url;
+        return /(^|\/)kuz\.(gltf|glb)(\?|#|$)/i.test(path);
     }
 
     /** True for flyable-aircraft collider assets (`*_collision.gltf` / `.glb`). */
@@ -352,7 +399,11 @@ export class ModelManager {
 
     private cloneObj(obj: THREE.Object3D): THREE.Object3D {
         const o = obj.clone();
-        o.onBeforeRender = updateUniforms;
+        // A builder's own hook (which must call updateUniforms itself) survives
+        // the clone when it says so; everything else gets the plain refresh.
+        o.onBeforeRender = (obj.onBeforeRender as { keepOnClone?: boolean }).keepOnClone
+            ? obj.onBeforeRender
+            : updateUniforms;
         return o;
     }
 }

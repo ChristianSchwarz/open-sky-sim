@@ -62,11 +62,8 @@ export function getF16AfterburnerConeDither(lever: number): F16AfterburnerConeDi
     return null;
 }
 
-export function isF16AfterburnerActive(lever: number): boolean {
-    return getF16ThrottleZone(lever) !== 'mil';
-}
 
-export const F16_AFTERBURNER_CONE_LENGTH_M = {
+const F16_AFTERBURNER_CONE_LENGTH_M = {
     mil: 0,
     abMin: 1.96,
     abMax: 3.43,
@@ -84,7 +81,7 @@ export function getF16AfterburnerConeLengthM(lever: number): number {
 }
 
 /** Lever [0, 1] as 0–100 throttle quadrant position. */
-export function leverToPercent(lever: number): number {
+function leverToPercent(lever: number): number {
     return clampLever(lever) * 100;
 }
 

@@ -3,6 +3,11 @@
 // Serves the built `dist/` folder statically and adds the F10 upload endpoint:
 //   POST /api/preview-mod  (scan a mod .zip and list aircraft + liveries)
 //   POST /api/import-mod   (import selected aircraft from a preview token)
+// and the F9 terrain area import (tools/areaImport.ts):
+//   GET  /api/osm/:z/:x/:y   OpenStreetMap tiles for the area picker
+//   GET  /api/areas          areas the baked pyramid holds
+//   POST /api/import-area    start a bake; GET the same path + /:id for progress
+//   POST /api/delete-area    remove a baked area (same progress stream)
 //
 // Multi-plane mod packs are split by Unity livery material: each aircraft becomes
 // its own .aircraft.pack so liveries stay separate in the spawn menu.
@@ -13,6 +18,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { unzipSync } from 'fflate';
+import {
+    areasHandler, importStream, osmTile, startDelete, startImport,
+} from './areaImport';
 
 const PROJECT_ROOT = path.dirname(__dirname);
 const DIST_DIR = path.join(PROJECT_ROOT, 'dist');
@@ -21,7 +29,7 @@ const IMPORTS_DIR = path.join(PROJECT_ROOT, 'tools', 'mods', 'imports');
 const IMPORTS_PREFIX = 'tools/mods/imports';
 const UPLOADS_DIR = path.join(PROJECT_ROOT, 'tools', 'mods', 'uploads');
 const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-const PORT = Number(process.env.PORT) || 8010;
+const PORT = Number(process.env.PORT) || 8020;
 
 interface ImportConfig {
     name?: string;
@@ -1004,6 +1012,13 @@ if (LIVE_RELOAD) {
     });
 }
 
+// Terrain area import (F9 in the app). See tools/areaImport.ts.
+app.get('/api/osm/:z/:x/:y', osmTile);
+app.get('/api/areas', areasHandler);
+app.post('/api/import-area', express.json(), startImport);
+app.post('/api/delete-area', express.json(), startDelete);
+app.get('/api/import-area/:id', importStream);
+
 app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ ok: true, server: 'modserver', previewMod: true });
 });
@@ -1195,6 +1210,35 @@ app.post('/api/import-mod', importUpload, async (req: Request, res: Response) =>
         return res.status(500).json({ ok: false, error: (err as Error).message, log: log.join('\n') });
     }
 });
+
+// Baked terrain pyramid, served straight from the repo rather than copied into
+// dist/ on every build (see webpack.config.js). Mounted before the dist static
+// handler so it wins for /assets/planet/*.
+//
+// .ptm tiles and their .ptx texture sidecars are stored gzip-compressed on
+// disk and served with
+// Content-Encoding: gzip so the browser inflates them in native code off the
+// main thread. express.static would otherwise serve them as opaque bytes.
+const PLANET_DIR = path.join(PROJECT_ROOT, 'assets', 'planet');
+const TERRAIN_DIR = path.join(PROJECT_ROOT, 'assets', 'terrain');
+const TERRAIN_MOUNTS: ReadonlyArray<readonly [string, string]> = [
+    ['/assets/terrain', TERRAIN_DIR],   // baked .ptm meshes (bake output)
+    ['/assets/planet', PLANET_DIR],     // .pdm heights (bake input)
+];
+for (const [mount, dir] of TERRAIN_MOUNTS) {
+    app.use(mount, express.static(dir, {
+        fallthrough: false,
+        setHeaders(res, filePath) {
+            res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+            res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+            res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+            if (filePath.endsWith('.ptm') || filePath.endsWith('.ptx') || filePath.endsWith('.ptr')) {
+                res.setHeader('Content-Encoding', 'gzip');
+                res.setHeader('Content-Type', 'application/octet-stream');
+            }
+        },
+    }));
+}
 
 app.use(express.static(DIST_DIR, {
     index: LIVE_RELOAD ? false : 'index.html',

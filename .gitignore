@@ -4,3 +4,34 @@ node_modules
 dist
 /tools/mods/uploads/
 /tools/mods/imports/
+
+# Baked terrain pyramid — build product, regenerate with `npm run bake:planet`
+/assets/planet/
+/assets/terrain/
+
+# Fetched cover sources — regenerate with `tools/fetch_cover_sources.py`
+/data/cover/
+
+# Fetched DEM sources for imported areas — regenerate with `tools/fetch_planet_dem.py`
+/data/imports/
+/data/osm-cache/
+
+# OSM raster tiles cached for the in-app area picker
+/tools/osm-cache/
+
+/build/
+
+# Overpass response cache written by the OSM bake tools
+/tools/data/osm-cache/
+
+# Per-area fetched cover sources (e.g. data/cover-mad) — regenerate with `tools/fetch_cover_sources.py`
+/data/cover-*/
+
+# esbuild bundle of the mesh bake worker, rebuilt on every bake
+/tools/bake/.build/
+
+# Global coarse DEM/imagery sources for the orbit view - see tools/prep_global_dem.py
+/data/global/
+
+# Scratch output of tools/rebake_all.mjs
+/rebake_all.log

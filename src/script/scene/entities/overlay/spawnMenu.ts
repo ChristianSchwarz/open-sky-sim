@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { Palette } from '../../../config/palettes/palette';
 import { CanvasPainter } from '../../../render/screen/canvasPainter';
 import { Entity } from '../../entity';
-import { Scene, SceneLayers } from '../../scene';
+import { Scene } from '../../scene';
 
 
 /** Spawn menu state holder; the visible UI is the HTML {@link SpawnPanel}. */

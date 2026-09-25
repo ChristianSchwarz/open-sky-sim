@@ -13,7 +13,7 @@ import { SimHitEvent } from './simTypes';
  */
 
 /** Floats per aircraft row. Keep in sync with the AC_* offsets below. */
-export const AC_STRIDE = 56;
+export const AC_STRIDE = 55;
 
 export const AC = {
     posX: 0, posY: 1, posZ: 2,
@@ -55,10 +55,8 @@ export const AC = {
     hookX: 50,
     hookY: 51,
     hookZ: 52,
-    /** Per-leg oleo compression (m); unused legs stay 0. */
-    gearCompress0: 53,
-    gearCompress1: 54,
-    gearCompress2: 55,
+    /** Tailhook lowered (arrestor-capable). */
+    hookDeployed: 53,
 } as const;
 
 /** Floats per projectile row: position (3) + quaternion (4). */

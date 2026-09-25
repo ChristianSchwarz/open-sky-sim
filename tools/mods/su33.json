@@ -1,0 +1,17 @@
+{
+  "bundle": "data/3443641237_Global_Skies_Collection.zip",
+  "out": "assets/su33_static.gltf",
+  "id": "su33",
+  "displayName": "Su-33",
+  "canonicalName": "Su-33",
+  "sourceMod": "Global Skies Collection",
+  "sourceModId": "3443641237",
+  "sourceMaterial": "Su-33 Mat",
+  "includeMaterials": ["Su-33 Mat"],
+  "includeRoots": [8973235991957018294],
+  "rescueGlassUnderRoot": true,
+  "flyable": {
+    "autoSurfaces": true,
+    "autoGear": true
+  }
+}

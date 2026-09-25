@@ -13,8 +13,7 @@
  */
 import * as THREE from 'three';
 import {
-    MAX_ALTITUDE, MAX_SPEED, PITCH_RATE, PLANE_DISTANCE_TO_GROUND, ROLL_RATE,
-    TERRAIN_MODEL_SIZE, TERRAIN_SCALE, YAW_RATE,
+    MAX_ALTITUDE, MAX_SPEED, PITCH_RATE, PLANE_DISTANCE_TO_GROUND, ROLL_RATE, YAW_RATE,
 } from '../../defs';
 import { clamp, FORWARD, isZero, RIGHT, UP } from '../../utils/math';
 import {
@@ -125,7 +124,6 @@ export class Fm2FlightModel extends FlightModel {
     private readonly gearForceWorld = new THREE.Vector3();
     private readonly gearMomentBody = new THREE.Vector3();
     private readonly invOrient = new THREE.Quaternion();
-    private readonly _up = new THREE.Vector3();
     private readonly _fwd = new THREE.Vector3();
     private readonly _right = new THREE.Vector3();
     private readonly _v = new THREE.Vector3();
@@ -136,6 +134,7 @@ export class Fm2FlightModel extends FlightModel {
     private readonly _friction = new THREE.Vector3();
     private readonly _groundNormal = new THREE.Vector3();
     private readonly _vTan = new THREE.Vector3();
+    private readonly _impulseR = new THREE.Vector3();
     /** Last forebody asymmetry side force (body frame, N); for the debug overlay. */
     private readonly forebodyForceBody = new THREE.Vector3();
 
@@ -222,6 +221,101 @@ export class Fm2FlightModel extends FlightModel {
         this.rb.velocityWorld.copy(this.velocity);
     }
 
+    /** Zero body rates (kinematic deck park). */
+    clearAngularVelocity(): void {
+        this.rb.angularVelocityBody.set(0, 0, 0);
+    }
+
+    /**
+     * Inward speed of the body at `pointWorld` along `normalWorld` (m/s).
+     * Zero when the contact is separating or sliding purely tangentially.
+     */
+    contactSpeedIntoNormal(pointWorld: THREE.Vector3, normalWorld: THREE.Vector3): number {
+        this.rb.orientation.copy(this.obj.quaternion);
+        this.rb.velocityWorld.copy(this.velocity);
+        this._impulseR.subVectors(pointWorld, this.obj.position);
+        this._omegaWorld.copy(this.rb.angularVelocityBody).applyQuaternion(this.rb.orientation);
+        this._contactVel.crossVectors(this._omegaWorld, this._impulseR).add(this.rb.velocityWorld);
+        const vn = this._contactVel.dot(normalWorld);
+        return vn < 0 ? -vn : 0;
+    }
+
+    /**
+     * Mild drag at a world contact point while scraping a solid.
+     * Bleeds a fraction of the contact-point velocity into an impulse at that
+     * point (linear + angular) — no bounce, no whole-body speed dump.
+     */
+    applyContactDragAt(
+        pointWorld: THREE.Vector3,
+        dt: number,
+        dragPerSec: number,
+        massFraction: number,
+        maxFrac: number,
+    ): void {
+        if (this.kinematic || dt <= 0) return;
+
+        this.rb.orientation.copy(this.obj.quaternion);
+        this.rb.velocityWorld.copy(this.velocity);
+        this.invOrient.copy(this.rb.orientation).invert();
+
+        this._impulseR.subVectors(pointWorld, this.obj.position);
+        this._omegaWorld.copy(this.rb.angularVelocityBody).applyQuaternion(this.rb.orientation);
+        this._contactVel.crossVectors(this._omegaWorld, this._impulseR).add(this.rb.velocityWorld);
+
+        const speed = this._contactVel.length();
+        if (speed < 1e-3) {
+            this.velocity.copy(this.rb.velocityWorld);
+            return;
+        }
+
+        let frac = 1 - Math.exp(-dragPerSec * dt);
+        if (frac > maxFrac) frac = maxFrac;
+        // Impulse opposing contact velocity; scaled so a tip scrape does not act like full-mass braking.
+        const jScale = -frac * this.rb.mass * massFraction;
+        this._friction.copy(this._contactVel).multiplyScalar(jScale);
+
+        this.rb.velocityWorld.addScaledVector(this._friction, 1 / this.rb.mass);
+        this._v.crossVectors(this._impulseR, this._friction).applyQuaternion(this.invOrient);
+        const I = this.rb.inertia;
+        this.rb.angularVelocityBody.x += this._v.x / I.x;
+        this.rb.angularVelocityBody.y += this._v.y / I.y;
+        this.rb.angularVelocityBody.z += this._v.z / I.z;
+
+        this.velocity.copy(this.rb.velocityWorld);
+        this.obj.quaternion.copy(this.rb.orientation);
+    }
+
+    /**
+     * Take a wrench from something that has hold of the airframe.
+     *
+     * Same book-keeping as the scrape friction above, in both halves: the linear
+     * impulse goes straight into world velocity, and the angular impulse into
+     * the body rates through the inertia. Applying impulses rather than forces
+     * keeps both independent of how long the caller's step happened to be.
+     */
+    applyExternalWrench(impulseWorld: THREE.Vector3, angularImpulseWorld: THREE.Vector3): void {
+        if (this.kinematic) return;
+        const linear = impulseWorld.lengthSq() > 1e-12;
+        const angular = angularImpulseWorld.lengthSq() > 1e-12;
+        if (!linear && !angular) return;
+
+        this.rb.orientation.copy(this.obj.quaternion);
+        this.rb.velocityWorld.copy(this.velocity);
+        this.invOrient.copy(this.rb.orientation).invert();
+
+        if (linear) {
+            this.rb.velocityWorld.addScaledVector(impulseWorld, 1 / this.rb.mass);
+            this.velocity.copy(this.rb.velocityWorld);
+        }
+        if (angular) {
+            this._v.copy(angularImpulseWorld).applyQuaternion(this.invOrient);
+            const I = this.rb.inertia;
+            this.rb.angularVelocityBody.x += this._v.x / I.x;
+            this.rb.angularVelocityBody.y += this._v.y / I.y;
+            this.rb.angularVelocityBody.z += this._v.z / I.z;
+        }
+    }
+
     step(delta: number): void {
         if (this.crashed) return;
 
@@ -238,7 +332,10 @@ export class Fm2FlightModel extends FlightModel {
         this.rb.orientation.copy(this.obj.quaternion);
         this.rb.velocityWorld.copy(this.velocity);
 
-        const altitude = this.obj.position.y;
+        // Height above the ellipsoid, not scene Y: away from the play area's
+        // origin the two differ by up to ~1.8 km, and feeding raw Y to the ISA
+        // model would fly the aircraft through air a fifth too dense out there.
+        const altitude = this.atmosphereAltitudeM;
         const airDensity = computeAirDensity(altitude);
 
         // Body-frame velocity through the air.
@@ -368,7 +465,6 @@ export class Fm2FlightModel extends FlightModel {
 
         this.updateStallState(speed, aoa, altitude);
         this.handleGroundState();
-        this.wrapPosition();
     }
 
     private spoolThrottle(delta: number): void {
@@ -767,14 +863,6 @@ export class Fm2FlightModel extends FlightModel {
         if (speed < env.landingMaxSpeedMps && Math.abs(rollAngle) < env.landingMaxRollRad) {
             this.landed = true;
         }
-    }
-
-    private wrapPosition(): void {
-        const h = 2.5 * TERRAIN_SCALE * TERRAIN_MODEL_SIZE;
-        if (this.obj.position.x > h) this.obj.position.x = -h;
-        if (this.obj.position.x < -h) this.obj.position.x = h;
-        if (this.obj.position.z > h) this.obj.position.z = -h;
-        if (this.obj.position.z < -h) this.obj.position.z = h;
     }
 
     getStallStatus(): number { return this.stall; }

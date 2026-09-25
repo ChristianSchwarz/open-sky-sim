@@ -9,6 +9,8 @@ In **Settings → AI pilot model**:
 
 - **Classic BFM** — existing `AiPilot` dogfight modes (`PURSUE`, yo-yos, etc.).
 - **Shaw (Fighter Combat)** — Offensive / Neutral / Defensive FSM + Flight Control Computer.
+- **Aggressive (Berserker)** — Attack / Merge / Counter FSM (see `ai-aggressive-pilot-model.md`).
+- **Ace (vertical fight + post-stall)** — Control / Merge / Evade / Reset FSM (see `ai-ace-pilot-model.md`).
 
 The choice is applied on the **next merge / opponent spawn**, not mid-dogfight.
 

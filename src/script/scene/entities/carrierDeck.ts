@@ -9,7 +9,21 @@ import { Model } from '../models/models';
 
 const EPS = 1e-8;
 
+/**
+ * Sentinel for "no surface of this kind here".
+ *
+ * It has to be -Infinity rather than 0. Every one of these samplers is folded
+ * into a `Math.max` that decides the ground, and scene Y = 0 is not the
+ * ground — it is the tangent plane at the play area's origin, which the
+ * terrain curves away from. Returning 0 for a miss therefore clamped the
+ * ground to Y >= 0 across the whole world: a hard invisible floor that an
+ * aircraft hit in clear air, tens of metres up near the home airfield and
+ * over a hundred at an imported one. See `HeightSampler.heightAtEnu`.
+ */
+export const NO_SURFACE_Y = -Infinity;
+
 /** Static carrier collider: local triangle soup + world origin. */
+
 export interface CarrierMeshCollider {
     /** World origin of the local mesh frame (carrier placement). */
     originX: number;
@@ -38,8 +52,10 @@ export function createCarrierMeshCollider(
 /**
  * Bake a collision soup from a loaded {@link Model} (volumes + flats).
  * Uses each mesh's local TRS (already world-baked by ModelManager for nested groups).
+ * An optional `root` transform (e.g. the placed entity's rotation/scale) is
+ * applied on top, keeping the soup in the entity-local frame around its origin.
  */
-export function bakeCollisionMeshFromModel(model: Model): AircraftCollisionMesh | undefined {
+export function bakeCollisionMeshFromModel(model: Model, root?: THREE.Matrix4): AircraftCollisionMesh | undefined {
     const flat: number[] = [];
     const vA = new THREE.Vector3();
     const vB = new THREE.Vector3();
@@ -62,6 +78,9 @@ export function bakeCollisionMeshFromModel(model: Model): AircraftCollisionMesh 
             return;
         }
         mat.compose(mesh.position, mesh.quaternion, mesh.scale);
+        if (root) {
+            mat.premultiply(root);
+        }
         const index = geom.index;
         const triCount = index ? index.count / 3 : pos.count / 3;
         for (let t = 0; t < triCount; t++) {
@@ -186,7 +205,7 @@ export function sampleCarrierMeshSurfaceY(
     const lz = worldZ - carrier.originZ;
     const { min, max } = carrier.aabb;
     if (lx < min[0] || lx > max[0] || lz < min[2] || lz > max[2]) {
-        return 0;
+        return NO_SURFACE_Y;
     }
     const tris = carrier.triangles;
     let bestY = -Infinity;
@@ -203,7 +222,7 @@ export function sampleCarrierMeshSurfaceY(
         }
     }
     if (bestY === -Infinity) {
-        return 0;
+        return NO_SURFACE_Y;
     }
     return carrier.originY + bestY;
 }
@@ -214,7 +233,7 @@ export function sampleCarrierMeshSurfaceYMax(
     worldZ: number,
     carriers: readonly CarrierMeshCollider[],
 ): number {
-    let maxY = 0;
+    let maxY = NO_SURFACE_Y;
     for (let i = 0; i < carriers.length; i++) {
         const y = sampleCarrierMeshSurfaceY(worldX, worldZ, carriers[i]);
         if (y > maxY) {

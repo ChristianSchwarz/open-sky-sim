@@ -6,7 +6,6 @@ import { Model, ModelLibBuilder } from "../models";
 
 
 const FACES = 4;
-const EDGE_PADDING = 1;
 
 export const HILL_MODEL_BASE_RADIUS = 700;
 export const HILL_MODEL_HEIGHT = 300;

@@ -4,10 +4,10 @@ import { AC_STRIDE, PROJ_STRIDE } from './simSnapshotCodec';
 export const SIM_SHARED_MAX_AIRCRAFT = 16;
 
 /** Must match combatSim projectile pool size. */
-export const SIM_SHARED_MAX_PROJECTILES = 480;
+const SIM_SHARED_MAX_PROJECTILES = 480;
 
 /** Int32 control-block indices (Atomics). */
-export const CTRL = {
+const CTRL = {
     BUSY: 0,
     WRITE_SEQ: 1,
     ACTIVE_BANK: 2,
@@ -16,7 +16,7 @@ export const CTRL = {
     /** Reserved / padding through 7. */
 } as const;
 
-const CTRL_INTS = 8;
+const CTRL_INTS = 6;
 const AIRCRAFT_BANK_FLOATS = SIM_SHARED_MAX_AIRCRAFT * AC_STRIDE;
 const PROJECTILE_BANK_FLOATS = SIM_SHARED_MAX_PROJECTILES * PROJ_STRIDE;
 
@@ -61,7 +61,11 @@ export function wrapSimSharedState(buffer: SharedArrayBuffer): SimSharedViews {
     const projectiles0 = new Float32Array(buffer, offset, PROJECTILE_BANK_FLOATS);
     offset += PROJECTILE_BANK_BYTES;
     const projectiles1 = new Float32Array(buffer, offset, PROJECTILE_BANK_FLOATS);
-    return { buffer, ctrl, aircraft0, aircraft1, projectiles0, projectiles1 };
+    return {
+        buffer, ctrl,
+        aircraft0, aircraft1,
+        projectiles0, projectiles1,
+    };
 }
 
 export function aircraftBank(views: SimSharedViews, bank: number): Float32Array {

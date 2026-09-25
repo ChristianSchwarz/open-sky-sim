@@ -4,7 +4,7 @@ import { Font } from '../../../render/screen/text';
 import { AircraftDeviceState, PlayerEntity } from '../player';
 
 export interface OverlayLayout {
-    /** Controls tick/marker density (1 = VGA, 2 = SVGA/HD). */
+    /** Controls tick/marker density (1 = low, 2 = normal). */
     detailScale: number;
     /** Uniform visual zoom for HUD elements. */
     layoutScale: number;
@@ -54,7 +54,9 @@ export function getAircraftDeviceStatusPosition(targetHeight: number, mfdSize: n
     };
 }
 
-/** Bottom-left GEAR / FLAPS / BRAKE stack beside the map MFD. */
+/** Bottom-left GEAR / FLAPS / HOOK / BRAKE stack beside the map MFD. */
+/* The ship's barricade rides the same stack: on the boat it is exactly as
+ * relevant to the pilot as his own hook. */
 export function renderAircraftDeviceStatus(
     actor: PlayerEntity,
     x: number,
@@ -75,8 +77,15 @@ export function renderAircraftDeviceStatus(
     if (actor.airbrakes === AircraftDeviceState.EXTENDED || actor.airbrakes === AircraftDeviceState.EXTENDING) {
         labels.push('AIRBRK');
     }
+    if (actor.tailhook === AircraftDeviceState.EXTENDED || actor.tailhook === AircraftDeviceState.EXTENDING) {
+        labels.push('HOOK');
+    }
     if (actor.wheelBrakesApplied) {
         labels.push('BRAKE');
+    }
+    const barricade = actor.barricadeStatus;
+    if (barricade !== undefined) {
+        labels.push(barricade);
     }
 
     for (let i = 0; i < labels.length; i++) {

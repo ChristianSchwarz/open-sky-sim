@@ -1,0 +1,32 @@
+{
+    // The shipped bundle is typechecked by tsconfig.json, which covers only
+    // src/**/* minus tests. That leaves the bake tooling under tools/ and every
+    // *.test.ts unchecked. This config checks those too, without emitting.
+    "compilerOptions": {
+        "module": "esnext",
+        "moduleResolution": "bundler",
+        "ignoreDeprecations": "6.0",
+        "target": "ES6",
+        "lib": [
+            "dom",
+            "es2019"
+        ],
+        "types": [
+            "node"
+        ],
+        "strict": true,
+        "noEmit": true,
+        "allowJs": false,
+        "resolveJsonModule": true,
+        "preserveConstEnums": true
+    },
+    // Scoped to the new terrain pipeline. TypeScript follows imports, so this
+    // still checks everything these files depend on. Widening it to all of
+    // src/**/* would drag in a pre-existing error in f16PaperCharts.test.ts.
+    "include": [
+        "src/script/terrain/**/*",
+        "tools/bake/**/*",
+        "tools/bake_planet_mesh.ts",
+        "tools/verify_planet.ts"
+    ]
+}

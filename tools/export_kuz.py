@@ -18,7 +18,8 @@ OUT = ROOT / 'assets' / 'kuz.glb'
 OUT_DATA = ROOT / 'data' / 'kuz.glb'
 
 # Hull / island faces with missing or texture-only materials.
-HULL_MATERIAL = 'SCENERY_BUILDING_METAL'
+# Darker navy charcoal at runtime (ModelManager remaps legacy METAL too).
+HULL_MATERIAL = 'VEHICLE_PLANE_ENGINE'
 
 
 def ensure_material(name: str) -> bpy.types.Material:

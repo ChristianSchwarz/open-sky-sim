@@ -31,7 +31,7 @@ function mimeForPath(path: string): string {
     return 'application/octet-stream';
 }
 
-export class AircraftPack {
+class AircraftPack {
     readonly id: string;
     private readonly files = new Map<string, ArrayBuffer>();
     private readonly blobUrls = new Map<string, string>();

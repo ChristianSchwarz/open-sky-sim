@@ -190,6 +190,55 @@ describe('obstacles', () => {
     });
 });
 
+/**
+ * A wing-and-fuselage cross: every corner of its bounding box is empty air,
+ * which is exactly where the old collider took its samples.
+ */
+function crossMesh(): AircraftCollisionMesh {
+    const triangles = [
+        // Wing, spanning x, one metre of chord.
+        -8, 0, 0, 8, 0, 0, 0, 0, 1,
+        // Fuselage, spanning z, one metre below and above the datum.
+        0, -1, 0, 0, 0, 8, 0, 0, -8,
+        0, 1, 0, 0, 0, 8, 0, 0, -8,
+    ];
+    return { triangles, aabb: { min: [-8, -1, -8], max: [8, 1, 8] } };
+}
+
+describe('contact points follow the airframe, not its bounding box', () => {
+    // Ground rising toward -x and -z, so the box corner at (-8, -1, -8) is over
+    // ground 8 m higher than anything the aircraft actually occupies.
+    const ground = (x: number, z: number) => 0.5 * (-x) + 0.5 * (-z);
+
+    it('stays clear while every hull point is above the slope', () => {
+        const mesh = crossMesh();
+        const point = new THREE.Vector3();
+        const normal = new THREE.Vector3();
+        // Wingtip and tail are over ground at 4 m and sit at 5 m; the phantom
+        // box corner is over ground at 8 m and would report 4 m of penetration.
+        assert.equal(
+            findCollisionMeshTerrainContact(
+                new THREE.Vector3(0, 5, 0), new THREE.Quaternion(), mesh,
+                ground, 0.05, point, normal,
+            ),
+            null,
+            'no part of the airframe is under the slope',
+        );
+    });
+
+    it('still contacts once the belly is in the ground', () => {
+        const mesh = crossMesh();
+        const point = new THREE.Vector3();
+        const normal = new THREE.Vector3();
+        const hit = findCollisionMeshTerrainContact(
+            new THREE.Vector3(0, 0.5, 0), new THREE.Quaternion(), mesh,
+            ground, 0.05, point, normal,
+        );
+        assert.ok(hit, 'expected the belly to contact');
+        assert.ok(hit!.penetration > 0.3, `pen=${hit!.penetration}`);
+    });
+});
+
 describe('findCollisionMeshTerrainContact', () => {
     it('returns deepest penetration and upward normal on a flat plateau', () => {
         const mesh = boxMesh([-1, -1, -1], [1, 1, 1]);

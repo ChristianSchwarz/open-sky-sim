@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
     createCarrierMeshCollider,
     sampleCarrierMeshSurfaceY,
+    NO_SURFACE_Y,
     sampleCarrierMeshSurfaceYMax,
 } from './carrierDeck';
 import { AircraftCollisionMesh } from './aircraftDef';
@@ -40,10 +41,12 @@ describe('carrierMesh', () => {
         assert.ok(Math.abs(sampleCarrierMeshSurfaceY(100 + 4, 200 - 4, carrier) - 10) < 1e-4);
     });
 
-    it('returns 0 outside the footprint', () => {
-        assert.equal(sampleCarrierMeshSurfaceY(100 + 6, 200, carrier), 0);
-        assert.equal(sampleCarrierMeshSurfaceY(100, 200 + 6, carrier), 0);
-        assert.equal(sampleCarrierMeshSurfaceY(0, 0, carrier), 0);
+    it('reports no surface outside the footprint', () => {
+        // NO_SURFACE_Y, not 0: this value is folded into the Math.max that
+        // decides the ground, and 0 there is a floor at the tangent plane.
+        assert.equal(sampleCarrierMeshSurfaceY(100 + 6, 200, carrier), NO_SURFACE_Y);
+        assert.equal(sampleCarrierMeshSurfaceY(100, 200 + 6, carrier), NO_SURFACE_Y);
+        assert.equal(sampleCarrierMeshSurfaceY(0, 0, carrier), NO_SURFACE_Y);
     });
 
     it('samples ski-jump ramp height along the incline', () => {
@@ -64,6 +67,6 @@ describe('carrierMesh', () => {
         });
         assert.ok(Math.abs(sampleCarrierMeshSurfaceYMax(0, 0, [low, high]) - 20) < 1e-4);
         assert.ok(Math.abs(sampleCarrierMeshSurfaceYMax(0.8, 0, [low, high]) - 5) < 1e-4);
-        assert.equal(sampleCarrierMeshSurfaceYMax(50, 0, [low, high]), 0);
+        assert.equal(sampleCarrierMeshSurfaceYMax(50, 0, [low, high]), NO_SURFACE_Y);
     });
 });

@@ -17,11 +17,24 @@ export enum PaletteCategory {
     FOG_LIGHT = 'FOG_LIGHT',
 
     SKY = 'SKY',
+    SKY_CLOUD = 'SKY_CLOUD',
+    /**
+     * The sun disc, and the dithered corona stepped around it - one colour for
+     * both, because the corona is that same light scattered forward by the air
+     * between the sun and the viewer.
+     */
+    SKY_SUN = 'SKY_SUN',
 
     TERRAIN_DEFAULT = 'TERRAIN_DEFAULT',
     TERRAIN_SAND = 'TERRAIN_SAND',
     TERRAIN_BARE = 'TERRAIN_BARE',
     TERRAIN_GRASS = 'TERRAIN_GRASS',
+    TERRAIN_FOREST = 'TERRAIN_FOREST',
+    TERRAIN_SCRUB = 'TERRAIN_SCRUB',
+    TERRAIN_CROP = 'TERRAIN_CROP',
+    TERRAIN_URBAN = 'TERRAIN_URBAN',
+    TERRAIN_SNOW = 'TERRAIN_SNOW',
+    TERRAIN_WETLAND = 'TERRAIN_WETLAND',
     TERRAIN_WATER = 'TERRAIN_WATER',
     TERRAIN_SHALLOW_WATER = 'TERRAIN_SHALLOW_WATER',
     SCENERY_MOUNTAIN_GRASS = 'SCENERY_MOUNTAIN_GRASS',
@@ -74,6 +87,15 @@ export enum PaletteCategory {
 
     SCENERY_BASE_RUNWAY_LINES = 'SCENERY_BASE_RUNWAY_LINES',
     SCENERY_BASE_RUNWAY_THRESHOLD = 'SCENERY_BASE_RUNWAY_THRESHOLD',
+    /**
+     * Concrete slab pavement, as against the asphalt of
+     * {@link SCENERY_ROAD_SECONDARY}.
+     *
+     * A military field laid in concrete plates is markedly paler than an
+     * asphalt civil one, and from the air that difference is most of what
+     * tells the two apart. OSM records which it is, so the sim can too.
+     */
+    SCENERY_BASE_CONCRETE = 'SCENERY_BASE_CONCRETE',
 
     FX_FIRE = 'FX_FIRE',
     FX_FIRE__B = 'FX_FIRE__B',
@@ -104,6 +126,20 @@ export interface Palette {
     colors: PaletteColors;
     values: PaletteValues;
     time: PaletteTime;
+    /**
+     * Linear-light factor for colours this palette does not own.
+     *
+     * A raw-colour material - a mod's own `#rrggbb` material name, or the
+     * canopy glass - opts out of the authored palettes, so the day-to-night
+     * blend never reaches it and it would sit at noon brightness against a
+     * midnight landscape. It stands in the same light as everything else
+     * though, so it takes this instead: what the palette's own lit surfaces
+     * were multiplied by to get where they are.
+     *
+     * Only blended palettes carry it. On an authored one it is absent, which
+     * means neutral - the noon palette is noon, with nothing to apply.
+     */
+    light?: readonly [number, number, number];
 }
 
 export type PaletteFogCategories = PaletteCategory.FOG_SKY | PaletteCategory.FOG_TERRAIN | PaletteCategory.FOG_SPECKLE | PaletteCategory.FOG_LIGHT;
@@ -124,6 +160,9 @@ const FogValueCategoryMap: Map<PaletteCategory, PaletteFogCategories> = new Map(
     [PaletteCategory.LIGHT_GREEN, PaletteCategory.FOG_LIGHT],
     [PaletteCategory.LIGHT_YELLOW, PaletteCategory.FOG_LIGHT],
     [PaletteCategory.FX_FIRE, PaletteCategory.FOG_LIGHT],
+    // Ocean keeps reading farther than land fog would allow.
+    [PaletteCategory.TERRAIN_WATER, PaletteCategory.FOG_LIGHT],
+    [PaletteCategory.TERRAIN_SHALLOW_WATER, PaletteCategory.FOG_LIGHT],
 ]);
 
 export function FogColorCategory(cat: PaletteCategory): PaletteFogCategories {

@@ -65,7 +65,7 @@ console.log('[dev] initial build...');
 await runCommand('npm', ['run', 'build']);
 
 console.log('[dev] starting webpack watch + dev server with live reload');
-console.log('[dev] open http://localhost:8010 — saves rebuild and refresh the browser');
+console.log('[dev] open http://localhost:8020 — saves rebuild and refresh the browser');
 
 spawnChild('npx', ['webpack', '--mode=development', '--watch']);
 spawnChild('npx', ['tsx', 'tools/modserver.ts'], {
