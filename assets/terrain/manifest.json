@@ -1,0 +1,209 @@
+{
+  "version": 4,
+  "scheme": "retro-terrain/1",
+  "ellipsoid": "WGS84",
+  "seaLevel": 0,
+  "coverage": {
+    "west": -15.908203125,
+    "south": 27.685546875,
+    "east": -15.29296875,
+    "north": 28.212890625
+  },
+  "areas": [
+    {
+      "name": "Gran Canaria",
+      "west": -15.908203125,
+      "south": 27.685546875,
+      "east": -15.29296875,
+      "north": 28.212890625
+    }
+  ],
+  "enuOrigin": {
+    "lat": 28.0015,
+    "lon": -15.3937,
+    "height": 0
+  },
+  "mesh": {
+    "path": "{z}/{x}/{y}.ptm",
+    "indexPath": "index_mesh.bin",
+    "minZoom": 0,
+    "maxZoom": 12,
+    "encoding": "PTM1",
+    "transport": "gzip",
+    "triangleBudget": 6144,
+    "levelGeometricErrorM": [
+      2185.6328735351562,
+      2185.6328735351562,
+      2185.6328735351562,
+      2185.6328735351562,
+      2185.6328735351562,
+      2185.6328735351562,
+      2185.6328735351562,
+      2185.6328735351562,
+      2069.0694580078125,
+      1788.46195602417,
+      1788.46195602417,
+      1611.7750205993652,
+      1422.1588134765625
+    ],
+    "levelSkirtDepthM": [
+      200376,
+      99486,
+      49743,
+      24871.5,
+      12435.75,
+      6217.875,
+      3108.9375,
+      2500,
+      2500,
+      1943.0859375,
+      971.54296875,
+      485.771484375,
+      269.3551254272461
+    ],
+    "swatches": [
+      "#877a59",
+      "#737b52",
+      "#8c8c63",
+      "#191910",
+      "#9c946b",
+      "#85845f",
+      "#998c7b",
+      "#cebdad",
+      "#b59c84",
+      "#3a3a29",
+      "#a59a8f",
+      "#000000",
+      "#b6a68f",
+      "#3a3129",
+      "#6f704b",
+      "#c4af9d",
+      "#d6bda5",
+      "#ada595",
+      "#515d38",
+      "#324b2c",
+      "#707b3e",
+      "#f0d7bb",
+      "#2c2d1c",
+      "#d6bd98"
+    ],
+    "luminance": {
+      "mid": 0.47287402616059904,
+      "spread": 0.19622252186421973
+    }
+  },
+  "height": {
+    "path": "{z}/{x}/{y}.pdm",
+    "indexPath": "index.bin",
+    "tileSize": 257,
+    "encoding": "uint16",
+    "compression": "zlib",
+    "nodata": 65535,
+    "minZoom": 0,
+    "maxZoom": 11,
+    "queryZoom": 11,
+    "coarseZoom": 7
+  },
+  "flattenPads": [
+    {
+      "lat": 27.93190422721271,
+      "lon": -15.386584487543125,
+      "headingDeg": 21.435393480187216,
+      "halfD": 1781.5880358425966,
+      "halfW": 155,
+      "featherM": 80,
+      "heightMsl": 12.895319602246595,
+      "gradient": -0.003943657238663628,
+      "gradientHeadingDeg": 21.435393480187216,
+      "icao": "GCLP"
+    },
+    {
+      "lat": 27.93120977128894,
+      "lon": -15.384600021170865,
+      "headingDeg": 21.416786364074934,
+      "halfD": 1779.4814959071782,
+      "halfW": 155,
+      "featherM": 80,
+      "heightMsl": 12.896328427797016,
+      "gradient": -0.003943657238663628,
+      "gradientHeadingDeg": 21.435393480187216,
+      "icao": "GCLP"
+    },
+    {
+      "lat": 27.932896466982637,
+      "lon": -15.38969750206674,
+      "headingDeg": 21.435393480187216,
+      "halfD": 1199.623320572498,
+      "halfW": 292.16030114360404,
+      "featherM": 80,
+      "heightMsl": 12.933256489479117,
+      "gradient": -0.003943657238663628,
+      "gradientHeadingDeg": 21.435393480187216,
+      "icao": "GCLP"
+    },
+    {
+      "lat": 27.934012135109583,
+      "lon": -15.38014829565575,
+      "headingDeg": 21.435393480187216,
+      "halfD": 652.9501352947333,
+      "halfW": 281.50714943122495,
+      "featherM": 80,
+      "heightMsl": 11.124849796353834,
+      "gradient": -0.003943657238663628,
+      "gradientHeadingDeg": 21.435393480187216,
+      "icao": "GCLP"
+    },
+    {
+      "lat": 27.91682938367319,
+      "lon": -15.388642559524065,
+      "headingDeg": 21.435393480187216,
+      "halfD": 228.45535884688906,
+      "halfW": 265.5562819576819,
+      "featherM": 80,
+      "heightMsl": 19.319707651033895,
+      "gradient": -0.003943657238663628,
+      "gradientHeadingDeg": 21.435393480187216,
+      "icao": "GCLP"
+    },
+    {
+      "lat": 27.943363349429863,
+      "lon": -15.377547165000795,
+      "headingDeg": 21.435393480187216,
+      "halfD": 142.04996436642085,
+      "halfW": 120.63620823840469,
+      "featherM": 80,
+      "heightMsl": 6.951803160383543,
+      "gradient": -0.003943657238663628,
+      "gradientHeadingDeg": 21.435393480187216,
+      "icao": "GCLP"
+    }
+  ],
+  "airfields": {
+    "path": "airfields.json",
+    "count": 1
+  },
+  "bake": {
+    "tool": "bake_planet_mesh",
+    "version": "1.0.0",
+    "utc": "2026-09-25T08:09:08.316Z"
+  },
+  "texture": {
+    "path": "{z}/{x}/{y}.ptx",
+    "indexPath": "index_tex.bin",
+    "encoding": "PTX1",
+    "transport": "gzip",
+    "size": 256,
+    "nearSize": 512,
+    "nearZoom": 10,
+    "minZoom": 4,
+    "maxZoom": 11
+  },
+  "roads": {
+    "path": "{z}/{x}/{y}.ptr",
+    "indexPath": "index_roads.bin",
+    "encoding": "PTR1",
+    "transport": "gzip",
+    "minZoom": 8,
+    "maxZoom": 12
+  }
+}

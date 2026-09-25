@@ -1,0 +1,141 @@
+body {
+    user-select: none;
+    background-color: #fafafa;
+    display: flex;
+    height: 100vh;
+    margin: 0;
+    font-family: sans-serif;
+    font-weight: bold;
+    text-shadow: black 0 0 2px;
+}
+
+a {
+    color: rgb(148, 221, 255);
+    text-decoration: none;
+}
+
+a:hover {
+    color: white;
+    text-decoration: underline;
+}
+
+#container {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+}
+
+#settings-button {
+    z-index: 1;
+    position: absolute;
+    top: 1rem;
+    left: 1rem;
+    user-select: none;
+    cursor: pointer;
+    color: black;
+    background-color: white;
+    font-size: 1.5rem;
+    line-height: 3rem;
+    text-align: center;
+    border-radius: 50%;
+    width: 3rem;
+    height: 3rem;
+}
+
+#settings-button:hover,
+#settings-button.active {
+    color: white;
+    background-color: black;
+}
+
+#settings-button.active:hover {
+    color: black;
+    background-color: white;
+}
+
+#boot-progress {
+    z-index: 4;
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(0, 0, 0, 0.85);
+}
+
+#boot-progress.hidden {
+    display: none;
+}
+
+#boot-progress-dialog {
+    min-width: 16rem;
+    max-width: 90vw;
+    padding: 1.25rem;
+    color: rgb(184, 184, 184);
+    background-color: rgba(0, 0, 0, 0.9);
+    border: 1px rgb(138, 138, 138) solid;
+    text-align: center;
+}
+
+#boot-progress-dialog h2 {
+    margin: 0 0 1rem;
+    color: white;
+    font-size: 1.25rem;
+}
+
+#boot-progress-label {
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+    color: white;
+}
+
+#boot-progress-track {
+    width: 100%;
+    height: 0.5rem;
+    background-color: rgb(58, 58, 58);
+    border: 1px rgb(138, 138, 138) solid;
+    overflow: hidden;
+}
+
+#boot-progress-fill {
+    width: 0%;
+    height: 100%;
+    background-color: white;
+    transition: width 0.2s ease-out;
+}
+
+#mod-status {
+    z-index: 2;
+    position: absolute;
+    top: 1rem;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 80vw;
+    padding: 0.5rem 1rem;
+    color: white;
+    background-color: rgba(0, 0, 0, 0.8);
+    border: 1px rgb(138, 138, 138) solid;
+    border-radius: 0.25rem;
+    font-size: 0.9rem;
+    text-align: center;
+}
+
+#showcase-pick {
+    z-index: 2;
+    position: absolute;
+    top: 1rem;
+    left: 1rem;
+    max-width: 40vw;
+    padding: 0.4rem 0.8rem;
+    color: white;
+    background-color: rgba(0, 0, 0, 0.8);
+    border: 1px rgb(138, 138, 138) solid;
+    border-radius: 0.25rem;
+    font-size: 0.85rem;
+}
+
+.hidden {
+    display: none;
+}
