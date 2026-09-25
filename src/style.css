@@ -216,3 +216,58 @@ a:hover {
 .hidden {
     display: none;
 }
+
+#key-sheet {
+    margin-top: 1rem;
+    font-size: 0.85rem;
+}
+
+#key-sheet summary {
+    color: white;
+    cursor: pointer;
+}
+
+#key-sheet-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    margin-top: 0.5rem;
+    max-height: 50vh;
+    overflow-y: auto;
+}
+
+#key-sheet h3 {
+    margin: 0.25rem 0;
+    color: white;
+    font-size: 0.9rem;
+}
+
+#key-sheet dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.2rem 0.6rem;
+    margin: 0;
+}
+
+#key-sheet dt {
+    display: flex;
+    gap: 0.2rem;
+}
+
+#key-sheet dd {
+    margin: 0;
+}
+
+#key-sheet kbd {
+    padding: 0 0.3rem;
+    font-family: monospace;
+    color: white;
+    background-color: rgb(55, 55, 55);
+    border: 1px rgb(138, 138, 138) solid;
+    border-radius: 3px;
+}
+
+#key-sheet-note {
+    margin: 0.5rem 0 0;
+    font-size: 0.8rem;
+}

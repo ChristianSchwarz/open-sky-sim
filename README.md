@@ -115,7 +115,14 @@ Choose your keyboard layout, for users using QWERTZ, AZERTY, Dvorak, or arrow ke
 
 Use the OSD settings to select the keyboard layout.
 
-QWERTY (default):
+Arrows (default):
+* `Up`/`Down`: Pitch
+* `Left`/`Right`: Roll
+* `Y`/`X`: Yaw
+* `Numpad +`/`Numpad -`: Throttle
+* `W`: Wheel brakes
+
+QWERTY:
 * `W`/`S`: Pitch (`W` is wheel brakes while on the ground)
 * `A`/`D`: Roll
 * `Q`/`E`: Yaw

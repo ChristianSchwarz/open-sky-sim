@@ -68,7 +68,8 @@ const SYSTEMS_HELP: HelpEntry[] = [
     { keys: ['1', '2', '3'], action: 'FCS limiter strategy (soft / predictive / smooth; FM2 only)' },
     { keys: ['T'], action: 'Select target' },
     { keys: ['I'], action: 'Target night view' },
-    { keys: ['H'], action: 'Cycle HUD focus' },
+    { keys: ['H'], action: 'Tailhook' },
+    { keys: ['U'], action: 'Cycle HUD focus' },
     { keys: ['F9'], action: 'Import or delete terrain areas (opens the World tab)' },
     { keys: ['F10'], action: 'Import aircraft mod (.zip)' },
 ];
