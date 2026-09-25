@@ -1,0 +1,7 @@
+# Python packages the terrain bake needs (tools/areaImport.ts runs it).
+# `npm run start` installs these on its own when any is missing.
+numpy
+rasterio
+requests
+shapely
+osmium
