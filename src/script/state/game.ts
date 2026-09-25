@@ -590,6 +590,8 @@ export class Game {
     private cockpit: CockpitEntity | undefined;
     private aiChaseHeading = ExteriorViewHeading.BACK;
     private heldOrbitKeys = new Set<string>();
+    /** A flight held by the settings dialog: it is open over it and nothing moves until it closes. */
+    private menuPaused = false;
     private _orbitPivot = new THREE.Vector3();
     private _orbitOffset = new THREE.Vector3();
     private _orbitAxis = new THREE.Vector3();
@@ -635,14 +637,16 @@ export class Game {
             (modelIndex) => this.selectAircraftModel(modelIndex),
             (liveryIndex) => this.selectAircraftLivery(liveryIndex),
             (icao) => this.selectAirfield(icao),
-            () => void this.beginFlight('approach'),
-            () => void this.beginFlight('runway'),
-            () => void this.beginFlight('headon'),
-            () => void this.beginFlight('carrier'),
-            () => void this.beginFlight('carrierBarricade'),
-            () => void this.beginFlight('carrierTakeoff'),
-            () => void this.beginFlight('highAlt'),
-            () => void this.beginFlight('space'),
+            (mode) => {
+                // The Flight tab is reachable mid-flight too; go through the
+                // menu first so the restart is the same as Esc then spawn.
+                if (this.state !== GameState.SPAWN_MENU) {
+                    this.enterSpawnMenu();
+                }
+                void this.beginFlight(mode);
+            },
+            () => this.pauseForMenu(),
+            () => this.resumeFromMenu(),
         );
 
         this.cameraUpdaters.set(PlayerViewState.CRASHED, new CrashedCameraUpdater(this.player, this.playerCamera.main));
@@ -1864,6 +1868,9 @@ export class Game {
 
     update(delta: number) {
         this.paintGroundStrips();
+        if (this.menuPaused) {
+            return;
+        }
         if (this.state === GameState.PLAYER) {
             if ((this.view === PlayerViewState.TARGET_TO || this.view === PlayerViewState.TARGET_FROM) && !this.player.weaponsTarget) {
                 this.setCockpitFrontView();
@@ -2409,6 +2416,13 @@ export class Game {
                 return;
             }
             if (this.state === GameState.SPAWN_MENU) {
+                if (event.code === 'Escape') {
+                    // The menu lives in the settings dialog; Esc closes that
+                    // (seen as an overlay key above), so it has to reopen too.
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.spawnPanel.show();
+                }
                 return;
             }
             if (this.state === GameState.FIXED_CAMERA) {
@@ -2430,8 +2444,14 @@ export class Game {
                 return;
             }
             if (event.code === 'Escape') {
+                // Opens the menu; the dialog opening pauses the flight
+                // (pauseForMenu) and closing it resumes.
                 event.preventDefault();
-                this.enterSpawnMenu();
+                // The dialog attaches within this same key press (its opening
+                // promises settle between listeners); without this its own Esc
+                // handler, further down the dispatch, closes it straight away.
+                event.stopPropagation();
+                this.spawnPanel.show();
                 return;
             }
             switch (event.key) {
@@ -2803,17 +2823,37 @@ export class Game {
         }
     }
 
+    /** The settings dialog opened, by Esc, the ⋮ button or F9: a flight holds still under it. */
+    private pauseForMenu() {
+        if (this.state !== GameState.PLAYER || this.menuPaused) {
+            return;
+        }
+        this.menuPaused = true;
+        this.player.setSimulationPaused(true);
+        this.heldOrbitKeys.clear();
+    }
+
+    /** The menu closed: a flight the dialog paused picks up again. A spawn has already cleared the flag. */
+    private resumeFromMenu() {
+        if (!this.menuPaused) {
+            return;
+        }
+        this.menuPaused = false;
+        if (this.state === GameState.PLAYER) {
+            this.player.setSimulationPaused(false);
+        }
+    }
+
     private enterSpawnMenu() {
+        this.menuPaused = false;
         this.state = GameState.SPAWN_MENU;
         this.player.setSimulationPaused(true);
         this.spawnMenu.afterCrash = false;
         this.spawnMenu.enabled = true;
-        this.spawnPanel.setTitle('Retro Flight Sim');
         this.refreshAircraftMenu();
         this.spawnPanel.show();
-
-        this.player.reset(this.runwaySpawnPosition(), this.baseHeading, PLAYER_LAND_SPAWN);
-        this.damageSmoke?.reset();
+        // The aircraft stays where it is: only a spawn button places it
+        // (beginFlight), so opening the menu never moves anything.
         this.setCockpitFrontView();
     }
 

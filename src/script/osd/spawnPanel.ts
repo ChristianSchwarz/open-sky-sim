@@ -1,4 +1,6 @@
+import { SpawnMode } from '../config/settingsStorage';
 import { AircraftModelGroup } from '../state/aircraftRegistry';
+import { closeSettingsDialog, openSettingsDialog, registerSpawnMenu } from '../ui/settings/settingsLauncher';
 
 /** One airfield the player can be based at. */
 export interface AirfieldChoice {
@@ -9,132 +11,124 @@ export interface AirfieldChoice {
     lengthM: number;
 }
 
-/** HTML spawn menu with aircraft, livery and airfield selectors, plus actions. */
+/** What the settings dialog's Flight tab shows: labels plus the selected index of each list. */
+export interface SpawnMenuState {
+    aircraft: string[];
+    aircraftIndex: number;
+    liveries: string[];
+    liveryIndex: number;
+    airfields: string[];
+    airfieldIndex: number;
+}
+
+/**
+ * The spawn menu: aircraft, livery and airfield choices plus the spawn
+ * actions. It has no DOM of its own; it is the first tab of the settings
+ * dialog, which reads this state and reports choices back through it.
+ */
 export class SpawnPanel {
-    private readonly panel: HTMLElement;
-    private readonly title: HTMLElement;
-    private readonly aircraftSelect: HTMLSelectElement;
-    private readonly liveryLabel: HTMLLabelElement;
-    private readonly liverySelect: HTMLSelectElement;
-    private readonly airfieldLabel: HTMLLabelElement;
-    private readonly airfieldSelect: HTMLSelectElement;
-    private airfields: AirfieldChoice[] = [];
+    private airfieldChoices: AirfieldChoice[] = [];
+    private state: SpawnMenuState = {
+        aircraft: [], aircraftIndex: 0, liveries: [], liveryIndex: 0, airfields: [], airfieldIndex: 0,
+    };
+    private readonly listeners = new Set<(state: SpawnMenuState) => void>();
 
     constructor(
-        onModelSelect: (modelIndex: number) => void,
-        onLiverySelect: (liveryIndex: number) => void,
-        onAirfieldSelect: (icao: string) => void,
-        onApproach: () => void,
-        onRunway: () => void,
-        onHeadOn: () => void,
-        onCarrier: () => void,
-        onCarrierBarricade: () => void,
-        onCarrierTakeoff: () => void,
-        onHighAlt: () => void,
-        onSpace: () => void,
+        private readonly onModelSelect: (modelIndex: number) => void,
+        private readonly onLiverySelect: (liveryIndex: number) => void,
+        private readonly onAirfieldSelect: (icao: string) => void,
+        private readonly onSpawn: (mode: SpawnMode) => void,
+        private readonly onOpened: () => void,
+        private readonly onClosed: () => void,
     ) {
-        this.panel = document.getElementById('spawn-panel')!;
-        this.title = document.getElementById('spawn-title')!;
-        this.aircraftSelect = document.getElementById('aircraft-select') as HTMLSelectElement;
-        this.liveryLabel = document.getElementById('livery-label') as HTMLLabelElement;
-        this.liverySelect = document.getElementById('livery-select') as HTMLSelectElement;
-        this.airfieldLabel = document.getElementById('airfield-label') as HTMLLabelElement;
-        this.airfieldSelect = document.getElementById('airfield-select') as HTMLSelectElement;
-
-        this.airfieldSelect.addEventListener('change', () => {
-            const choice = this.airfields[this.airfieldSelect.selectedIndex];
-            if (choice !== undefined) {
-                onAirfieldSelect(choice.icao || choice.name);
-            }
-        });
-
-        this.aircraftSelect.addEventListener('change', () => {
-            onModelSelect(this.aircraftSelect.selectedIndex);
-        });
-        this.liverySelect.addEventListener('change', () => {
-            onLiverySelect(this.liverySelect.selectedIndex);
-        });
-
-        document.getElementById('spawn-approach')!.addEventListener('click', onApproach);
-        document.getElementById('spawn-runway')!.addEventListener('click', onRunway);
-        document.getElementById('spawn-headon')!.addEventListener('click', onHeadOn);
-        document.getElementById('spawn-carrier')!.addEventListener('click', onCarrier);
-        document.getElementById('spawn-carrier-barricade')!.addEventListener('click', onCarrierBarricade);
-        document.getElementById('spawn-carrier-takeoff')!.addEventListener('click', onCarrierTakeoff);
-        document.getElementById('spawn-high-alt')!.addEventListener('click', onHighAlt);
-        document.getElementById('spawn-space')!.addEventListener('click', onSpace);
+        registerSpawnMenu(this);
     }
 
-    setTitle(text: string): void {
-        this.title.textContent = text;
+    getState(): SpawnMenuState {
+        return this.state;
+    }
+
+    /** Calls `listener` on every change; returns the unsubscribe. */
+    subscribe(listener: (state: SpawnMenuState) => void): () => void {
+        this.listeners.add(listener);
+        return () => this.listeners.delete(listener);
+    }
+
+    selectModel(index: number): void {
+        this.onModelSelect(index);
+    }
+
+    selectLivery(index: number): void {
+        this.onLiverySelect(index);
+    }
+
+    selectAirfield(index: number): void {
+        const choice = this.airfieldChoices[index];
+        if (choice !== undefined) {
+            this.update({ airfieldIndex: index });
+            this.onAirfieldSelect(choice.icao || choice.name);
+        }
+    }
+
+    spawn(mode: SpawnMode): void {
+        this.onSpawn(mode);
     }
 
     /**
      * Offer the airfields of the area being flown.
      *
-     * Hidden entirely when there is one or none: a menu whose only choice is
-     * the one already made is furniture, and an area baked before airfields
-     * existed has nothing to put in it.
+     * The dialog hides the list entirely when there is one or none: a menu
+     * whose only choice is the one already made is furniture, and an area
+     * baked before airfields existed has nothing to put in it.
      */
     setAirfields(choices: AirfieldChoice[], selectedIcao: string | undefined): void {
-        this.airfields = choices;
-        const show = choices.length > 1;
-        this.airfieldLabel.classList.toggle('hidden', !show);
-        this.airfieldSelect.classList.toggle('hidden', !show);
-        if (!show) {
-            return;
-        }
-        this.airfieldSelect.replaceChildren();
-        for (const choice of choices) {
-            const option = document.createElement('option');
-            const id = choice.icao ? `${choice.icao} — ` : '';
-            option.textContent = `${id}${choice.name} (${choice.ref}, `
-                + `${Math.round(choice.lengthM)} m)`;
-            this.airfieldSelect.appendChild(option);
-        }
+        this.airfieldChoices = choices;
         const index = choices.findIndex(c => (c.icao || c.name) === selectedIcao);
-        this.airfieldSelect.selectedIndex = index >= 0 ? index : 0;
+        this.update({
+            airfields: choices.map(choice => {
+                const id = choice.icao ? `${choice.icao} — ` : '';
+                return `${id}${choice.name} (${choice.ref}, ${Math.round(choice.lengthM)} m)`;
+            }),
+            airfieldIndex: index >= 0 ? index : 0,
+        });
     }
 
     setSelection(groups: AircraftModelGroup[], modelIndex: number, liveryIndex: number): void {
-        this.aircraftSelect.replaceChildren();
-        for (const group of groups) {
-            const option = document.createElement('option');
-            option.textContent = group.label;
-            this.aircraftSelect.appendChild(option);
-        }
-        const modelRows = Math.min(Math.max(groups.length, 1), 12);
-        this.aircraftSelect.size = modelRows;
-        this.aircraftSelect.selectedIndex = Math.min(
-            modelIndex,
-            Math.max(0, groups.length - 1),
-        );
-
-        const group = groups[this.aircraftSelect.selectedIndex];
-        const liveries = group?.variants ?? [];
-        this.liverySelect.replaceChildren();
-        for (const variant of liveries) {
-            const option = document.createElement('option');
-            option.textContent = variant.liveryName ?? variant.name;
-            this.liverySelect.appendChild(option);
-        }
-        const liveryRows = Math.min(Math.max(liveries.length, 1), 12);
-        this.liverySelect.size = liveryRows;
-        this.liverySelect.selectedIndex = Math.min(
-            liveryIndex,
-            Math.max(0, liveries.length - 1),
-        );
-
-        const showLivery = liveries.length > 1;
-        this.liveryLabel.classList.toggle('hidden', !showLivery);
-        this.liverySelect.classList.toggle('hidden', !showLivery);
+        const aircraftIndex = Math.min(modelIndex, Math.max(0, groups.length - 1));
+        const liveries = (groups[aircraftIndex]?.variants ?? [])
+            .map(variant => variant.liveryName ?? variant.name);
+        this.update({
+            aircraft: groups.map(group => group.label),
+            aircraftIndex,
+            liveries,
+            liveryIndex: Math.min(liveryIndex, Math.max(0, liveries.length - 1)),
+        });
     }
 
+    /** Open the settings dialog on the Flight tab. */
     show(): void {
-        this.panel.classList.remove('hidden');
+        void openSettingsDialog('Flight');
     }
 
+    /** Close the settings dialog: a flight is starting. */
     hide(): void {
-        this.panel.classList.add('hidden');
+        closeSettingsDialog();
+    }
+
+    /** The settings dialog opened, whichever way. */
+    notifyOpened(): void {
+        this.onOpened();
+    }
+
+    /** The settings dialog closed, whether by a spawn or not. */
+    notifyClosed(): void {
+        this.onClosed();
+    }
+
+    private update(change: Partial<SpawnMenuState>): void {
+        this.state = { ...this.state, ...change };
+        for (const listener of this.listeners) {
+            listener(this.state);
+        }
     }
 }

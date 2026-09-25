@@ -1,16 +1,18 @@
 import { BreakpointObserver } from '@angular/cdk/layout';
 import { NgTemplateOutlet } from '@angular/common';
-import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, ElementRef, afterNextRender, computed, inject, signal, viewChild } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatListModule } from '@angular/material/list';
 import { MatRadioModule } from '@angular/material/radio';
 import { MatSelectModule } from '@angular/material/select';
 import { MatSlideToggleChange, MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatSliderModule } from '@angular/material/slider';
 import { MatTabsModule } from '@angular/material/tabs';
 import { map } from 'rxjs';
+import { SpawnMode } from '../../config/settingsStorage';
 import { AudioSystem } from '../../audio/audioSystem';
 import { ConfigService, RENDER_SCALES } from '../../config/configService';
 import { loadSettings, updateSettings } from '../../config/settingsStorage';
@@ -19,6 +21,7 @@ import {
     KeyboardControlAction, KeyboardControlDevice, KeyboardControlLayoutId, KeyboardControlLayouts,
     KeyboardPitchStickMode,
 } from '../../input/devices/keyboardControlDevice';
+import type { SpawnPanel } from '../../osd/spawnPanel';
 import { formatSunTime } from '../../scene/materials/shaders/sun';
 import { clearCameraRouteFromLocation } from '../../state/cameraRoute';
 import { AiPilotModels, FlightModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
@@ -33,13 +36,13 @@ import { DEFAULT_TERRAIN_URL, loadTerrainManifest } from '../../terrain/manifest
 import { homeArea, terrainAreas } from '../../terrain/playArea';
 import { TerrainImporter } from './terrain/terrainImporter';
 
-export type SettingsTab = 'Graphics' | 'World' | 'Simulation' | 'General' | 'Help';
+export type SettingsTab = 'Flight' | 'Graphics' | 'World' | 'Simulation' | 'General' | 'Help';
 
 /** In display order. */
-const TABS: SettingsTab[] = ['Graphics', 'World', 'Simulation', 'General', 'Help'];
+const TABS: SettingsTab[] = ['Flight', 'Graphics', 'World', 'Simulation', 'General', 'Help'];
 
 /**
- * Below this viewport width the five tab links do not fit the dialog, and the
+ * Below this viewport width the six tab links do not fit the dialog, and the
  * tab bar is swapped for a select rather than scrolled or wrapped.
  */
 const NARROW_QUERY = '(max-width: 599.98px)';
@@ -49,11 +52,25 @@ export interface SettingsDialogData {
     keyboardInput: KeyboardControlDevice;
     joystickInput: JoystickControlDevice;
     audio: AudioSystem;
+    /** The aircraft, livery and airfield choices and spawn actions the Flight tab shows. */
+    spawnMenu: SpawnPanel;
     /** The tab to open on; otherwise the one last looked at. */
     initialTab?: SettingsTab;
     /** Whether the World tab offers terrain import: only the dev server can bake terrain. */
     terrainImport: boolean;
 }
+
+/** The Flight tab's spawn buttons, in display order, with the key that also starts each. */
+const SPAWN_ACTIONS: { mode: SpawnMode; label: string; key: string }[] = [
+    { mode: 'approach', label: 'Approach', key: '1' },
+    { mode: 'runway', label: 'Runway', key: '2' },
+    { mode: 'headon', label: 'Head-on', key: '3' },
+    { mode: 'carrier', label: 'Carrier land', key: '4' },
+    { mode: 'carrierTakeoff', label: 'Carrier TO', key: '5' },
+    { mode: 'carrierBarricade', label: 'Carrier barricade', key: '8' },
+    { mode: 'highAlt', label: '10 km', key: '6' },
+    { mode: 'space', label: 'Space', key: '7' },
+];
 
 /** A row of the Help tab: the keys, then what they do. */
 interface HelpEntry {
@@ -181,7 +198,7 @@ const PITCH_STICK_MODE_OPTIONS: Option<KeyboardPitchStickMode>[] = [
 const DETAIL_OFF_KM = TERRAIN_DETAIL_DISTANCE_MAX_M / 1000;
 
 /** The tab the player last looked at, so reopening lands back on it. */
-let lastTab: SettingsTab = 'Graphics';
+let lastTab: SettingsTab = 'Flight';
 
 function sliderValue(event: Event): number {
     return parseFloat((event.target as HTMLInputElement).value);
@@ -197,7 +214,7 @@ function sliderValue(event: Event): number {
     selector: 'rfs-settings-dialog',
     changeDetection: ChangeDetectionStrategy.OnPush,
     imports: [
-        NgTemplateOutlet, MatButtonModule, MatDialogModule, MatFormFieldModule, MatRadioModule,
+        NgTemplateOutlet, MatButtonModule, MatDialogModule, MatFormFieldModule, MatListModule, MatRadioModule,
         MatSelectModule, MatSlideToggleModule, MatSliderModule, MatTabsModule, TerrainImporter,
     ],
     // The page body is bold with a text shadow for legibility over the 3D
@@ -233,6 +250,53 @@ function sliderValue(event: Event): number {
              the whole dialog fits on short windows. -->
         <div class="box-border h-[min(55vh,480px,calc(100dvh-16rem))] overflow-x-hidden overflow-y-auto pt-4 pr-2 wrap-anywhere">
             @switch (tab()) {
+                @case ('Flight') {
+                    <!-- Fills the tab exactly: the aircraft list takes what the
+                         other fields and the buttons leave, and scrolls itself. -->
+                    <div class="flex h-full flex-col gap-4 overflow-hidden">
+                        <section class="flex min-h-0 flex-1 flex-col">
+                            <h3 class="m-0 mb-1 text-base font-medium">Aircraft</h3>
+                            <mat-selection-list #aircraftList [multiple]="false" class="min-h-0 flex-1 overflow-y-auto"
+                                    (selectionChange)="spawnMenu.selectModel($event.options[0].value)">
+                                @for (label of spawn().aircraft; track $index) {
+                                    <mat-list-option [value]="$index" [selected]="$index === spawn().aircraftIndex">
+                                        {{ label }}
+                                    </mat-list-option>
+                                }
+                            </mat-selection-list>
+                        </section>
+                        @if (spawn().liveries.length > 1) {
+                            <mat-form-field class="w-full" subscriptSizing="dynamic">
+                                <mat-label>Livery</mat-label>
+                                <mat-select [value]="spawn().liveryIndex" (selectionChange)="spawnMenu.selectLivery($event.value)">
+                                    @for (label of spawn().liveries; track $index) {
+                                        <mat-option [value]="$index">{{ label }}</mat-option>
+                                    }
+                                </mat-select>
+                            </mat-form-field>
+                        }
+                        @if (spawn().airfields.length > 1) {
+                            <mat-form-field class="w-full" subscriptSizing="dynamic">
+                                <mat-label>Airfield</mat-label>
+                                <mat-select [value]="spawn().airfieldIndex" (selectionChange)="spawnMenu.selectAirfield($event.value)">
+                                    @for (label of spawn().airfields; track $index) {
+                                        <mat-option [value]="$index">{{ label }}</mat-option>
+                                    }
+                                </mat-select>
+                            </mat-form-field>
+                        }
+                        <section>
+                            <h3 class="m-0 mb-2 text-base font-medium">Start</h3>
+                            <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                                @for (action of spawnActions; track action.mode) {
+                                    <button mat-flat-button type="button" (click)="spawnMenu.spawn(action.mode)">
+                                        {{ action.label }} ({{ action.key }})
+                                    </button>
+                                }
+                            </div>
+                        </section>
+                    </div>
+                }
                 @case ('Graphics') {
                     <div class="flex flex-col gap-6">
                         <section>
@@ -607,6 +671,10 @@ export class SettingsDialog {
     private readonly config = this.data.config;
 
     readonly tabs = TABS;
+    readonly spawnMenu = this.data.spawnMenu;
+    readonly spawnActions = SPAWN_ACTIONS;
+    readonly spawn = signal(this.spawnMenu.getState());
+    private readonly aircraftList = viewChild('aircraftList', { read: ElementRef });
     readonly narrow = toSignal(
         inject(BreakpointObserver).observe(NARROW_QUERY).pipe(map(state => state.matches)),
         { initialValue: inject(BreakpointObserver).isMatched(NARROW_QUERY) },
@@ -712,6 +780,10 @@ export class SettingsDialog {
         // so the dialog takes it while open and hands back a no-op on close.
         this.data.joystickInput.setListener(() => this.joystick.set(this.readJoystick()));
         inject(DestroyRef).onDestroy(() => this.data.joystickInput.setListener(() => { }));
+        inject(DestroyRef).onDestroy(this.spawnMenu.subscribe(state => this.spawn.set(state)));
+        // The list is long; open it with the current aircraft in view.
+        afterNextRender(() => this.aircraftList()?.nativeElement
+            .querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'center' }));
     }
 
     selectTab(tab: SettingsTab) {

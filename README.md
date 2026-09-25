@@ -1,19 +1,45 @@
-# Open Sky Sim
+# Retro Flight Simulator
 
-Try it: [open-sky-sim](https://christianschwarz.github.io/open-sky-sim)
+Quick and dirty attempt to replicate the visuals of late 80s / early 90s flight simulators, using as a reference MicroProse's F-117A Nighthawk Stealth Fighter 2.0 (1991).
 
-## Keyboard cheat sheet (default Arrows layout)
+## Live demo
 
-| Flight | | Systems | | Views | |
-|---|---|---|---|---|---|
-| `↑` / `↓` | Pitch down / up | `G` | Landing gear | `F1` | Cockpit / padlock |
-| `←` / `→` | Roll | `F` | Flaps | `F2` / `F3` | Exterior views |
-| `Y` / `X` | Yaw left / right | `B` | Airbrakes | `F6` | AI plane view |
-| `Num+` / `Num-` | Throttle up / down | `H` | Tailhook | `F12` | Aircraft showcase |
-| `Space` | Fire | `A` | Autopilot | `4` | Target view |
-| `W` | Wheel brakes | `L` | FCS limiters on/off | `Num 2 4 6 8` | Orbit camera |
-| | | `T` | Cycle target | `Num *` / `Num /` | Zoom |
-| | | `U` | Cycle HUD focus | `N` | Day / night |
-| | | `M` | MFD moving map | `Esc` | Back to start menu |
+[https://ruben3d.github.io/retroflightsim/dist](https://ruben3d.github.io/retroflightsim/dist)
 
-Other keyboard layouts and the full help: ⋮ Settings → Help.
+## Keyboard (default Arrows layout)
+
+### Plane
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Pitch down / up |
+| `←` / `→` | Roll |
+| `Y` / `X` | Yaw left / right |
+| `Num+` / `Num-` | Throttle up / down |
+| `Space` | Fire |
+| `W` | Wheel brakes |
+| `G` | Landing gear |
+| `F` | Flaps |
+| `B` | Airbrakes |
+| `H` | Tailhook |
+| `A` | Autopilot |
+| `L` | FCS limiters on/off |
+| `T` | Cycle target |
+| `U` | Cycle HUD focus |
+| `M` | MFD moving map |
+
+### Views and other keys
+
+| Key | Action |
+|---|---|
+| `F1` | Cockpit / padlock |
+| `F2` / `F3` | Exterior views |
+| `F6` | AI plane view |
+| `F12` | Aircraft showcase |
+| `4` | Target view |
+| `Num 2 4 6 8` | Orbit camera |
+| `Num *` / `Num /` | Zoom |
+| `N` | Day / night |
+| `Esc` | Back to start menu |
+
+Other layouts and the full help are in the in-game Settings → Help tab.
