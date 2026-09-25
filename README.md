@@ -1,6 +1,6 @@
-# Retro Flight Simulator
+# Open Sky Sim
 
-Quick and dirty attempt to replicate the visuals of late 80s / early 90s flight simulators, using as a reference MicroProse's F-117A Nighthawk Stealth Fighter 2.0 (1991).
+Pure polygonal flight sim in a late 90s style, no textures and realworld terrain. Inspired by Flanker 1.5, Falcon 3.0, LHX, GS-2000, Outerra and many more.
 
 ## Live demo
 
