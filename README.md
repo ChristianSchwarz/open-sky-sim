@@ -4,7 +4,7 @@ Quick and dirty attempt to replicate the visuals of late 80s / early 90s flight 
 
 ## Live demo
 
-[https://ruben3d.github.io/retroflightsim/dist](https://ruben3d.github.io/retroflightsim/dist)
+[https://christianschwarz.github.io/open-sky-sim/](https://christianschwarz.github.io/open-sky-sim/)
 
 ## Keyboard (default Arrows layout)
 
