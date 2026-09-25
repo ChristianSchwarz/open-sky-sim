@@ -4,7 +4,7 @@ Pure polygonal flight sim in a late 90s style, no textures and realworld terrain
 
 ## Live demo
 
-[https://christianschwarz.github.io/open-sky-sim/](https://christianschwarz.github.io/open-sky-sim/)
+[Open-Sky-Sim](https://christianschwarz.github.io/open-sky-sim/)
 
 ## Keyboard (default Arrows layout)
 
