@@ -475,6 +475,10 @@ def bake(args: argparse.Namespace) -> int:
         bridge_spans += len(items)
     print(f'bridges     {bridge_spans}/{len(spans)} spans in {bridge_files} leaf tiles (.rbr)')
 
+    # Re-read: the importer runs this alongside the coast and airfield bakes,
+    # which write the same manifest meanwhile. Writing back the copy loaded at
+    # start silently dropped the airfields they had just added.
+    manifest = load_manifest(manifest_path)
     previous = (manifest.get('roads') or {}).get('coverage')
     merged = {
         'west': min(previous['west'], bbox.west) if previous else bbox.west,
