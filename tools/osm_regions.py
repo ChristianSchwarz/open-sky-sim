@@ -54,12 +54,15 @@ OVERLAY_GRID_SIZE = 1e-9
 # before it can win any pixels, exactly as `stamp_landuse_classes` does by
 # construction (LANDUSE_TAG_TO_CLASS has no water-producing tag at all).
 
-# A generous ceiling on how many pieces one tile's partition may carry.
-# Real per-tile landuse density in this codebase's own areas runs to the
-# tens; this is headroom, not a target. Exceeding it drops the
-# smallest/lowest-priority claimed pieces first - a bake-time data-hygiene
-# decision this module can make selectively, which the mesh bake's own
-# triangle-budget coarsening cannot (it can only coarsen everything at once).
+# A ceiling on how many pieces one tile's partition may carry. Most tiles
+# carry tens, but dense field-and-forest mosaics carry hundreds - the
+# Erzgebirge import has tiles past this cap. Exceeding it folds the
+# smallest claimed landuse pieces back into bare land - a bake-time
+# data-hygiene decision this module can make selectively, which the mesh
+# bake's own triangle-budget coarsening cannot (it can only coarsen
+# everything at once). They are folded in, never just dropped: the mesh
+# bake's regionAt falls back to region 0 for a point no region covers, and
+# region 0 can be anything, water included.
 MAX_REGIONS_PER_TILE = 512
 
 
@@ -292,28 +295,56 @@ def _finish_regions(tile_box: Polygon, local_land: BaseGeometry, claimed: List[t
         bare_land = _valid(bare_land.intersection(tile_box, grid_size=OVERLAY_GRID_SIZE))
     water = _valid(tile_box.difference(local_land, grid_size=OVERLAY_GRID_SIZE))
 
+    claimed_parts: List[tuple] = []
+    for geom, cls in reversed(claimed):
+        for part in _polys_of(geom.intersection(tile_box, grid_size=OVERLAY_GRID_SIZE)):
+            claimed_parts.append((part, cls))
+    bare_parts = _polys_of(bare_land)
+    water_parts = _polys_of(water)
+
+    if len(claimed_parts) + len(bare_parts) + len(water_parts) > MAX_REGIONS_PER_TILE:
+        # Keep the largest claimed pieces and fold the rest into bare land,
+        # so the partition still covers the whole tile. Folding joins pieces
+        # up, but a folded piece enclosed by kept ones stays a separate bare
+        # part - and kept pieces can split bare land into hundreds of parts
+        # on their own - so the count is only known after the union. The
+        # largest `keep` that fits is found by bisection; at keep == 0 the
+        # land and water alone exceed the cap, nothing else can be folded,
+        # and that is returned as it is rather than leaving a hole.
+        ranked = sorted(range(len(claimed_parts)), key=lambda i: claimed_parts[i][0].area, reverse=True)
+
+        def fold(keep: int):
+            folded = [claimed_parts[i][0] for i in ranked[keep:]]
+            parts = _polys_of(_valid(unary_union([bare_land, *folded], grid_size=OVERLAY_GRID_SIZE)))
+            return keep + len(parts) + len(water_parts) <= MAX_REGIONS_PER_TILE, parts
+
+        hi = max(0, min(len(claimed_parts), MAX_REGIONS_PER_TILE - len(water_parts) - 1))
+        fits, merged_parts = fold(hi)
+        keep = hi
+        if not fits:
+            keep, merged_parts = 0, fold(0)[1]
+            lo = 0  # the largest keep known to fit (0 is taken regardless)
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                fits, parts = fold(mid)
+                if fits:
+                    lo, keep, merged_parts = mid, mid, parts
+                else:
+                    hi = mid
+        kept = set(ranked[:keep])
+        # Kept pieces stay in the uncapped order below.
+        claimed_parts = [cp for i, cp in enumerate(claimed_parts) if i in kept]
+        bare_parts = merged_parts
+
     regions: List[Region] = []
     # Emitted largest-first, as before: tools/bake/regions.ts breaks a
     # shared-edge tie in favour of the later region, and that should stay
     # the smaller one.
-    for geom, cls in reversed(claimed):
-        for part in _polys_of(geom.intersection(tile_box, grid_size=OVERLAY_GRID_SIZE)):
-            regions.append(Region(part, True, cls))
-    for part in _polys_of(bare_land):
+    for part, cls in claimed_parts:
+        regions.append(Region(part, True, cls))
+    for part in bare_parts:
         regions.append(Region(part, True, None))
-    for part in _polys_of(water):
+    for part in water_parts:
         regions.append(Region(part, False, None))
-
-    if len(regions) > MAX_REGIONS_PER_TILE:
-        # Keep every bare-land/water piece (the base layer, always kept) and
-        # drop the smallest claimed landuse pieces first - the ones the
-        # overlay itself already ranked least important.
-        base = [r for r in regions if r.landuse_class is None]
-        claimed_regions = sorted(
-            (r for r in regions if r.landuse_class is not None),
-            key=lambda r: r.geom.area, reverse=True,
-        )
-        keep = max(0, MAX_REGIONS_PER_TILE - len(base))
-        regions = base + claimed_regions[:keep]
 
     return regions

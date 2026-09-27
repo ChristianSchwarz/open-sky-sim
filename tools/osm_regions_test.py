@@ -126,6 +126,67 @@ class RegionCapTest(unittest.TestCase):
         # The base (bare-land) region is always kept even once capped.
         self.assertTrue(any(r.is_land and r.landuse_class is None for r in regions))
 
+    def _grid_of_squares(self, n: int, cols: int):
+        polys = []
+        for i in range(n):
+            gx = (i % cols) * (1.0 / cols)
+            gy = (i // cols) * (1.0 / cols)
+            polys.append(box(gx, gy, gx + 1.0 / cols * 0.5, gy + 1.0 / cols * 0.5))
+        return polys
+
+    def test_capped_regions_still_cover_the_whole_tile(self):
+        # Dropped pieces used to leave holes no region covered, and the mesh
+        # bake's regionAt falls back to region 0 there - water, on a tile
+        # with no bare land.
+        land = MultiPolygon([TILE])
+        polys = self._grid_of_squares(MAX_REGIONS_PER_TILE + 200, 30)
+        tree = build_landuse_index(polys)
+        regions = assemble_tile_regions(TILE, HALO, land, tree, polys, [CLS_TREE] * len(polys))
+
+        self.assertLessEqual(len(regions), MAX_REGIONS_PER_TILE)
+        self.assertAlmostEqual(_total_area(regions), TILE.area, places=6)
+        self.assertTrue(all(r.is_land for r in regions))
+
+    def test_capped_regions_keep_the_uncapped_order(self):
+        # Claimed pieces first, then bare land, then water: regions.ts breaks
+        # a shared-edge tie in favour of the later region.
+        land = MultiPolygon([box(0.0, 0.0, 0.9, 1.0)])
+        polys = self._grid_of_squares(MAX_REGIONS_PER_TILE + 200, 30)
+        tree = build_landuse_index(polys)
+        regions = assemble_tile_regions(TILE, HALO, land, tree, polys, [CLS_TREE] * len(polys))
+
+        self.assertLessEqual(len(regions), MAX_REGIONS_PER_TILE)
+        self.assertAlmostEqual(_total_area(regions), TILE.area, places=6)
+        rank = [0 if r.landuse_class is not None else 1 if r.is_land else 2 for r in regions]
+        self.assertEqual(rank, sorted(rank))
+        self.assertAlmostEqual(_total_area([r for r in regions if not r.is_land]), 0.1, places=6)
+
+    def test_bare_land_shattered_by_kept_pieces_still_fits_the_cap(self):
+        # Squares filling their cells exactly except for thin frames: the
+        # bare land between them is one connected lattice, but a square
+        # enclosed by others and folded into bare land becomes its own part.
+        land = MultiPolygon([TILE])
+        cols = 25
+        step = 1.0 / cols
+        polys = []
+        for gx in range(cols):
+            for gy in range(cols):
+                x0, y0 = gx * step, gy * step
+                # Each cell: an outer ring piece and an inner square.
+                outer = box(x0, y0, x0 + step, y0 + step).difference(
+                    box(x0 + step * 0.2, y0 + step * 0.2, x0 + step * 0.8, y0 + step * 0.8))
+                polys.append(outer)
+                polys.append(box(x0 + step * 0.3, y0 + step * 0.3, x0 + step * 0.7, y0 + step * 0.7))
+        tree = build_landuse_index(polys)
+        regions = assemble_tile_regions(TILE, HALO, land, tree, polys, [CLS_TREE, CLS_CROP] * (len(polys) // 2))
+
+        self.assertLessEqual(len(regions), MAX_REGIONS_PER_TILE)
+        self.assertAlmostEqual(_total_area(regions), TILE.area, places=6)
+        # Keeping every frame would split bare land into a part per frame,
+        # but folding all of them would throw away every tag; the cap keeps
+        # as many as fit.
+        self.assertGreater(sum(1 for r in regions if r.landuse_class is not None), MAX_REGIONS_PER_TILE // 3)
+
 
 class InvalidGeometryTest(unittest.TestCase):
     """The regression case for a real crash found baking Leipzig: a long
