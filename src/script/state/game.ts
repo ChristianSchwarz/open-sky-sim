@@ -94,7 +94,9 @@ import {
     StaticModelView, buildStaticModelViews, forEachStaticAircraftSlot,
 } from './staticModelViews';
 import { SpawnMenuEntity } from '../scene/entities/overlay/spawnMenu';
-import { setBootProgress } from '../osd/bootProgress';
+import {
+    fadeOutBootProgress, hideCountdown, setBootProgress, setBootStreaming, showCountdown,
+} from '../osd/bootProgress';
 import { SpawnPanel } from '../osd/spawnPanel';
 import { AircraftRegistry, buildF22Def, groupAircraftByModel } from './aircraftRegistry';
 import { FlyableAircraftDef } from '../scene/entities/aircraftDef';
@@ -127,6 +129,16 @@ import {
 /** Altitude at which the atmosphere shell starts to fade in over the sky dome. */
 const ATMOSPHERE_SHELL_FADE_IN_M = 30_000;
 /** Scratch for {@link Game.updateAtmosphereShell}. */
+/** How long the terrain backlog must stay empty before the boot blur lifts; see Game.holdUntilStreamed. */
+const STREAM_SETTLE_MS = 600;
+/** The boot blur lifts after this even if streaming never goes quiet (a failing tile, a slow link). */
+const STREAM_HOLD_MAX_MS = 20_000;
+/** Seconds counted down, still paused, once streaming has settled; "Go" follows. */
+const STREAM_COUNTDOWN_FROM = 3;
+/** How long "Go" stays up over the running flight. */
+const STREAM_GO_SHOWN_MS = 800;
+/** Fastest the streaming bar may advance (fraction of full per second), so it sweeps rather than jumps. */
+const STREAM_BAR_RATE_PER_S = 0.5;
 const SHELL_CENTRE = new THREE.Vector3();
 const SHELL_AXIS = new THREE.Vector3();
 const SHELL_REL = new THREE.Vector3();
@@ -593,6 +605,12 @@ export class Game {
     /** A flight held by the settings dialog: it is open over it and nothing moves until it closes. */
     private menuPaused = false;
     private _orbitPivot = new THREE.Vector3();
+    /** The whole game holds still under the blurred overlay while terrain streams in; see holdUntilStreamed. */
+    private streamHeld = false;
+    /** Bumped per hold, so a spawn during an older hold's wait takes it over. */
+    private streamHoldToken = 0;
+    /** False during setup(), before the kernel draws frames: a spawn then cannot hold, index.ts does it after start. */
+    private kernelRunning = false;
     private _orbitOffset = new THREE.Vector3();
     private _orbitAxis = new THREE.Vector3();
     private _debugDebrisVel = new THREE.Vector3();
@@ -1346,6 +1364,93 @@ export class Game {
     }
 
     private reportTerrainBootProgress(meshed: number, total: number, min: number, max: number): void {
+    /**
+     * After a spawn the pinned set is in, but the per-frame LOD pass still
+     * asks for finer tiles, cover textures and roads for a few seconds. Hold
+     * the whole game still under the blurred overlay until that backlog stays
+     * empty for STREAM_SETTLE_MS (or STREAM_HOLD_MAX_MS passes), so the first
+     * thing the player sees is the finished view rather than it popping in.
+     * Needs the kernel running: LOD is chosen in render3D, which keeps
+     * drawing while update() sits out the hold.
+     */
+    async holdUntilStreamed(): Promise<void> {
+        const token = ++this.streamHoldToken;
+        this.streamHeld = true;
+        this.kernelRunning = true;
+        const wasPaused = !this.player.controlsEnabled;
+        this.player.setSimulationPaused(true);
+        setBootStreaming(0, 'Streaming terrain... 0%');
+        const start = performance.now();
+        let idleSince: number | undefined;
+        // The backlog grows as the LOD pass finds more to want, so a plain
+        // backlog/peak ratio jumps back and forth. Count what drained instead,
+        // never let the bar go backwards, and move it at a capped rate so it
+        // reads as a steady sweep.
+        let prevBacklog = 0;
+        let drained = 0;
+        let shown = 0;
+        let lastTick = start;
+        await new Promise<void>(resolve => {
+            const tick = () => {
+                if (token !== this.streamHoldToken) {
+                    resolve();
+                    return;
+                }
+                const now = performance.now();
+                const backlog = this.planetTerrain.streamingBacklog;
+                drained += Math.max(0, prevBacklog - backlog);
+                prevBacklog = backlog;
+                const target = backlog > 0 ? drained / (drained + backlog) : 1;
+                const step = STREAM_BAR_RATE_PER_S * (now - lastTick) / 1000;
+                lastTick = now;
+                shown = Math.min(Math.max(shown, target), shown + step);
+                // The label reads off the same smoothed value as the bar: the
+                // raw backlog count rises and falls as the LOD pass finds work.
+                setBootStreaming(100 * shown, `Streaming terrain... ${Math.floor(100 * shown)}%`);
+                if (backlog > 0) {
+                    idleSince = undefined;
+                } else {
+                    idleSince ??= now;
+                }
+                // Let the bar finish its sweep before clearing, so it never
+                // vanishes at 70%.
+                const settled = idleSince !== undefined && now - idleSince >= STREAM_SETTLE_MS && shown >= 1;
+                if (settled || now - start >= STREAM_HOLD_MAX_MS) {
+                    resolve();
+                    return;
+                }
+                requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+        });
+        // A newer hold (another spawn) took over; it releases the game.
+        if (token !== this.streamHoldToken) {
+            return;
+        }
+        // The blur clears over the first second of a "get ready" count,
+        // still paused; the flight starts on "Go".
+        fadeOutBootProgress();
+        for (let n = STREAM_COUNTDOWN_FROM; n > 0; n--) {
+            showCountdown(String(n));
+            await new Promise(r => setTimeout(r, 1000));
+            if (token !== this.streamHoldToken) {
+                return;
+            }
+        }
+        showCountdown('Go');
+        setTimeout(() => {
+            if (token === this.streamHoldToken) {
+                hideCountdown();
+            }
+        }, STREAM_GO_SHOWN_MS);
+        this.streamHeld = false;
+        // Something else (a fixed camera from the URL, the menu) may have
+        // wanted the flight paused all along; only undo our own pause.
+        if (!wasPaused && this.state === GameState.PLAYER && !this.menuPaused) {
+            this.player.setSimulationPaused(false);
+        }
+    }
+
         const frac = total > 0 ? meshed / total : 1;
         const pct = min + (max - min) * frac;
         const label = total > 0
@@ -1868,7 +1973,7 @@ export class Game {
 
     update(delta: number) {
         this.paintGroundStrips();
-        if (this.menuPaused) {
+        if (this.menuPaused || this.streamHeld) {
             return;
         }
         if (this.state === GameState.PLAYER) {
@@ -2993,6 +3098,13 @@ export class Game {
         // Place the plane first, then warm DEM/meshes around it with the
         // simulation still paused from the menu. The other order - warm, then
         // place - left the aircraft sitting live on the runway for the whole
+        if (this.kernelRunning) {
+            // A respawn: blur the old view straight away rather than showing
+            // the aircraft jump and the terrain around it fill in.
+            this.streamHeld = true;
+            hideCountdown();
+            setBootStreaming(0, 'Loading terrain...');
+        }
         // preload, which for the 10 km spawn is several hundred tiles: long
         // enough to read as the spawn having done nothing. Pausing rather
         // than stepping through the wait means an airborne spawn does not
@@ -3052,6 +3164,9 @@ export class Game {
             this.spawnOpponent(spawn === 'headon');
             this.spawnWingman();
             this.setCockpitFrontView();
+        if (this.kernelRunning) {
+            void this.holdUntilStreamed();
+        }
         }
         if (this.aiOpponent?.enabled) {
             this.player.setWeaponsTarget(this.aiOpponent);

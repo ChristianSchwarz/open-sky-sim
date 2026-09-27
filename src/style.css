@@ -69,6 +69,52 @@ a:hover {
     display: none;
 }
 
+/* After boot: the live view shows through, blurred, until terrain streaming settles. */
+#boot-progress.streaming {
+    background-color: rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition: backdrop-filter 1s linear, -webkit-backdrop-filter 1s linear, background-color 1s linear;
+}
+
+/* Blur and dim go to zero in 1s, under the countdown; the dialog leaves at once. */
+#boot-progress.fading {
+    background-color: rgba(0, 0, 0, 0);
+    backdrop-filter: blur(0);
+    -webkit-backdrop-filter: blur(0);
+    pointer-events: none;
+}
+
+#boot-progress.fading #boot-progress-dialog {
+    visibility: hidden;
+}
+
+#countdown {
+    z-index: 4;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: white;
+    font-size: 8rem;
+    font-weight: bold;
+    text-shadow: 0 0 0.5rem black, 0 0 1.5rem black;
+    pointer-events: none;
+}
+
+#countdown.hidden {
+    display: none;
+}
+
+#countdown.tick {
+    animation: countdown-tick 1s ease-out;
+}
+
+@keyframes countdown-tick {
+    from { transform: translate(-50%, -50%) scale(1.4); opacity: 1; }
+    to { transform: translate(-50%, -50%) scale(1); opacity: 0.6; }
+}
+
 #boot-progress-dialog {
     min-width: 16rem;
     max-width: 90vw;
@@ -103,7 +149,7 @@ a:hover {
     width: 0%;
     height: 100%;
     background-color: white;
-    transition: width 0.2s ease-out;
+    transition: width 0.2s linear;
 }
 
 #mod-status {

@@ -9,7 +9,7 @@ import { Kernel } from './core/kernel';
 import { HD_FPS_CAP, H_RES, V_RES } from './defs';
 import { JoystickControlDevice } from './input/devices/joystickControlDevice';
 import { KeyboardControlDevice } from './input/devices/keyboardControlDevice';
-import { hideBootProgress, setBootProgress } from './osd/bootProgress';
+import { setBootProgress } from './osd/bootProgress';
 import { setupOSD } from './osd/osdPanel';
 import { CombatSimClient } from './physics/sim/combatSimClient';
 import { SimProxyFlightModel } from './physics/model/simProxyFlightModel';
@@ -134,7 +134,7 @@ window.addEventListener("load", () => {
     void setup().then(([kernel, config, keyboardInput, joystickInput, game, audio]) => {
         kernel.start();
         setupOSD(config, keyboardInput, joystickInput, audio);
-        hideBootProgress();
+        void game.holdUntilStreamed();
     }).catch((err) => {
         setBootProgress(100, `Load failed: ${err instanceof Error ? err.message : String(err)}`);
         console.error(err);

@@ -1057,6 +1057,20 @@ export class TerrainEntity implements Entity {
         const start = Date.now();
         while (Date.now() - start < DEADLINE_MS) {
             const outstanding = this.outstandingPinned();
+    /**
+     * Tile requests of every kind still queued, downloading or waiting to
+     * upload: meshes, far cover textures, roads and bridges. Zero means the
+     * streamer has caught up with what the current view asked for.
+     */
+    get streamingBacklog(): number {
+        const m = this.meshStore.stats;
+        const c = this.cover.stats;
+        const r = this.roads.stats;
+        const b = this.bridges.stats;
+        return m.queued + m.inflight + this.streamer.pendingUploads
+            + c.queued + c.inflight + r.queued + r.inflight + b.queued + b.inflight;
+    }
+
             const done = total - outstanding.length;
             onProgress?.(done, total);
             if (outstanding.length === 0) {
