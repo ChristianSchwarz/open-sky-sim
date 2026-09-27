@@ -59,6 +59,8 @@ from osm_common import (
     LAND,
     glue_negative_bbox,
     load_manifest,
+    replace_file,
+    update_manifest,
     OVERPASS_CELL_ZOOM,
     OVERPASS_LIGHT_CELL_ZOOM,
     OVERPASS_OUT,
@@ -73,6 +75,7 @@ from osm_common import (
     tile_bounds,
     ways_map,
 )
+from osm_pbf import pbf_elements_groups
 
 
 # --- what counts as an airfield --------------------------------------------
@@ -815,10 +818,40 @@ def _aeroway_query(clauses: Sequence[str]) -> str:
 """
 
 
+# The tag tests for each airfield fetch group, at module level so the local
+# extract read can pickle them to its worker processes (a nested function
+# sent the whole read down osm_pbf's one-core path).
+def aerodromes_tags(tags: dict) -> bool:
+    return tags.get('aeroway') == 'aerodrome'
+
+
+def runways_tags(tags: dict) -> bool:
+    return tags.get('aeroway') in ('runway', 'helipad')
+
+
+def taxiways_tags(tags: dict) -> bool:
+    return tags.get('aeroway') == 'taxiway'
+
+
+def aprons_tags(tags: dict) -> bool:
+    return tags.get('aeroway') in ('apron', 'terminal', 'hangar', 'control_tower', 'tower')
+
+
+# Cache key and tag test of each group, as overpass_airports reads them from
+# a local extract - what osm_prefetch.py fills the cache under.
+PBF_GROUPS = (
+    ('aerodromes', aerodromes_tags),
+    ('runways', runways_tags),
+    ('taxiways', taxiways_tags),
+    ('aprons', aprons_tags),
+)
+
+
 def overpass_airports(
     b: Bounds, refresh: bool = False,
     progress: Optional[StageProgress] = None, phase_prefix: str = '',
     skip_sea: Optional[Callable[[Bounds], bool]] = None,
+    pbf: Optional[str] = None,
 ) -> dict:
     """Aerodromes, runways and the rest of the surfaces, as separate requests.
 
@@ -870,15 +903,25 @@ def overpass_airports(
             + [f'relation["aeroway"="{kind}"]({c.as_overpass()})'
                for kind in ('apron', 'terminal')])
 
+    # Same tag test as the query closures above, for the PBF path.
+
     groups = (
-        ('aerodromes', 'aerodromes', aerodromes, OVERPASS_LIGHT_CELL_ZOOM, False, None),
-        ('runways', 'runways', runways, OVERPASS_LIGHT_CELL_ZOOM, False, None),
-        ('taxiways', 'taxiways', taxiways, OVERPASS_CELL_ZOOM, True, skip_sea),
-        ('aprons', 'aprons and buildings', aprons, OVERPASS_CELL_ZOOM, True, skip_sea),
+        ('aerodromes', 'aerodromes', aerodromes, aerodromes_tags, OVERPASS_LIGHT_CELL_ZOOM, False, None),
+        ('runways', 'runways', runways, runways_tags, OVERPASS_LIGHT_CELL_ZOOM, False, None),
+        ('taxiways', 'taxiways', taxiways, taxiways_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
+        ('aprons', 'aprons and buildings', aprons, aprons_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
+    )
+
+    # One pass over the file covers all four groups - see pbf_elements_groups's
+    # docstring for why four separate pbf_elements calls would each re-read
+    # the whole extract.
+    pbf_answers: Dict[str, dict] = (
+        pbf_elements_groups(pbf, b, [(key, pred) for key, _, _, pred, *_ in groups], refresh=refresh)
+        if pbf else {}
     )
 
     elements: List[dict] = []
-    for key, label, query_for, zoom, is_optional, skip in groups:
+    for key, label, query_for, tags_predicate, zoom, is_optional, skip in groups:
         extra: Dict[str, object] = {}
         if progress is not None:
             progress.begin(phase_prefix + key)
@@ -887,7 +930,10 @@ def overpass_airports(
                 progress.update(fetch_fraction(received), f'{format_mb(received)} received')
             extra['on_progress'] = on_bytes
         try:
-            got = overpass_fetch_cells(query_for, b, label, refresh, zoom=zoom, skip=skip, **extra)
+            if pbf:
+                got = pbf_answers[key]
+            else:
+                got = overpass_fetch_cells(query_for, b, label, refresh, zoom=zoom, skip=skip, **extra)
         except Exception as err:
             if not is_optional:
                 raise
@@ -898,7 +944,7 @@ def overpass_airports(
         got_elements = got.get('elements', [])
         elements.extend(got_elements)
         if progress is not None:
-            progress.end(f'{len(got_elements)} elements')
+            progress.end(f'{len(got_elements)} elements' + (' (pbf)' if pbf else ''))
     return merge_elements([{'elements': elements}])
 
 
@@ -1707,7 +1753,7 @@ def bake(args: argparse.Namespace) -> int:
         # box needs is not there yet, so every cell is asked for.
         for name, bounds in targets:
             print(f'\narea {name}: fetching')
-            overpass_airports(bounds, args.refresh_osm)
+            overpass_airports(bounds, args.refresh_osm, pbf=args.pbf)
         print(f'fetched in {time.time() - started:.0f}s; nothing baked (--fetch-only)')
         return 0
 
@@ -1721,6 +1767,9 @@ def bake(args: argparse.Namespace) -> int:
     block = manifest.get('airfields') or {}
     items: List[dict] = list(block.get('items') or [])
     coverage = block.get('coverage')
+    # Every (kept, bbox) merged below, replayed onto the manifest as it is
+    # at write time - see the write.
+    merges: List[Tuple[List[dict], Bounds]] = []
 
     # Every area's phases in order, then the one write at the end. With one
     # target (the importer's case) the prefix is empty and the headings read
@@ -1743,7 +1792,7 @@ def bake(args: argparse.Namespace) -> int:
         print(f'\narea {name}  lon [{bounds.west:.4f}, {bounds.east:.4f}] '
               f'lat [{bounds.south:.4f}, {bounds.north:.4f}]')
         try:
-            data = overpass_airports(bounds, args.refresh_osm, progress, prefix, skip_sea)
+            data = overpass_airports(bounds, args.refresh_osm, progress, prefix, skip_sea, pbf=args.pbf)
         except Exception as err:
             # One area's fetch failing must not cost the areas after it. The
             # merge is per-bbox, so a skipped area simply keeps whatever it had
@@ -1797,6 +1846,7 @@ def bake(args: argparse.Namespace) -> int:
 
         items = merge_items(items, kept, bounds)
         coverage = union_bounds(coverage, bounds)
+        merges.append((kept, bounds))
         total_kept += len(kept)
         fresh_ids.update(i['osmId'] for i in kept)
 
@@ -1806,17 +1856,26 @@ def bake(args: argparse.Namespace) -> int:
         return 1 if failed else 0
 
     progress.begin('write')
-    manifest['airfields'] = {
-        'source': 'osm',
-        'coverage': coverage,
-        'items': items,
-    }
-    # No version bump: the block is additive and every existing reader ignores
-    # what it does not know about. The mesh bake starts reading it in the next
-    # step, and that is where a version means something.
-    with open(manifest_path, 'w', encoding='utf-8') as fh:
-        json.dump(manifest, fh, indent=2)
-        fh.write('\n')
+
+    def set_airfields(fresh: dict) -> None:
+        # Replayed onto the manifest as it is now, not the copy loaded at
+        # start: other chunks' airfield, coast and road bakes may have
+        # written it meanwhile, and writing back the old copy dropped them.
+        fresh_block = fresh.get('airfields') or {}
+        merged_items: List[dict] = list(fresh_block.get('items') or [])
+        merged_coverage = fresh_block.get('coverage')
+        for kept_items, b in merges:
+            merged_items = merge_items(merged_items, kept_items, b)
+            merged_coverage = union_bounds(merged_coverage, b)
+        # No version bump: the block is additive and every existing reader
+        # ignores what it does not know about. The mesh bake starts reading
+        # it in the next step, and that is where a version means something.
+        fresh['airfields'] = {
+            'source': 'osm',
+            'coverage': merged_coverage,
+            'items': merged_items,
+        }
+    items = update_manifest(manifest_path, set_airfields)['airfields']['items']
     progress.end()
 
     runways = sum(len(i['runways']) for i in items)
@@ -1858,6 +1917,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument('--manifest', help='planet manifest.json (default: {out}/manifest.json)')
     parser.add_argument('--out', default='assets/planet', help='planet asset directory')
     parser.add_argument('--bbox', help='west,south,east,north degrees (default: every baked area)')
+    parser.add_argument('--pbf', help='read airfields from this local .osm.pbf instead of Overpass '
+                                       '(pip install osmium)')
     parser.add_argument('--per-area', type=int, default=DEFAULT_PER_AREA,
                         help='airfields kept per area, best first (default: unlimited)')
     parser.add_argument('--fetch-only', action='store_true',

@@ -165,15 +165,53 @@ def pbf_elements_groups(
     return answers
 
 
-def _scan_groups(
+def pbf_prefetch(
+    pbf_path: str, bbox: Bounds,
+    specs: Sequence[Tuple[str, TagPredicate, bool]],
+    refresh: bool = False,
+) -> Dict[str, int]:
+    """Fill the cache for every (key, predicate, include_relations) in one read.
+
+    The bake stages of one import chunk - coast, roads, airfields, cover -
+    each read the same extract for the same bbox with their own tags: three
+    full reads a chunk before this. The importer runs this once per chunk
+    first, and every stage's own `pbf_elements*` call is then a cache hit
+    under exactly the key it would have written. Returns element counts of
+    what it had to read.
+    """
+    todo = [(k, p, rel) for k, p, rel in specs
+            if refresh or _cache_get(_cache_path(pbf_path, bbox, k, rel)) is None]
+    counts: Dict[str, int] = {}
+    if not todo:
+        return counts
+    answers = _scan_groups(pbf_path, bbox, [(k, p) for k, p, _ in todo], True,
+                           relation_keys={k for k, _, rel in todo if rel})
+    for k, _, rel in todo:
+        _cache_put(_cache_path(pbf_path, bbox, k, rel), answers[k])
+        counts[k] = len(answers[k]['elements'])
+    return counts
+
+
+def _scan_groups_serial(
     pbf_path: str, bbox: Bounds,
     groups: Sequence[Tuple[str, TagPredicate]],
     include_relations: bool,
 ) -> Dict[str, dict]:
-    """The uncached read `pbf_elements_groups` falls back to for its cache misses."""
+    """`_scan_groups` on one core, for predicates that cannot be pickled to workers.
+
+    Only a way with a node inside `bbox` can end up in an answer (and so
+    only a relation with such a member way), so that is all Python ever
+    sees: numpy finds the node ids inside the box on every core
+    (`clip_pbf.node_ids_in`), and osmium's C++ `IdTracker` filters drop
+    every other node, way and relation before a callback would run. Before
+    this, every object of the file went through a Python callback that
+    built its tag dict - one core, ~20 min per stage on a 391 MB extract,
+    repeated by every stage of every chunk.
+    """
     if osmium is None:
         raise RuntimeError(
             "reading a .osm.pbf needs the 'osmium' package: pip install osmium")
+    from clip_pbf import node_ids_in, node_tracker
 
     keys = [key for key, _ in groups]
     matched_ways: Dict[str, Dict[int, dict]] = {key: {} for key in keys}
@@ -181,114 +219,76 @@ def _scan_groups(
     matched_nodes: Dict[str, Dict[int, dict]] = {key: {} for key in keys}
     wanted_way_ids: Dict[str, set] = {key: set() for key in keys}
 
-    # Pass 1: classify every node/way/relation against every group's
-    # predicate in one read, and remember which node ids (and, for a
-    # relation, which member way ids) each group needs. A standalone node is
-    # a first-class match too - Overpass's `node[...]` half of a `nwr[...]`
-    # query catches features (most small airfields) that are only ever
-    # mapped as a single point, never a way or relation.
-    class ScanHandler(osmium.SimpleHandler):
-        def node(self, n):
-            loc = n.location
-            if not loc.valid():
-                return
-            tags: Optional[dict] = None
-            for key, predicate in groups:
-                if tags is None:
-                    tags = _tags_dict(n)
-                if not predicate(tags):
-                    continue
-                matched_nodes[key][n.id] = {'type': 'node', 'id': n.id, 'tags': tags, 'lon': loc.lon, 'lat': loc.lat}
+    in_box = node_tracker(node_ids_in(pbf_path, (bbox.west, bbox.south, bbox.east, bbox.north)))
 
-        def way(self, w):
-            tags: Optional[dict] = None
-            node_ids: Optional[List[int]] = None
-            for key, predicate in groups:
-                if tags is None:
-                    tags = _tags_dict(w)
-                if not predicate(tags):
-                    continue
-                if node_ids is None:
-                    node_ids = [n.ref for n in w.nodes]
-                    if not node_ids:
-                        break
-                matched_ways[key][w.id] = {'type': 'way', 'id': w.id, 'tags': tags, 'nodes': node_ids}
+    # Standalone nodes: a first-class match too - Overpass's `node[...]`
+    # half of a `nwr[...]` query catches features (most small airfields)
+    # that are only ever mapped as a single point. Untagged nodes are
+    # skipped in C++ unless some predicate would accept no tags at all.
+    nodes_fp = osmium.FileProcessor(pbf_path, osmium.osm.NODE).with_filter(in_box.id_filter())
+    if not any(predicate({}) for _, predicate in groups):
+        nodes_fp = nodes_fp.with_filter(osmium.filter.EmptyTagFilter())
+    for n in nodes_fp:
+        tags = _tags_dict(n)
+        loc = n.location
+        for key, predicate in groups:
+            if predicate(tags):
+                matched_nodes[key][n.id] = {'type': 'node', 'id': n.id, 'tags': tags,
+                                            'lon': loc.lon, 'lat': loc.lat}
 
-        def relation(self, r):
-            if not include_relations:
-                return
-            tags: Optional[dict] = None
+    # Every way touching the box, matched or not: a relation's member way is
+    # included in its group whatever its own tags - the same way Overpass's
+    # `out geom;` on a matched relation includes its members' geometry.
+    touching: Dict[int, dict] = {}
+    touching_ids = osmium.IdTracker()
+    for w in osmium.FileProcessor(pbf_path, osmium.osm.WAY).with_filter(in_box.contains_filter()):
+        node_ids = [n.ref for n in w.nodes]
+        if not node_ids:
+            continue
+        way = {'type': 'way', 'id': w.id, 'tags': _tags_dict(w), 'nodes': node_ids}
+        touching[w.id] = way
+        touching_ids.add_way(w.id)
+        for key, predicate in groups:
+            if predicate(way['tags']):
+                matched_ways[key][w.id] = way
+
+    if include_relations:
+        for r in osmium.FileProcessor(pbf_path, osmium.osm.RELATION).with_filter(
+                touching_ids.contains_filter()):
+            tags = _tags_dict(r)
             members: Optional[List[dict]] = None
             for key, predicate in groups:
-                if tags is None:
-                    tags = _tags_dict(r)
                 if not predicate(tags):
                     continue
                 if members is None:
                     members = [{'type': _MEMBER_TYPE.get(m.type, m.type), 'ref': m.ref, 'role': m.role}
                                for m in r.members]
-                matched_relations[key][r.id] = {'type': 'relation', 'id': r.id, 'tags': tags, 'members': members}
-                for m in r.members:
-                    if m.type == 'w':
-                        wanted_way_ids[key].add(m.ref)
-
-    ScanHandler().apply_file(pbf_path)
-
-    # A relation member way is included in its own group even when it
-    # carries no tags of its own (or tags that don't match that group's
-    # predicate) - the same way Overpass's `out geom;` on a matched relation
-    # includes its members' geometry unconditionally.
-    all_extra_ids: set = set()
-    for key in keys:
-        all_extra_ids |= wanted_way_ids[key] - matched_ways[key].keys()
-    if all_extra_ids:
-        found: Dict[int, dict] = {}
-
-        class MemberWayHandler(osmium.SimpleHandler):
-            def way(self, w):
-                if w.id not in all_extra_ids:
-                    return
-                node_ids = [n.ref for n in w.nodes]
-                if node_ids:
-                    found[w.id] = {'type': 'way', 'id': w.id, 'tags': _tags_dict(w), 'nodes': node_ids}
-
-        MemberWayHandler().apply_file(pbf_path)
+                matched_relations[key][r.id] = {'type': 'relation', 'id': r.id, 'tags': tags,
+                                                'members': members}
+                for m in members:
+                    if m['type'] == 'way' and m['ref'] in touching:
+                        wanted_way_ids[key].add(m['ref'])
         for key in keys:
             for wid in wanted_way_ids[key] - matched_ways[key].keys():
-                if wid in found:
-                    matched_ways[key][wid] = found[wid]
+                matched_ways[key][wid] = touching[wid]
 
-    wanted_node_ids = {nid for key in keys for way in matched_ways[key].values() for nid in way['nodes']}
-
-    # Pass 2: resolve coordinates for exactly the nodes any group's matched
-    # ways need, in one more read. A way that leaves the box (a road or
-    # coastline crossing the edge) keeps its out-of-box nodes too, the same
-    # way an Overpass cell answer includes a way's full geometry even where
-    # it runs past the cell edge - callers clip afterwards, same as the
-    # Overpass path.
+    # Coordinates for every node of every answer way, including the ones
+    # outside the box: a road or coastline crossing the edge keeps its full
+    # geometry, as an Overpass cell answer does - callers clip afterwards.
+    wanted = osmium.IdTracker()
+    for key in keys:
+        for way in matched_ways[key].values():
+            for nid in way['nodes']:
+                wanted.add_node(nid)
     nodes: Dict[int, dict] = {}
-
-    class NodeHandler(osmium.SimpleHandler):
-        def node(self, n):
-            if n.id not in wanted_node_ids:
-                return
-            loc = n.location
-            if not loc.valid():
-                return
+    for n in osmium.FileProcessor(pbf_path, osmium.osm.NODE).with_filter(wanted.id_filter()):
+        loc = n.location
+        if loc.valid():
             nodes[n.id] = {'type': 'node', 'id': n.id, 'lon': loc.lon, 'lat': loc.lat}
-
-    NodeHandler().apply_file(pbf_path)
-
-    def in_bbox(nid: int) -> bool:
-        n = nodes.get(nid)
-        return n is not None and bbox.west <= n['lon'] <= bbox.east and bbox.south <= n['lat'] <= bbox.north
-
-    def way_touches_bbox(way: dict) -> bool:
-        return any(in_bbox(nid) for nid in way['nodes'])
 
     answers: Dict[str, dict] = {}
     for key in keys:
-        elements = [w for w in matched_ways[key].values() if way_touches_bbox(w)]
+        elements = list(matched_ways[key].values())
         kept_way_ids = {w['id'] for w in elements}
         kept_node_ids = {nid for w in elements for nid in w['nodes'] if nid in nodes}
         elements.extend(nodes[nid] for nid in kept_node_ids)
@@ -296,8 +296,228 @@ def _scan_groups(
             elements.extend(
                 r for r in matched_relations[key].values()
                 if any(m['type'] == 'way' and m['ref'] in kept_way_ids for m in r['members']))
-        elements.extend(
-            n for n in matched_nodes[key].values()
-            if bbox.west <= n['lon'] <= bbox.east and bbox.south <= n['lat'] <= bbox.north)
+        elements.extend(matched_nodes[key].values())
+        answers[key] = {'elements': elements}
+    return answers
+
+
+# --- the parallel scan -------------------------------------------------------
+
+_SCAN: dict = {}
+
+
+def _scan_init(pbf_path: str, head: Tuple[int, int], groups, bounds, touching_path: str,
+               skip_untagged: bool) -> None:
+    import numpy as np
+    # Memory-mapped, so every worker shares one copy through the page cache.
+    # An osmium IdTracker of the box's nodes per worker was a bitset over the
+    # whole node id range - over a GB each, and 16 of them ran out of memory.
+    touching = np.memmap(touching_path, dtype=np.int64, mode='r') if os.path.getsize(touching_path) else         np.zeros(0, np.int64)
+    _SCAN.update(path=pbf_path, head=head, groups=groups, bounds=bounds, touching=touching,
+                 skip_untagged=skip_untagged)
+
+
+def _scan_batch(task):
+    """One run of blobs: its matched tagged nodes and touching ways.
+
+    Returns (batch index, {key: [node dict]}, {key: [way dict]}). A way
+    that touches the box but matches no group costs one id lookup - most of
+    them are buildings and roads nobody asked for, and building their tags
+    and node lists was half of the serial scan.
+    """
+    import numpy as np
+    index, first, end = task
+    with open(_SCAN['path'], 'rb') as fh:
+        fh.seek(_SCAN['head'][0])
+        data = fh.read(_SCAN['head'][1])
+        fh.seek(first)
+        data += fh.read(end - first)
+    groups = _SCAN['groups']
+    west, south, east, north = _SCAN['bounds']
+    nodes: Dict[str, list] = {key: [] for key, _ in groups}
+    ways: Dict[str, list] = {key: [] for key, _ in groups}
+    touching = _SCAN['touching']
+    last = len(touching) - 1
+
+    fp = osmium.FileProcessor(osmium.io.FileBuffer(data, 'pbf'), osmium.osm.NODE)
+    if _SCAN['skip_untagged']:
+        fp = fp.with_filter(osmium.filter.EmptyTagFilter())
+    for n in fp:
+        loc = n.location
+        if not loc.valid():
+            continue
+        lon, lat = loc.lon, loc.lat
+        if not (west <= lon <= east and south <= lat <= north):
+            continue
+        tags = _tags_dict(n)
+        for key, predicate in groups:
+            if predicate(tags):
+                nodes[key].append({'type': 'node', 'id': n.id, 'tags': tags, 'lon': lon, 'lat': lat})
+
+    for w in osmium.FileProcessor(osmium.io.FileBuffer(data, 'pbf'), osmium.osm.WAY):
+        wid = w.id
+        i = int(np.searchsorted(touching, wid))
+        if i > last or touching[i] != wid:
+            continue
+        tags = _tags_dict(w)
+        keys = [key for key, predicate in groups if predicate(tags)]
+        if keys:
+            way = {'type': 'way', 'id': w.id, 'tags': tags, 'nodes': [r.ref for r in w.nodes]}
+            for key in keys:
+                ways[key].append(way)
+    return index, nodes, ways
+
+
+def _scan_groups(
+    pbf_path: str, bbox: Bounds,
+    groups: Sequence[Tuple[str, TagPredicate]],
+    include_relations: bool,
+    workers: Optional[int] = None,
+    relation_keys: Optional[set] = None,
+) -> Dict[str, dict]:
+    """The uncached read `pbf_elements_groups` falls back to for its cache misses.
+
+    `relation_keys` picks, per group, whether relations (and their member
+    ways) are part of its answer; by default all groups or none, as
+    `include_relations` says. `pbf_prefetch` needs the mix: the roads read
+    is relation-free, the coast and airfield reads are not.
+
+    Only a way with a node inside `bbox` can end up in an answer (and so
+    only a relation with such a member way). The file is read on every core:
+    numpy finds the node ids inside the box (`clip_pbf.node_ids_in`), each
+    worker takes a run of blobs and tests its tagged nodes and - through an
+    osmium C++ `IdTracker` filter, so a way that misses the box never reaches
+    Python - its touching ways against the groups; numpy then decodes the
+    coordinates of every answer way's nodes (`clip_pbf.node_coords`). Only
+    relations, a few thousand, are read on one core.
+
+    The serial version, one Python callback per touching way and per answer
+    node, took 401 s on its own and 889 s inside the Erz import for one
+    chunk's coast and landuse read of a 698 MB extract. Answers are the same
+    element sets; predicates that cannot be pickled (a closure) take the
+    serial path.
+    """
+    if osmium is None:
+        raise RuntimeError(
+            "reading a .osm.pbf needs the 'osmium' package: pip install osmium")
+    rel_keys = set(relation_keys) if relation_keys is not None else (
+        {key for key, _ in groups} if include_relations else set())
+    try:
+        pickle.dumps(list(groups))
+    except Exception:
+        with_rel = [(k, p) for k, p in groups if k in rel_keys]
+        without = [(k, p) for k, p in groups if k not in rel_keys]
+        answers = _scan_groups_serial(pbf_path, bbox, with_rel, True) if with_rel else {}
+        if without:
+            answers.update(_scan_groups_serial(pbf_path, bbox, without, False))
+        return answers
+    import multiprocessing as mp
+    import tempfile
+    import numpy as np
+    from clip_pbf import blob_index, default_workers, node_batches, node_coords, node_ids_in, node_tracker
+
+    workers = workers or default_workers()
+    keys = [key for key, _ in groups]
+    bounds = (bbox.west, bbox.south, bbox.east, bbox.north)
+    # The ways touching the box, by id: one C++-filtered pass with one
+    # tracker, Python seeing only an id per touching way.
+    tracker = node_tracker(node_ids_in(pbf_path, bounds, workers))
+    touching_ids = np.fromiter(
+        (w.id for w in osmium.FileProcessor(pbf_path, osmium.osm.WAY).with_filter(tracker.contains_filter())),
+        dtype=np.int64)
+    del tracker
+    touching_ids.sort()
+    blobs = blob_index(pbf_path)
+    head = (blobs[0][1], blobs[0][2])
+    tasks = [(i, a, b) for i, (a, b) in enumerate(node_batches(pbf_path, workers))]
+
+    fd, touching_path = tempfile.mkstemp(suffix='.ids')
+    os.close(fd)
+    results = []
+    try:
+        touching_ids.tofile(touching_path)
+        skip_untagged = not any(predicate({}) for _, predicate in groups)
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(min(workers, max(1, len(tasks))), _scan_init,
+                      (pbf_path, head, list(groups), bounds, touching_path, skip_untagged)) as pool:
+            results = list(pool.imap_unordered(_scan_batch, tasks))
+    finally:
+        try:
+            os.remove(touching_path)
+        except OSError:
+            pass  # still mapped by a worker on its way out; it is only a temp file
+    results.sort(key=lambda r: r[0])
+
+    # In file order, as the serial scan inserted them.
+    matched_nodes: Dict[str, Dict[int, dict]] = {key: {} for key in keys}
+    matched_ways: Dict[str, Dict[int, dict]] = {key: {} for key in keys}
+    for _, nodes, ways in results:
+        for key in keys:
+            for n in nodes[key]:
+                matched_nodes[key][n['id']] = n
+            for w in ways[key]:
+                matched_ways[key][w['id']] = w
+    touching = set(touching_ids.tolist())
+
+    matched_relations: Dict[str, Dict[int, dict]] = {key: {} for key in keys}
+    if rel_keys and touching:
+        touching_tracker = osmium.IdTracker()
+        for wid in touching:
+            touching_tracker.add_way(wid)
+        wanted_way_ids: Dict[str, set] = {key: set() for key in keys}
+        for r in osmium.FileProcessor(pbf_path, osmium.osm.RELATION).with_filter(
+                touching_tracker.contains_filter()):
+            tags = _tags_dict(r)
+            members: Optional[List[dict]] = None
+            for key, predicate in groups:
+                if key not in rel_keys or not predicate(tags):
+                    continue
+                if members is None:
+                    members = [{'type': _MEMBER_TYPE.get(m.type, m.type), 'ref': m.ref, 'role': m.role}
+                               for m in r.members]
+                matched_relations[key][r.id] = {'type': 'relation', 'id': r.id, 'tags': tags,
+                                                'members': members}
+                for m in members:
+                    if m['type'] == 'way' and m['ref'] in touching:
+                        wanted_way_ids[key].add(m['ref'])
+        # A relation's member way belongs to its group whatever its own tags,
+        # the same as Overpass's `out geom;` on a matched relation.
+        missing = {wid for key in keys for wid in wanted_way_ids[key] - matched_ways[key].keys()}
+        if missing:
+            member_tracker = osmium.IdTracker()
+            for wid in missing:
+                member_tracker.add_way(wid)
+            members_found: Dict[int, dict] = {}
+            for w in osmium.FileProcessor(pbf_path, osmium.osm.WAY).with_filter(member_tracker.id_filter()):
+                node_ids = [r.ref for r in w.nodes]
+                if node_ids:
+                    members_found[w.id] = {'type': 'way', 'id': w.id, 'tags': _tags_dict(w), 'nodes': node_ids}
+            for key in keys:
+                for wid in wanted_way_ids[key] - matched_ways[key].keys():
+                    if wid in members_found:
+                        matched_ways[key][wid] = members_found[wid]
+
+    # Coordinates for every node of every answer way, including the ones
+    # outside the box: a road or coastline crossing the edge keeps its full
+    # geometry, as an Overpass cell answer does - callers clip afterwards.
+    wanted_ids = np.fromiter(
+        (nid for key in keys for way in matched_ways[key].values() for nid in way['nodes']),
+        dtype=np.int64)
+    got_ids, lons, lats = node_coords(pbf_path, wanted_ids, workers)
+    nodes: Dict[int, dict] = {
+        nid: {'type': 'node', 'id': nid, 'lon': lon, 'lat': lat}
+        for nid, lon, lat in zip(got_ids.tolist(), lons.tolist(), lats.tolist())}
+
+    answers: Dict[str, dict] = {}
+    for key in keys:
+        elements = list(matched_ways[key].values())
+        kept_way_ids = {w['id'] for w in elements}
+        kept_node_ids = {nid for w in elements for nid in w['nodes'] if nid in nodes}
+        elements.extend(nodes[nid] for nid in kept_node_ids)
+        if key in rel_keys:
+            elements.extend(
+                r for r in matched_relations[key].values()
+                if any(m['type'] == 'way' and m['ref'] in kept_way_ids for m in r['members']))
+        elements.extend(matched_nodes[key].values())
         answers[key] = {'elements': elements}
     return answers

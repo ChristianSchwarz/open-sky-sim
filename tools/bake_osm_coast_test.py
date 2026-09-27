@@ -435,3 +435,132 @@ class RiverProfile(unittest.TestCase):
         self.assertLessEqual(out[39], 31.0)
         self.assertGreaterEqual(out[39], 29.7)
         self.assertLessEqual(out[99], 29.7)
+
+
+class AncestorFromChildrenTest(unittest.TestCase):
+    """Ancestor .lvr tiles are derived from the children on disk.
+
+    They used to be clipped from the current bake's land, which only covers
+    that bake's bbox: every chunk of an import wrote its neighbours' land
+    into the shared ancestors as water (blue bands over Erz/PDM from
+    altitude, 2026-09-26).
+    """
+    PZ = LANDUSE_REGION_MIN_ZOOM  # parent zoom: regions are carried here
+    PX, PY = 100, 50
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def child(self, qx, qy):
+        return self.PZ + 1, self.PX * 2 + qx, self.PY * 2 + qy
+
+    def write_child(self, qx, qy, landuse=None, inland=()):
+        z, x, y = self.child(qx, qy)
+        b = tile_bounds(z, x, y)
+        land = MultiPolygon([box(b.west, b.south, b.east, b.north)])
+        polys, classes = ([landuse], [CLS_TREE]) if landuse is not None else ([], [])
+        tree = build_landuse_index(polys) if polys else None
+        _clip_worker_inline(self.tmp, 9, land, inland, (), z, x, y, bytearray(81), 0.0, 0.0,
+                            tree, polys, classes)
+
+    def parent(self):
+        from bake_osm_coast import _ancestor_worker, decode_lvr
+        _ancestor_worker((self.tmp, 9, self.PZ, self.PX, self.PY, bytearray(81), 0.0, 0.0))
+        path = os.path.join(self.tmp, str(self.PZ), str(self.PX), f'{self.PY}.lvr')
+        if not os.path.isfile(path):
+            return None
+        with open(path, 'rb') as fh:
+            return decode_lvr(fh.read())
+
+    @staticmethod
+    def area(rings_list):
+        return sum(Polygon(ext, holes).area for ext, holes in rings_list)
+
+    def test_decode_lvr_reads_back_what_encode_lvr_wrote(self):
+        from bake_osm_coast import decode_lvr
+        ring = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        hole = [(0.25, 0.25), (0.5, 0.25), (0.5, 0.5)]
+        got = decode_lvr(encode_lvr(
+            [(ring, [hole])],
+            [(12.5, ring, [], []), (None, ring, [], [(0.5, 0.5, 30.0)])],
+            [(20.0, [(0.0, 0.0), (1.0, 1.0)])],
+            [(True, CLS_TREE, ring, []), (False, None, ring, [hole])],
+        ))
+        self.assertEqual(got['polys'], [(ring, [hole])])
+        self.assertEqual(got['inland'][0][0], 12.5)
+        self.assertIsNone(got['inland'][1][0])
+        self.assertEqual(got['inland'][1][3], [(0.5, 0.5, 30.0)])
+        self.assertEqual(got['lines'], [(20.0, [(0.0, 0.0), (1.0, 1.0)])])
+        self.assertEqual(got['regions'][0][:2], (True, CLS_TREE))
+        self.assertEqual(got['regions'][1][:2], (False, None))
+
+    def test_children_from_two_bakes_make_an_all_land_parent(self):
+        # "Chunk A" baked the northern children, "chunk B" the southern ones;
+        # the parent must be land everywhere, not only where the last bake was.
+        for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            self.write_child(qx, qy)
+        b = tile_bounds(self.PZ, self.PX, self.PY)
+        tile_area = (b.east - b.west) * (b.north - b.south)
+        self.assertAlmostEqual(self.area(self.parent()['polys']) / tile_area, 1.0, places=5)
+
+    def test_a_missing_child_stays_water(self):
+        for qx, qy in ((0, 0), (1, 0), (0, 1)):
+            self.write_child(qx, qy)
+        b = tile_bounds(self.PZ, self.PX, self.PY)
+        tile_area = (b.east - b.west) * (b.north - b.south)
+        self.assertAlmostEqual(self.area(self.parent()['polys']) / tile_area, 0.75, places=5)
+
+    def test_a_lake_split_across_children_is_one_body_again(self):
+        b = tile_bounds(self.PZ, self.PX, self.PY)
+        cx, cy = (b.west + b.east) / 2, (b.south + b.north) / 2
+        r = (b.east - b.west) / 8
+        from bake_osm_coast import WaterBody
+        lake = WaterBody(box(cx - r, cy - r, cx + r, cy + r), True, 101.5)
+        for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            self.write_child(qx, qy, inland=[lake])
+        bodies = self.parent()['inland']
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(bodies[0][0], 101.5)
+        self.assertAlmostEqual(Polygon(bodies[0][1], bodies[0][2]).area, (2 * r) ** 2, places=9)
+
+    def test_landuse_regions_are_carried_up_from_the_children(self):
+        for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            z, x, y = self.child(qx, qy)
+            cb = tile_bounds(z, x, y)
+            forest = box(cb.west, cb.south, cb.east, cb.north) if qx == 0 else None
+            self.write_child(qx, qy, landuse=forest)
+        b = tile_bounds(self.PZ, self.PX, self.PY)
+        tile_area = (b.east - b.west) * (b.north - b.south)
+        trees = [(ext, holes) for is_land, cls, ext, holes in self.parent()['regions']
+                 if is_land and cls == CLS_TREE]
+        self.assertAlmostEqual(self.area(trees) / tile_area, 0.5, places=4)
+
+    def test_an_ancestor_with_nothing_left_under_it_loses_its_stale_lvr(self):
+        path = os.path.join(self.tmp, str(self.PZ), str(self.PX), f'{self.PY}.lvr')
+        os.makedirs(os.path.dirname(path))
+        with open(path, 'wb') as fh:
+            fh.write(encode_lvr([([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], [])]))
+        from bake_osm_coast import TilePool, ancestor_level_parallel
+        with TilePool(1) as pool:
+            ancestor_level_parallel(self.tmp, 9, self.PZ, 0.0, 0.0,
+                                    [((self.PX, self.PY), bytearray(81))], pool)
+        self.assertFalse(os.path.exists(path))
+
+
+class CoarseInputsTest(unittest.TestCase):
+    """An ancestor keeps only what its level can show, within the .lvr's u16 counts."""
+
+    def test_ponds_under_a_cell_go_from_land_holes_and_water_together(self):
+        from bake_osm_coast import WaterBody, coarse_inputs
+        b = tile_bounds(4, 17, 3)
+        cell = (b.east - b.west) / 256
+        big = box(b.west + 1, b.south + 1, b.west + 2, b.south + 2)
+        ponds = [box(b.west + 3 + i * 0.001, b.south + 3, b.west + 3 + i * 0.001 + 0.0005, b.south + 3.0005)
+                 for i in range(70000)]
+        land = Polygon(box(b.west, b.south, b.east, b.north).exterior,
+                       [big.exterior] + [p.exterior for p in ponds])
+        inland = [WaterBody(big, True, 300.0)] + [WaterBody(p, True, 400.0) for p in ponds]
+        land, inland, courses = coarse_inputs(land, inland, [], 4, 257)
+        self.assertEqual(len(land.interiors), 1, 'only the lake bigger than a cell stays a hole')
+        self.assertEqual([b.height for b in inland], [300.0])
+        self.assertGreater(cell * cell, ponds[0].area)

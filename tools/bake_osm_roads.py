@@ -41,12 +41,16 @@ except ImportError:
     print('error: shapely is required (pip install shapely)', file=sys.stderr)
     raise
 
+from osm_pbf import pbf_elements
+
 from osm_common import (
     CLASS_BYTE, ROAD_CLASSES, road_class_byte,
     OVERPASS_OUT,
     Bounds,
     glue_negative_bbox,
     load_manifest,
+    replace_file,
+    update_manifest,
     nodes_map,
     overpass_fetch_cells,
     parse_bbox,
@@ -57,7 +61,7 @@ from osm_common import (
     ways_map,
 )
 from bake_osm_coast import decode_index, scan_pdm_tiles
-from osm_bridges import Bridge, encode_rbr, extract_bridges, is_span, polyline_length_m
+from osm_bridges import Bridge, decode_rbr, encode_rbr, extract_bridges, is_span, polyline_length_m
 
 RVR_MAGIC = b'RVR1'
 
@@ -154,6 +158,11 @@ def overpass_roads_query(c: Bounds) -> str:
 );
 {OVERPASS_OUT}
 '''
+
+
+def road_tag_predicate(tags: dict) -> bool:
+    """The same test `overpass_roads_query` encodes as QL, for the PBF path."""
+    return road_class_byte(tags) is not None
 
 
 def assemble_roads(data: dict, skip_spans: bool = False) -> List[Road]:
@@ -374,6 +383,99 @@ def line_tolerance_deg(z: int, max_zoom: int) -> float:
     return cells
 
 
+def child_roads(out_dir: str, z: int, x: int, y: int, max_zoom: int) -> List[Road]:
+    """The runs of tile (z, x, y)'s four children on disk, as Roads.
+
+    A coarser tile used to be clipped from this bake's own roads, which only
+    cover this bake's bbox, so every chunk of an import and every later
+    import emptied the shared coarser tiles of their neighbours' roads (the
+    same flaw as the coast bake's ancestors, see its child_inputs). The
+    children on disk hold every bake's roads. A leaf carries its bridge and
+    tunnel spans in its .rbr instead of its .rvr, so for the level just
+    above the leaf those spans are added back, or every bridge would be a
+    gap in the coarser strokes.
+    """
+    out: List[Road] = []
+    for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+        cx, cy = x * 2 + qx, y * 2 + qy
+        path = rvr_path(out_dir, z + 1, cx, cy)
+        if os.path.isfile(path):
+            with open(path, 'rb') as fh:
+                for cls, width, pts in decode_rvr(fh.read()):
+                    if len(pts) >= 2:
+                        out.append(Road(cls, width, LineString(pts)))
+        span_path = rbr_path(out_dir, z + 1, cx, cy)
+        if z + 1 == max_zoom and os.path.isfile(span_path):
+            with open(span_path, 'rb') as fh:
+                for span in decode_rbr(fh.read()):
+                    if span.cls != 255 and len(span.points) >= 2:
+                        out.append(Road(span.cls, span.deck_width_m, LineString(span.points)))
+    return out
+
+
+def write_levels(
+    out_dir: str, tiles: Dict[int, Set[Tuple[int, int]]], bbox: Bounds,
+    min_zoom: int, max_zoom: int, leaf_roads: Optional[Sequence[Road]],
+) -> Tuple[int, int, int, int]:
+    """Writes the .rvr tiles in `bbox`, finest level first.
+
+    The leaf is clipped from `leaf_roads` (None leaves it alone, for
+    --rebuild-ancestors); every coarser level from the level below it on
+    disk, see child_roads. Returns (files, bytes, runs, stale files removed).
+    """
+    total_files = 0
+    total_bytes = 0
+    total_parts = 0
+    removed = 0
+    for z in range(max_zoom, min_zoom - 1, -1):
+        cut = class_cut_for_zoom(z)
+        x0, y0, x1, y1 = tile_range_for_bounds(z, bbox)
+        level_tiles = sorted(t for t in tiles.get(z, ()) if x0 <= t[0] <= x1 and y0 <= t[1] <= y1)
+        if cut is None or not level_tiles or (z >= max_zoom and leaf_roads is None):
+            continue
+        tol = line_tolerance_deg(z, max_zoom)
+        if z >= max_zoom:
+            level_roads = [r for r in leaf_roads if r.cls <= cut]
+            tree = STRtree([r.line for r in level_roads])
+        files = 0
+        parts_written = 0
+        level_bytes = 0
+        for x, y in level_tiles:
+            if z < max_zoom:
+                level_roads = [r for r in child_roads(out_dir, z, x, y, max_zoom) if r.cls <= cut]
+                tree = STRtree([r.line for r in level_roads])
+            parts = clip_roads(level_roads, tree, tile_bounds(z, x, y), tol) if level_roads else []
+            path = rvr_path(out_dir, z, x, y)
+            if not parts:
+                if os.path.isfile(path):
+                    os.remove(path)
+                    removed += 1
+                continue
+            level_bytes += write_rvr(out_dir, z, x, y, encode_rvr(parts))
+            files += 1
+            parts_written += len(parts)
+        total_files += files
+        total_bytes += level_bytes
+        total_parts += parts_written
+        print(f'level {z:2d}    {files}/{len(level_tiles)} tiles carry roads, '
+              f'{parts_written} runs, {level_bytes / 1024:.0f} KB, classes <= {ROAD_CLASSES[cut]}',
+              flush=True)
+    return total_files, total_bytes, total_parts, removed
+
+
+def known_tiles(out_dir: str, manifest: dict, min_zoom: int, max_zoom: int) -> Dict[int, Set[Tuple[int, int]]]:
+    """The .pdm files on disk, topped up from the index, the way the coast
+    bake enumerates them: a road is only worth writing where a mesh will be
+    baked, and that is wherever there are heights."""
+    index_path = os.path.join(out_dir, manifest.get('indexPath', 'index.bin'))
+    tiles = scan_pdm_tiles(out_dir, min_zoom, max_zoom)
+    if os.path.isfile(index_path):
+        for z, coords in decode_index(index_path, min_zoom, max_zoom).items():
+            if coords:
+                tiles[z] = coords | tiles.get(z, set())
+    return tiles
+
+
 def bake(args: argparse.Namespace) -> int:
     started = time.time()
     manifest_path = args.manifest or os.path.join(args.out, 'manifest.json')
@@ -391,16 +493,31 @@ def bake(args: argparse.Namespace) -> int:
     print(f'coverage    lon [{bbox.west:.5f}, {bbox.east:.5f}] lat [{bbox.south:.5f}, {bbox.north:.5f}]')
     print(f'zoom        {min_zoom}..{max_zoom}')
 
-    print('fetching OSM roads', flush=True)
-    received = [0]
+    if getattr(args, 'rebuild_ancestors', False):
+        # The repair for tiles written before coarser levels came from disk:
+        # nothing fetched, the leaf left alone.
+        files, size, parts, removed = write_levels(
+            out_dir, known_tiles(out_dir, manifest, min_zoom, max_zoom), bbox, min_zoom, max_zoom, None)
+        print(f'rebuilt {files} coarser road tiles, {parts} runs'
+              + (f'; removed {removed} stale' if removed else '') + f' in {time.time() - started:.1f}s')
+        return 0
 
-    def on_progress(n: int) -> None:
-        if n - received[0] > 4 * 1024 * 1024:
-            received[0] = n
-            print(f'  {n / 1048576:.1f} MB received', flush=True)
+    if args.pbf:
+        print(f'reading OSM roads from {args.pbf}', flush=True)
+        data = pbf_elements(args.pbf, bbox, road_tag_predicate, 'roads',
+                             include_relations=False, refresh=args.refresh_osm)
+        print(f'  {sum(1 for el in data["elements"] if el["type"] == "way")} ways')
+    else:
+        print('fetching OSM roads', flush=True)
+        received = [0]
 
-    data = overpass_fetch_cells(overpass_roads_query, bbox, 'roads', args.refresh_osm,
-                                on_progress=on_progress, zoom=ROAD_CELL_ZOOM)
+        def on_progress(n: int) -> None:
+            if n - received[0] > 4 * 1024 * 1024:
+                received[0] = n
+                print(f'  {n / 1048576:.1f} MB received', flush=True)
+
+        data = overpass_fetch_cells(overpass_roads_query, bbox, 'roads', args.refresh_osm,
+                                    on_progress=on_progress, zoom=ROAD_CELL_ZOOM)
     if args.fetch_only:
         print('fetch-only: cache filled, nothing baked')
         return 0
@@ -415,51 +532,11 @@ def bake(args: argparse.Namespace) -> int:
         print('no roads in this box; nothing written')
         return 0
 
-    # The .pdm files on disk, topped up from the index, the way the coast
-    # bake enumerates them: a road is only worth writing where a mesh will
-    # be baked, and that is wherever there are heights.
-    index_path = os.path.join(out_dir, manifest.get('indexPath', 'index.bin'))
-    tiles = scan_pdm_tiles(out_dir, min_zoom, max_zoom)
-    if os.path.isfile(index_path):
-        for z, coords in decode_index(index_path, min_zoom, max_zoom).items():
-            if coords:
-                tiles[z] = coords | tiles.get(z, set())
+    tiles = known_tiles(out_dir, manifest, min_zoom, max_zoom)
 
-    total_files = 0
-    total_bytes = 0
-    total_parts = 0
-    removed = 0
-    for z in range(min_zoom, max_zoom + 1):
-        cut = class_cut_for_zoom(z)
-        x0, y0, x1, y1 = tile_range_for_bounds(z, bbox)
-        level_tiles = sorted(t for t in tiles.get(z, ()) if x0 <= t[0] <= x1 and y0 <= t[1] <= y1)
-        if cut is None or not level_tiles:
-            continue
-        level_roads = [r for r in (leaf_roads if z >= max_zoom else roads) if r.cls <= cut]
-        tree = STRtree([r.line for r in level_roads])
-        tol = line_tolerance_deg(z, max_zoom)
-        files = 0
-        parts_written = 0
-        level_bytes = 0
-        for x, y in level_tiles:
-            parts = clip_roads(level_roads, tree, tile_bounds(z, x, y), tol)
-            path = rvr_path(out_dir, z, x, y)
-            if not parts:
-                if os.path.isfile(path):
-                    os.remove(path)
-                    removed += 1
-                continue
-            level_bytes += write_rvr(out_dir, z, x, y, encode_rvr(parts))
-            files += 1
-            parts_written += len(parts)
-        total_files += files
-        total_bytes += level_bytes
-        total_parts += parts_written
-        print(f'level {z:2d}    {files}/{len(level_tiles)} tiles carry roads, '
-              f'{parts_written} runs, {level_bytes / 1024:.0f} KB, classes <= {ROAD_CLASSES[cut]}',
-              flush=True)
-
-    # Bridges ride only the leaf: a span is a few hundred metres, and the
+    # Bridges before the levels: z11 is derived from the z12 tiles on disk,
+    # and a leaf's spans live in its .rbr, not its .rvr.
+    # They ride only the leaf: a span is a few hundred metres, and the
     # deck and piers are drawn from close enough that a coarser tile has no
     # use for them. Filed by midpoint, never clipped (see bridges_by_tile).
     bridge_files = 0
@@ -475,27 +552,28 @@ def bake(args: argparse.Namespace) -> int:
         bridge_spans += len(items)
     print(f'bridges     {bridge_spans}/{len(spans)} spans in {bridge_files} leaf tiles (.rbr)')
 
-    # Re-read: the importer runs this alongside the coast and airfield bakes,
-    # which write the same manifest meanwhile. Writing back the copy loaded at
-    # start silently dropped the airfields they had just added.
-    manifest = load_manifest(manifest_path)
-    previous = (manifest.get('roads') or {}).get('coverage')
-    merged = {
-        'west': min(previous['west'], bbox.west) if previous else bbox.west,
-        'south': min(previous['south'], bbox.south) if previous else bbox.south,
-        'east': max(previous['east'], bbox.east) if previous else bbox.east,
-        'north': max(previous['north'], bbox.north) if previous else bbox.north,
-    }
-    manifest['roads'] = {
-        'path': '{z}/{x}/{y}.rvr',
-        'source': 'osm',
-        'minZoom': min_zoom,
-        'coverage': merged,
-        'bridges': {'path': '{z}/{x}/{y}.rbr', 'zoom': max_zoom},
-    }
-    with open(manifest_path, 'w', encoding='utf-8') as fh:
-        json.dump(manifest, fh, indent=2)
-        fh.write('\n')
+    total_files, total_bytes, total_parts, removed = write_levels(
+        out_dir, tiles, bbox, min_zoom, max_zoom, leaf_roads)
+
+    # Locked and re-read: the importer runs this alongside the coast and
+    # airfield bakes, which write the same manifest meanwhile. Writing back
+    # the copy loaded at start silently dropped the airfields they had added.
+    def set_roads(manifest: dict) -> None:
+        previous = (manifest.get('roads') or {}).get('coverage')
+        merged = {
+            'west': min(previous['west'], bbox.west) if previous else bbox.west,
+            'south': min(previous['south'], bbox.south) if previous else bbox.south,
+            'east': max(previous['east'], bbox.east) if previous else bbox.east,
+            'north': max(previous['north'], bbox.north) if previous else bbox.north,
+        }
+        manifest['roads'] = {
+            'path': '{z}/{x}/{y}.rvr',
+            'source': 'osm',
+            'minZoom': min_zoom,
+            'coverage': merged,
+            'bridges': {'path': '{z}/{x}/{y}.rbr', 'zoom': max_zoom},
+        }
+    update_manifest(manifest_path, set_roads)
     print(f'\nwrote {total_files} road tiles, {total_parts} runs, {total_bytes / 1048576:.1f} MB (.rvr)'
           + (f'; removed {removed} stale' if removed else ''))
     print(f'updated {manifest_path} (roads)')
@@ -509,6 +587,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument('--manifest', help='planet manifest.json (default: {out}/manifest.json)')
     parser.add_argument('--out', default='assets/planet', help='planet asset directory')
     parser.add_argument('--bbox', help='west,south,east,north degrees (default: manifest coverage)')
+    parser.add_argument('--pbf', help='read roads from this local .osm.pbf instead of Overpass '
+                                       '(pip install osmium)')
     parser.add_argument('--min-zoom', type=int, default=DEFAULT_MIN_ZOOM,
                         help=f'coarsest level that carries roads (default {DEFAULT_MIN_ZOOM})')
     parser.add_argument('--refresh-osm', action='store_true',
@@ -517,6 +597,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                         help='keep bridge and tunnel ways in the leaf road strokes and write no .rbr')
     parser.add_argument('--fetch-only', action='store_true',
                         help='only fetch the Overpass answers into the cache; bake nothing')
+    parser.add_argument('--rebuild-ancestors', action='store_true',
+                        help='re-derive every level above the leaf in the bbox from the tiles on '
+                             'disk; fetches nothing and leaves the leaf alone')
     raw = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(glue_negative_bbox(raw))
     return bake(args)

@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-    Step, deletePlan, formatDuration, isProgressLine, parseProgress, plan, chunkBbox, snapBboxToTiles, splitStream,
-    stepOutcome,
-    prefetchPlan,
+    Lanes, Step, dataSteps, deletePlan, extractPathFor, formatDuration, isProgressLine, parseProgress, plan, chunkBbox,
+    snapBboxToTiles, splitStream, stepOutcome,
 } from './areaImport';
 
 /**
@@ -45,6 +44,12 @@ describe('parseProgress', () => {
         assert.equal(parseProgress('  writing coast and vector tiles  (100.0% of stage)'), 100);
     });
 
+    it('reads the extract download counter', () => {
+        // tools/osm_extract.py: `  {got_mb:.1f}/{total_mb:.1f} MB ({pct:.1f}%)`
+        assert.equal(parseProgress('  12.3/456.7 MB (2.7%)'), 2.7);
+        assert.equal(parseProgress('  456.7/456.7 MB (100.0%)'), 100);
+    });
+
     it('reads the coastline rasterise counter', () => {
         // tools/bake_osm_coast.py: `  rasterize {i+1}/{len(max_tiles)}`
         assert.equal(parseProgress('  rasterize 12/24'), 50);
@@ -75,6 +80,7 @@ describe('isProgressLine', () => {
         assert.equal(isProgressLine('  rasterize 12/24'), true);
         assert.equal(isProgressLine('  fetching OSM coastline 4.2 MB received  (13.1% of stage)'), true);
         assert.equal(isProgressLine('  writing coast and vector tiles zoom 11 40/120  (88.5% of stage)'), true);
+        assert.equal(isProgressLine('  12.3/456.7 MB (2.7%)'), true);
     });
 
     it('keeps the coast bake phase headings and summaries in the log', () => {
@@ -200,10 +206,9 @@ describe('the bake plans end with meshes then textures over the same box', () =>
         }
     }
 
-    it('holds for an import, with and without cover', () => {
+    it('holds for an import', () => {
         const job = { name: 'Test Area', bbox: [7.6, 45.9, 7.8, 46.0] };
-        assertMeshThenTextures(plan(job, true), true);
-        assertMeshThenTextures(plan(job, false), true);
+        assertMeshThenTextures(plan(job), true);
     });
 
     it('holds for a delete', () => {
@@ -211,24 +216,22 @@ describe('the bake plans end with meshes then textures over the same box', () =>
     });
 });
 
-describe('prefetchPlan', () => {
-    it('warms the cache with the fetch-only modes of the three Overpass bakes, and the OSM stages wait for it', () => {
+describe('plan', () => {
+    it('resolves a local OSM extract first and reads it from every OSM-fetching stage', () => {
         const job = { name: 'Test Area', bbox: [7.6, 45.9, 7.8, 46.0] };
-        const side = prefetchPlan(job);
-        assert.deepEqual(side.map(s => s.args[0]),
-            ['tools/bake_osm_coast.py', 'tools/bake_osm_airports.py', 'tools/bake_osm_roads.py']);
-        for (const s of side) {
-            assert.ok(s.args.includes('--fetch-only'), `${s.label} would bake, not just fetch`);
-            assert.ok(s.args.includes(`--bbox=${job.bbox.join(',')}`), `${s.label} has no box`);
+        const steps = plan(job);
+        assert.equal(steps[0].args[0], 'tools/osm_extract.py');
+        assert.ok(steps[0].args.includes(`--bbox=${job.bbox.join(',')}`));
+        const pbf = extractPathFor(job.bbox);
+        for (const tool of ['tools/bake_osm_coast.py', 'tools/bake_osm_roads.py',
+            'tools/bake_osm_airports.py', 'tools/bake_planet_cover.py']) {
+            const step = steps.find(s => s.args[0] === tool);
+            assert.ok(step, `${tool} missing from the plan`);
+            assert.ok(step.args.includes(`--pbf=${pbf}`), `${tool} does not read the local extract`);
         }
-        // The coast prefetch has to ask for the landuse groups too, or the
-        // coast stage fetches them itself after all.
-        assert.ok(side[0].args.includes('--osm-landuse'));
-        const steps = plan(job, true);
-        const waiting = steps.filter(s => s.afterPrefetch);
-        assert.deepEqual(waiting.map(s => s.args[0]), ['tools/bake_osm_coast.py', 'tools/bake_osm_roads.py']);
-        // The DEM stages run under the prefetch, not after it.
-        assert.ok(steps.indexOf(waiting[0]) >= 2, 'nothing overlaps the prefetch');
+        // Satellite cover is no longer optional.
+        assert.ok(steps.some(s => s.args[0] === 'tools/fetch_cover_sources.py'));
+        assert.ok(steps.some(s => s.args[0] === 'tools/bake_planet_cover.py'));
     });
 });
 
@@ -249,7 +252,7 @@ describe('stepOutcome', () => {
         // bake_osm_airports.py exits EXIT_PARTIAL (2) when it wrote the
         // manifest but every mirror failed for an area; one such area used
         // to abort the whole import after the DEM and coast stages.
-        const airfields = plan({ name: 'lhg', bbox: [166.9, -21.8, 168.4, -20.6] }, true)
+        const airfields = plan({ name: 'lhg', bbox: [166.9, -21.8, 168.4, -20.6] })
             .find(s => s.args.includes('tools/bake_osm_airports.py'));
         assert.ok(airfields, 'no airfield bake in the plan');
         assert.equal(airfields.partialCode, 2);
@@ -279,5 +282,60 @@ describe('chunkBbox', () => {
                 assert.ok(Math.abs(v / tile - Math.round(v / tile)) < 1e-6);
             }
         }
+    });
+});
+
+describe('dataSteps lanes', () => {
+    it('gives every data step a lane, and reads the OSM data before the coast bake', () => {
+        const steps = dataSteps({ name: 'Test Area', bbox: [7.6, 45.9, 7.8, 46.0], pbf: 'x.osm.pbf' });
+        for (const s of steps) {
+            assert.ok(s.lane, `${s.label} has no lane`);
+        }
+        const tools = steps.map(s => s.args[0]);
+        const read = tools.indexOf('tools/osm_prefetch.py');
+        assert.ok(read >= 0, 'no shared OSM read');
+        assert.ok(read < tools.indexOf('tools/bake_osm_coast.py'), 'the coast bake runs before the OSM read');
+        assert.ok(steps[read].args.includes('--pbf=x.osm.pbf'));
+    });
+});
+
+describe('Lanes', () => {
+    const tick = () => new Promise(r => setTimeout(r, 5));
+
+    it('runs a lane in order, one at a time, and waits for dependencies', async () => {
+        const lanes = new Lanes();
+        const events: string[] = [];
+        let busy = 0;
+        const step = (name: string) => async () => {
+            busy++;
+            assert.equal(busy, 1, `${name} overlapped another step of its lane`);
+            events.push(`start ${name}`);
+            await tick();
+            events.push(`end ${name}`);
+            busy--;
+        };
+        const gate = lanes.run('other', [], async () => {
+            await tick();
+            await tick();
+            events.push('gate');
+        });
+        lanes.run('a', [], step('a1'));
+        lanes.run('a', [gate], step('a2'));
+        await lanes.join();
+        assert.deepEqual(events, ['start a1', 'end a1', 'gate', 'start a2', 'end a2']);
+    });
+
+    it('starts nothing after a failure, and join throws it', async () => {
+        const lanes = new Lanes();
+        let ran = false;
+        const failed = lanes.run('a', [], async () => {
+            throw new Error('cover bake exited with code 1');
+        });
+        lanes.run('b', [failed], async () => {
+            ran = true;
+        });
+        await assert.rejects(lanes.join(), /cover bake exited/);
+        assert.equal(ran, false);
+        assert.ok(lanes.error);
     });
 });

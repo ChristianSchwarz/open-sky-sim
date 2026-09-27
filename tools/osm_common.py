@@ -289,8 +289,80 @@ def parse_bbox(text: str) -> Bounds:
 
 
 def load_manifest(path: str) -> dict:
-    with open(path, encoding='utf-8') as fh:
-        return json.load(fh)
+    # A writer's os.replace can briefly make the file unopenable on Windows.
+    for attempt in range(50):
+        try:
+            with open(path, encoding='utf-8') as fh:
+                return json.load(fh)
+        except PermissionError:
+            if attempt == 49:
+                raise
+            time.sleep(0.1)
+    raise AssertionError('unreachable')
+
+
+def replace_file(path: str, data: bytes) -> None:
+    """Write `data` to `path` atomically: a reader sees the old file or the new, never half.
+
+    On Windows the rename fails while another process has the target open,
+    so it is retried for a few seconds.
+    """
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'wb') as fh:
+        fh.write(data)
+    for attempt in range(100):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 99:
+                os.remove(tmp)
+                raise
+            time.sleep(0.05)
+
+
+MANIFEST_LOCK_STALE_S = 300.0
+
+
+def update_manifest(path: str, mutate: Callable[[dict], None]) -> dict:
+    """Re-read the manifest, apply `mutate` to it and write it back, under a lock.
+
+    The importer runs the coast, road and airfield bakes of different chunks
+    at the same time, and each of them owns a block of the one manifest.
+    Writing back the copy loaded at start dropped whatever the others had
+    written meanwhile (the airfields, more than once); re-reading just before
+    the write narrowed that to a race. Under the lock, `mutate` always sees
+    the latest file. A lock older than MANIFEST_LOCK_STALE_S is taken to be
+    left behind by a killed bake. Returns the manifest as written.
+    """
+    lock = path + '.lock'
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode('ascii'))
+            os.close(fd)
+            break
+        except (FileExistsError, PermissionError):
+            # PermissionError too: on Windows a lock file another process is
+            # still deleting cannot be created either, and that is busy, not
+            # a failure - taking it as one lost a writer's updates.
+            try:
+                if time.time() - os.path.getmtime(lock) > MANIFEST_LOCK_STALE_S:
+                    os.remove(lock)
+                    continue
+            except OSError:
+                pass
+            time.sleep(0.05)
+    try:
+        manifest = load_manifest(path)
+        mutate(manifest)
+        replace_file(path, (json.dumps(manifest, indent=2) + '\n').encode('utf-8'))
+        return manifest
+    finally:
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
 
 
 # --- Overpass client --------------------------------------------------

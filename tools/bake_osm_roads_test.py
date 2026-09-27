@@ -170,3 +170,51 @@ class BridgeOwnership(unittest.TestCase):
         self.assertEqual(sum(len(v) for v in got.values()), 1)
         mid = span_midpoint(span.points)
         self.assertAlmostEqual(mid[0], 0.0005, places=4)
+
+
+class CoarserLevelsFromDiskTest(unittest.TestCase):
+    """A coarser .rvr tile comes from the tiles below it on disk.
+
+    It used to be clipped from one bake's roads, so the chunk baked last
+    emptied the shared coarser tiles of every neighbouring chunk's roads.
+    """
+
+    def test_two_chunks_and_a_bridge_all_reach_the_coarser_tile(self):
+        import os
+        import tempfile
+        from shapely.geometry import LineString
+        from bake_osm_roads import (Road, decode_rvr, rvr_path, write_levels)
+        from osm_bridges import Bridge, encode_rbr
+        from osm_common import CLASS_BYTE, Bounds, tile_bounds
+        tmp = tempfile.mkdtemp()
+        z, px, py = 11, 2200, 434
+        tiles = {12: {(px * 2 + qx, py * 2 + qy) for qx in (0, 1) for qy in (0, 1)}, 11: {(px, py)}}
+        motorway = CLASS_BYTE['motorway']
+
+        def leaf_road(qx, qy):
+            b = tile_bounds(12, px * 2 + qx, py * 2 + qy)
+            mid = (b.south + b.north) / 2
+            return Road(motorway, 20.0, LineString([(b.west, mid), (b.east, mid)]))
+
+        def bake_chunk(cells):
+            b0 = tile_bounds(12, *min(cells))
+            b1 = tile_bounds(12, *max(cells))
+            box_ = Bounds(min(b0.west, b1.west), min(b0.south, b1.south),
+                          max(b0.east, b1.east), max(b0.north, b1.north))
+            roads = [leaf_road(x - px * 2, y - py * 2) for x, y in cells]
+            write_levels(tmp, tiles, box_, 11, 12, roads)
+
+        # Chunk A: the northern children; chunk B, baked later: the southern.
+        bake_chunk([(px * 2, py * 2), (px * 2 + 1, py * 2)])
+        # A bridge span on the leaf, kept out of its .rvr like a real bake does.
+        sb = tile_bounds(12, px * 2, py * 2 + 1)
+        span = [(sb.west, sb.south + 1e-4), (sb.east, sb.south + 1e-4)]
+        os.makedirs(os.path.join(tmp, '12', str(px * 2)), exist_ok=True)
+        with open(os.path.join(tmp, '12', str(px * 2), f'{py * 2 + 1}.rbr'), 'wb') as fh:
+            fh.write(encode_rbr([Bridge(0, 25.0, 1, 0.0, motorway, span)]))
+        bake_chunk([(px * 2, py * 2 + 1), (px * 2 + 1, py * 2 + 1)])
+
+        with open(rvr_path(tmp, z, px, py), 'rb') as fh:
+            parts = decode_rvr(fh.read())
+        self.assertEqual(len(parts), 5, 'four leaf runs from two chunks plus the bridge span')
+        self.assertIn(25.0, [round(w, 3) for _, w, _ in parts])

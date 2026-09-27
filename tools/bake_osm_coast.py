@@ -9,7 +9,11 @@ assembles land polygons from OpenStreetMap, rasterises them onto the same
 Data sources (in priority order):
 
 1. ``--land-shp PATH`` — shapefile from osmcoastline (preferred)
-2. ``--pbf PATH`` — run osmcoastline if installed, else parse with Overpass-style logic
+2. ``--pbf PATH`` — read coastline, inland water, watercourses and (with
+   ``--osm-landuse``) landuse straight out of a local extract via
+   ``tools/osm_pbf.py`` (``pip install osmium``); falls back to running
+   ``osmcoastline`` (shoreline only, no inland water) if ``osmium`` isn't
+   installed
 3. Overpass API for ``--bbox`` or manifest ``coverage``
 
 Usage::
@@ -22,7 +26,8 @@ Requires ``shapely`` and ``requests``::
 
     pip install shapely requests
 
-Optional: ``osmcoastline`` binary for robust coastline assembly from PBF.
+Optional: ``osmium`` (pip install osmium) for the local-``--pbf`` path, or
+the ``osmcoastline`` binary as a shoreline-only fallback.
 """
 
 from __future__ import annotations
@@ -65,6 +70,8 @@ from osm_common import (
     Bounds,
     glue_negative_bbox,
     load_manifest,
+    replace_file,
+    update_manifest,
     merge_elements,
     nodes_map as _nodes_map,
     overpass_fetch as _overpass_fetch,
@@ -81,6 +88,7 @@ from osm_common import (
     tile_range_for_bounds,
     ways_map as _ways_map,
 )
+from osm_pbf import pbf_elements, pbf_elements_groups, pbf_available
 
 try:
     from rasterio.features import rasterize
@@ -93,7 +101,9 @@ except ImportError:
 # bake_planet_cover.py's own HAS_OSM_LANDUSE - a bake that never passes
 # --osm-landuse never needs shapely's STRtree or the landuse tag table.
 try:
-    from osm_landuse import assemble_landuse_polygons, build_landuse_index, overpass_landuse_query
+    from osm_landuse import (
+        assemble_landuse_polygons, build_landuse_index, landuse_tag_predicate, overpass_landuse_query,
+    )
     from osm_regions import Region, assemble_tile_regions, derive_tile_regions
     HAS_OSM_LANDUSE = True
 except ImportError:
@@ -178,6 +188,8 @@ def decode_index(index_path: str, min_zoom: int, max_zoom: int) -> Dict[int, Set
             break
         bits = data[offset:offset + nbytes]
         offset += nbytes
+        if z not in tiles:
+            continue
         for dy in range(h):
             for dx in range(w):
                 idx = dy * w + dx
@@ -304,6 +316,21 @@ class StageProgress:
         tail = f', {summary}' if summary else ''
         print(f'  {self._label} done in {elapsed:.1f}s{tail}', flush=True)
         self._current = None
+
+
+def coast_tag_predicate(tags: dict) -> bool:
+    """The union of `overpass_query`'s three groups (coastline, water features,
+    islands), for the local-PBF path — same tags, one read instead of three
+    fetches, since a local file has no per-request cost to split against."""
+    if tags.get('natural') in ('coastline', 'water', 'bay'):
+        return True
+    if tags.get('waterway') == 'riverbank' or tags.get('waterway') in ('river', 'canal'):
+        return True
+    if tags.get('landuse') == 'reservoir':
+        return True
+    if tags.get('place') in ('island', 'islet'):
+        return True
+    return False
 
 
 def overpass_query(
@@ -1059,6 +1086,12 @@ def resolve_river_profiles(
     lines = [merged] if isinstance(merged, LineString) else list(getattr(merged, 'geoms', []))
     step = cell_deg * PROFILE_STEP_CELLS
     lakes = [b for b in bodies if b.flat and b.height is not None]
+    # Indexed, not scanned: every chain against every lake, and every flowing
+    # body against every sample, was quadratic on one core - the western
+    # Erzgebirge chunk (44602 lakes) sat in here for over twenty minutes
+    # with the pool idle.
+    lake_tree = STRtree([lake.geom for lake in lakes]) if lakes else None
+    lake_heights = np.array([lake.height for lake in lakes], dtype=float)
     chains: List[np.ndarray] = []
     anchored_chains = 0
     for line in lines:
@@ -1072,12 +1105,12 @@ def resolve_river_profiles(
         if fitted is None:
             continue
         anchors = np.full(len(xs), np.nan)
-        for lake in lakes:
-            minx, miny, maxx, maxy = lake.geom.bounds
-            near = np.nonzero((xs >= minx) & (xs <= maxx) & (ys >= miny) & (ys <= maxy))[0]
-            if len(near):
-                inside = shapely.contains_xy(lake.geom, xs[near], ys[near])
-                anchors[near[inside]] = lake.height
+        if lake_tree is not None:
+            point_idx, lake_idx = lake_tree.query(pts, predicate='within')
+            # Lake order, so where two lakes overlap the later one wins, as
+            # the scan over the lake list did.
+            order = np.argsort(lake_idx, kind='stable')
+            anchors[point_idx[order]] = lake_heights[lake_idx[order]]
         if np.isfinite(anchors).any():
             anchored_chains += 1
             fitted = anchor_profile(fitted, anchors)
@@ -1087,14 +1120,12 @@ def resolve_river_profiles(
     if not chains:
         return 0
     all_samples = np.concatenate(chains)
+    sample_tree = STRtree(shapely.points(all_samples[:, 0], all_samples[:, 1]))
     resolved = 0
     for body in flowing:
         reach = body.geom.buffer(step * 2.0)
-        minx, miny, maxx, maxy = reach.bounds
-        near = all_samples[(all_samples[:, 0] >= minx) & (all_samples[:, 0] <= maxx)
-                           & (all_samples[:, 1] >= miny) & (all_samples[:, 1] <= maxy)]
-        if len(near):
-            near = near[shapely.contains_xy(reach, near[:, 0], near[:, 1])]
+        # Sorted back into sample order, which is the order along each river.
+        near = all_samples[np.sort(sample_tree.query(reach, predicate='contains'))]
         if len(near) >= 2:
             body.profile = near
             resolved += 1
@@ -1147,6 +1178,7 @@ def resolve_body_heights(
 def assemble_land(
     bbox: Bounds, args: argparse.Namespace, progress: Optional[StageProgress] = None,
     skip_sea: Optional[Callable[[Bounds], bool]] = None,
+    pbf_data: Optional[dict] = None,
 ) -> Tuple[MultiPolygon, List[WaterBody], List[Watercourse]]:
     # osmcoastline emits the ocean shoreline and nothing else, so those two
     # paths carry no inland water and no watercourses. They still bake
@@ -1173,6 +1205,33 @@ def assemble_land(
         return from_shapefile(args.land_shp)
 
     if args.pbf:
+        if pbf_available():
+            # Reads coastline, inland water and watercourses out of the local
+            # file in one pass, through the same _polygons_from_osm assembly
+            # the Overpass path uses - unlike the osmcoastline/shapefile
+            # route below, this keeps inland water and watercourses instead
+            # of leaving them empty.
+            if pbf_data is not None:
+                data = pbf_data
+            else:
+                if progress is not None:
+                    progress.begin('coast', f'reading OSM coastline and water features from {args.pbf}')
+                data = pbf_elements(args.pbf, bbox, coast_tag_predicate, 'coast',
+                                     refresh=getattr(args, 'refresh_osm', False))
+                if progress is not None:
+                    progress.end(f'{len(data.get("elements", []))} elements')
+            if progress is not None:
+                progress.begin('land')
+            land, inland, courses = _polygons_from_osm(
+                data, bbox, progress.update if progress is not None else None)
+            clip = bbox.as_box()
+            inland = [body for body in inland if body.geom.intersects(clip)]
+            courses = [course for course in courses if course.line.intersects(clip)]
+            if progress is not None:
+                progress.end(f'{len(land.geoms)} land polygons, {len(inland)} inland bodies, '
+                             f'{len(courses)} watercourses')
+            return land, inland, courses
+        print('osmium not installed (pip install osmium) — falling back to osmcoastline', file=sys.stderr)
         with tempfile.TemporaryDirectory() as tmp:
             shp = os.path.join(tmp, 'land_polygons.shp')
             if run_osmcoastline(args.pbf, shp):
@@ -1333,6 +1392,32 @@ def _encode_ring(ring: Sequence[Tuple[float, float]]) -> bytes:
     return out
 
 
+_NEAR_CACHE: list = []
+
+
+def _near_tile(items: Sequence, geoms, b: Bounds) -> List[int]:
+    """Indices of `items` whose geometry's bounding box touches tile `b`, in order.
+
+    The bounds of the whole list are read once, vectorised, and kept for the
+    next tile: testing them one by one in Python was 12% of the coast bake's
+    tile writing on the Erzgebirge chunk (45 031 lakes, every one of them
+    looked at for each of its 2025 tiles). The last few lists are cached -
+    by identity, holding a reference so the id cannot be reused - since an
+    ancestor tile brings a small list of its own every time.
+    """
+    for ref, bounds in _NEAR_CACHE:
+        if ref is items:
+            break
+    else:
+        bounds = shapely.bounds(np.asarray(list(geoms(items)), dtype=object)) if len(items) else             np.zeros((0, 4))
+        _NEAR_CACHE.insert(0, (items, bounds))
+        del _NEAR_CACHE[4:]
+    if len(bounds) == 0:
+        return []
+    return np.flatnonzero(~((bounds[:, 2] < b.west) | (bounds[:, 0] > b.east)
+                            | (bounds[:, 3] < b.south) | (bounds[:, 1] > b.north))).tolist()
+
+
 def clip_inland_bodies(
     bodies: Sequence[WaterBody],
     b: Bounds,
@@ -1347,10 +1432,8 @@ def clip_inland_bodies(
     """
     tile_box = box(b.west, b.south, b.east, b.north)
     out: List[Tuple[Optional[float], List[Tuple[float, float]], List[List[Tuple[float, float]]]]] = []
-    for body in bodies:
-        minx, miny, maxx, maxy = body.geom.bounds
-        if maxx < b.west or minx > b.east or maxy < b.south or miny > b.north:
-            continue
+    for i in _near_tile(bodies, lambda xs: (x.geom for x in xs), b):
+        body = bodies[i]
         clipped = body.geom.intersection(tile_box)
         if clipped.is_empty:
             continue
@@ -1387,10 +1470,8 @@ def clip_watercourses(
     """
     tile_box = box(b.west, b.south, b.east, b.north)
     out: List[Tuple[float, List[Tuple[float, float]]]] = []
-    for course in courses:
-        minx, miny, maxx, maxy = course.line.bounds
-        if maxx < b.west or minx > b.east or maxy < b.south or miny > b.north:
-            continue
+    for i in _near_tile(courses, lambda xs: (x.line for x in xs), b):
+        course = courses[i]
         try:
             clipped = course.line.intersection(tile_box)
         except Exception:
@@ -1490,16 +1571,16 @@ def encode_lvr(
 def write_lvr(out_dir: str, z: int, x: int, y: int, blob: bytes) -> int:
     path = os.path.join(out_dir, str(z), str(x))
     os.makedirs(path, exist_ok=True)
-    with open(os.path.join(path, f'{y}.lvr'), 'wb') as fh:
-        fh.write(blob)
+    # Atomic: another chunk's airfield bake may be reading it right now.
+    replace_file(os.path.join(path, f'{y}.lvr'), blob)
     return len(blob)
 
 
 def write_lwm(out_dir: str, z: int, x: int, y: int, blob: bytes) -> int:
     path = os.path.join(out_dir, str(z), str(x))
     os.makedirs(path, exist_ok=True)
-    with open(os.path.join(path, f'{y}.lwm'), 'wb') as fh:
-        fh.write(blob)
+    # Atomic: another chunk's airfield bake may be reading it right now.
+    replace_file(os.path.join(path, f'{y}.lwm'), blob)
     return len(blob)
 
 
@@ -1863,7 +1944,7 @@ def encode_regions_for_tile(
     finer) and this level's simplify `tol`, the partition is derived from
     them instead of resolved from the landuse polygons again.
     """
-    if landuse_tree is None:
+    if landuse_tree is None and child_claims is None:
         return [], []
     tile_box = box(b.west, b.south, b.east, b.north)
     land_mp = MultiPolygon(list(simplified_land)) if simplified_land else MultiPolygon()
@@ -1920,7 +2001,7 @@ def _clip_worker_inline(
     lines = clip_watercourses(courses, b, line_tol) if courses else []
     regions: list = []
     claims: Optional[List[Tuple[int, bytes]]] = None
-    if landuse_tree is not None and z >= LANDUSE_REGION_MIN_ZOOM:
+    if (landuse_tree is not None or child_claims is not None) and z >= LANDUSE_REGION_MIN_ZOOM:
         regions, claims = encode_regions_for_tile(
             simplified_land, landuse_tree, landuse_polys, landuse_classes, b, child_claims, tol)
         if z <= LANDUSE_REGION_MIN_ZOOM:
@@ -1929,6 +2010,301 @@ def _clip_worker_inline(
         return lwm_bytes, False, 0, 0, claims
     lvr_bytes = write_lvr(out_dir, z, x, y, encode_lvr(polys, inland_polys, lines, regions))
     return lwm_bytes, True, lvr_bytes, len(lines), claims
+
+
+def decode_lvr(blob: bytes) -> dict:
+    """The inverse of `encode_lvr`, for any of LVR1..LVR5.
+
+    Returns `polys` [(ext, holes)], `inland` [(height or None, ext, holes,
+    profile)], `lines` [(width_m, points)] and `regions` [(is_land, class or
+    None, ext, holes)] - the shapes `encode_lvr` takes.
+    """
+    data = zlib.decompress(blob)
+    magic = bytes(data[:4])
+    if magic not in (LVR_MAGIC, LVR2_MAGIC, LVR3_MAGIC, LVR4_MAGIC, LVR5_MAGIC):
+        raise ValueError(f'not an .lvr tile: {magic!r}')
+    pos = 4
+
+    def u16() -> int:
+        nonlocal pos
+        (v,) = struct.unpack_from('<H', data, pos)
+        pos += 2
+        return v
+
+    def f32() -> float:
+        nonlocal pos
+        (v,) = struct.unpack_from('<f', data, pos)
+        pos += 4
+        return v
+
+    def ring() -> List[Tuple[float, float]]:
+        nonlocal pos
+        n = u16()
+        flat = struct.unpack_from(f'<{2 * n}f', data, pos)
+        pos += 8 * n
+        return list(zip(flat[0::2], flat[1::2]))
+
+    def rings() -> Tuple[List[Tuple[float, float]], List[List[Tuple[float, float]]]]:
+        rs = [ring() for _ in range(u16())]
+        return rs[0], rs[1:]
+
+    polys = [rings() for _ in range(u16())]
+    inland: list = []
+    lines: list = []
+    regions: list = []
+    if magic != LVR_MAGIC:
+        for _ in range(u16()):
+            height = f32()
+            ext, holes = rings()
+            inland.append((None if math.isnan(height) else height, ext, holes, []))
+    if magic in (LVR3_MAGIC, LVR4_MAGIC, LVR5_MAGIC):
+        for _ in range(u16()):
+            width = f32()
+            lines.append((width, ring()))
+    if magic in (LVR4_MAGIC, LVR5_MAGIC):
+        for _ in range(u16()):
+            is_land, cls = struct.unpack_from('<BB', data, pos)
+            pos += 2
+            ext, holes = rings()
+            regions.append((bool(is_land), None if cls == REGION_CLASS_NONE else cls, ext, holes))
+    if magic == LVR5_MAGIC:
+        for i, (height, ext, holes, _) in enumerate(inland):
+            n = u16()
+            flat = struct.unpack_from(f'<{3 * n}f', data, pos)
+            pos += 12 * n
+            inland[i] = (height, ext, holes, list(zip(flat[0::3], flat[1::3], flat[2::3])))
+    return {'polys': polys, 'inland': inland, 'lines': lines, 'regions': regions}
+
+
+def _ring_polygon(ext, holes) -> Optional[Polygon]:
+    if len(ext) < 3:
+        return None
+    poly = Polygon(ext, [h for h in holes if len(h) >= 3])
+    if not poly.is_valid:
+        # float32 storage can nudge a ring into touching itself.
+        poly = poly.buffer(0)
+    return None if poly.is_empty else poly
+
+
+def child_inputs(out_dir: str, z: int, x: int, y: int):
+    """What an ancestor tile is clipped from: its four children's .lvr, off disk.
+
+    Returns (land, inland bodies, watercourses, landuse claims or None). An
+    ancestor used to be clipped from the land, water and landuse this bake
+    had assembled - which covers this bake's bbox only, so every chunk of an
+    import and every later import wrote the land of its neighbours into the
+    ancestors they share as open water (blue bands from altitude over Erz
+    and PDM, 2026-09-26: 11/2199/434 half water under four all-land
+    children). The children already on disk are the whole truth for the
+    ancestor's area, whichever bake wrote them, the same reason the mask
+    walk tops its quadrants up from disk.
+
+    Flat lake pieces are merged per surface height, so a lake split across
+    children is one body again; flowing pieces stay separate, each with its
+    own river profile. Claims are None when no child carries regions, which
+    keeps a tile that never had landuse without it.
+    """
+    land_parts: List[Polygon] = []
+    flat: Dict[float, List[Polygon]] = {}
+    bodies: List[WaterBody] = []
+    courses: List[Watercourse] = []
+    claims: List[Tuple[int, bytes]] = []
+    has_regions = False
+    for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+        path = os.path.join(out_dir, str(z + 1), str(x * 2 + qx), f'{y * 2 + qy}.lvr')
+        if not os.path.isfile(path):
+            continue
+        with open(path, 'rb') as fh:
+            tile = decode_lvr(fh.read())
+        for ext, holes in tile['polys']:
+            poly = _ring_polygon(ext, holes)
+            if poly is not None:
+                land_parts.append(poly)
+        for height, ext, holes, profile in tile['inland']:
+            poly = _ring_polygon(ext, holes)
+            if poly is None:
+                continue
+            if height is None:
+                bodies.append(WaterBody(poly, False, None,
+                                        np.asarray(profile, dtype=float) if profile else None))
+            else:
+                flat.setdefault(height, []).append(poly)
+        for width, pts in tile['lines']:
+            if len(pts) >= 2:
+                courses.append(Watercourse(LineString(pts), width))
+        has_regions = has_regions or bool(tile['regions'])
+        for is_land, cls, ext, holes in tile['regions']:
+            if is_land and cls is not None:
+                poly = _ring_polygon(ext, holes)
+                if poly is not None:
+                    claims.append((cls, wkb_dumps(poly)))
+    land = unary_union(land_parts) if land_parts else MultiPolygon()
+    for height, parts in flat.items():
+        bodies.append(WaterBody(unary_union(parts), True, height))
+    return land, bodies, courses, (claims if has_regions else None)
+
+
+# What one .lvr section can hold: every count in it is a u16.
+LVR_MAX_ITEMS = 0xFFFF
+
+
+def _drop_small(geom, min_area: float):
+    """`geom` without the parts and holes smaller than `min_area`, or None.
+
+    Keeps at most LVR_MAX_ITEMS holes per polygon, largest first.
+    """
+    parts = [geom] if isinstance(geom, Polygon) else list(getattr(geom, 'geoms', []))
+    kept = []
+    for part in parts:
+        if not isinstance(part, Polygon) or part.area < min_area:
+            continue
+        holes = [r for r in part.interiors if Polygon(r).area >= min_area]
+        if len(holes) > LVR_MAX_ITEMS:
+            holes = sorted(holes, key=lambda r: Polygon(r).area, reverse=True)[:LVR_MAX_ITEMS]
+        kept.append(Polygon(part.exterior, holes))
+    if not kept:
+        return None
+    return kept[0] if len(kept) == 1 else MultiPolygon(kept)
+
+
+def coarse_inputs(land, inland: List[WaterBody], courses: List[Watercourse], z: int, tile_size: int):
+    """Land, inland water and watercourses thinned to what a zoom-`z` tile can show.
+
+    Built from its children, an ancestor carries every pond of every bake
+    under it: the z4 tile over Erz, PDM and Czechia held more lakes - and
+    more lake holes in one land polygon - than an .lvr's u16 counts allow,
+    and failed the Erz import (2026-09-26). Anything under one grid cell of
+    this level cannot be drawn at the distance the level is shown, so it goes
+    from both layers together: a pond becomes land, not a hole with no water
+    in it. Above the level, the largest pieces win if there are still too many.
+    """
+    cell = (180.0 / (1 << z)) / max(1, tile_size - 1)
+    min_area = cell * cell
+    thinned_land = _drop_small(land, min_area) if not land.is_empty else None
+    land = thinned_land if thinned_land is not None else MultiPolygon()
+    bodies: List[WaterBody] = []
+    for body in inland:
+        geom = _drop_small(body.geom, min_area)
+        if geom is not None:
+            bodies.append(WaterBody(geom, body.flat, body.height, body.profile))
+    pieces = sum(len(getattr(b.geom, 'geoms', [b.geom])) for b in bodies)
+    if pieces > LVR_MAX_ITEMS:
+        bodies.sort(key=lambda b: b.geom.area, reverse=True)
+        kept, count = [], 0
+        for body in bodies:
+            n = len(getattr(body.geom, 'geoms', [body.geom]))
+            if count + n > LVR_MAX_ITEMS:
+                break
+            kept.append(body)
+            count += n
+        bodies = kept
+    courses = [c for c in courses if c.line.length >= cell]
+    if len(courses) > LVR_MAX_ITEMS:
+        courses = sorted(courses, key=lambda c: c.line.length, reverse=True)[:LVR_MAX_ITEMS]
+    return land, bodies, courses
+
+
+AncestorTask = Tuple[str, int, int, int, int, bytearray, float, float]
+
+
+def _ancestor_worker(task: AncestorTask) -> 'Tuple[int, int, ClipResult]':
+    out_dir, tile_size, z, x, y, grid, tol, line_tol = task
+    land, inland, courses, claims = child_inputs(out_dir, z, x, y)
+    land, inland, courses = coarse_inputs(land, inland, courses, z, tile_size)
+    return x, y, _clip_worker_inline(
+        out_dir, tile_size, land, inland, courses, z, x, y, grid, tol, line_tol, child_claims=claims)
+
+
+def ancestor_level_parallel(
+    out_dir: str, tile_size: int, z: int, tol: float, line_tol: float,
+    items: Sequence[Tuple[Tuple[int, int], bytearray]], pool: TilePool,
+    progress: Optional[PhaseProgress] = None,
+) -> Tuple[int, int, int, int, int]:
+    """Writes .lwm and .lvr for one ancestor level from the level below it on disk.
+
+    Returns (total_lwm_bytes, written, lvr_written, total_lvr_bytes,
+    total_lines). The level below must be completely written first - the
+    caller runs levels one at a time, finest first.
+    """
+    total_bytes = written = lvr_written = total_lvr_bytes = total_lines = 0
+    if not items:
+        return total_bytes, written, lvr_written, total_lvr_bytes, total_lines
+    report = _progress_reporter(len(items), f'clip {z}', gate=40, progress=progress)
+    tasks: List[AncestorTask] = [
+        (out_dir, tile_size, z, x, y, grid, tol, line_tol) for (x, y), grid in items]
+    for x, y, (lwm_bytes, has_lvr, lvr_bytes, num_lines, _) in pool.map(
+            _ancestor_worker, _ancestor_worker, tasks, chunksize=1):
+        total_bytes += lwm_bytes
+        written += 1
+        if has_lvr:
+            lvr_written += 1
+            total_lvr_bytes += lvr_bytes
+            total_lines += num_lines
+        else:
+            # Nothing left on it - remove what an earlier bake wrote, or the
+            # mesh bake would still cut the old land out of it.
+            stale = os.path.join(out_dir, str(z), str(x), f'{y}.lvr')
+            if os.path.isfile(stale):
+                os.remove(stale)
+        report()
+    return total_bytes, written, lvr_written, total_lvr_bytes, total_lines
+
+
+def parent_masks(
+    out_dir: str, z: int, level_grids: Dict[Tuple[int, int], bytearray], tile_size: int,
+) -> Tuple[Dict[Tuple[int, int], bytearray], int]:
+    """Level `z - 1`'s masks from level `z`'s, topped up with siblings off disk.
+
+    Returns (parents, siblings reloaded).
+    """
+    parents: Dict[Tuple[int, int], bytearray] = {}
+    parent_children: Dict[Tuple[int, int], Dict[Tuple[int, int], bytearray]] = {}
+    for (x, y), grid in level_grids.items():
+        parent_children.setdefault((x >> 1, y >> 1), {})[(x & 1, y & 1)] = grid
+    reloaded = 0
+    for key, children in parent_children.items():
+        # Top the quadrants up from disk before decimating, or the coast of
+        # every area baked before this one is replaced with open water in
+        # the ancestors they share.
+        for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            if (qx, qy) in children:
+                continue
+            sibling = read_lwm(out_dir, z, key[0] * 2 + qx, key[1] * 2 + qy)
+            if sibling is not None:
+                children[(qx, qy)] = sibling
+                reloaded += 1
+        parents[key] = build_parent_mask(children, tile_size)
+    return parents, reloaded
+
+
+def rebuild_ancestors(out_dir: str, tile_size: int, min_zoom: int, max_zoom: int,
+                      bbox: Bounds, jobs: int) -> int:
+    """Re-derive every ancestor of the max-zoom tiles in `bbox` from disk.
+
+    The repair for a pyramid baked before ancestors were derived from their
+    children: nothing is fetched and no max-zoom tile is touched.
+    """
+    started = time.time()
+    bx0, by0, bx1, by1 = tile_range_for_bounds(max_zoom, bbox)
+    level_grids: Dict[Tuple[int, int], bytearray] = {}
+    for y in range(by0, by1 + 1):
+        for x in range(bx0, bx1 + 1):
+            grid = read_lwm(out_dir, max_zoom, x, y)
+            if grid is not None:
+                level_grids[(x, y)] = grid
+    print(f'rebuilding ancestors of {len(level_grids)} zoom-{max_zoom} tiles')
+    with TilePool(jobs) as pool:
+        for z in range(max_zoom, min_zoom, -1):
+            level_grids, _ = parent_masks(out_dir, z, level_grids, tile_size)
+            tol = vector_simplify_tol(z - 1, max_zoom, tile_size)
+            line_tol = ((180.0 / (1 << (z - 1))) / max(1, tile_size - 1)) * LINE_SIMPLIFY_CELLS
+            level_started = time.monotonic()
+            _, written, lvr_written, _, _ = ancestor_level_parallel(
+                out_dir, tile_size, z - 1, tol, line_tol, sorted(level_grids.items()), pool)
+            print(f'level {z - 1:2d}    wrote {written} .lwm + {lvr_written} .lvr tiles '
+                  f'in {time.monotonic() - level_started:.1f}s', flush=True)
+    print(f'done in {time.time() - started:.0f}s')
+    return 0
 
 
 def build_parent_mask(children: Dict[Tuple[int, int], bytearray], n: int) -> bytearray:
@@ -1989,9 +2365,10 @@ def bake(args: argparse.Namespace) -> int:
         # The importer runs this alongside the DEM fetch to warm the cache;
         # the real bake later finds every cell cached. Nothing is written.
         # Without the DEM in place yet, no cell can be called sea.
-        overpass_query(bbox, args.refresh_osm)
-        if args.osm_landuse and HAS_OSM_LANDUSE:
-            overpass_landuse_query((bbox.west, bbox.south, bbox.east, bbox.north), args.refresh_osm)
+        if not args.pbf:
+            overpass_query(bbox, args.refresh_osm)
+            if args.osm_landuse and HAS_OSM_LANDUSE:
+                overpass_landuse_query((bbox.west, bbox.south, bbox.east, bbox.north), args.refresh_osm)
         print(f'fetched in {time.time() - started:.0f}s; nothing baked (--fetch-only)')
         return 0
 
@@ -2000,7 +2377,29 @@ def bake(args: argparse.Namespace) -> int:
     # TilePool.publish.
     pool = TilePool(args.jobs).start()
 
-    land, inland, courses = assemble_land(bbox, args, progress, skip_sea)
+    # One scan of the local extract covers coastline/water and (with
+    # --osm-landuse) landuse together - two separate pbf_elements calls
+    # would each re-read the whole file (see pbf_elements_groups's
+    # docstring), and a Portugal-sized extract costs ~200-250s per read.
+    pbf_coast_data: Optional[dict] = None
+    pbf_landuse_data: Optional[dict] = None
+    if args.pbf and pbf_available():
+        want_landuse = getattr(args, 'osm_landuse', False) and HAS_OSM_LANDUSE
+        pbf_groups = [('coast', coast_tag_predicate)]
+        if want_landuse:
+            pbf_groups.append(('landuse', landuse_tag_predicate))
+        if progress is not None:
+            progress.begin('coast', f'reading OSM data from {args.pbf}')
+        pbf_answers = pbf_elements_groups(args.pbf, bbox, pbf_groups, refresh=args.refresh_osm)
+        pbf_coast_data = pbf_answers['coast']
+        if want_landuse:
+            pbf_landuse_data = pbf_answers['landuse']
+        if progress is not None:
+            progress.end(f'{len(pbf_coast_data.get("elements", []))} coast elements'
+                         + (f', {len(pbf_landuse_data.get("elements", []))} landuse elements'
+                            if pbf_landuse_data is not None else ''))
+
+    land, inland, courses = assemble_land(bbox, args, progress, skip_sea, pbf_data=pbf_coast_data)
     if not inland and not courses:
         # A silently truncated Overpass answer looks exactly like a box with
         # no water in it, and one such answer was cached and baked for a
@@ -2026,9 +2425,15 @@ def bake(args: argparse.Namespace) -> int:
         def on_landuse_bytes(index: int, count: int, label: str, received: int) -> None:
             progress.update((index + fetch_fraction(received)) / count,
                             f'({label}) {format_mb(received)} received')
-        landuse_data = overpass_landuse_query(
-            (bbox.west, bbox.south, bbox.east, bbox.north), args.refresh_osm,
-            on_progress=on_landuse_bytes, skip_cell=skip_sea)
+        if pbf_landuse_data is not None:
+            landuse_data = pbf_landuse_data
+        elif args.pbf and pbf_available():
+            landuse_data = pbf_elements(args.pbf, bbox, landuse_tag_predicate, 'landuse',
+                                         refresh=args.refresh_osm)
+        else:
+            landuse_data = overpass_landuse_query(
+                (bbox.west, bbox.south, bbox.east, bbox.north), args.refresh_osm,
+                on_progress=on_landuse_bytes, skip_cell=skip_sea)
         progress.end(f'{len(landuse_data.get("elements", []))} elements')
         progress.begin('landuse')
         landuse_polys, landuse_classes = assemble_landuse_polygons(landuse_data, progress.update)
@@ -2155,7 +2560,6 @@ def bake(args: argparse.Namespace) -> int:
         progress.begin('clip')
         progress.update(0.0, f'{clip_total} tiles over zoom {max_zoom}..{min_zoom}', force=True)
 
-        child_claims: Optional[Dict[Tuple[int, int], List[Tuple[int, bytes]]]] = None
         for z in range(max_zoom, min_zoom - 1, -1):
             tol = vector_simplify_tol(z, max_zoom, tile_size)
             line_tol = ((180.0 / (1 << z)) / max(1, tile_size - 1)) * LINE_SIMPLIFY_CELLS
@@ -2164,15 +2568,15 @@ def bake(args: argparse.Namespace) -> int:
 
             def level_progress(fraction: float, detail: str, z=z, n=len(items)) -> None:
                 progress.update((clip_done + fraction * n) / max(1, clip_total), f'zoom {z} {detail}')
-            level_bytes, written, lvr_written, level_lvr_bytes, level_lines, level_claims = clip_level_parallel(
-                out_dir, tile_size, land, inland, courses, z, tol, line_tol, items, pool,
-                landuse_tree, landuse_polys, landuse_classes, progress=level_progress,
-                child_claims=child_claims)
-            # The landuse pieces this level claimed, grouped under the parent
-            # tiles that will derive their own regions from them.
-            child_claims = {}
-            for (x, y), pieces in level_claims.items():
-                child_claims.setdefault((x >> 1, y >> 1), []).extend(pieces)
+            if z == max_zoom:
+                level_bytes, written, lvr_written, level_lvr_bytes, level_lines, _ = clip_level_parallel(
+                    out_dir, tile_size, land, inland, courses, z, tol, line_tol, items, pool,
+                    landuse_tree, landuse_polys, landuse_classes, progress=level_progress)
+            else:
+                # Ancestors come from the level below on disk, not from this
+                # bake's own land - see child_inputs.
+                level_bytes, written, lvr_written, level_lvr_bytes, level_lines = ancestor_level_parallel(
+                    out_dir, tile_size, z, tol, line_tol, items, pool, progress=level_progress)
             clip_done += len(items)
             total_bytes += level_bytes
             total_lvr_bytes += level_lvr_bytes
@@ -2185,55 +2589,41 @@ def bake(args: argparse.Namespace) -> int:
                 break
             progress.update(clip_done / max(1, clip_total), f'zoom {z - 1} building ancestors',
                             force=True)
-            parents: Dict[Tuple[int, int], bytearray] = {}
-            parent_children: Dict[Tuple[int, int], Dict[Tuple[int, int], bytearray]] = {}
-            for (x, y), grid in level_grids.items():
-                key = (x >> 1, y >> 1)
-                parent_children.setdefault(key, {})[(x & 1, y & 1)] = grid
-            reloaded = 0
-            for key, children in parent_children.items():
-                # Top the quadrants up from disk before decimating, or the coast of
-                # every area baked before this one is replaced with open water in
-                # the ancestors they share.
-                for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
-                    if (qx, qy) in children:
-                        continue
-                    sibling = read_lwm(out_dir, z, key[0] * 2 + qx, key[1] * 2 + qy)
-                    if sibling is not None:
-                        children[(qx, qy)] = sibling
-                        reloaded += 1
-                parents[key] = build_parent_mask(children, tile_size)
+            parents, reloaded = parent_masks(out_dir, z, level_grids, tile_size)
             if reloaded:
                 print(f'            {reloaded} siblings reloaded for {len(parents)} ancestors')
             level_grids = parents
 
-    # Union with whatever was already masked, not a replacement: this run only
-    # looked at its own bbox, and the tiles baked outside it are still there.
-    previous = (manifest.get('coastMask') or {}).get('coverage')
-    if previous:
-        masked = {
-            'west': min(previous['west'], bbox.west),
-            'south': min(previous['south'], bbox.south),
-            'east': max(previous['east'], bbox.east),
-            'north': max(previous['north'], bbox.north),
-        }
-    else:
-        masked = {
-            'west': bbox.west, 'south': bbox.south,
-            'east': bbox.east, 'north': bbox.north,
-        }
     progress.end(f'{total_tiles} .lwm + {total_lvr_tiles} .lvr tiles')
-    manifest['version'] = 3
-    manifest['coastMask'] = {
-        'enabled': True,
-        'path': '{z}/{x}/{y}.lwm',
-        'vectorPath': '{z}/{x}/{y}.lvr',
-        'source': 'osm',
-        'coverage': masked,
-    }
-    with open(manifest_path, 'w', encoding='utf-8') as fh:
-        json.dump(manifest, fh, indent=2)
-        fh.write('\n')
+
+    def set_coast_mask(manifest: dict) -> None:
+        # Union with whatever was already masked, not a replacement: this run
+        # only looked at its own bbox, and the tiles baked outside it are
+        # still there.
+        previous = (manifest.get('coastMask') or {}).get('coverage')
+        if previous:
+            masked = {
+                'west': min(previous['west'], bbox.west),
+                'south': min(previous['south'], bbox.south),
+                'east': max(previous['east'], bbox.east),
+                'north': max(previous['north'], bbox.north),
+            }
+        else:
+            masked = {
+                'west': bbox.west, 'south': bbox.south,
+                'east': bbox.east, 'north': bbox.north,
+            }
+        manifest['version'] = 3
+        manifest['coastMask'] = {
+            'enabled': True,
+            'path': '{z}/{x}/{y}.lwm',
+            'vectorPath': '{z}/{x}/{y}.lvr',
+            'source': 'osm',
+            'coverage': masked,
+        }
+    # Locked and re-read: other chunks' road and airfield bakes may have
+    # written their blocks since this bake loaded the manifest.
+    update_manifest(manifest_path, set_coast_mask)
 
     print(f'\nwrote {total_tiles} coast tiles, {total_bytes / (1024 * 1024):.1f} MB (.lwm)')
     print(f'wrote {total_lvr_tiles} vector tiles, {total_lvr_bytes / (1024 * 1024):.1f} MB (.lvr)')
@@ -2265,8 +2655,21 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                         help='also bake every tile in the bbox at max zoom (slow; default: PDM tiles only)')
     parser.add_argument('--jobs', type=int, default=DEFAULT_JOBS,
                         help=f'worker processes for rasterizing and clipping (default {DEFAULT_JOBS})')
+    parser.add_argument('--rebuild-ancestors', action='store_true',
+                        help='re-derive every coarser tile above the bbox from the tiles on disk '
+                             '(repairs ancestors written from one bake\'s land only); fetches nothing')
     raw = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(glue_negative_bbox(raw))
+    if args.rebuild_ancestors:
+        manifest_path = args.manifest or os.path.join(args.out, 'manifest.json')
+        manifest = load_manifest(manifest_path)
+        cov = manifest.get('coverage', {})
+        max_zoom = manifest.get('maxZoom', 12)
+        asked = parse_bbox(args.bbox) if args.bbox else Bounds(
+            cov['west'], cov['south'], cov['east'], cov['north'])
+        return rebuild_ancestors(args.out or os.path.dirname(manifest_path), manifest.get('tileSize', 257),
+                                 manifest.get('minZoom', 0), max_zoom,
+                                 snap_bounds_to_tiles(asked, max_zoom), args.jobs)
     return bake(args)
 
 

@@ -43,7 +43,7 @@ import {
     HISTOGRAM_BINS, accumulateColors, luminanceWindow, medianCut, newColorHistogram,
 } from './bake/swatches';
 import {
-    EnuBasis, ecefToEnu, enuToGeodeticApprox, geodeticToEcef, makeEnuBasis,
+    EnuBasis, ecefToEnu, geodeticOnSurfaceAtEnu, geodeticToEcef, makeEnuBasis,
 } from '../src/script/terrain/geodesy';
 import { FlattenPadRecord, padFromRecord } from '../src/script/terrain/flattenPad';
 import { AIRBASE_FLATTEN_PAD, PLAY_ORIGIN } from '../src/script/state/worldLayout';
@@ -218,7 +218,7 @@ function computePadHeight(
     let maxH = -Infinity;
     for (let dz = -pad.halfD; dz <= pad.halfD; dz += step) {
         for (let dx = -pad.halfW; dx <= pad.halfW; dx += step) {
-            const g = enuToGeodeticApprox(basis, pad.centerX + dx, pad.centerZ + dz, 0);
+            const g = geodeticOnSurfaceAtEnu(basis, pad.centerX + dx, pad.centerZ + dz);
             const h = sampleAt(g.lon, g.lat);
             if (h > seaLevel && h > maxH) {
                 maxH = h;
@@ -264,11 +264,27 @@ function copyHeightTiles(
                 fs.mkdirSync(dstDir, { recursive: true });
                 const dst = path.join(dstDir, f);
                 const srcStat = fs.statSync(path.join(xDir, f));
+                const dstStat = fs.existsSync(dst) ? fs.statSync(dst) : undefined;
                 // The physics reads this zoom, and the mesh over it has the
                 // motorway roadbeds laid in: give the CPU ground the same
                 // embankments and cuttings. The four child leaves' lines
                 // cover the tile and the reach beyond its edge.
                 if (z === maxZoom) {
+                    // Carved before and nothing it was carved from has
+                    // changed since: skip. Without this every bake re-read,
+                    // re-carved and deflated at level 9 every motorway tile
+                    // of every area on disk - most of the single-threaded
+                    // setup, growing with each area imported (2026-09-27).
+                    const inputs = childGradePaths(src, z, Number(xs), Number(f.slice(0, -4)))
+                        .filter(p => fs.existsSync(p));
+                    if (inputs.length > 0 && dstStat !== undefined) {
+                        const newest = Math.max(srcStat.mtimeMs, ...inputs.map(p => fs.statSync(p).mtimeMs));
+                        if (dstStat.mtimeMs >= newest) {
+                            bytes += dstStat.size;
+                            skipped++;
+                            continue;
+                        }
+                    }
                     const lines = childGradeLines(src, z, Number(xs), Number(f.slice(0, -4)));
                     if (lines.length > 0) {
                         const dem = decodePdm(fs.readFileSync(path.join(xDir, f)));
@@ -283,7 +299,6 @@ function copyHeightTiles(
                         continue;
                     }
                 }
-                const dstStat = fs.existsSync(dst) ? fs.statSync(dst) : undefined;
                 // Already there and no older than the source: nothing to do.
                 // A DEM bake rewrites its tiles, so a changed tile is newer.
                 if (dstStat !== undefined && dstStat.size === srcStat.size
@@ -307,10 +322,14 @@ function copyHeightTiles(
 }
 
 /** Motorway roadbed lines of the four leaves under tile z/x/y, or none. */
+function childGradePaths(src: string, z: number, x: number, y: number): string[] {
+    return [[0, 0], [1, 0], [0, 1], [1, 1]].map(([dx, dy]) =>
+        path.join(src, String(z + 1), String(x * 2 + dx), `${y * 2 + dy}.rgr`));
+}
+
 function childGradeLines(src: string, z: number, x: number, y: number): GradeLine[] {
     const lines: GradeLine[] = [];
-    for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-        const p = path.join(src, String(z + 1), String(x * 2 + dx), `${y * 2 + dy}.rgr`);
+    for (const p of childGradePaths(src, z, x, y)) {
         if (fs.existsSync(p)) {
             lines.push(...decodeRgr(fs.readFileSync(p)));
         }

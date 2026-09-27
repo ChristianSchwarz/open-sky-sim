@@ -1,14 +1,17 @@
-"""Tests for tools/osm_extract.py: picking the smallest covering Geofabrik region."""
+"""Tests for tools/osm_extract.py: picking the extracts that cover a bbox."""
 from __future__ import annotations
 
 import unittest
 
-from osm_extract import _geometry_bbox, find_region, parse_bbox
+from shapely.geometry import box
+
+from osm_extract import Source, _bbox_from_clip_name, _geometry_bbox, parse_bbox, plan_sources, regions_near
 
 
 def _feature(id_, west, south, east, north, pbf='https://example.test/x.osm.pbf'):
     return {
-        'properties': {'id': id_, 'name': id_, 'urls': {'pbf': pbf}},
+        'properties': {'id': id_, 'name': id_, 'urls': {'pbf': pbf},
+                       'parent': None if id_ == 'europe' else 'europe'},
         'geometry': {
             'type': 'Polygon',
             'coordinates': [[
@@ -48,27 +51,76 @@ class GeometryBbox(unittest.TestCase):
         self.assertIsNone(_geometry_bbox({'type': 'Point', 'coordinates': [1, 2]}))
 
 
-class FindRegion(unittest.TestCase):
-    def test_picks_the_smallest_region_that_fully_contains_the_bbox(self):
-        index = {'features': [
-            _feature('europe', -30, 30, 45, 75),
-            _feature('switzerland', 5.9, 45.8, 10.5, 47.9),
-            _feature('france', -5.5, 41, 9.9, 51.5),
-        ]}
-        region = find_region(index, (7.6, 45.9, 7.8, 46.0))
-        self.assertEqual(region['id'], 'switzerland')
+def _ids(sources):
+    return [s.path or s.region['id'] for s in sources]
 
-    def test_rejects_a_region_that_only_partially_overlaps(self):
-        index = {'features': [_feature('france', -5.5, 41, 5.0, 51.5)]}
+
+class PlanSources(unittest.TestCase):
+    # Erz in miniature: Germany west of 13.8, Czechia east of it, and a
+    # DACH whose *rectangle* spans both but whose polygon is Germany plus a
+    # strip south of the box (Austria) - the shape that fooled the old picker.
+    GERMANY = _feature('germany', 6, 47, 13.8, 55)
+    CZECHIA = _feature('czech-republic', 13.8, 48.5, 19, 51.1)
+    EUROPE = _feature('europe', -30, 30, 45, 75)
+    BOX = (12.0, 49.7, 15.0, 51.0)
+
+    def dach(self):
+        f = _feature('dach', 6, 46, 17, 55)
+        f['geometry'] = {'type': 'MultiPolygon', 'coordinates': [
+            [[[6, 47], [13.8, 47], [13.8, 55], [6, 55], [6, 47]]],
+            [[[9, 46], [17, 46], [17, 49], [9, 49], [9, 46]]],
+        ]}
+        return f
+
+    def near(self, *features):
+        return regions_near({'features': list(features)}, self.BOX)
+
+    def test_a_box_across_a_border_takes_the_country_on_disk_and_downloads_the_other(self):
+        near = self.near(self.GERMANY, self.CZECHIA, self.EUROPE, self.dach())
+        local = [Source(g, 4.8e9, path='germany.osm.pbf') for f, g in near if f['properties']['id'] == 'germany']
+        local += [Source(g, 6.2e9, path='dach.osm.pbf') for f, g in near if f['properties']['id'] == 'dach']
+        self.assertEqual(_ids(plan_sources(self.BOX, near, local)), ['germany.osm.pbf', 'czech-republic'])
+
+    def test_a_rectangle_that_covers_the_box_is_not_enough(self):
+        near = self.near(self.dach(), self.CZECHIA)
+        self.assertEqual(sorted(_ids(plan_sources(self.BOX, near, []))), ['czech-republic', 'dach'])
+
+    def test_a_country_beats_its_continent(self):
+        box_ = (12.0, 50.0, 13.0, 51.0)
+        near = regions_near({'features': [self.GERMANY, self.EUROPE]}, box_)
+        self.assertEqual(_ids(plan_sources(box_, near, [])), ['germany'])
+
+    def test_an_earlier_clip_beats_the_country_on_disk(self):
+        box_ = (12.3, 50.5, 12.7, 50.8)
+        near = regions_near({'features': [self.GERMANY]}, box_)
+        local = [Source(near[0][1], 4.8e9, path='germany.osm.pbf'),
+                 Source(box(12.0, 50.0, 14.0, 52.0), 2e8, path='clip.osm.pbf')]
+        self.assertEqual(_ids(plan_sources(box_, near, local)), ['clip.osm.pbf'])
+
+    def test_open_sea_in_the_box_needs_no_extract(self):
+        box_ = (13.0, 54.0, 15.0, 56.0)  # half of it north of every region
+        near = regions_near({'features': [self.GERMANY]}, box_)
+        self.assertEqual(_ids(plan_sources(box_, near, [])), ['germany'])
+
+    def test_no_region_near_the_box_is_an_error(self):
         with self.assertRaises(LookupError):
-            find_region(index, (7.6, 45.9, 7.8, 46.0))
+            plan_sources((100, 0, 101, 1), [], [])
 
     def test_skips_a_feature_with_no_pbf_url(self):
         no_pbf = _feature('vatican-shp-only', 12.4, 41.9, 12.5, 41.91, pbf=None)
         del no_pbf['properties']['urls']['pbf']
-        index = {'features': [no_pbf, _feature('italy', 6, 36, 19, 47)]}
-        region = find_region(index, (12.4, 41.9, 12.45, 41.905))
-        self.assertEqual(region['id'], 'italy')
+        self.assertEqual([f['properties']['id'] for f, _ in
+                          regions_near({'features': [no_pbf]}, (12.4, 41.9, 12.45, 41.905))], [])
+
+
+class BboxFromClipName(unittest.TestCase):
+    def test_reads_negative_coordinates(self):
+        self.assertEqual(
+            _bbox_from_clip_name('-15.9_27.6_-15.2_28.2.osm.pbf'), (-15.9, 27.6, -15.2, 28.2))
+
+    def test_ignores_a_partial_or_foreign_file(self):
+        self.assertIsNone(_bbox_from_clip_name('1_2_3_4.osm.pbf.part'))
+        self.assertIsNone(_bbox_from_clip_name('lisbon.osm.pbf'))
 
 
 if __name__ == '__main__':

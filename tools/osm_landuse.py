@@ -195,6 +195,11 @@ def overpass_landuse_query(
     return merge_elements([a for a in answers if a is not None])
 
 
+def landuse_tag_predicate(tags: dict) -> bool:
+    """The tag test `_query_for` encodes as QL clauses, for the local-PBF path."""
+    return _class_for_tags(tags) is not None
+
+
 def _class_for_tags(tags: dict) -> Optional[int]:
     for key, value, cls in LANDUSE_TAG_TO_CLASS:
         if tags.get(key) == value:

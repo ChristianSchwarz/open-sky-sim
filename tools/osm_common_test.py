@@ -155,3 +155,31 @@ class RemarkTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class UpdateManifestTest(unittest.TestCase):
+    """Concurrent read-modify-writes of the manifest must not lose each other's blocks."""
+
+    def test_no_update_is_lost_under_contention(self):
+        import json
+        import os
+        import tempfile
+        import threading
+        from osm_common import load_manifest, update_manifest
+        path = os.path.join(tempfile.mkdtemp(), 'manifest.json')
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump({'counts': {}}, fh)
+
+        def writer(name):
+            for i in range(25):
+                def bump(m, name=name, i=i):
+                    m['counts'][f'{name}-{i}'] = i
+                update_manifest(path, bump)
+
+        threads = [threading.Thread(target=writer, args=(f't{n}',)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(load_manifest(path)['counts']), 8 * 25)
+        self.assertFalse(os.path.exists(path + '.lock'))
