@@ -65,9 +65,10 @@ export function sampleSkiJumpSurfaceY(worldX: number, worldZ: number, ramp: SkiJ
     const sin = Math.sin(ramp.heading);
     const dx = worldX - ramp.originX;
     const dz = worldZ - ramp.originZ;
-    // Rotate world delta into ramp local XZ (heading 0 → identity).
-    const localX = dx * cos + dz * sin;
-    const localZ = -dx * sin + dz * cos;
+    // World delta into ramp local XZ: the inverse of the scene heading convention,
+    // where +localZ is (sin h, cos h). heading 0 → identity.
+    const localX = dx * cos - dz * sin;
+    const localZ = dx * sin + dz * cos;
     if (localZ < 0 || localZ > ramp.length) {
         return NO_SURFACE_Y;
     }

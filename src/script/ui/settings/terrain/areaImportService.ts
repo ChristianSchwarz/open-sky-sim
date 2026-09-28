@@ -4,10 +4,12 @@ import { Area, Box, blockedReason } from './importMath';
 /**
  * Terrain import state and the jobs behind it.
  *
- * The bake itself is the command line in tools/README.md — six stages sharing
- * one bbox — driven by the dev server (tools/areaImport.ts) and reported back
- * over server-sent events, because the whole thing takes minutes, and longer
- * on a cold cache while Overpass and the imagery download answer.
+ * The bake itself is the command line in tools/README.md — a local OSM
+ * extract resolved (downloading it if needed) and then several stages
+ * sharing one bbox, cover always included — driven by the dev server
+ * (tools/areaImport.ts) and reported back over server-sent events, because
+ * the whole thing takes minutes, and longer on a cold cache while the
+ * extract and the imagery download answer.
  *
  * A root service rather than component state: the Angular application lives
  * for the whole session, so a bake started from the dialog keeps its progress
@@ -19,6 +21,14 @@ export interface ImportProgress {
     value: number;
     label: string;
     failed: boolean;
+}
+
+/** localStorage key for the job currently being followed, so a reload can reconnect to it. */
+const JOB_STORAGE_KEY = 'retroflightsim.areaImport.job';
+
+interface SavedJob {
+    id: string;
+    doneNote: string;
 }
 
 interface JobMessage {
@@ -55,7 +65,8 @@ export class AreaImportService {
     readonly running = signal(false);
     readonly selection = signal<Box | undefined>(undefined);
     readonly name = signal('');
-    readonly withCover = signal(false);
+    /** Geofabrik regions already downloaded locally, so the map can shade them. */
+    readonly extracts = signal<Area[]>([]);
     readonly progress = signal<ImportProgress | undefined>(undefined);
     readonly log = signal('');
     readonly blocked = computed(() => blockedReason(this.running(), this.selection(), this.name()));
@@ -70,6 +81,47 @@ export class AreaImportService {
     constructor() {
         // Dev aid, alongside globalThis.__terrain.
         (globalThis as Record<string, unknown>).__areaImport = this;
+
+        // A bake outlives the page: reconnect to whatever was running when
+        // the tab was last open, so a reload or a browser restart doesn't
+        // make the progress (or the eventual failure) disappear.
+        const saved = this.readSavedJob();
+        if (saved) {
+            this.running.set(true);
+            this.log.set('');
+            this.lastLineWasProgress = false;
+            this.follow(saved.id, saved.doneNote);
+        }
+    }
+
+    private readSavedJob(): SavedJob | undefined {
+        try {
+            const raw = localStorage.getItem(JOB_STORAGE_KEY);
+            if (!raw) {
+                return undefined;
+            }
+            const parsed = JSON.parse(raw);
+            return typeof parsed?.id === 'string' && typeof parsed?.doneNote === 'string' ? parsed : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private saveJob(id: string, doneNote: string): void {
+        try {
+            localStorage.setItem(JOB_STORAGE_KEY, JSON.stringify({ id, doneNote } satisfies SavedJob));
+        } catch {
+            // No persistence (private browsing, quota) - the job still runs, it just
+            // won't be picked back up after a reload.
+        }
+    }
+
+    private clearSavedJob(): void {
+        try {
+            localStorage.removeItem(JOB_STORAGE_KEY);
+        } catch {
+            // Nothing to clean up if it never got saved.
+        }
     }
 
     async loadAreas(): Promise<void> {
@@ -82,6 +134,17 @@ export class AreaImportService {
         }
     }
 
+    /** Which Geofabrik regions already have a local extract on disk, for the map overlay. */
+    async loadExtracts(): Promise<void> {
+        try {
+            const res = await fetch('/api/osm-extracts');
+            const body = await res.json();
+            this.extracts.set(Array.isArray(body.extracts) ? body.extracts : []);
+        } catch {
+            this.extracts.set([]);
+        }
+    }
+
     async startImport(): Promise<void> {
         const b = this.selection();
         if (!b || this.blocked() !== undefined) {
@@ -90,7 +153,6 @@ export class AreaImportService {
         await this.startJob('/api/import-area', {
             name: this.name().trim(),
             bbox: [b.west, b.south, b.east, b.north],
-            withCover: this.withCover(),
         }, 'Reload the page and pick it under Settings -> World -> Area.');
     }
 
@@ -124,6 +186,7 @@ export class AreaImportService {
             return;
         }
 
+        this.saveJob(id, doneNote);
         this.follow(id, doneNote);
     }
 
@@ -149,6 +212,7 @@ export class AreaImportService {
                 this.running.set(false);
                 this.stream?.close();
                 this.stream = undefined;
+                this.clearSavedJob();
                 if (data.state === 'failed') {
                     this.progress.update(p => p && { ...p, failed: true });
                 }
@@ -156,6 +220,7 @@ export class AreaImportService {
                     const n = data.stepCount ?? 0;
                     this.setProgress(100, n, n, 'done', 100);
                     void this.loadAreas();
+                    void this.loadExtracts();
                     this.append(`\n${doneNote}`);
                 }
             }
@@ -167,6 +232,7 @@ export class AreaImportService {
                 this.append('lost the progress stream — the bake may still be running');
                 this.running.set(false);
             }
+            this.clearSavedJob();
             this.stream?.close();
             this.stream = undefined;
         };

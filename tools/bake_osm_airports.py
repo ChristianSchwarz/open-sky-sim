@@ -1560,10 +1560,20 @@ def bbox_area_name(manifest: dict, bbox: Bounds, tol: float = 1e-6) -> str:
     from bake_planet_dem.py --name) keeps the name real; an unregistered
     box - genuine ad-hoc exploration - still falls back to 'bbox'.
     """
-    for name, bounds in area_bounds(manifest):
+    areas = area_bounds(manifest)
+    for name, bounds in areas:
         if (abs(bounds.west - bbox.west) < tol and abs(bounds.south - bbox.south) < tol
                 and abs(bounds.east - bbox.east) < tol and abs(bounds.north - bbox.north) < tol):
             return name
+    # The importer bakes a big area one 2-degree chunk at a time, so the box
+    # is usually a piece of an area rather than the area itself; every chunked
+    # import tagged its airfields 'bbox' until this. The smallest area holding
+    # the whole box wins, so a box inside a nested area names the inner one.
+    holding = [((b.east - b.west) * (b.north - b.south), name) for name, b in areas
+               if b.west - tol <= bbox.west and b.south - tol <= bbox.south
+               and bbox.east <= b.east + tol and bbox.north <= b.north + tol]
+    if holding:
+        return min(holding)[1]
     return 'bbox'
 
 

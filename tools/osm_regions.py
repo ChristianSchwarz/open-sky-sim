@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 import numpy as np
+import shapely
 from shapely import make_valid, unary_union
 from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.geometry.base import BaseGeometry
@@ -212,10 +213,18 @@ def assemble_tile_regions(
                 (claimed_bounds[:, 0] <= x1) & (claimed_bounds[:, 2] >= x0)
                 & (claimed_bounds[:, 1] <= y1) & (claimed_bounds[:, 3] >= y0))
             if len(hit):
-                taken = unary_union([claimed[i][0] for i in hit], grid_size=OVERLAY_GRID_SIZE)
-                piece = _valid(piece.difference(_valid(taken), grid_size=OVERLAY_GRID_SIZE))
-                if piece.is_empty:
-                    continue
+                # Only the claims that really touch the piece: most of those
+                # whose boxes overlap do not, and the union below was the
+                # largest single cost of the overlay (16% of the coast bake's
+                # tile writing on the Erzgebirge chunk). One vectorised GEOS
+                # call to drop them costs less than unioning them.
+                near = [claimed[i][0] for i in hit]
+                touching = [g for g, t in zip(near, shapely.intersects(near, piece)) if t]
+                if touching:
+                    taken = unary_union(touching, grid_size=OVERLAY_GRID_SIZE)
+                    piece = _valid(piece.difference(_valid(taken), grid_size=OVERLAY_GRID_SIZE))
+                    if piece.is_empty:
+                        continue
         claimed.append((piece, cls))
         claimed_bounds = np.vstack([claimed_bounds, np.array(piece.bounds, dtype=np.float64)])
 

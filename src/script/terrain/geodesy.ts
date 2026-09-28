@@ -149,6 +149,44 @@ export function enuToGeodeticApprox(basis: EnuBasis, e: number, n: number, u: nu
     return ecefToGeodetic(ecef.x, ecef.y, ecef.z);
 }
 
+/** Below this the ground point under an ENU column is found. */
+const SURFACE_SOLVE_TOL_M = 0.01;
+const SURFACE_SOLVE_MAX_STEPS = 4;
+
+/**
+ * The geodetic point on the ground straight below (or above) an ENU `(e, n)`
+ * - "straight" meaning along the play origin's up, which is scene Y.
+ *
+ * Reading `(e, n)` at u = 0 instead answers for a point on the origin's
+ * tangent plane, which far out is hundreds of metres above the ground and,
+ * because the vertical tilts with distance, not over the same spot: 65 km out
+ * that is 3.5 m sideways, a hundred at the corner of a big area. The mesh is
+ * placed through geodetic -> ECEF -> ENU, so this is the lat/lon whose drawn
+ * vertex actually sits at `(e, n)`.
+ *
+ * `heightAt` is the ground's elevation above the ellipsoid; omit it for the
+ * ellipsoid itself. A few fixed-point steps settle it, starting from the
+ * spherical drop, which is already within centimetres of the ellipsoid.
+ */
+export function geodeticOnSurfaceAtEnu(
+    basis: EnuBasis, e: number, n: number,
+    heightAt?: (lat: number, lon: number) => number,
+    out: Geodetic = { lat: 0, lon: 0, height: 0 },
+): Geodetic {
+    let u = -(e * e + n * n) / (2 * WGS84_A);
+    for (let i = 0; ; i++) {
+        const ecef = enuToEcef(basis, { e, n, u }, _solveEcef);
+        ecefToGeodetic(ecef.x, ecef.y, ecef.z, out);
+        const target = heightAt === undefined ? 0 : heightAt(out.lat, out.lon);
+        const miss = target - out.height;
+        if (Math.abs(miss) < SURFACE_SOLVE_TOL_M || i + 1 >= SURFACE_SOLVE_MAX_STEPS) {
+            return out;
+        }
+        u += miss;
+    }
+}
+const _solveEcef: Ecef = { x: 0, y: 0, z: 0 };
+
 /**
  * Scene space: **x = east, y = up, z = south**. North is −z.
  *

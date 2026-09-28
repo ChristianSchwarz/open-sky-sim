@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { SurfacePadCollider, sampleSurfacePadY, sampleSurfacePadYMax } from './surfacePad';
+import {
+    SurfacePadCollider, SurfacePadIndex, sampleSurfacePadCoreYMax, sampleSurfacePadY, sampleSurfacePadYMax,
+} from './surfacePad';
 
 describe('surface pad', () => {
     const pad: SurfacePadCollider = {
@@ -67,9 +69,22 @@ describe('sloping pads', () => {
     });
 
     it('turns the slope with the heading', () => {
+        // Scene heading pi/2 faces +X (forward is (sin h, cos h)), so +X is uphill.
         const turned = { ...SLOPED, heading: Math.PI / 2 };
-        assert.ok(Math.abs(sampleSurfacePadY(1000, 0, turned) - 92) < 1e-9);
-        assert.ok(Math.abs(sampleSurfacePadY(-1000, 0, turned) - 108) < 1e-9);
+        assert.ok(Math.abs(sampleSurfacePadY(1000, 0, turned) - 108) < 1e-9);
+        assert.ok(Math.abs(sampleSurfacePadY(-1000, 0, turned) - 92) < 1e-9);
+    });
+
+    it('follows a diagonal runway along its own axis', () => {
+        // Headings off the cardinal axes are where a wrong rotation shows:
+        // at 0/90/180/270 a transposed matrix still lands inside the footprint.
+        const h = 83.5 * Math.PI / 180;
+        const diag = { ...SLOPED, heading: h };
+        const along = (d: number) => sampleSurfacePadY(Math.sin(h) * d, Math.cos(h) * d, diag);
+        assert.ok(Math.abs(along(1000) - 108) < 1e-9);
+        assert.ok(Math.abs(along(-1400) - (100 - 0.008 * 1400)) < 1e-9);
+        // Across the axis by more than the half-width plus skirt is off the pad.
+        assert.equal(sampleSurfacePadY(Math.cos(h) * 120, -Math.sin(h) * 120, diag), -Infinity);
     });
 
     it('blends the feather from the height at that point, not the centre', () => {
@@ -130,5 +145,79 @@ describe('a building as a pad', () => {
         assert.equal(sampleSurfacePadYMax(500, 0, [HANGAR, runway]), 21);
         // Over the hangar, the hangar wins.
         assert.equal(sampleSurfacePadYMax(0, 0, [HANGAR, runway]), 32);
+    });
+});
+
+describe('pad footprint alone', () => {
+    // What the shadow stands on: the pavement where it is drawn, and nothing
+    // in the skirt, where what is seen is the terrain.
+    const RUNWAY: SurfacePadCollider = {
+        centerX: 0, centerZ: 0, heading: 68.8 * Math.PI / 180,
+        halfLength: 2000, halfWidth: 30,
+        surfaceY: -280, baseY: -281.5, feather: 15, slope: 0.001,
+    };
+    const across = (d: number) => ({
+        x: Math.cos(RUNWAY.heading) * d, z: -Math.sin(RUNWAY.heading) * d,
+    });
+
+    it('is the pavement inside the footprint', () => {
+        const p = across(29);
+        assert.equal(sampleSurfacePadCoreYMax(p.x, p.z, [RUNWAY]), sampleSurfacePadY(p.x, p.z, RUNWAY));
+    });
+
+    it('is nothing in the skirt the gear still stands on', () => {
+        const p = across(37);
+        assert.ok(sampleSurfacePadY(p.x, p.z, RUNWAY) > -Infinity);
+        assert.equal(sampleSurfacePadCoreYMax(p.x, p.z, [RUNWAY]), -Infinity);
+    });
+});
+
+describe('surface pad index', () => {
+    // A deterministic scatter: runways kilometres long at odd headings, roofs
+    // with a hard edge, some sloping, either side of zero on both axes so the
+    // grid's negative cells are exercised.
+    let seed = 7;
+    const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const pads: SurfacePadCollider[] = [];
+    for (let i = 0; i < 300; i++) {
+        const runway = i % 3 === 0;
+        pads.push({
+            centerX: (rand() - 0.5) * 20000,
+            centerZ: (rand() - 0.5) * 20000,
+            heading: rand() * Math.PI * 2,
+            halfLength: runway ? 500 + rand() * 1500 : 5 + rand() * 60,
+            halfWidth: runway ? 20 + rand() * 30 : 5 + rand() * 40,
+            surfaceY: rand() * 300,
+            baseY: rand() * 250,
+            feather: runway ? 15 : 0.5,
+            slope: runway ? (rand() - 0.5) * 0.02 : undefined,
+        });
+    }
+
+    it('answers exactly what the array scan answers', () => {
+        const index = new SurfacePadIndex(pads);
+        let hits = 0;
+        for (let i = 0; i < 20000; i++) {
+            // Half the probes next to a pad, so most of them land on one.
+            const near = pads[i % pads.length];
+            const x = i % 2 === 0 ? near.centerX + (rand() - 0.5) * 3000 : (rand() - 0.5) * 22000;
+            const z = i % 2 === 0 ? near.centerZ + (rand() - 0.5) * 3000 : (rand() - 0.5) * 22000;
+            const want = sampleSurfacePadYMax(x, z, pads);
+            assert.equal(index.sampleYMax(x, z), want, `at ${x}, ${z}`);
+            assert.equal(index.sampleCoreYMax(x, z), sampleSurfacePadCoreYMax(x, z, pads));
+            if (want > -Infinity) hits++;
+        }
+        assert.ok(hits > 1000, `only ${hits} probes hit a pad - the test is not testing much`);
+    });
+
+    it('takes pads added later, and forgets them on clear', () => {
+        const index = new SurfacePadIndex(pads.slice(0, 100));
+        index.add(pads.slice(100));
+        assert.equal(index.length, pads.length);
+        const p = pads[250];
+        assert.equal(index.sampleYMax(p.centerX, p.centerZ), sampleSurfacePadYMax(p.centerX, p.centerZ, pads));
+        index.clear();
+        assert.equal(index.length, 0);
+        assert.equal(index.sampleYMax(p.centerX, p.centerZ), -Infinity);
     });
 });

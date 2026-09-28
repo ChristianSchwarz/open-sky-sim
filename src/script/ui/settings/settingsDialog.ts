@@ -275,7 +275,7 @@ function sliderValue(event: Event): number {
                                 </mat-select>
                             </mat-form-field>
                         }
-                        @if (spawn().airfields.length > 1) {
+                        @if (spawn().airfields.length > 0) {
                             <mat-form-field class="w-full" subscriptSizing="dynamic">
                                 <mat-label>Airfield</mat-label>
                                 <mat-select [value]="spawn().airfieldIndex" (selectionChange)="spawnMenu.selectAirfield($event.value)">

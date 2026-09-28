@@ -31,7 +31,9 @@ export function isBuildRelevant(filePath) {
     if (!rel || rel.startsWith('..')) {
         return false;
     }
-    if (rel.startsWith('.cursor/') || rel.startsWith('dist/') || rel.startsWith('node_modules/')) {
+    if (rel.startsWith('.cursor/') || rel.startsWith('dist/') || rel.startsWith('node_modules/')
+        // Baked terrain, served straight from assets/ - a bake writes thousands of these.
+        || rel.startsWith('assets/terrain/') || rel.startsWith('assets/planet/')) {
         return false;
     }
     return WEBPACK_PATTERNS.some((pattern) => pattern.test(rel))

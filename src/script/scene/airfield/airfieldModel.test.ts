@@ -265,6 +265,27 @@ describe('airfield model', () => {
         }
     });
 
+    it('lies on the runway axis far from the play origin', () => {
+        // 65 km out the ground is 300 m below the origin's tangent plane.
+        // Reading (e, n) back on that plane put BER's pavement 3.5 m to the
+        // south-west of the runway the spawn and the collider are laid on.
+        const far = makeEnuBasis(27.55, -15.95, 0);
+        const built = buildAirfieldModel(gclp(), far, MATERIALS)!;
+        const rw = gclp().runways[0];
+        const centre = new THREE.Vector3();
+        const flat = vertices(built.model.lod[2].flats);
+        for (const v of flat) {
+            centre.add(v);
+        }
+        centre.divideScalar(flat.length).add(built.origin);
+        const ecef = enuToEcef(far, enuFromScene(centre));
+        const g = ecefToGeodetic(ecef.x, ecef.y, ecef.z);
+        const offM = Math.hypot(
+            (g.lat - rw.lat) * 110800,
+            (g.lon - rw.lon) * 111320 * Math.cos(rw.lat * Math.PI / 180));
+        assert.ok(offM < 0.1, `pavement centre ${offM.toFixed(2)} m off the runway's own`);
+    });
+
     it('paints a paved runway and leaves a grass one bare', () => {
         const paved = buildAirfieldModel(gclp(), BASIS, MATERIALS)!;
         const grass = buildAirfieldModel(gclp({

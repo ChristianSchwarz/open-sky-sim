@@ -33,7 +33,7 @@ interface SerializedHill {
     worldReach: number;
 }
 
-interface SerializedObstacle {
+export interface SerializedObstacle {
     position: [number, number, number];
     radius: number;
     height: number;
@@ -212,11 +212,7 @@ export function deserializeWorldQuery(
         worldZ: h.worldZ,
         worldReach: h.worldReach,
     }));
-    const obstacles: Obstacle[] = world.obstacles.map(o => ({
-        position: new THREE.Vector3(o.position[0], o.position[1], o.position[2]),
-        radius: o.radius,
-        height: o.height,
-    }));
+    const obstacles = deserializeObstacles(world.obstacles);
     const runways: Runway[] = (world.runways ?? []).map(r => ({
         center: new THREE.Vector3(r.center[0], r.center[1], r.center[2]),
         heading: r.heading,
@@ -251,6 +247,40 @@ export function deserializeWorldQuery(
         hills, () => true, obstacles, runways, skiJumps, carrierMeshes, baseHeightAt,
         world.surfacePads ?? [], sceneryMeshes,
     );
+}
+
+function deserializeObstacles(list: readonly SerializedObstacle[]): Obstacle[] {
+    return list.map(o => ({
+        position: new THREE.Vector3(o.position[0], o.position[1], o.position[2]),
+        radius: o.radius,
+        height: o.height,
+    }));
+}
+
+/**
+ * Static colliders added to a world already sent - an airfield's buildings,
+ * streamed in mid-flight. Applied with {@link applyStaticColliders}.
+ */
+export interface SerializedStaticColliders {
+    surfacePads: SurfacePadCollider[];
+    obstacles: SerializedObstacle[];
+}
+
+export function serializeStaticColliders(
+    surfacePads: readonly SurfacePadCollider[], obstacles: readonly Obstacle[],
+): SerializedStaticColliders {
+    return {
+        surfacePads: surfacePads.map(p => ({ ...p })),
+        obstacles: obstacles.map(o => ({
+            position: [o.position.x, o.position.y, o.position.z],
+            radius: o.radius,
+            height: o.height,
+        })),
+    };
+}
+
+export function applyStaticColliders(world: SceneWorldQuery, colliders: SerializedStaticColliders): void {
+    world.addStaticColliders(colliders.surfacePads, deserializeObstacles(colliders.obstacles));
 }
 
 /** Rebuild arrestor cable fields for combat-sim trap physics. */

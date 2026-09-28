@@ -19,7 +19,8 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { unzipSync } from 'fflate';
 import {
-    areasHandler, importStream, osmTile, startDelete, startImport,
+    areasHandler, ensureTerrain, importStream, osmExtractsHandler, osmTile, startDelete, startImport,
+    terrainBootstrapHandler,
 } from './areaImport';
 
 const PROJECT_ROOT = path.dirname(__dirname);
@@ -1015,9 +1016,12 @@ if (LIVE_RELOAD) {
 // Terrain area import (F9 in the app). See tools/areaImport.ts.
 app.get('/api/osm/:z/:x/:y', osmTile);
 app.get('/api/areas', areasHandler);
+app.get('/api/osm-extracts', osmExtractsHandler);
 app.post('/api/import-area', express.json(), startImport);
 app.post('/api/delete-area', express.json(), startDelete);
 app.get('/api/import-area/:id', importStream);
+app.get('/api/terrain-bootstrap', terrainBootstrapHandler);
+ensureTerrain();
 
 app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ ok: true, server: 'modserver', previewMod: true });

@@ -388,6 +388,23 @@ class IslandsInInlandWaterTest(unittest.TestCase):
         self.assertEqual(inland, [])
 
 
+class SelfIntersectingWaterTest(unittest.TestCase):
+    """A water way that crosses itself is repaired, not fed to the union raw."""
+
+    # A figure eight: two lobes meeting at (0.5, 0.5).
+    BOWTIE = ({'natural': 'water'}, [(0.2, 0.2), (0.8, 0.8), (0.8, 0.2), (0.2, 0.8), (0.2, 0.2)])
+    LAKE = ({'natural': 'water', 'water': 'lake'}, _square(0.1, 0.4, 0.9, 0.6))
+
+    def test_both_lobes_stay_water(self):
+        from shapely.geometry import Point
+        land, inland, _ = _polygons_from_osm(_tagged_answer(self.BOWTIE, self.LAKE), TILE)
+        self.assertFalse(land.contains(Point(0.3, 0.5)))
+        self.assertFalse(land.contains(Point(0.7, 0.5)))
+        self.assertTrue(land.contains(Point(0.5, 0.25)))
+        self.assertTrue(land.contains(Point(0.05, 0.05)))
+        self.assertTrue(all(b.geom.is_valid for b in inland))
+
+
 class RiverProfile(unittest.TestCase):
     def test_never_rises_downstream(self):
         import numpy as np

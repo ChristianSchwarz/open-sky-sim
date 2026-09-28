@@ -812,6 +812,8 @@ def main() -> None:
                          '(opt-in; requires shapely and either --bbox or --only)')
     ap.add_argument('--refresh-osm', action='store_true',
                     help='bypass the Overpass cache for --osm-landuse')
+    ap.add_argument('--pbf', help='read --osm-landuse polygons from this local .osm.pbf '
+                                   'instead of Overpass (pip install osmium)')
     args = ap.parse_args(glue_negative_bbox(sys.argv[1:]))
 
     manifest_path = os.path.join(args.src, 'manifest.json')
@@ -897,13 +899,26 @@ def main() -> None:
         # --only has no such mixture (it's whatever specific tiles were
         # named), so union_bounds() over exactly those is correct there.
         fetch_bbox = parse_bbox(args.bbox) if args.bbox else union_bounds(tiles)
-        print(f'fetching OSM landuse for {len(tiles)} tiles...')
-        # The same cells the coast bake fetched, and the same open-sea
-        # cells it skipped, so this is a cache hit end to end.
-        from osm_common import sea_cell_skipper
-        data = overpass_landuse_query(
-            fetch_bbox, args.refresh_osm,
-            skip_cell=sea_cell_skipper(args.src, manifest.get('seaLevel', 0.0)))
+        if args.pbf:
+            from osm_common import Bounds
+            from osm_landuse import landuse_tag_predicate
+            from osm_pbf import pbf_elements
+            print(f'reading OSM landuse for {len(tiles)} tiles from {args.pbf}...')
+            # Same cache key ('landuse') and bbox shape bake_osm_coast.py's own
+            # --osm-landuse read uses, so this shares its cache hit instead of
+            # re-scanning the file - only when both were given the exact same
+            # --bbox (the fetch_bbox == union_bounds(tiles) case does not
+            # match byte for byte, so it simply misses instead of sharing).
+            data = pbf_elements(args.pbf, Bounds(*fetch_bbox), landuse_tag_predicate, 'landuse',
+                                 refresh=args.refresh_osm)
+        else:
+            print(f'fetching OSM landuse for {len(tiles)} tiles...')
+            # The same cells the coast bake fetched, and the same open-sea
+            # cells it skipped, so this is a cache hit end to end.
+            from osm_common import sea_cell_skipper
+            data = overpass_landuse_query(
+                fetch_bbox, args.refresh_osm,
+                skip_cell=sea_cell_skipper(args.src, manifest.get('seaLevel', 0.0)))
         osm_polys, osm_classes = assemble_landuse_polygons(data)
         print(f'  {len(osm_polys)} landuse polygons assembled')
         if osm_polys:

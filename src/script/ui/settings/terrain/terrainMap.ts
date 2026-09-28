@@ -3,7 +3,7 @@ import {
 } from '@angular/core';
 import { AreaImportService } from './areaImportService';
 import {
-    Box, MAX_SPAN_DEG, MAX_ZOOM, MIN_ZOOM, TILE_PX, boxSpanDeg, crossesAntimeridian, latToWorld, lonToWorld,
+    Box, boxTooBig, MAX_ZOOM, MIN_ZOOM, TILE_PX, crossesAntimeridian, latToWorld, lonToWorld,
     worldToLat, worldToLon, wrapLon,
 } from './importMath';
 
@@ -43,6 +43,7 @@ export class TerrainMap implements AfterViewInit, OnDestroy {
     constructor() {
         effect(() => {
             this.service.areas();
+            this.service.extracts();
             this.service.selection();
             this.draw();
         });
@@ -258,12 +259,18 @@ export class TerrainMap implements AfterViewInit, OnDestroy {
             }
         }
 
+        // Extracts behind areas: a region already downloaded locally is a much
+        // weaker signal than an area actually baked, and the fainter, unlabelled
+        // box should never compete with the labelled one for attention.
+        for (const extract of this.service.extracts()) {
+            this.strokeBox(ctx, extract, 'rgba(140, 255, 170, 0.55)', 'rgba(140, 255, 170, 0.05)');
+        }
         for (const area of this.service.areas()) {
             this.strokeBox(ctx, area, 'rgba(120, 200, 255, 0.9)', 'rgba(120, 200, 255, 0.15)', area.name);
         }
         const selection = this.service.selection();
         if (selection) {
-            const tooBig = boxSpanDeg(selection) > MAX_SPAN_DEG || crossesAntimeridian(selection);
+            const tooBig = boxTooBig(selection) || crossesAntimeridian(selection);
             this.strokeBox(
                 ctx,
                 selection,

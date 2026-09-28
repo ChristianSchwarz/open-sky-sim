@@ -43,6 +43,9 @@ function handleMessage(data: SimToWorkerMessage): void {
         case 'setWorld':
             sim.setWorld(data.world);
             break;
+        case 'addStaticColliders':
+            sim.addStaticColliders(data.colliders);
+            break;
         case 'setHeightField':
             sim.setHeightField(data.config);
             break;

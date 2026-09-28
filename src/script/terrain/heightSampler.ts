@@ -10,7 +10,8 @@
 
 import { DemTile, sampleBilinear } from './demTile';
 import {
-    Ecef, Enu, EnuBasis, ecefToEnu, enuToGeodeticApprox, geodeticToEcef,
+    Ecef, Enu, EnuBasis, Geodetic, ecefToEnu, enuToGeodeticApprox, geodeticOnSurfaceAtEnu,
+    geodeticToEcef,
 } from './geodesy';
 import { FlattenPad, applyFlattenPad, padBlendWeight } from './flattenPad';
 import { TileKey, tileAtLonLat, tileBounds, tileKeyString } from './tiling';
@@ -26,6 +27,7 @@ export type TileLookup = (id: TileKey) => DemTile | undefined;
 /** Scratch for the geodetic round trip; these are called per contact test. */
 const _ecef: Ecef = { x: 0, y: 0, z: 0 };
 const _enu: Enu = { e: 0, n: 0, u: 0 };
+const _ground: Geodetic = { lat: 0, lon: 0, height: 0 };
 
 export interface HeightSamplerOptions {
     basis: EnuBasis;
@@ -71,9 +73,8 @@ export class HeightSampler {
      * ground the player could see, and the aircraft exploded in mid-air.
      */
     heightAtEnu(e: number, n: number): number {
-        const g = enuToGeodeticApprox(this.basis, e, n, 0);
-        const h = this.surfaceHeight(e, n, g.lon, g.lat);
-        geodeticToEcef(g.lat, g.lon, h, _ecef);
+        const h = this.groundAtEnu(e, n);
+        geodeticToEcef(_ground.lat, _ground.lon, h, _ecef);
         return ecefToEnu(this.basis, _ecef, _enu).u;
     }
 
@@ -83,8 +84,26 @@ export class HeightSampler {
      * the scene Y, which goes negative with distance on its own.
      */
     geodeticHeightAtEnu(e: number, n: number): number {
-        const g = enuToGeodeticApprox(this.basis, e, n, 0);
-        return this.surfaceHeight(e, n, g.lon, g.lat);
+        return this.groundAtEnu(e, n);
+    }
+
+    /**
+     * Elevation of the ground under scene `(e, n)`, leaving where it was read
+     * in `_ground`.
+     *
+     * Read where the drawn ground at `(e, n)` really is, not at the lat/lon of
+     * the origin's tangent plane there - see {@link geodeticOnSurfaceAtEnu}.
+     * Far out those are metres apart sideways, and the collider slid off the
+     * mesh by as much. The last sample is the answer, so it is kept rather
+     * than read a second time.
+     */
+    private groundAtEnu(e: number, n: number): number {
+        let h = 0;
+        geodeticOnSurfaceAtEnu(this.basis, e, n, (lat, lon) => {
+            h = this.surfaceHeight(e, n, lon, lat);
+            return h;
+        }, _ground);
+        return h;
     }
 
     /**
@@ -159,7 +178,7 @@ export class HeightSampler {
 
     /** Which tier would answer a query here. */
     tierAtEnu(e: number, n: number): HeightTier {
-        const g = enuToGeodeticApprox(this.basis, e, n, 0);
+        const g = geodeticOnSurfaceAtEnu(this.basis, e, n);
         if (this.tileAt(this.queryZoom, g.lon, g.lat, this.fine)) {
             return 'fine';
         }
@@ -168,7 +187,7 @@ export class HeightSampler {
 
     /** Key (`z/x/y`) of the fine tile covering an ENU point. */
     fineTileKeyAtEnu(e: number, n: number): string {
-        const g = enuToGeodeticApprox(this.basis, e, n, 0);
+        const g = geodeticOnSurfaceAtEnu(this.basis, e, n);
         return tileKeyString(tileAtLonLat(this.queryZoom, g.lon, g.lat));
     }
 

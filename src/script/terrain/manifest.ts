@@ -180,8 +180,12 @@ export const DEFAULT_TERRAIN_URL: string =
 
 export async function loadTerrainManifest(
     url: string = DEFAULT_TERRAIN_URL,
+    onBake?: (percent: number, label: string) => void,
 ): Promise<TerrainManifest> {
-    const res = await fetch(url);
+    let res = await fetch(url);
+    if (res.status === 404 && onBake && await waitForBootstrapBake(onBake)) {
+        res = await fetch(url);
+    }
     if (!res.ok) {
         throw new Error(
             `Failed to load terrain manifest ${url}: ${res.status}. `
@@ -193,6 +197,47 @@ export async function loadTerrainManifest(
         throw new Error(`Unsupported terrain manifest scheme: ${m.scheme}`);
     }
     return m;
+}
+
+/**
+ * The dev server bakes missing terrain itself when it starts (see
+ * tools/areaImport.ts, `ensureTerrain`). Follows that bake, reporting through
+ * `onBake`, and resolves true once it has finished. False when there is no
+ * such bake to wait for - the static published build has no /api at all.
+ */
+async function waitForBootstrapBake(
+    onBake: (percent: number, label: string) => void,
+): Promise<boolean> {
+    for (;;) {
+        let s: {
+            state: string; name?: string; step?: string; stepIndex?: number;
+            stepCount?: number; percent?: number; error?: string;
+        };
+        try {
+            const r = await fetch('api/terrain-bootstrap');
+            if (!r.ok) {
+                return false;
+            }
+            s = await r.json();
+        } catch {
+            return false;
+        }
+        if (s.state === 'done') {
+            return true;
+        }
+        if (s.state !== 'running') {
+            if (s.error) {
+                throw new Error(`Terrain bake failed: ${s.error}. See the dev server log.`);
+            }
+            return false;
+        }
+        const count = Math.max(1, s.stepCount ?? 1);
+        const overall = (((s.stepIndex ?? 0) + (s.percent ?? 0) / 100) / count) * 100;
+        onBake(Math.min(99, overall),
+            `No terrain yet - baking ${s.name} (step ${(s.stepIndex ?? 0) + 1}/${count}: ${s.step}). `
+            + 'This runs once and can take a while.');
+        await new Promise(r => setTimeout(r, 1000));
+    }
 }
 
 function expand(template: string, z: number, x: number, y: number): string {

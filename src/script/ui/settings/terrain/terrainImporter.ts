@@ -2,7 +2,6 @@ import {
     ChangeDetectionStrategy, Component, ElementRef, afterRenderEffect, computed, inject, viewChild,
 } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
-import { MatCheckboxModule } from '@angular/material/checkbox';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatDialog } from '@angular/material/dialog';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -21,7 +20,7 @@ import { TerrainMap } from './terrainMap';
     selector: 'rfs-terrain-importer',
     changeDetection: ChangeDetectionStrategy.OnPush,
     imports: [
-        MatButtonModule, MatCheckboxModule, MatChipsModule, MatFormFieldModule, MatInputModule,
+        MatButtonModule, MatChipsModule, MatFormFieldModule, MatInputModule,
         MatProgressBarModule, TerrainMap,
     ],
     host: { class: 'block' },
@@ -57,9 +56,6 @@ import { TerrainMap } from './terrainMap';
                     [value]="service.name()" (input)="setName($event)">
             </mat-form-field>
         </div>
-        <mat-checkbox [checked]="service.withCover()" (change)="service.withCover.set($event.checked)">
-            Satellite colour (adds ~30 min)
-        </mat-checkbox>
         <button mat-flat-button type="button"
             [disabled]="service.blocked() !== undefined" (click)="startImport()">Import</button>
     </div>
@@ -98,6 +94,7 @@ export class TerrainImporter {
 
     constructor() {
         void this.service.loadAreas();
+        void this.service.loadExtracts();
         // Follow the newest line of the bake log.
         afterRenderEffect(() => {
             this.service.log();

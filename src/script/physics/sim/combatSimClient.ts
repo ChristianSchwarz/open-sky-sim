@@ -3,7 +3,7 @@ import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { Faction } from '../../weapons/combatant';
 import { ForceVectorSample } from '../model/flightModel';
 import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
-import { SerializedArrestorCables, SerializedWorld } from './serializedWorld';
+import { SerializedArrestorCables, SerializedStaticColliders, SerializedWorld } from './serializedWorld';
 import { HeightTileUpdate, SerializedHeightField } from '../../terrain/heightMirror';
 import { AC_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
 import {
@@ -109,6 +109,11 @@ export class CombatSimClient {
 
     setWorld(world: SerializedWorld): void {
         this.post({ type: 'setWorld', world });
+    }
+
+    /** More static ground for the world already sent - see CombatSim.addStaticColliders. */
+    addStaticColliders(colliders: SerializedStaticColliders): void {
+        this.post({ type: 'addStaticColliders', colliders });
     }
 
     /** Sampler config for the mirrored DEM. Send before any tiles. */

@@ -2,9 +2,10 @@
  * Keeps scattered trees off an airfield's own pavement and clearways.
  *
  * Built once per area (see terrainEntity.ts's setAirfieldExclusion) from the
- * same airfield descriptions airfieldModel.ts draws, in the same tile axes
- * the trees are scattered in - +X east, +Z south - so `x`/`z` here match
- * treeBillboards.ts's `point.x`/`point.z` directly, no further conversion.
+ * same airfield descriptions airfieldModel.ts draws, in scene x/z - +X east,
+ * +Z south, from the play origin. A scatter point is an offset from its
+ * tile's centre, so terrainEntity.ts's sceneExclusionFor moves it into the
+ * scene before asking.
  *
  * Runways are oriented rectangles (their pad, plus a margin); taxiways are
  * buffered centreline segments; aprons are their own ring, buffered the same

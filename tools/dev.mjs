@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -61,6 +61,24 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+// A blank checkout: node packages first (everything below runs through them),
+// then the Python ones the terrain bake needs - the dev server bakes missing
+// terrain on its own at startup (see tools/areaImport.ts, ensureTerrain).
+if (!fs.existsSync(path.join(PROJECT_ROOT, 'node_modules', '.package-lock.json'))) {
+    console.log('[dev] installing node packages...');
+    await runCommand('npm', ['install']);
+}
+
+const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+const PY_MODULES = ['numpy', 'rasterio', 'requests', 'shapely', 'osmium'];
+const pyCheck = spawnSync(PYTHON, ['-c', `import ${PY_MODULES.join(', ')}`], { cwd: PROJECT_ROOT });
+if (pyCheck.error) {
+    console.warn(`[dev] ${PYTHON} not found - terrain cannot be baked. Install Python 3 or set PYTHON.`);
+} else if (pyCheck.status !== 0) {
+    console.log('[dev] installing Python packages for the terrain bake...');
+    await runCommand(PYTHON, ['-m', 'pip', 'install', '-r', 'tools/requirements.txt']);
+}
+
 console.log('[dev] initial build...');
 await runCommand('npm', ['run', 'build']);
 
@@ -70,6 +88,7 @@ console.log('[dev] open http://localhost:8020 — saves rebuild and refresh the 
 spawnChild('npx', ['webpack', '--mode=development', '--watch']);
 spawnChild('npx', ['tsx', 'tools/modserver.ts'], {
     ...process.env,
+    PYTHON,
     LIVE_RELOAD: '1',
 });
 

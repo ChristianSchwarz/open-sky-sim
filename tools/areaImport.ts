@@ -638,6 +638,10 @@ export function dataSteps(
     const bbox = job.bbox.join(',');
     const pbfArg = `--pbf=${job.pbf}`;
     const tif = path.join('data', 'imports', `${slug(job.name)}-${job.bbox.join('_')}.tif`);
+    // Each chunk's satellite sources in a directory of their own: the fetch
+    // lane runs ahead of the cover lane, so a shared data/cover had the next
+    // chunk's fetch overwrite the rasters a cover bake was still reading.
+    const coverDir = path.join('data', 'cover', 'chunks', job.bbox.join('_'));
     return [
         {
             label: 'fetching heights', cmd: PYTHON, lane: 'dem',
@@ -698,11 +702,12 @@ export function dataSteps(
         },
         {
             label: 'fetching cover sources', cmd: PYTHON, lane: 'cover-fetch',
-            args: ['tools/fetch_cover_sources.py', `--bbox=${bbox}`],
+            args: ['tools/fetch_cover_sources.py', `--bbox=${bbox}`, `--out=${coverDir}`],
         },
         {
             label: 'baking cover', cmd: PYTHON, lane: 'cover',
-            args: ['tools/bake_planet_cover.py', `--bbox=${bbox}`, '--osm-landuse', pbfArg],
+            args: ['tools/bake_planet_cover.py', `--bbox=${bbox}`, '--osm-landuse', pbfArg,
+                `--sources=${path.join(coverDir, 'sources.json')}`],
         },
     ];
 }

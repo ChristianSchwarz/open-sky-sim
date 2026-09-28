@@ -77,9 +77,9 @@ export class SpawnPanel {
     /**
      * Offer the airfields of the area being flown.
      *
-     * The dialog hides the list entirely when there is one or none: a menu
-     * whose only choice is the one already made is furniture, and an area
-     * baked before airfields existed has nothing to put in it.
+     * The dialog shows the list whenever there is at least one, so the field
+     * being flown from is always visible; an area baked before airfields
+     * existed has nothing to put in it, and then the list is hidden.
      */
     setAirfields(choices: AirfieldChoice[], selectedIcao: string | undefined): void {
         this.airfieldChoices = choices;

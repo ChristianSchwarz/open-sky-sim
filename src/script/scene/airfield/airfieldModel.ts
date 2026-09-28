@@ -20,7 +20,7 @@ import {
 } from '../../terrain/airfields';
 import { bearingAxisAt } from '../../terrain/flattenPad';
 import {
-    Ecef, Enu, EnuBasis, ecefToEnu, enuToGeodeticApprox, geodeticToEcef, sceneFromEnu,
+    Ecef, Enu, EnuBasis, ecefToEnu, geodeticOnSurfaceAtEnu, geodeticToEcef, sceneFromEnu,
 } from '../../terrain/geodesy';
 import { toneCategoryOfClass } from '../../terrain/terrainEntity';
 import { TileCover } from '../../terrain/tileHeightIndex';
@@ -72,9 +72,10 @@ const TAXIWAY_STEP_M = 20;
  * What each surface fogs as, and what it is drawn in before the terrain
  * under it has streamed in (see {@link GroundStrip}).
  *
- * Every runway surface - paved or not - is drawn in the observed colour of
- * the ground it sits on (see {@link groundPaint}); this is only the tone
- * used for fog and for the stand-in before that colour is known. Concrete
+ * Paved runways are drawn in this tone outright: gray concrete, dark gray
+ * asphalt. Unpaved ones are drawn in the observed colour of the ground they
+ * sit on (see {@link groundPaint}), and for them this is only the tone used
+ * for fog and for the stand-in before that colour is known. Concrete
  * gets its own stand-in rather than sharing asphalt's - a military field laid
  * in slabs is markedly paler than an asphalt civil field, and OSM records
  * which it is, so there is no reason to guess even for a placeholder.
@@ -476,6 +477,11 @@ export function buildAirfieldModel(
     const unpaved: { runway: AirfieldRunway; paint: Paint; zoom: number; points: { e: number; n: number }[] }[] = [];
     const surfacePaint = (runway: AirfieldRunway): Paint => {
         const lighten = runwayLighten(runway.surface);
+        // Paved runways are drawn in their own surface tone - gray concrete,
+        // dark gray asphalt - never the ground's, and so are never repainted.
+        if (runway.surface === 'asphalt' || runway.surface === 'concrete') {
+            return { category: RUNWAY_FALLBACK_CATEGORY[runway.surface], lighten };
+        }
         const points = runwaySamplePoints(runway).map(p => toEnu(p.lat, p.lon));
         // See RUNWAY_SEA_LEVEL_GUARD_M: a runway this low is exactly where the
         // bake's own coast-vector-vs-raster fallback can hand back Grass for
@@ -546,9 +552,17 @@ export function buildAirfieldModel(
     };
 }
 
-/** Scene position of an ENU point at a given elevation. */
+/**
+ * Scene position of an ENU point at a given elevation.
+ *
+ * `(e, n)` comes from a geodetic point at height 0 with its `u` dropped, so it
+ * has to be read back at that same `u` - on the ellipsoid - not on the tangent
+ * plane at u = 0. Sixty kilometres from the play origin the ground is 300 m
+ * below that plane and its vertical is tilted half a degree, and reading the
+ * plane instead moved a whole airfield 3.5 m sideways off its runway axis.
+ */
 function sceneAt(basis: EnuBasis, e: number, n: number, elevation: number): THREE.Vector3 {
-    const g = enuToGeodeticApprox(basis, e, n, 0);
+    const g = geodeticOnSurfaceAtEnu(basis, e, n);
     geodeticToEcef(g.lat, g.lon, elevation, _ecef);
     return sceneFromEnu(ecefToEnu(basis, _ecef, _enu));
 }

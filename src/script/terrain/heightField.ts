@@ -20,7 +20,7 @@
  */
 
 import { DemTile } from './demTile';
-import { EnuBasis, enuToGeodeticApprox, northFromSceneZ } from './geodesy';
+import { EnuBasis, geodeticOnSurfaceAtEnu, northFromSceneZ } from './geodesy';
 import { FlattenPad } from './flattenPad';
 import { HeightSampler, HeightTier } from './heightSampler';
 import { TerrainManifest } from './manifest';
@@ -220,7 +220,7 @@ export class HeightField {
 function boundsAroundEnu(
     basis: EnuBasis, e: number, n: number, radiusM: number,
 ): LonLatBounds {
-    const c = enuToGeodeticApprox(basis, e, n, 0);
+    const c = geodeticOnSurfaceAtEnu(basis, e, n);
     const dLat = radiusM / 110540;
     const dLon = radiusM / (111320 * Math.max(0.1, Math.cos(c.lat * Math.PI / 180)));
     return {

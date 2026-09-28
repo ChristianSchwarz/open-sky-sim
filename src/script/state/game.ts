@@ -32,7 +32,7 @@ import { DebrisField } from '../scene/entities/debrisField';
 import { DamageSmokeField } from '../scene/entities/damageSmokeField';
 import { GroundTargetEntity } from '../scene/entities/groundTarget';
 import { ActivePlayArea, homeArea, resolvePlayArea, terrainAreas } from '../terrain/playArea';
-import { AirfieldBuilding, airfieldsInArea } from '../terrain/airfields';
+import { Airfield, AirfieldBuilding, airfieldsInArea } from '../terrain/airfields';
 import {
     SceneRunway, airfieldChoices, headingForward, pickStartRunway, sceneRunwaysOf,
 } from './activeAirfield';
@@ -62,7 +62,8 @@ import {
 import {
     createSkiJumpCollider, sampleSkiJumpSurfaceYMax, SkiJumpCollider,
 } from '../scene/entities/skiJump';
-import { SurfacePadCollider, sampleSurfacePadYMax } from '../scene/entities/surfacePad';
+import { SurfacePadCollider, SurfacePadIndex, sampleSurfacePadY } from '../scene/entities/surfacePad';
+import { buildSurfaceExclusion } from '../terrain/surfaceExclusion';
 import { SceneryField, SceneryFieldSettings } from '../scene/entities/sceneryField';
 import { SimpleEntity } from '../scene/entities/simpleEntity';
 import { StaticSceneryEntity } from '../scene/entities/staticScenery';
@@ -108,7 +109,7 @@ import { WeaponsField } from '../scene/entities/weaponsField';
 import { Faction } from '../weapons/combatant';
 import { CombatSimClient } from '../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../physics/model/simProxyFlightModel';
-import { serializeWorld, defaultArrestorCableField } from '../physics/sim/serializedWorld';
+import { serializeStaticColliders, serializeWorld, defaultArrestorCableField } from '../physics/sim/serializedWorld';
 import { HeightFieldSender, MirrorFocus } from '../terrain/heightMirror';
 import { SimAircraftSpawn, SimFlightModelKind, SimGunConfig } from '../physics/sim/simTypes';
 import { PLAYER_SIM_ID, WINGMAN_SIM_ID, aiSimId } from '../physics/sim/simIds';
@@ -128,7 +129,6 @@ import {
 /** Loose cloud deck: base altitude and per-puff undulation, well under HIGH_ALTITUDE_M. */
 /** Altitude at which the atmosphere shell starts to fade in over the sky dome. */
 const ATMOSPHERE_SHELL_FADE_IN_M = 30_000;
-/** Scratch for {@link Game.updateAtmosphereShell}. */
 /** How long the terrain backlog must stay empty before the boot blur lifts; see Game.holdUntilStreamed. */
 const STREAM_SETTLE_MS = 600;
 /** The boot blur lifts after this even if streaming never goes quiet (a failing tile, a slow link). */
@@ -139,6 +139,7 @@ const STREAM_COUNTDOWN_FROM = 3;
 const STREAM_GO_SHOWN_MS = 800;
 /** Fastest the streaming bar may advance (fraction of full per second), so it sweeps rather than jumps. */
 const STREAM_BAR_RATE_PER_S = 0.5;
+/** Scratch for {@link Game.updateAtmosphereShell}. */
 const SHELL_CENTRE = new THREE.Vector3();
 const SHELL_AXIS = new THREE.Vector3();
 const SHELL_REL = new THREE.Vector3();
@@ -227,8 +228,22 @@ const SURFACE_PAD_FEATHER_M = 15;
  * reaches well past the runway strips the bake flattened.
  */
 const AIRFIELD_GROUND_RADIUS_M = 4000;
+/**
+ * Airfields are built - pavement, buildings, target - only within this of the
+ * aircraft (or of the spawn airfield, at boot), and streamed in as it flies.
+ * An area can hold hundreds of them: building all 518 of DACH at boot took
+ * five minutes and 2 GB.
+ */
+const AIRFIELD_STREAM_RADIUS_M = 50_000;
+/** How often the aircraft's position is checked for airfields to stream in. */
+const AIRFIELD_STREAM_INTERVAL_MS = 1000;
 /** Edge softening on a building's roof pad. A wall is a step, not a ramp. */
 const BUILDING_PAD_FEATHER_M = 0.5;
+/**
+ * A building streamed in mid-flight gets no collider while an aircraft is
+ * over its footprint lower than this above its roof (see aircraftUnder).
+ */
+const BUILDING_STREAM_CLEARANCE_M = 50;
 /** Hangar-ground pavement half extent: lib:pavement unit square × scale 200. */
 const HANGAR_GROUND_HALF_M = 100;
 /** Kuznetsov carrier origin — open water (matches {@link ARRESTOR_CARRIER_ORIGIN}). */
@@ -443,9 +458,17 @@ export class Game {
     private readonly skiJumps: SkiJumpCollider[] = [];
     private readonly carrierMeshes: CarrierMeshCollider[] = [];
     /** Flat solid surfaces (runway strip, pavement pads); gear rests on them, not the terrain below. */
-    private readonly surfacePads: SurfacePadCollider[] = [];
+    private readonly surfacePads = new SurfacePadIndex();
     /** Every runway of this play area, longest first. Empty on an old pyramid. */
     private sceneRunways: SceneRunway[] = [];
+    /** Every airfield of this play area with its scene position; built or not. */
+    private areaAirfields: Array<{ airfield: Airfield; x: number; z: number }> = [];
+    /** Airfields already built into the scene, or being built right now. */
+    private readonly builtAirfields = new Set<Airfield>();
+    private airfieldStreamBusy = false;
+    /** Set once setupCombat has handed the static world to the sim worker. */
+    private worldSent = false;
+    private lastAirfieldStreamMs = 0;
     /**
      * Unpaved runways whose colour is not final: the finest terrain tile
      * under them has not been drawn yet, so they carry a stand-in or a coarse
@@ -604,13 +627,13 @@ export class Game {
     private heldOrbitKeys = new Set<string>();
     /** A flight held by the settings dialog: it is open over it and nothing moves until it closes. */
     private menuPaused = false;
-    private _orbitPivot = new THREE.Vector3();
     /** The whole game holds still under the blurred overlay while terrain streams in; see holdUntilStreamed. */
     private streamHeld = false;
     /** Bumped per hold, so a spawn during an older hold's wait takes it over. */
     private streamHoldToken = 0;
     /** False during setup(), before the kernel draws frames: a spawn then cannot hold, index.ts does it after start. */
     private kernelRunning = false;
+    private _orbitPivot = new THREE.Vector3();
     private _orbitOffset = new THREE.Vector3();
     private _orbitAxis = new THREE.Vector3();
     private _debugDebrisVel = new THREE.Vector3();
@@ -1363,7 +1386,6 @@ export class Game {
         }
     }
 
-    private reportTerrainBootProgress(meshed: number, total: number, min: number, max: number): void {
     /**
      * After a spawn the pinned set is in, but the per-frame LOD pass still
      * asks for finer tiles, cover textures and roads for a few seconds. Hold
@@ -1451,6 +1473,7 @@ export class Game {
         }
     }
 
+    private reportTerrainBootProgress(meshed: number, total: number, min: number, max: number): void {
         const frac = total > 0 ? meshed / total : 1;
         const pct = min + (max - min) * frac;
         const label = total > 0
@@ -1626,7 +1649,7 @@ export class Game {
         return Math.max(
             demY,
             sampleSkiJumpSurfaceYMax(x, z, this.skiJumps),
-            sampleSurfacePadYMax(x, z, this.surfacePads),
+            this.surfacePads.sampleYMax(x, z),
             sampleCarrierMeshSurfaceYMax(x, z, this.sceneryMeshes),
             sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes),
         );
@@ -1640,13 +1663,22 @@ export class Game {
      * Only decals want this. A ground shadow has to land on the triangles the
      * depth test will compare it against or it is simply not drawn, whereas
      * physics wants the one surface that does not shift under an LOD change.
+     *
+     * On a pad's own footprint - runway, apron, roof - the pad *is* what is
+     * drawn, and it replaces the terrain rather than competing with it. A
+     * coarse tile drawn before the fine ones stream in can sit metres above a
+     * runway (3 m at BER on z9), and taking the higher of the two floated the
+     * shadow at canopy height over the pavement the aircraft stood on.
      */
     private drawnGroundHeightAt(x: number, z: number): number {
-        const drawnY = this.planetTerrain.drawnHeightAtWorld(x, z);
+        const paved = this.surfacePads.sampleCoreYMax(x, z);
+        const ground = paved > -Infinity
+            ? paved
+            : this.planetTerrain.drawnHeightAtWorld(x, z) ?? this.planetTerrain.heightAtWorld(x, z);
         return Math.max(
-            drawnY ?? this.planetTerrain.heightAtWorld(x, z),
+            ground,
             sampleSkiJumpSurfaceYMax(x, z, this.skiJumps),
-            sampleSurfacePadYMax(x, z, this.surfacePads),
+            this.surfacePads.sampleYMax(x, z),
             sampleCarrierMeshSurfaceYMax(x, z, this.sceneryMeshes),
             sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes),
         );
@@ -1663,7 +1695,7 @@ export class Game {
         return Math.max(
             this.planetTerrain.heightAtWorld(x, z),
             sampleSkiJumpSurfaceYMax(x, z, this.skiJumps),
-            sampleSurfacePadYMax(x, z, this.surfacePads),
+            this.surfacePads.sampleYMax(x, z),
         );
     }
 
@@ -1717,7 +1749,7 @@ export class Game {
         const z = at?.z ?? p.z;
         const dem = this.planetTerrain.heightAtWorld(x, z);
         const drawn = this.planetTerrain.drawnHeightAtWorld(x, z);
-        const pad = sampleSurfacePadYMax(x, z, this.surfacePads);
+        const pad = this.surfacePads.sampleYMax(x, z);
         const ski = sampleSkiJumpSurfaceYMax(x, z, this.skiJumps);
         const scenery = sampleCarrierMeshSurfaceYMax(x, z, this.sceneryMeshes);
         const carrier = sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes);
@@ -1975,6 +2007,9 @@ export class Game {
         this.paintGroundStrips();
         if (this.menuPaused || this.streamHeld) {
             return;
+        }
+        if (this.state === GameState.PLAYER) {
+            this.streamAirfields();
         }
         if (this.state === GameState.PLAYER) {
             if ((this.view === PlayerViewState.TARGET_TO || this.view === PlayerViewState.TARGET_FROM) && !this.player.weaponsTarget) {
@@ -3088,16 +3123,6 @@ export class Game {
         }
         this.applySelectedAircraft();
         this.state = GameState.PLAYER;
-        // Held until the terrain under the spawn is in (see below); the menu
-        // already paused it, the boot path has not.
-        this.player.setSimulationPaused(true);
-        this.spawnMenu.enabled = false;
-        this.spawnPanel.hide();
-        this.damageSmoke?.reset();
-
-        // Place the plane first, then warm DEM/meshes around it with the
-        // simulation still paused from the menu. The other order - warm, then
-        // place - left the aircraft sitting live on the runway for the whole
         if (this.kernelRunning) {
             // A respawn: blur the old view straight away rather than showing
             // the aircraft jump and the terrain around it fill in.
@@ -3105,6 +3130,22 @@ export class Game {
             hideCountdown();
             setBootStreaming(0, 'Loading terrain...');
         }
+        // Held until the terrain under the spawn is in (see below); the menu
+        // already paused it, the boot path has not.
+        this.player.setSimulationPaused(true);
+        this.spawnMenu.enabled = false;
+        this.spawnPanel.hide();
+        this.damageSmoke?.reset();
+        // A respawn at another airfield of a big area can land where nothing
+        // has streamed in yet: build it, and its neighbours, before placing.
+        if (this.activeRunway !== undefined) {
+            await this.buildAirfieldsNear(
+                this.activeRunway.center.x, this.activeRunway.center.z);
+        }
+
+        // Place the plane first, then warm DEM/meshes around it with the
+        // simulation still paused from the menu. The other order - warm, then
+        // place - left the aircraft sitting live on the runway for the whole
         // preload, which for the 10 km spawn is several hundred tiles: long
         // enough to read as the spawn having done nothing. Pausing rather
         // than stepping through the wait means an airborne spawn does not
@@ -3154,6 +3195,9 @@ export class Game {
             : spawn === 'carrierTakeoff' ? PLAYER_CARRIER_TAKEOFF_HEADING : this.baseHeading;
         this.syncSpawnCameraUrl(spawnHeading);
         this.player.setSimulationPaused(false);
+        if (this.kernelRunning) {
+            void this.holdUntilStreamed();
+        }
 
         if (spawn === 'carrierBarricade') {
             // A barricade arrival is a deck exercise, not a sortie: an opponent
@@ -3164,9 +3208,6 @@ export class Game {
             this.spawnOpponent(spawn === 'headon');
             this.spawnWingman();
             this.setCockpitFrontView();
-        if (this.kernelRunning) {
-            void this.holdUntilStreamed();
-        }
         }
         if (this.aiOpponent?.enabled) {
             this.player.setWeaponsTarget(this.aiOpponent);
@@ -3255,9 +3296,10 @@ export class Game {
                     pose.position.x, pose.position.y, pose.position.z, pose.quaternion,
                 )];
             })(),
-            this.surfacePads,
+            this.surfacePads.pads,
             this.sceneryMeshes,
         ));
+        this.worldSent = true;
         this.startHeightFieldMirror();
         this.combatSim.addAircraft({
             id: PLAYER_SIM_ID,
@@ -3537,7 +3579,7 @@ export class Game {
     }
 
     private async setupScene(spawn: SpawnMode) {
-        const manifest = await loadTerrainManifest();
+        const manifest = await loadTerrainManifest(DEFAULT_TERRAIN_URL, setBootProgress);
         // Which baked area this session flies in, and therefore where the ENU
         // origin sits. Home keeps PLAY_ORIGIN exactly and gets the authored
         // scenery; anywhere else is terrain only, rebased onto its own centre
@@ -3677,7 +3719,7 @@ export class Game {
         // the spawns are, which way the ILS points, and where the hangars and
         // the ramp go — so it has to be chosen before any of that is placed.
         setBootProgress(60, 'Loading airfields...');
-        this.surfacePads.length = 0;
+        this.surfacePads.clear();
         this.sceneryMeshes.length = 0;
         this.stagedSceneryMeshes.length = 0;
         await this.addOsmAirfields(this.scene);
@@ -3713,6 +3755,8 @@ export class Game {
 
         // All scenery is placed — its colliders become solid ground from here on.
         this.activateSceneryColliders();
+        // And nothing grows on the pavement and roofs those pads stand for.
+        this.planetTerrain.setSurfaceExclusion(buildSurfaceExclusion(this.surfacePads.pads));
 
         this.scene.add(this.player);
 
@@ -3767,19 +3811,71 @@ export class Game {
             : here.find(a => a.icao === this.homeRunway!.icao
                 && a.name === this.homeRunway!.name);
         this.homeHasRealAprons = (homeField?.aprons.length ?? 0) > 0;
+        this.builtAirfields.clear();
+        this.areaAirfields = here.map(airfield => {
+            const p = geodeticToWorld(this.planetTerrain.basis, airfield.lat, airfield.lon, 0);
+            return { airfield, x: p.x, z: p.z };
+        });
         if (here.length === 0) {
             return;
         }
-        // The ground under the taxiways has to be readable before they can be
-        // draped on it, and an airfield two hundred kilometres away has none of
-        // its height tiles resident at boot. Pinned per airfield rather than
-        // for the whole area: they can be a degree apart.
+        // Every runway is solid, near or far: a pad is the airfield's own
+        // fitted plane and needs no terrain, and the sim worker only gets its
+        // colliders once, below in setupCombat.
         for (const runway of this.sceneRunways) {
-            if (runway.primary) {
-                await this.planetTerrain.heights.ensureLoadedAroundWorld(
-                    runway.center.x, -runway.center.z, AIRFIELD_GROUND_RADIUS_M);
-            }
+            this.addRunwayPad(runway);
         }
+        this.osmBuildings = [];
+        // The rest - pavement, buildings, the target - only near the spawn;
+        // the others stream in as the aircraft comes within range.
+        const centre = this.activeRunway?.center;
+        await this.buildAirfieldsNear(centre?.x ?? 0, centre?.z ?? 0);
+        const active = this.activeRunway;
+        console.log(`airfields: ${here.length} in "${this.playArea.area.name}", `
+            + `${this.sceneRunways.length} runways, ${this.builtAirfields.size} built within `
+            + `${AIRFIELD_STREAM_RADIUS_M / 1000} km`
+            + (active ? `; based at ${active.icao || active.name} ${active.ref}` : ''));
+        // Dev aid, alongside __terrain: the pavement is laid on the same plane
+        // the terrain under it was cut to, and the only way to see whether
+        // those two agree is to read the numbers back.
+        (globalThis as Record<string, unknown>).__airfields = here;
+        (globalThis as Record<string, unknown>).__runways = this.sceneRunways;
+        (globalThis as Record<string, unknown>).__airfieldsBuilt = this.builtAirfields;
+        (globalThis as Record<string, unknown>).__surfacePads = this.surfacePads;
+        this.spawnPanel.setAirfields(
+            airfieldChoices(this.sceneRunways),
+            active ? (active.icao || active.name) : undefined);
+    }
+
+    /**
+     * Build every not-yet-built airfield within AIRFIELD_STREAM_RADIUS_M of a
+     * scene (x, z), nearest first: pavement, buildings, target, and solid
+     * buildings (see addBuildingColliders). Runways are solid from boot.
+     */
+    private async buildAirfieldsNear(x: number, z: number): Promise<void> {
+        const r2 = AIRFIELD_STREAM_RADIUS_M * AIRFIELD_STREAM_RADIUS_M;
+        const due = this.areaAirfields
+            .filter(a => !this.builtAirfields.has(a.airfield)
+                && (a.x - x) ** 2 + (a.z - z) ** 2 <= r2)
+            .sort((a, b) => ((a.x - x) ** 2 + (a.z - z) ** 2) - ((b.x - x) ** 2 + (b.z - z) ** 2));
+        for (const { airfield } of due) {
+            if (this.builtAirfields.has(airfield)) {
+                continue;
+            }
+            this.builtAirfields.add(airfield);
+            await this.buildAirfield(airfield);
+        }
+    }
+
+    private async buildAirfield(airfield: Airfield): Promise<void> {
+        // The ground under the taxiways has to be readable before they can be
+        // draped on it, and the height store is an LRU: loaded right before
+        // this field is built, not for every field of the area up front, or
+        // the first fields' tiles are gone again by the time they are built.
+        const primary = this.sceneRunways.find(
+            r => r.primary && r.icao === airfield.icao && r.name === airfield.name);
+        const at = primary?.center ?? geodeticToWorld(this.planetTerrain.basis, airfield.lat, airfield.lon, 0);
+        await this.planetTerrain.heights.ensureLoadedAroundWorld(at.x, -at.z, AIRFIELD_GROUND_RADIUS_M);
         // Elevation of the real ground, which inside a runway's pad is the
         // airfield's own plane and outside it is whatever is there.
         const groundElevationAt = (e: number, n: number) =>
@@ -3788,13 +3884,10 @@ export class Game {
         const groundCoverAt = (e: number, n: number) =>
             this.planetTerrain.drawnCoverAtWorld(e, -n);
 
-        for (const airfield of here) {
-            const built = buildAirfieldModel(
-                airfield, this.planetTerrain.basis, this.materials,
-                groundElevationAt, groundCoverAt);
-            if (built === undefined) {
-                continue;
-            }
+        const built = buildAirfieldModel(
+            airfield, this.planetTerrain.basis, this.materials,
+            groundElevationAt, groundCoverAt);
+        if (built !== undefined) {
             this.pendingGroundStrips.push(...built.groundStrips);
             for (const strip of built.groundStrips) {
                 // Infinity already here means the sea-level guard built it
@@ -3810,8 +3903,6 @@ export class Game {
             const entity = new GroundTargetEntity(
                 built.model, undefined, 'Airbase', airfield.icao || airfield.name);
             entity.position.copy(built.origin);
-            const primary = this.sceneRunways.find(
-                r => r.primary && r.icao === airfield.icao && r.name === airfield.name);
             if (primary !== undefined) {
                 entity.approachRunway = {
                     center: primary.center.clone(),
@@ -3819,29 +3910,26 @@ export class Game {
                     halfLength: primary.halfLength,
                 };
             }
-            scene.add(entity);
+            this.scene.add(entity);
         }
-        for (const runway of this.sceneRunways) {
-            this.addRunwayPad(runway);
+        this.addBuildingColliders(airfield);
+    }
+
+    /** Stream in airfields the aircraft has come within range of; throttled. */
+    private streamAirfields(): void {
+        if (this.areaAirfields.length === 0 || this.airfieldStreamBusy) {
+            return;
         }
-        this.osmBuildings = [];
-        for (const airfield of here) {
-            for (const b of airfield.buildings) {
-                this.addBuildingCollider(b);
-            }
+        const now = performance.now();
+        if (now - this.lastAirfieldStreamMs < AIRFIELD_STREAM_INTERVAL_MS) {
+            return;
         }
-        const active = this.activeRunway;
-        console.log(`airfields: ${here.length} in "${this.playArea.area.name}", `
-            + `${this.sceneRunways.length} runways`
-            + (active ? `; based at ${active.icao || active.name} ${active.ref}` : ''));
-        // Dev aid, alongside __terrain: the pavement is laid on the same plane
-        // the terrain under it was cut to, and the only way to see whether
-        // those two agree is to read the numbers back.
-        (globalThis as Record<string, unknown>).__airfields = here;
-        (globalThis as Record<string, unknown>).__runways = this.sceneRunways;
-        this.spawnPanel.setAirfields(
-            airfieldChoices(this.sceneRunways),
-            active ? (active.icao || active.name) : undefined);
+        this.lastAirfieldStreamMs = now;
+        const p = this.player.position;
+        this.airfieldStreamBusy = true;
+        void this.buildAirfieldsNear(p.x, p.z)
+            .catch(err => console.warn('airfield streaming failed', err))
+            .finally(() => { this.airfieldStreamBusy = false; });
     }
 
     /**
@@ -3878,7 +3966,10 @@ export class Game {
      * roof, so you are underground - which is the same test that decides every
      * other crash into terrain.
      */
-    private addBuildingCollider(b: AirfieldBuilding): void {
+    private buildingCollider(b: AirfieldBuilding): {
+        pad: SurfacePadCollider;
+        obstacle: { x: number; z: number; radius: number; height: number };
+    } | undefined {
         const toWorld = (lat: number, lon: number) => sceneFromEnu(
             ecefToEnu(this.planetTerrain.basis, geodeticToEcef(lat, lon, 0)));
         const perDegLat = 110540;
@@ -3903,11 +3994,11 @@ export class Game {
             baseY = Math.min(baseY, this.planetTerrain.heightAtWorld(c.x, c.z));
         }
         if (!Number.isFinite(baseY)) {
-            return;
+            return undefined;
         }
         const height = buildingHeightM(b);
         const ahead = at(halfDepth, 0);
-        this.surfacePads.push({
+        const pad: SurfacePadCollider = {
             centerX: centre.x,
             centerZ: centre.z,
             heading: Math.atan2(ahead.x - centre.x, ahead.z - centre.z),
@@ -3918,12 +4009,71 @@ export class Game {
             // A wall is a step, not a ramp. Just enough that the edge is not a
             // mathematical discontinuity for the gear springs to land on.
             feather: BUILDING_PAD_FEATHER_M,
-        });
-        this.osmBuildings.push({
-            x: centre.x, z: centre.z,
-            radius: Math.hypot(b.widthM, b.depthM) / 2,
-            height,
-        });
+        };
+        return {
+            pad,
+            obstacle: {
+                x: centre.x, z: centre.z,
+                radius: Math.hypot(b.widthM, b.depthM) / 2,
+                height,
+            },
+        };
+    }
+
+    /**
+     * Make an airfield's buildings solid. Before setupCombat they simply join
+     * the world it sends; after it - an airfield streamed in mid-flight - they
+     * go to the sim worker on their own, into the world it already holds.
+     */
+    private addBuildingColliders(airfield: Airfield): void {
+        const pads: SurfacePadCollider[] = [];
+        const obstacles: Obstacle[] = [];
+        for (const b of airfield.buildings) {
+            const collider = this.buildingCollider(b);
+            if (collider === undefined) {
+                continue;
+            }
+            // A roof appearing around an aircraft below it would put that
+            // aircraft underground, which is a crash. Streaming builds fields
+            // tens of km ahead, so this only happens after a teleport; that
+            // building is left hollow rather than killing anyone.
+            if (this.worldSent && this.aircraftUnder(collider.pad)) {
+                console.warn(`airfield ${airfield.icao || airfield.name}: building left without `
+                    + 'a collider, an aircraft is inside it');
+                continue;
+            }
+            this.surfacePads.push(collider.pad);
+            this.osmBuildings.push(collider.obstacle);
+            pads.push(collider.pad);
+            const o = collider.obstacle;
+            obstacles.push({
+                position: new THREE.Vector3(o.x, this.obstacleBaseY(o.x, o.z), o.z),
+                radius: o.radius,
+                height: o.height,
+            });
+        }
+        if (!this.worldSent || pads.length === 0) {
+            // setupCombat builds the obstacles from osmBuildings and sends it all.
+            return;
+        }
+        this.obstacles.push(...obstacles);
+        this.combatSim.addStaticColliders(serializeStaticColliders(pads, obstacles));
+        this.planetTerrain.setSurfaceExclusion(buildSurfaceExclusion(this.surfacePads.pads));
+    }
+
+    /** True when any live aircraft is over `pad` and below its roof. */
+    private aircraftUnder(pad: SurfacePadCollider): boolean {
+        const positions: THREE.Vector3[] = [this.player.position];
+        for (const ai of this.aiOpponents) {
+            if (ai.isAlive()) {
+                positions.push(ai.position);
+            }
+        }
+        if (this.wingman?.isAlive()) {
+            positions.push(this.wingman.position);
+        }
+        return positions.some(p => p.y < pad.surfaceY + BUILDING_STREAM_CLEARANCE_M
+            && sampleSurfacePadY(p.x, p.z, pad) > -Infinity);
     }
 
 

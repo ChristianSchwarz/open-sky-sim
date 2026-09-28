@@ -66,7 +66,7 @@ import { TileStore } from './tileStore';
 import { PRIORITY_IN_FRUSTUM, TileStreamer, TileWant, predictViewTarget } from './tileStreamer';
 import { TileCover, TileHeightIndex } from './tileHeightIndex';
 import { TileKey, approxTileEdgeMetres, parentOf, tileAtLonLat, tileKeyString } from './tiling';
-import { enuToGeodeticApprox } from './geodesy';
+import { geodeticOnSurfaceAtEnu } from './geodesy';
 import {
     CLASS_TO_TONE, LAND_TONE_BASE, LAND_TONE_COUNT, TONE_COUNT, TerrainTone,
 } from './tones';
@@ -271,6 +271,7 @@ export class TerrainEntity implements Entity {
     private readonly cover: CoverTextures;
     private readonly roads: RoadStrokes;
     private airfieldExclusion: AirfieldExclusion | undefined;
+    private surfaceExclusion: ((x: number, z: number) => boolean) | undefined;
     private readonly bridges: BridgeMeshes;
     private readonly quadtree: Quadtree;
     private readonly oceans = new Map<string, OceanPatch>();
@@ -447,9 +448,9 @@ export class TerrainEntity implements Entity {
         meshes.treesBusy = true;
         const ptr = await this.roads.load(tile.id, 0);
         const onRoad = ptr ? buildRoadExclusion(ptr) : undefined;
-        const onAirfield = this.airfieldExclusion;
-        const isExcluded = onRoad || onAirfield
-            ? (x: number, z: number) => (onRoad?.(x, z) ?? false) || (onAirfield?.(x, z) ?? false)
+        const onManMade = this.sceneExclusionFor(tile);
+        const isExcluded = onRoad || onManMade
+            ? (x: number, z: number) => (onRoad?.(x, z) ?? false) || (onManMade?.(x, z) ?? false)
             : undefined;
         const groups = scatterTreeSpecies(tile, densityScale, isExcluded);
         // Ground clutter (rocks + extra shrubs on open, non-forested ground -
@@ -507,8 +508,37 @@ export class TerrainEntity implements Entity {
         meshes.treesGroup = treesGroup;
     }
 
+    /**
+     * The airfield and man-made surface tests for one tile's scatter, in the
+     * tile's own local frame.
+     *
+     * Both tests are built in scene coordinates, but a scatter point is an
+     * offset from its tile's centre in the bake's axes - the same frame the
+     * road strokes are in, which is why roadExclusion needs no conversion and
+     * these do. Testing the raw offset only ever matched the tile at the play
+     * origin, so everywhere else shrubs grew on aprons and taxiways.
+     */
+    private sceneExclusionFor(tile: PtmTile): ((x: number, z: number) => boolean) | undefined {
+        const onAirfield = this.airfieldExclusion;
+        const onSurface = this.surfaceExclusion;
+        if (!onAirfield && !onSurface) {
+            return undefined;
+        }
+        const origin = tileOriginWorld(tile.id, tile.centerHeightM, this.basis);
+        const q = this.frameFix;
+        const v = new THREE.Vector3();
+        return (x, z) => {
+            v.set(x, 0, z).applyQuaternion(q);
+            const wx = origin.x + v.x;
+            const wz = origin.z + v.z;
+            return (onAirfield?.(wx, wz) ?? false) || (onSurface?.(wx, wz) ?? false);
+        };
+    }
+
     /** True while rebuildResidentTrees is already pacing through the resident set, so a second call (another slider nudge) doesn't start a redundant one. */
     private treeRebuildRunning = false;
+    /** Set when a rebuild was asked for mid-rebuild, so tiles it already passed get the newer inputs too. */
+    private treeRebuildAgain = false;
     private treeMaterials!: SceneMaterialManager;
 
     /**
@@ -523,6 +553,7 @@ export class TerrainEntity implements Entity {
      */
     private async rebuildResidentTrees(materials: SceneMaterialManager): Promise<void> {
         if (this.treeRebuildRunning) {
+            this.treeRebuildAgain = true;
             return;
         }
         this.treeRebuildRunning = true;
@@ -540,6 +571,10 @@ export class TerrainEntity implements Entity {
             }
         } finally {
             this.treeRebuildRunning = false;
+        }
+        if (this.treeRebuildAgain) {
+            this.treeRebuildAgain = false;
+            await this.rebuildResidentTrees(materials);
         }
     }
 
@@ -946,6 +981,25 @@ export class TerrainEntity implements Entity {
             return { e: enu.e, n: enu.n };
         };
         this.airfieldExclusion = buildAirfieldExclusion(airfields, toEnu);
+        this.rescatterAfterExclusionChange();
+    }
+
+    /**
+     * Keep vegetation off the man-made surfaces the game places itself - the
+     * authored apron pavement and runway, building footprints, the ski jump -
+     * which the baked airfields and road strokes know nothing about. `test`
+     * takes scene x/z; undefined clears it.
+     */
+    setSurfaceExclusion(test: ((x: number, z: number) => boolean) | undefined): void {
+        this.surfaceExclusion = test;
+        this.rescatterAfterExclusionChange();
+    }
+
+    /** Tiles already resident at boot were scattered before the exclusions existed. */
+    private rescatterAfterExclusionChange(): void {
+        if (this.treeMaterials) {
+            void this.rebuildResidentTrees(this.treeMaterials);
+        }
     }
 
     async loadAirfields(): Promise<AirfieldsFile> {
@@ -1003,6 +1057,20 @@ export class TerrainEntity implements Entity {
         return out;
     }
 
+    /**
+     * Tile requests of every kind still queued, downloading or waiting to
+     * upload: meshes, far cover textures, roads and bridges. Zero means the
+     * streamer has caught up with what the current view asked for.
+     */
+    get streamingBacklog(): number {
+        const m = this.meshStore.stats;
+        const c = this.cover.stats;
+        const r = this.roads.stats;
+        const b = this.bridges.stats;
+        return m.queued + m.inflight + this.streamer.pendingUploads
+            + c.queued + c.inflight + r.queued + r.inflight + b.queued + b.inflight;
+    }
+
     /** Resolve once every pinned tile is uploaded, reporting progress. */
     async waitForPinned(onProgress?: (done: number, total: number) => void): Promise<void> {
         try {
@@ -1057,20 +1125,6 @@ export class TerrainEntity implements Entity {
         const start = Date.now();
         while (Date.now() - start < DEADLINE_MS) {
             const outstanding = this.outstandingPinned();
-    /**
-     * Tile requests of every kind still queued, downloading or waiting to
-     * upload: meshes, far cover textures, roads and bridges. Zero means the
-     * streamer has caught up with what the current view asked for.
-     */
-    get streamingBacklog(): number {
-        const m = this.meshStore.stats;
-        const c = this.cover.stats;
-        const r = this.roads.stats;
-        const b = this.bridges.stats;
-        return m.queued + m.inflight + this.streamer.pendingUploads
-            + c.queued + c.inflight + r.queued + r.inflight + b.queued + b.inflight;
-    }
-
             const done = total - outstanding.length;
             onProgress?.(done, total);
             if (outstanding.length === 0) {
@@ -1145,7 +1199,7 @@ export class TerrainEntity implements Entity {
         if (zoom < 0) {
             return undefined;
         }
-        const g = enuToGeodeticApprox(this.basis, x, northFromSceneZ(z), 0);
+        const g = geodeticOnSurfaceAtEnu(this.basis, x, northFromSceneZ(z));
         const id = tileAtLonLat(zoom, g.lon, g.lat);
         if (this.meshStore.isAbsent(id)) {
             return undefined;
@@ -1161,18 +1215,29 @@ export class TerrainEntity implements Entity {
 
     /** The index of the drawn land tile holding a scene point, if any. */
     private drawnIndexAt(x: number, z: number): TileHeightIndex | undefined {
-        // Indices are pruned to the draw list, so at most one of them can hold
-        // the point and checking the cache first makes the common case — an
-        // aircraft sitting over the same tile for hundreds of frames — a
-        // couple of triangle tests with no lookup at all.
-        for (const index of this.drawnHeightIndices.values()) {
-            if (index.heightAtWorld(x, z) !== undefined) {
+        // Checking the cache first makes the common case — an aircraft sitting
+        // over the same tile for hundreds of frames — a couple of triangle
+        // tests with no lookup at all. But the draw list is not a clean cut:
+        // a parent is drawn *under* its children during the leaf dissolve,
+        // depth-pushed so they win, and its index holds the same point. Its
+        // coarse surface can be metres above the one on screen (at BER, 10 m
+        // over the runway), and whichever index came first in the map used to
+        // answer - so the aircraft's shadow floated at canopy height. Only a
+        // tile nothing is drawn over is the answer outright; otherwise the
+        // deepest drawn tile, as drawnNodeAt finds it, is.
+        for (const [key, index] of this.drawnHeightIndices) {
+            if (this.drawnByKey.get(key)?.under !== true
+                && index.heightAtWorld(x, z) !== undefined) {
                 return index;
             }
         }
         const node = this.drawnNodeAt(x, z);
-        if (node === undefined || this.drawnHeightIndices.has(node.key)) {
+        if (node === undefined) {
             return undefined;
+        }
+        const cached = this.drawnHeightIndices.get(node.key);
+        if (cached !== undefined) {
+            return cached.heightAtWorld(x, z) === undefined ? undefined : cached;
         }
         const meshes = this.streamer.get(node.id);
         if (meshes?.land === undefined) {
@@ -1188,7 +1253,7 @@ export class TerrainEntity implements Entity {
         if (this.drawList.length === 0) {
             return undefined;
         }
-        const c = enuToGeodeticApprox(this.basis, x, northFromSceneZ(z), 0);
+        const c = geodeticOnSurfaceAtEnu(this.basis, x, northFromSceneZ(z));
         // The draw list is a quadtree cut, so exactly one level holds the
         // point. Walking down from the deepest costs a handful of lookups and
         // avoids a scan of a draw list that runs to hundreds of nodes.
@@ -1748,7 +1813,7 @@ async function fetchIndex(url: string): Promise<TileIndex | undefined> {
 function tilesAround(
     basis: EnuBasis, x: number, z: number, radiusM: number, zoom: number, span: number,
 ): TileKey[] {
-    const c = enuToGeodeticApprox(basis, x, northFromSceneZ(z), 0);
+    const c = geodeticOnSurfaceAtEnu(basis, x, northFromSceneZ(z));
     const cosLat = Math.max(0.1, Math.cos(c.lat * Math.PI / 180));
     const dLat = radiusM / 110540;
     const dLon = radiusM / (111320 * cosLat);

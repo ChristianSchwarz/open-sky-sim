@@ -641,3 +641,26 @@ class ExitCodeTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BboxAreaNameTest(unittest.TestCase):
+    """A chunk of an importer area is tagged with that area, not 'bbox'."""
+
+    MANIFEST = {'areas': [
+        {'name': 'DACH', 'west': 5.0, 'south': 45.0, 'east': 17.0, 'north': 53.0},
+        {'name': 'inner', 'west': 10.0, 'south': 47.0, 'east': 12.0, 'north': 49.0},
+    ]}
+
+    def test_exact_bounds_name_the_area(self):
+        from bake_osm_airports import Bounds, bbox_area_name
+        self.assertEqual(bbox_area_name(self.MANIFEST, Bounds(10.0, 47.0, 12.0, 49.0)), 'inner')
+
+    def test_a_chunk_names_the_smallest_area_holding_it(self):
+        from bake_osm_airports import Bounds, bbox_area_name
+        self.assertEqual(bbox_area_name(self.MANIFEST, Bounds(6.0, 46.0, 8.0, 48.0)), 'DACH')
+        self.assertEqual(bbox_area_name(self.MANIFEST, Bounds(10.5, 47.5, 11.5, 48.5)), 'inner')
+
+    def test_a_box_outside_every_area_is_still_bbox(self):
+        from bake_osm_airports import Bounds, bbox_area_name
+        self.assertEqual(bbox_area_name(self.MANIFEST, Bounds(-16.0, 27.0, -15.0, 28.0)), 'bbox')
+        self.assertEqual(bbox_area_name(self.MANIFEST, Bounds(16.0, 52.0, 18.0, 54.0)), 'bbox')

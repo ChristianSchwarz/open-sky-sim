@@ -15,6 +15,8 @@ import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { ForceVectorSample } from '../model/flightModel';
 import {
     deserializeWorldQuery,
+    applyStaticColliders,
+    SerializedStaticColliders,
     deserializeArrestorCables,
     SerializedArrestorCables,
     SerializedWorld,
@@ -542,6 +544,8 @@ class ExternalCombatant implements Combatant {
 export class CombatSim implements ProjectileSink {
 
     private world: SceneWorldQuery | undefined;
+    /** Colliders that arrived before the world did; applied when it does. */
+    private pendingColliders: SerializedStaticColliders[] = [];
     private arrestorFields: ArrestorCableField[] = [];
     /** World velocity of the moving carrier (m/s); trap scrub is relative to this. */
     private readonly carrierVel = new THREE.Vector3();
@@ -617,11 +621,28 @@ export class CombatSim implements ProjectileSink {
             world, (x, z) => this.heightField.heightAtWorld(x, z),
         );
         this.arrestorFields = deserializeArrestorCables(world);
+        for (const colliders of this.pendingColliders) {
+            applyStaticColliders(this.world, colliders);
+        }
+        this.pendingColliders = [];
         // Any aircraft added before the world arrived can now get its pilot + terrain.
         for (const a of this.aircraft.values()) {
             a.bindWorld(this.world);
             a.buildPilot(undefined, this.world);
         }
+    }
+
+    /**
+     * More static ground for the world already set - an airfield's buildings,
+     * streamed in mid-flight. Unlike setWorld this touches no pilot: the
+     * world every aircraft holds just gains them.
+     */
+    addStaticColliders(colliders: SerializedStaticColliders): void {
+        if (this.world === undefined) {
+            this.pendingColliders.push(colliders);
+            return;
+        }
+        applyStaticColliders(this.world, colliders);
     }
 
     /** Barricade functionality has been removed. */

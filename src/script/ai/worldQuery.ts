@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CarrierMeshCollider, sampleCarrierMeshSurfaceYMax } from '../scene/entities/carrierDeck';
 import { HillCollider, sampleHillSurfaceY } from '../scene/entities/hillCollider';
-import { SurfacePadCollider, sampleSurfacePadYMax } from '../scene/entities/surfacePad';
+import { SurfacePadCollider, SurfacePadIndex } from '../scene/entities/surfacePad';
 import { SkiJumpCollider, sampleSkiJumpSurfaceYMax } from '../scene/entities/skiJump';
 
 /** A static world obstacle approximated as an upright cylinder for avoidance. */
@@ -61,6 +61,8 @@ const TMP = new THREE.Vector3();
  */
 export class SceneWorldQuery implements WorldQuery {
 
+    private readonly padIndex: SurfacePadIndex;
+
     constructor(
         private readonly hills: HillCollider[],
         private readonly isLandFn: (x: number, z: number) => boolean,
@@ -71,17 +73,30 @@ export class SceneWorldQuery implements WorldQuery {
         /** Optional DEM / base terrain height under hills and decks. */
         private readonly baseHeightAt: (x: number, z: number) => number = () => 0,
         /** Flat solid surfaces (runway strip, pavement pads) sitting slightly above the terrain. */
-        private readonly surfacePads: readonly SurfacePadCollider[] = [],
+        surfacePads: readonly SurfacePadCollider[] = [],
         /** Static scenery collision soups (hangars, towers, depots...). */
         private readonly sceneryMeshes: readonly CarrierMeshCollider[] = [],
-    ) { }
+    ) {
+        this.padIndex = new SurfacePadIndex(surfacePads);
+    }
+
+    /**
+     * More static ground, after the world was built: the buildings of an
+     * airfield that streamed in mid-flight. Appended in place, so every
+     * flight model and pilot already holding this world sees them at once -
+     * rebuilding the world instead would rebuild every pilot with it.
+     */
+    addStaticColliders(pads: readonly SurfacePadCollider[], obstacles: readonly Obstacle[]): void {
+        this.padIndex.add(pads);
+        this.obstacleList.push(...obstacles);
+    }
 
     groundHeightAt(x: number, z: number): number {
         return Math.max(
             this.baseHeightAt(x, z),
             sampleHillSurfaceY(x, z, this.hills),
             sampleSkiJumpSurfaceYMax(x, z, this.skiJumps),
-            sampleSurfacePadYMax(x, z, this.surfacePads),
+            this.padIndex.sampleYMax(x, z),
             sampleCarrierMeshSurfaceYMax(x, z, this.sceneryMeshes),
             this.carrierHeightAt(x, z),
         );

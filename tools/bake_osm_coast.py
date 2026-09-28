@@ -628,9 +628,10 @@ def _polygons_from_osm(
                     poly = Polygon(coords)
                 except Exception:
                     continue
-                water_polys.append(poly)
-                if kind != 'ocean':
-                    inland_parts.append((poly, kind == 'flat'))
+                for part in _valid_polygons(poly):
+                    water_polys.append(part)
+                    if kind != 'ocean':
+                        inland_parts.append((part, kind == 'flat'))
         else:
             # A watercourse mapped as a centreline, which is how OSM maps most
             # of them: on one Berlin tile there were 36 water areas and 20
@@ -1658,6 +1659,27 @@ RasterBlock = Tuple[int, List[Tuple[int, int]]]
 # tiles are rasterized from that piece, so the land's full vertex count is
 # paid per block, not per tile.
 RASTER_BLOCK_TILES = 8
+
+
+def _valid_polygons(poly: Polygon) -> List[Polygon]:
+    """A closed way's polygon, repaired into valid parts if it crosses itself.
+
+    A self-intersecting water way (one in the Danube wetlands by Bratislava)
+    made the water union raise a TopologyException and killed the bake.
+    make_valid keeps both lobes of a figure eight, where buffer(0) drops one.
+    """
+    if poly.is_valid:
+        return [poly]
+    out: List[Polygon] = []
+    stack = [shapely.make_valid(poly)]
+    while stack:
+        g = stack.pop()
+        if isinstance(g, Polygon):
+            if not g.is_empty and g.area > 0:
+                out.append(g)
+        elif hasattr(g, 'geoms'):
+            stack.extend(g.geoms)
+    return out
 
 
 def _polygonal(geom) -> MultiPolygon:

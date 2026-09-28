@@ -3,7 +3,7 @@ import { AiPilotOptions } from '../../ai/aiPilot';
 import { ForceVectorSample } from '../model/flightModel';
 import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
 import { AircraftCollisionMesh } from '../../scene/entities/aircraftDef';
-import { SerializedArrestorCables, SerializedBarricade, SerializedWorld } from './serializedWorld';
+import { SerializedArrestorCables, SerializedBarricade, SerializedStaticColliders, SerializedWorld } from './serializedWorld';
 import { HeightTileUpdate, SerializedHeightField } from '../../terrain/heightMirror';
 
 /**
@@ -144,6 +144,7 @@ export type SimToWorkerMessage =
     | { type: 'init' }
     | { type: 'attachSharedState'; buffer: SharedArrayBuffer }
     | { type: 'setWorld'; world: SerializedWorld }
+    | { type: 'addStaticColliders'; colliders: SerializedStaticColliders }
     | { type: 'setHeightField'; config: SerializedHeightField }
     | { type: 'heightTiles'; update: HeightTileUpdate }
     | { type: 'setArrestorCables'; cables: SerializedArrestorCables[] }

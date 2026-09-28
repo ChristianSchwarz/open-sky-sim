@@ -451,6 +451,106 @@ Verified on two adjacent Alpine areas: baking them as two scoped runs gives a
 `assets/terrain` byte-identical to one unscoped bake of both — same 60 .ptm
 files, same index, same manifest.
 
+### Reading OSM from a local extract instead of Overpass
+
+The in-app importer (Settings -> World -> Area) no longer touches Overpass at
+all: `tools/areaImport.ts` always runs `tools/osm_extract.py` first, which
+resolves the bbox to a Geofabrik region, downloads it once into
+`data/imports/geofabrik/` (reused by every later import inside it) and clips
+it down to the bbox with `clip_pbf.py` into `data/imports/pbf/`. Satellite
+cover is likewise always fetched — there is no toggle for it any more.
+Nothing to install or download by hand; `pip install osmium requests` covers
+what the importer needs, and the first import into a new region just takes
+longer while its extract downloads.
+
+What follows is for driving the same stages by hand from the command line,
+where `--pbf` is still a manual flag.
+
+Every OSM fetch above (`bake_osm_coast.py`, `bake_osm_airports.py`,
+`bake_osm_roads.py`, `bake_planet_cover.py --osm-landuse`) depends by default
+on the public Overpass mirrors. That's fine for a small area, but a real
+100x100km import can spend most of its wall-clock time retrying 429/504s
+across all three mirrors for answers a few hundred KB in size — see
+`docs/terrain-import-speed.md`'s 2026-09-24 update for a measured example
+(coast + airfields alone: 42 minutes, almost all of it Overpass wait, not
+CPU).
+
+`--pbf PATH`, now accepted by all four of those scripts, reads the same data
+out of a local `.osm.pbf` extract instead — no network, no retries, no
+per-request cost to split against. Get a country or regional extract from
+[Geofabrik](https://download.geofabrik.de/) (a full planet file works too,
+but is unnecessarily large for a 100x100km-at-a-time workflow) and install
+the reader:
+
+```
+pip install osmium
+```
+
+Then pass `--pbf` to every OSM-fetching stage:
+
+```
+npm run fetch:dem -- --bbox 7.6,45.9,7.8,46.0 --out data/imports/alps.tif
+npm run merge:dem -- --input data/imports/alps.tif --out assets/planet
+python tools/bake_osm_coast.py --bbox 7.6,45.9,7.8,46.0 --osm-landuse --pbf data/switzerland-latest.osm.pbf
+npm run bake:airports -- --bbox 7.6,45.9,7.8,46.0 --pbf data/switzerland-latest.osm.pbf
+npm run bake:roads -- --bbox 7.6,45.9,7.8,46.0 --pbf data/switzerland-latest.osm.pbf
+npm run fetch:cover -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:cover -- --bbox 7.6,45.9,7.8,46.0 --osm-landuse --pbf data/switzerland-latest.osm.pbf
+npm run bake:mesh -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:tex -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:road-strokes -- --bbox 7.6,45.9,7.8,46.0
+```
+
+The same extract file is reused for every future import inside its coverage —
+download it once. `tools/osm_pbf.py` is the shared reader all four scripts
+call through; it reads nodes/ways/relations matching each stage's own tag
+filter (the same filters the Overpass queries use) and hands them back in the
+same shape `overpass_fetch_cells` returns, so everything downstream of the
+fetch — polygon assembly, tiling, `.lwm`/`.rvr`/manifest writing — is
+unchanged.
+
+#### Clip the extract to the bbox first — the read cost is the file size, not the bbox
+
+A country-sized extract works, but `osm_pbf.py` still visits every
+node/way/relation in the whole file before its tag predicate ever runs — for
+a 100x100km bbox against a 424 MB Portugal extract, that cost ~250-470s per
+stage even with the batched reads above. Clip once with `tools/clip_pbf.py`
+(no external `osmium-tool` binary needed — it's a single-pass script on top
+of the same `osmium` package):
+
+```
+python tools/clip_pbf.py --bbox 7.6,45.9,7.8,46.0 --in data/switzerland-latest.osm.pbf --out data/imports/alps.osm.pbf
+```
+
+Then point every `--pbf` above at the clipped file instead. Each group's
+read is also cached on disk (`data/osm-cache/pbf/`, keyed on the file's
+mtime+size and the bbox) so a second process reading the same bbox for the
+same purpose - `bake_planet_cover.py --osm-landuse` after `bake_osm_coast.py
+--osm-landuse` already scanned the same tags - hits the cache instead of
+re-scanning; `--refresh-osm` bypasses it, same as the Overpass cache.
+
+Measured on the
+Lisbon 100x100km benchmark (`docs/terrain-import-speed.md`): clipping a 424
+MB Portugal extract down to the bbox (+0.05° padding so edge-crossing ways
+and coastline still resolve) took 345s once and produced an 82.6 MB file;
+every later stage's read time dropped in proportion (coast+landuse scan
+81s, down from 346s), and the full end-to-end import went from 2050s (34.2
+min) to 1223s (20.4 min) — output identical either way. The clipped file is
+reusable at that speed for every future re-bake of the same area.
+
+Two things differ from the Overpass path on purpose:
+
+- `bake_osm_coast.py --pbf` with `osmium` installed reads coastline, inland
+  water *and* watercourses in one pass (unlike the older `osmcoastline`
+  shapefile fallback it uses when `osmium` isn't installed, which only
+  covers ocean shoreline).
+- There's nothing to warm ahead of time, so `--fetch-only` / the importer's
+  prefetch step is a no-op when `--pbf` is given.
+
+`--land-shp` (a pre-built `osmcoastline` shapefile) still works exactly as
+before and takes priority over `--pbf` on `bake_osm_coast.py` if both are
+given.
+
 #### The box is snapped to whole tiles
 
 Every stage writes whole tiles, and a stage whose sources stop halfway across

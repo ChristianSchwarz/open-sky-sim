@@ -44,6 +44,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -255,6 +256,30 @@ def _fetch_reprojected(
     return name, tmp, None
 
 
+_POOL: Optional[ThreadPoolExecutor] = None
+
+
+def _worker_pool(jobs: int) -> ThreadPoolExecutor:
+    """One pool for the whole run, every thread started before any fetch.
+
+    On Windows a thread started after GDAL has done /vsicurl/ reads can hang
+    for ever in its own start-up, holding the GIL, before it runs a line of
+    Python - the imagery mosaic froze that way right after the landcover one,
+    every time, while either alone finished in seconds. A pool per mosaic
+    starts threads lazily, mid-run; this one starts them all up front and
+    never needs another.
+    """
+    global _POOL
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(max_workers=jobs)
+        # submit() only starts a thread when none is idle, so hold every task
+        # at a barrier until all `jobs` threads exist.
+        gate = threading.Barrier(jobs)
+        for f in [_POOL.submit(gate.wait) for _ in range(jobs)]:
+            f.result()
+    return _POOL
+
+
 def mosaic_into(
     out: np.ndarray,
     dst_transform,
@@ -276,27 +301,26 @@ def mosaic_into(
     """
     used = 0
     filled = np.zeros(out.shape[1:], dtype=bool)
-    jobs = max(1, min(jobs, len(sources))) if sources else 1
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        results = pool.map(
-            lambda url: _fetch_reprojected(
-                url, dst_transform, out.shape, out.dtype, bands, resampling, nodata, target_m),
-            sources,
-        )
-        for name, tmp, err in results:
-            if err is not None:
-                print(f'  skipped {name}: {err}')
-                continue
-            fresh = np.any(tmp != nodata, axis=0) & ~filled
-            if not fresh.any():
-                print(f'  nothing new from {name}')
-                continue
-            for b in range(out.shape[0]):
-                out[b][fresh] = tmp[b][fresh]
-            filled |= fresh
-            used += 1
-            pct = 100.0 * filled.mean()
-            print(f'  merged {name} -> {pct:.1f}% covered')
+    pool = _worker_pool(jobs)
+    results = pool.map(
+        lambda url: _fetch_reprojected(
+            url, dst_transform, out.shape, out.dtype, bands, resampling, nodata, target_m),
+        sources,
+    )
+    for name, tmp, err in results:
+        if err is not None:
+            print(f'  skipped {name}: {err}')
+            continue
+        fresh = np.any(tmp != nodata, axis=0) & ~filled
+        if not fresh.any():
+            print(f'  nothing new from {name}')
+            continue
+        for b in range(out.shape[0]):
+            out[b][fresh] = tmp[b][fresh]
+        filled |= fresh
+        used += 1
+        pct = 100.0 * filled.mean()
+        print(f'  merged {name} -> {pct:.1f}% covered')
     return used
 
 
@@ -410,7 +434,8 @@ def main() -> None:
     ap.add_argument('--no-imagery', action='store_true')
     ap.add_argument('--jobs', type=int, default=DEFAULT_JOBS,
                     help=f'sources fetched concurrently (default {DEFAULT_JOBS})')
-    args = ap.parse_args()
+    from osm_common import glue_negative_bbox
+    args = ap.parse_args(glue_negative_bbox(sys.argv[1:]))
     started = time.time()
 
     if args.bbox:
@@ -426,6 +451,7 @@ def main() -> None:
     print(f'coverage: {west:.4f},{south:.4f} .. {east:.4f},{north:.4f}')
 
     sources: Dict[str, str] = {}
+    _worker_pool(max(1, args.jobs))
 
     if not args.no_landcover:
         tiles = worldcover_tiles(west, south, east, north)

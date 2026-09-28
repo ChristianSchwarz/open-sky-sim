@@ -4,9 +4,33 @@
         {
             "name": "retroflightsim",
             "runtimeExecutable": "node",
-            "runtimeArgs": ["node_modules/tsx/dist/cli.mjs", "tools/modserver.ts"],
+            "runtimeArgs": [
+                "node_modules/tsx/dist/cli.mjs",
+                "tools/modserver.ts"
+            ],
             "port": 8020,
             "autoPort": true
+        },
+        {
+            "name": "pages-preview",
+            "runtimeExecutable": "python",
+            "runtimeArgs": [
+                "-m",
+                "http.server",
+                "8031",
+                "--directory",
+                "C:/Users/CHRIST~1/AppData/Local/Temp/claude/C--Users-chris-Projects-retroflightsim/6fccee6d-ba67-46da-a341-1ddcfc1304f0/scratchpad/pages"
+            ],
+            "port": 8031
+        },
+        {
+            "name": "npm-start",
+            "runtimeExecutable": "npm",
+            "runtimeArgs": [
+                "run",
+                "start"
+            ],
+            "port": 8020
         }
     ]
 }
