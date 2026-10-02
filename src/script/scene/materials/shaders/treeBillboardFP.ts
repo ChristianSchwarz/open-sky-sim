@@ -13,7 +13,8 @@ import { LOG_DEPTH_FRAGMENT, LOG_DEPTH_PARS_FRAGMENT } from './logDepth';
  * low-saturation canopy test below excludes from tinting.
  */
 export const TreeBillboardFragProgram: string = `
-  precision lowp float;
+  // highp for the logarithmic gl_FragDepth - see DepthFragProgram.
+  precision highp float;
 
   uniform sampler2D uMap;
   uniform vec3 vCameraPos;

@@ -54,6 +54,19 @@ export function clampLeafRefineScale(value: number): number {
 }
 
 /**
+ * Range of the *Finest terrain level* slider: the deepest zoom the quadtree
+ * may refine to for drawing. The top is the baked leaf level, so it is no cap;
+ * the bake's own maxZoom still applies on top when it is lower.
+ */
+export const TERRAIN_VISIBLE_ZOOM_MIN = 5;
+export const TERRAIN_VISIBLE_ZOOM_MAX = 12;
+
+export function clampVisibleZoom(value: number): number {
+    if (!Number.isFinite(value)) return TERRAIN_VISIBLE_ZOOM_MAX;
+    return Math.min(TERRAIN_VISIBLE_ZOOM_MAX, Math.max(TERRAIN_VISIBLE_ZOOM_MIN, Math.round(value)));
+}
+
+/**
  * Distance (m) past which terrain is allowed to coarsen faster than screen
  * space alone would coarsen it.
  *

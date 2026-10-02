@@ -2,9 +2,11 @@ import { BreakpointObserver } from '@angular/cdk/layout';
 import { NgTemplateOutlet } from '@angular/common';
 import { ChangeDetectionStrategy, Component, DestroyRef, ElementRef, afterNextRender, computed, inject, signal, viewChild } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
+import { MatAutocompleteModule, MatAutocompleteTrigger } from '@angular/material/autocomplete';
 import { MatButtonModule } from '@angular/material/button';
 import { MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
 import { MatListModule } from '@angular/material/list';
 import { MatRadioModule } from '@angular/material/radio';
 import { MatSelectModule } from '@angular/material/select';
@@ -22,6 +24,11 @@ import {
     KeyboardPitchStickMode,
 } from '../../input/devices/keyboardControlDevice';
 import type { SpawnPanel } from '../../osd/spawnPanel';
+import type { SpawnDestination } from '../../state/spawnSearch';
+import {
+    COLOUR_ADJUST_GROUPS, COLOUR_HUE_MAX_DEG, COLOUR_TWEAK_MAX, COLOUR_TWEAK_MIN, ColourAdjustGroup, ColourTweak,
+    defaultColourAdjust,
+} from '../../scene/materials/shaders/colourAdjust';
 import { formatSunTime } from '../../scene/materials/shaders/sun';
 import { clearCameraRouteFromLocation } from '../../state/cameraRoute';
 import { AiPilotModels, FlightModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
@@ -30,22 +37,24 @@ import {
     DETAIL_DISTANCE_OFF, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
     LEAF_REFINE_DISTANCE_SCALE_MAX, LEAF_REFINE_DISTANCE_SCALE_MIN,
     TERRAIN_DETAIL_DISTANCE_MAX_M, TERRAIN_DETAIL_DISTANCE_MIN_M, TERRAIN_TRIANGLE_BUDGET_MAX,
-    TERRAIN_TRIANGLE_BUDGET_MIN,
+    TERRAIN_TRIANGLE_BUDGET_MIN, TERRAIN_VISIBLE_ZOOM_MAX, TERRAIN_VISIBLE_ZOOM_MIN,
 } from '../../terrain/lod';
 import { DEFAULT_TERRAIN_URL, loadTerrainManifest } from '../../terrain/manifest';
 import { homeArea, terrainAreas } from '../../terrain/playArea';
 import { TerrainImporter } from './terrain/terrainImporter';
 
-export type SettingsTab = 'Flight' | 'Graphics' | 'World' | 'Simulation' | 'General' | 'Help';
+export type SettingsTab = 'Flight' | 'Graphics' | 'Colours' | 'World' | 'Simulation' | 'General' | 'Help';
 
 /** In display order. */
-const TABS: SettingsTab[] = ['Flight', 'Graphics', 'World', 'Simulation', 'General', 'Help'];
+const TABS: SettingsTab[] = ['Flight', 'Graphics', 'Colours', 'World', 'Simulation', 'General', 'Help'];
 
 /**
- * Below this viewport width the six tab links do not fit the dialog, and the
- * tab bar is swapped for a select rather than scrolled or wrapped.
+ * Below this viewport width the seven tab links do not fit the dialog, and the
+ * tab bar is swapped for a select rather than scrolled or wrapped. The links
+ * take about 650px; the dialog is 94vw less its 48px of padding, which only
+ * clears that from about 750px up.
  */
-const NARROW_QUERY = '(max-width: 599.98px)';
+const NARROW_QUERY = '(max-width: 767.98px)';
 
 export interface SettingsDialogData {
     config: ConfigService;
@@ -157,6 +166,36 @@ const TERRAIN_SHADING_OPTIONS: Option<TerrainShading>[] = [
     { value: TerrainShading.SMOOTH, label: 'Smooth (blended)' },
 ];
 
+const COLOUR_GROUP_OPTIONS: { key: ColourAdjustGroup; label: string }[] = [
+    { key: 'trees', label: 'Trees and shrubs' },
+    { key: 'terrain', label: 'Terrain' },
+    { key: 'water', label: 'Water' },
+    { key: 'sky', label: 'Sky' },
+];
+
+/**
+ * One slider per channel. `scale` turns the stored value into what the slider
+ * and its label show: percent for saturation and brightness, degrees as they
+ * are for hue.
+ */
+const COLOUR_CHANNEL_OPTIONS: {
+    key: keyof ColourTweak; label: string; min: number; max: number; step: number; scale: number; unit: string;
+}[] = [
+    {
+        key: 'hue', label: 'Hue', min: -COLOUR_HUE_MAX_DEG, max: COLOUR_HUE_MAX_DEG, step: 5, scale: 1, unit: '°',
+    },
+    {
+        key: 'saturation', label: 'Saturation', min: COLOUR_TWEAK_MIN * 100, max: COLOUR_TWEAK_MAX * 100,
+        step: 5, scale: 100, unit: '%',
+    },
+    {
+        key: 'brightness', label: 'Brightness', min: COLOUR_TWEAK_MIN * 100, max: COLOUR_TWEAK_MAX * 100,
+        step: 5, scale: 100, unit: '%',
+    },
+];
+
+type ColourChannelOption = typeof COLOUR_CHANNEL_OPTIONS[number];
+
 const FLIGHT_MODEL_OPTIONS: Option<string>[] = [
     { value: FlightModels.FM2, label: 'FM2 (Rigid body)' },
     { value: FlightModels.FM3, label: 'FM3 (Physical, post-stall)' },
@@ -214,8 +253,8 @@ function sliderValue(event: Event): number {
     selector: 'rfs-settings-dialog',
     changeDetection: ChangeDetectionStrategy.OnPush,
     imports: [
-        NgTemplateOutlet, MatButtonModule, MatDialogModule, MatFormFieldModule, MatListModule, MatRadioModule,
-        MatSelectModule, MatSlideToggleModule, MatSliderModule, MatTabsModule, TerrainImporter,
+        NgTemplateOutlet, MatAutocompleteModule, MatButtonModule, MatDialogModule, MatFormFieldModule,
+        MatInputModule, MatListModule, MatRadioModule, MatSelectModule, MatSlideToggleModule, MatSliderModule, MatTabsModule, TerrainImporter,
     ],
     // The page body is bold with a text shadow for legibility over the 3D
     // view; the dialog sits on its own opaque surface and wants neither.
@@ -275,6 +314,55 @@ function sliderValue(event: Event): number {
                                 </mat-select>
                             </mat-form-field>
                         }
+                        <div class="flex items-start gap-2">
+                            <div class="min-w-0 flex-1">
+                                <mat-form-field class="w-full" subscriptSizing="dynamic">
+                                    <mat-label>Find an airfield or place</mat-label>
+                                    <input matInput type="search" autocomplete="off" [value]="searchQuery()"
+                                        placeholder="ICAO, name, town, or lat, lon"
+                                        [matAutocomplete]="destinations"
+                                        (input)="onSearchInput($any($event.target).value)"
+                                        (keydown.enter)="onSearchEnter($event)">
+                                    <mat-hint>Airfields match as you type; Enter also looks up places.</mat-hint>
+                                </mat-form-field>
+                            </div>
+                            <button mat-stroked-button type="button" class="mt-2"
+                                [disabled]="searchQuery().trim() === '' || placeStatus() === 'searching'"
+                                (click)="searchPlaces()">Search</button>
+                        </div>
+                        <mat-autocomplete #destinations="matAutocomplete" [displayWith]="clearOnPick"
+                                (optionSelected)="goTo($event.option.value)">
+                            @if (quickResults().length > 0) {
+                                <mat-optgroup label="Airfields">
+                                    @for (d of quickResults(); track $index) {
+                                        <mat-option [value]="d" [disabled]="d.area === undefined">
+                                            <span class="flex flex-col py-1 leading-tight">
+                                                <span>{{ d.label }}</span>
+                                                <span class="text-xs opacity-70">{{ d.detail }}</span>
+                                            </span>
+                                        </mat-option>
+                                    }
+                                </mat-optgroup>
+                            }
+                            @if (searchQuery().trim() !== '') {
+                                <mat-optgroup label="Places">
+                                    @for (d of placeResults(); track $index) {
+                                        <mat-option [value]="d" [disabled]="d.area === undefined">
+                                            <span class="flex flex-col py-1 leading-tight">
+                                                <span>{{ d.label }}</span>
+                                                <span class="text-xs opacity-70">{{ d.detail }}</span>
+                                            </span>
+                                        </mat-option>
+                                    }
+                                    @switch (placeStatus()) {
+                                        @case ('idle') { <mat-option disabled>Press Enter to look up places</mat-option> }
+                                        @case ('searching') { <mat-option disabled>Searching…</mat-option> }
+                                        @case ('none') { <mat-option disabled>No places found</mat-option> }
+                                        @case ('error') { <mat-option disabled>Place search failed, check the connection</mat-option> }
+                                    }
+                                </mat-optgroup>
+                            }
+                        </mat-autocomplete>
                         @if (spawn().airfields.length > 0) {
                             <mat-form-field class="w-full" subscriptSizing="dynamic">
                                 <mat-label>Airfield</mat-label>
@@ -353,6 +441,21 @@ function sliderValue(event: Event): number {
                                     <input matSliderThumb [value]="landuseReach()" (input)="setLanduseReach($event)">
                                 </mat-slider>
                                 <output class="w-16 text-right tabular-nums">{{ landuseReach().toFixed(2) }}x</output>
+                            </div>
+                        </section>
+
+                        <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Finest terrain level</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">
+                                The deepest zoom level of terrain tiles drawn. Each level down halves
+                                the tile resolution and drops the land-use outlines the finer tiles
+                                carry, for fewer triangles and fewer tile fetches. 12 is full detail.
+                            </p>
+                            <div class="flex items-center gap-4">
+                                <mat-slider class="flex-1" [min]="visibleZoomMin" [max]="visibleZoomMax" [step]="1">
+                                    <input matSliderThumb [value]="visibleZoom()" (input)="setVisibleZoom($event)">
+                                </mat-slider>
+                                <output class="w-16 text-right tabular-nums">z{{ visibleZoom() }}</output>
                             </div>
                         </section>
 
@@ -477,6 +580,35 @@ function sliderValue(event: Event): number {
                                 }
                             </mat-radio-group>
                         </section>
+                    </div>
+                }
+
+                @case ('Colours') {
+                    <div class="flex flex-col gap-6">
+                        <p class="m-0 text-sm opacity-70">
+                            Hue, saturation and brightness of the trees and shrubs, the ground, water
+                            and the sky, on top of whichever terrain colour is picked. 0° and 100% are
+                            the look as drawn; 0% saturation is grey, and hue turns every colour round
+                            the colour wheel by that many degrees.
+                        </p>
+                        @for (group of colourGroups; track group.key) {
+                            <section>
+                                <h3 class="m-0 mb-1 text-base font-medium">{{ group.label }}</h3>
+                                @for (channel of colourChannels; track channel.key) {
+                                    <div class="flex items-center gap-4">
+                                        <span class="w-20 text-sm opacity-70">{{ channel.label }}</span>
+                                        <mat-slider class="flex-1" [min]="channel.min" [max]="channel.max" [step]="channel.step">
+                                            <input matSliderThumb [value]="colourSliderValue(group.key, channel)"
+                                                (input)="setColourTweak(group.key, channel, $event)">
+                                        </mat-slider>
+                                        <output class="w-16 text-right tabular-nums">{{ colourSliderValue(group.key, channel) }}{{ channel.unit }}</output>
+                                    </div>
+                                }
+                            </section>
+                        }
+                        <div>
+                            <button mat-button type="button" (click)="resetColourAdjust()">Reset colours</button>
+                        </div>
                     </div>
                 }
 
@@ -674,6 +806,16 @@ export class SettingsDialog {
     readonly spawnMenu = this.data.spawnMenu;
     readonly spawnActions = SPAWN_ACTIONS;
     readonly spawn = signal(this.spawnMenu.getState());
+
+    readonly searchQuery = signal('');
+    readonly quickResults = signal<SpawnDestination[]>([]);
+    readonly placeResults = signal<SpawnDestination[]>([]);
+    readonly placeStatus = signal<'idle' | 'searching' | 'done' | 'none' | 'error'>('idle');
+    private readonly searchTrigger = viewChild(MatAutocompleteTrigger);
+    /** Bumped per query, so a slow answer to an old one cannot land on a new one. */
+    private placeSearchToken = 0;
+    /** The input is emptied once a result is picked. */
+    readonly clearOnPick = () => '';
     private readonly aircraftList = viewChild('aircraftList', { read: ElementRef });
     readonly narrow = toSignal(
         inject(BreakpointObserver).observe(NARROW_QUERY).pipe(map(state => state.matches)),
@@ -698,6 +840,9 @@ export class SettingsDialog {
     /** Percent of a land-use facet's colour taken from its land type's tone. */
     readonly landuseBlend = signal(Math.round(this.config.landuseBlend.getActive() * 100));
     readonly treeDensity = signal(Math.round(this.config.treeDensity.getActive()));
+    readonly colourGroups = COLOUR_GROUP_OPTIONS;
+    readonly colourChannels = COLOUR_CHANNEL_OPTIONS;
+    readonly colourAdjust = signal(this.config.colourAdjust.getActive());
     readonly flightModel = signal(this.config.flightModels.getActiveKey());
     readonly aiPilotModel = signal(this.config.aiPilotModels.getActive());
     readonly unitSystem = signal(this.config.unitSystem.getActive());
@@ -722,6 +867,10 @@ export class SettingsDialog {
     readonly reachMin = LEAF_REFINE_DISTANCE_SCALE_MIN;
     readonly reachMax = LEAF_REFINE_DISTANCE_SCALE_MAX;
     readonly landuseReach = signal(this.config.landuseReach.getActive());
+
+    readonly visibleZoomMin = TERRAIN_VISIBLE_ZOOM_MIN;
+    readonly visibleZoomMax = TERRAIN_VISIBLE_ZOOM_MAX;
+    readonly visibleZoom = signal(this.config.visibleZoom.getActive());
 
     readonly revealMin = LANDUSE_REVEAL_MIN_PX_MIN;
     readonly revealMax = LANDUSE_REVEAL_MIN_PX_MAX;
@@ -816,6 +965,13 @@ export class SettingsDialog {
         this.landuseReach.set(scale);
     }
 
+    setVisibleZoom(event: Event) {
+        this.config.visibleZoom.setActive(sliderValue(event));
+        const zoom = this.config.visibleZoom.getActive();
+        updateSettings({ visibleZoom: zoom });
+        this.visibleZoom.set(zoom);
+    }
+
     setLanduseReveal(event: Event) {
         this.config.landuseReveal.setActive(sliderValue(event));
         const px = this.config.landuseReveal.getActive();
@@ -868,6 +1024,30 @@ export class SettingsDialog {
         this.treeDensity.set(multiplier);
     }
 
+    colourSliderValue(group: ColourAdjustGroup, channel: ColourChannelOption): number {
+        return Math.round(this.colourAdjust()[group][channel.key] * channel.scale);
+    }
+
+    setColourTweak(group: ColourAdjustGroup, channel: ColourChannelOption, event: Event) {
+        const value = Math.round(sliderValue(event)) / channel.scale;
+        this.config.colourAdjust.setTweak(group, { ...this.colourAdjust()[group], [channel.key]: value });
+        this.saveColourAdjust();
+    }
+
+    resetColourAdjust() {
+        const defaults = defaultColourAdjust();
+        for (const group of COLOUR_ADJUST_GROUPS) {
+            this.config.colourAdjust.setTweak(group, defaults[group]);
+        }
+        this.saveColourAdjust();
+    }
+
+    private saveColourAdjust() {
+        const adjust = this.config.colourAdjust.getActive();
+        updateSettings({ colourAdjust: adjust });
+        this.colourAdjust.set(adjust);
+    }
+
     setDaytime(event: Event) {
         this.config.daytime.setActive(sliderValue(event));
         this.daytime.set(this.config.daytime.getActive());
@@ -907,6 +1087,47 @@ export class SettingsDialog {
         this.data.keyboardInput.setKeyboardPitchStickMode(mode);
         updateSettings({ keyboardPitchStickMode: mode });
         this.pitchStickMode.set(mode);
+    }
+
+    onSearchInput(query: string) {
+        this.searchQuery.set(query);
+        this.quickResults.set(this.spawnMenu.quickSearch(query));
+        this.placeResults.set([]);
+        this.placeStatus.set('idle');
+        this.placeSearchToken++;
+    }
+
+    /** Enter picks the highlighted result if there is one, and otherwise looks up places. */
+    onSearchEnter(event: Event) {
+        if (event.defaultPrevented || this.searchTrigger()?.activeOption) {
+            return;
+        }
+        this.searchPlaces();
+    }
+
+    searchPlaces() {
+        const query = this.searchQuery().trim();
+        if (query === '') {
+            return;
+        }
+        const token = ++this.placeSearchToken;
+        this.placeStatus.set('searching');
+        this.searchTrigger()?.openPanel();
+        this.spawnMenu.searchPlaces(query).then(places => {
+            if (token === this.placeSearchToken) {
+                this.placeResults.set(places);
+                this.placeStatus.set(places.length > 0 ? 'done' : 'none');
+            }
+        }).catch(() => {
+            if (token === this.placeSearchToken) {
+                this.placeStatus.set('error');
+            }
+        });
+    }
+
+    goTo(destination: SpawnDestination) {
+        this.onSearchInput('');
+        this.spawnMenu.goTo(destination);
     }
 
     /**

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
     Lanes, Step, dataSteps, deletePlan, extractPathFor, formatDuration, isProgressLine, parseProgress, plan, chunkBbox,
-    snapBboxToTiles, splitStream, stepOutcome,
+    snapBboxToTiles, splitStream, stepOutcome, EXIT_NO_LAND, landChunks,
 } from './areaImport';
 
 /**
@@ -282,6 +282,92 @@ describe('chunkBbox', () => {
                 assert.ok(Math.abs(v / tile - Math.round(v / tile)) < 1e-6);
             }
         }
+    });
+});
+
+describe('chunkBbox slivers', () => {
+    const tile = 180 / 4096;
+    const spans = (chunks: number[][], axis: 0 | 1) =>
+        [...new Set(chunks.map(c => c[axis + 2] - c[axis]).map(v => Math.round(v / tile)))];
+
+    it('splits the Germany North East box evenly instead of ending on a sliver', () => {
+        // 2026-09-28: this box ended on a 0.09 degree column whose northern
+        // chunk was pure Baltic.
+        const box = snapBboxToTiles([10.8, 52.5146484375, 14.8, 54.75]);
+        const chunks = chunkBbox(box);
+        const widths = spans(chunks, 0);
+        const heights = spans(chunks, 1);
+        assert.ok(Math.max(...widths) - Math.min(...widths) <= 1, `widths ${widths}`);
+        assert.ok(Math.max(...heights) - Math.min(...heights) <= 1, `heights ${heights}`);
+        for (const c of chunks) {
+            assert.ok(c[2] - c[0] <= 2 + 1e-9 && c[3] - c[1] <= 2 + 1e-9);
+            assert.ok(c[2] - c[0] >= 1 && c[3] - c[1] >= 1, `sliver ${c}`);
+        }
+        assert.equal(chunks[0][0], box[0]);
+        assert.equal(chunks[chunks.length - 1][2], box[2]);
+    });
+
+    it('never cuts more chunks than a fixed 2 degree grid would', () => {
+        for (const w of [2.05, 3.9, 4.09, 6.01]) {
+            const box: [number, number, number, number] = [10, 50, 10 + Math.round(w / tile) * tile, 51];
+            assert.equal(chunkBbox(box).length, Math.ceil(Math.round(w / tile) / Math.floor(2 / tile)));
+        }
+    });
+});
+
+describe('open-sea chunks', () => {
+    it('the heights fetch declares the DEM tool\'s no-land code as a skip', () => {
+        const steps = dataSteps({ name: 'Test Area', bbox: [7.6, 45.9, 7.8, 46.0], pbf: 'x.osm.pbf' });
+        const fetch = steps.find(s => s.args[0] === 'tools/fetch_planet_dem.py');
+        assert.equal(fetch?.skipCode, EXIT_NO_LAND);
+        assert.equal(stepOutcome(EXIT_NO_LAND, fetch!), 'skipped');
+        assert.equal(stepOutcome(1, fetch!), 'failed');
+        assert.equal(stepOutcome(EXIT_NO_LAND, {}), 'failed');
+        for (const s of steps.filter(s => s !== fetch)) {
+            assert.equal(s.skipCode, undefined, `${s.label} can be skipped`);
+        }
+    });
+
+    const fakeChunks = (sea: Set<number>) => {
+        const ran: string[] = [];
+        const landBefore: boolean[] = [];
+        const stepsFor = (ci: number, before: boolean): Step[] => {
+            landBefore[ci] = before;
+            return ['fetch', 'merge'].map(k => ({ label: `${k} ${ci}`, cmd: 'x', args: [], lane: 'dem' as const }))
+                .concat([{ label: `coast ${ci}`, cmd: 'x', args: [], lane: 'coast' }]);
+        };
+        const run = async (s: Step) => {
+            ran.push(s.label);
+            return s.label.startsWith('fetch') && sea.has(Number(s.label.split(' ')[1])) ? 'skipped' : 'done';
+        };
+        return { ran, landBefore, stepsFor, run };
+    };
+
+    it('skips a sea chunk\'s merge and later stages, and the next land chunk founds the area', async () => {
+        const f = fakeChunks(new Set([0, 2]));
+        const skipped: number[] = [];
+        const land = await landChunks(4, f.stepsFor, f.run, ci => skipped.push(ci));
+        assert.deepEqual(skipped, [0, 2]);
+        assert.deepEqual(f.ran, ['fetch 0', 'fetch 1', 'merge 1', 'fetch 2', 'fetch 3', 'merge 3']);
+        assert.deepEqual(land.map(steps => steps[2].label), ['coast 1', 'coast 3']);
+        // Chunk 1 is the first with land, so it must not --extend-area.
+        assert.deepEqual(f.landBefore, [false, false, true, true]);
+    });
+
+    it('fails when every chunk is sea', async () => {
+        const f = fakeChunks(new Set([0, 1]));
+        await assert.rejects(landChunks(2, f.stepsFor, f.run, () => undefined), /no land/);
+    });
+
+    it('a failed fetch still fails the import', async () => {
+        const f = fakeChunks(new Set());
+        const run = async (s: Step) => {
+            if (s.label === 'fetch 1') {
+                throw new Error('fetching heights exited with code 1');
+            }
+            return f.run(s);
+        };
+        await assert.rejects(landChunks(3, f.stepsFor, run, () => undefined), /code 1/);
     });
 });
 

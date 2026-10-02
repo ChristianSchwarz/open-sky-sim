@@ -711,3 +711,31 @@ describe('leaf dissolve', () => {
         }
     });
 });
+
+describe('visible zoom cap', () => {
+    function everything(maxZoom: number) {
+        const all = new Set<string>();
+        for (let z = 0; z <= maxZoom; z++) {
+            for (let x = 0; x < (1 << (z + 1)); x++) {
+                for (let y = 0; y < (1 << z); y++) {
+                    all.add(`${z}/${x}/${y}`);
+                }
+            }
+        }
+        return makeTree({ resident: all, maxZoom });
+    }
+
+    it('never draws or wants a tile past the cap', () => {
+        const cam = camera(0, 50, 0);
+        const free = everything(4).tree.update(cam, 1000, 50, 1);
+        assert.ok(free.draw.some(n => n.id.z === 4), 'uncapped reaches the leaf');
+
+        const capped = everything(4).tree.update(
+            cam, 1000, 50, 1, DETAIL_DISTANCE_OFF, undefined, undefined, 0, 2,
+        );
+        assert.ok(capped.draw.length > 0);
+        assert.ok(capped.draw.every(n => n.id.z <= 2));
+        assert.ok(capped.draw.some(n => n.id.z === 2));
+        assert.ok(capped.wants.every(w => w.id.z <= 2));
+    });
+});

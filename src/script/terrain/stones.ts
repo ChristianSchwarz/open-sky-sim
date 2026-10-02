@@ -195,7 +195,7 @@ export interface GroundClutter {
  * Returns empty arrays for a tile with no eligible ground.
  */
 export function scatterGroundClutter(
-    tile: PtmTile, densityScale = 1, onExcluded?: (x: number, z: number) => boolean,
+    tile: PtmTile, densityScale = 1, onExcluded?: (x: number, z: number, y: number) => boolean,
 ): GroundClutter {
     const triCount = tile.landAttrs.length / 4 / 3;
     const byShape = new Map<RockShape, ShapeGroup>();
@@ -258,7 +258,7 @@ export function scatterGroundClutter(
             const r1 = hash01(seed + i * 2.371);
             const r2 = hash01(seed + i * 2.371 + 0.5);
             const point = pointInTriangle(v0, v1, v2, r1, r2);
-            if (onExcluded && onExcluded(point.x, point.z)) {
+            if (onExcluded && onExcluded(point.x, point.z, point.y)) {
                 continue;
             }
 

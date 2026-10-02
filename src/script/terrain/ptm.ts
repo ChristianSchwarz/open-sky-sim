@@ -22,7 +22,7 @@
  *    12  u32  y                     52  u32  skirtSeamFactor
  *    16  f32  centerHeightM         56  u32  waterDeepIdx     | = waterIndexCount
  *    20  f32  quantScale            60  u32  waterShallowIdx  |
- *    24  u32  reserved              64  f32  skirtDepthM
+ *    24  u32  borderBytes           64  f32  skirtDepthM
  *    28  f32  boundingRadiusM       68  f32  geometricErrorM
  *
  *   payload, each section padded to a 4-byte boundary
@@ -36,6 +36,7 @@
  *     riverDir   i8  x4 per vertex   unit cross-flow offset + pad, /127
  *     riverHalf  u16 x1 per vertex   half the true width, decimetres
  *     riverIdx   u16 x3 per triangle
+ *     border     optional, borderBytes long; see PtmBorder
  *
  * The river section is a stroke, not a surface: its two vertices per centreline
  * point sit at the *same* place and carry opposite unit offsets, and the width
@@ -60,6 +61,10 @@
  * changed, but a v3 tile drawn as v4 is a mirror image of the place it
  * describes, which is precisely the kind of silently-wrong that the version
  * byte exists to stop. See `sceneFromEnu` in geodesy.ts.
+ *
+ * The border table rides in what was a reserved header word, which every
+ * older tile wrote as 0: such a tile decodes with no table and is simply
+ * never stitched (see seamStitch.ts), so the table needs no version bump.
  *
  * Version 6 fills the last reserved header word with the tile's own geometric
  * error - the bound on what drawing its children instead would gain. The
@@ -160,6 +165,47 @@ export const PTM_STROKE_KIND_WATER = 0;
 /** The edge of an OSM landuse region: drawn in the outline colour. */
 export const PTM_STROKE_KIND_OUTLINE = 1;
 
+/**
+ * Where a tile's land border lies, for stitching it to a neighbour at run
+ * time (see seamStitch.ts). Sides are PTM_SIDE_*; a param runs 0..1 along
+ * the side, north to south on W/E and west to east on N/S, over the tile's
+ * own extent, so two tiles meeting on a line can map one onto the other.
+ */
+export interface PtmBorder {
+    /** Land vertices lying on the border: see packBorderEntry. A corner appears once per side. */
+    vertices: Uint32Array;
+    /** Param of each entry in `vertices`. */
+    vertexParams: Float32Array;
+    /**
+     * The drawn surface's border edges, two land vertex indices each, packed
+     * like `vertices` (both carry the side). Skirts, walls and fills are not
+     * edges: they ride along with the surface edge they hang from.
+     */
+    edges: Uint32Array;
+    /** Params of both ends of each edge. */
+    edgeParams: Float32Array;
+}
+
+export const PTM_SIDE_W = 0;
+export const PTM_SIDE_E = 1;
+export const PTM_SIDE_N = 2;
+export const PTM_SIDE_S = 3;
+const PTM_SIDE_SHIFT = 30;
+const PTM_INDEX_MASK = (1 << PTM_SIDE_SHIFT) - 1;
+
+/** A border table entry: the side in the top two bits, a land vertex index below. */
+export function packBorderEntry(side: number, index: number): number {
+    return ((side << PTM_SIDE_SHIFT) | index) >>> 0;
+}
+
+export function borderEntrySide(packed: number): number {
+    return packed >>> PTM_SIDE_SHIFT;
+}
+
+export function borderEntryIndex(packed: number): number {
+    return packed & PTM_INDEX_MASK;
+}
+
 export interface PtmEncodeInput {
     id: PtmTileId;
     /** Geodetic height (m) of the tile-local frame origin. */
@@ -182,6 +228,8 @@ export interface PtmEncodeInput {
     water: PtmWaterInput;
     /** Omit for a tile with no watercourse on it, which is most of them. */
     rivers?: PtmRiverInput;
+    /** Omit and the tile is never stitched. */
+    border?: PtmBorder;
 }
 
 export interface PtmTile {
@@ -227,6 +275,8 @@ export interface PtmTile {
     /** Half-width in decimetres. Bind raw and multiply by 0.1 for metres. */
     riverHalfWidths: Uint16Array;
     riverIndices: Uint16Array;
+    /** Undefined for a tile baked without one. */
+    border?: PtmBorder;
 }
 
 function align4(n: number): number {
@@ -386,10 +436,23 @@ export function encodePtm(input: PtmEncodeInput): Uint8Array {
     const riverDirBytes = align4(riverVertCount * 4);
     const riverHalfBytes = align4(riverVertCount * 2);
     const riverIdxBytes = align4(riverIndexCount * 2);
+    const border = input.border;
+    if (border) {
+        if (border.vertexParams.length !== border.vertices.length
+            || border.edges.length % 2 !== 0 || border.edgeParams.length !== border.edges.length) {
+            throw new Error('PTM1: border table lengths do not match');
+        }
+        for (const packed of [...border.vertices, ...border.edges]) {
+            if (borderEntryIndex(packed) >= landVertCount) {
+                throw new Error(`PTM1: border vertex ${borderEntryIndex(packed)} is past the land stream`);
+            }
+        }
+    }
+    const borderBytes = border ? borderSectionBytes(border) : 0;
 
     const total = PTM_HEADER_BYTES + landPosBytes + landNrmBytes + landAttrBytes
         + waterPosBytes + waterToneBytes + waterIdxBytes
-        + riverPosBytes + riverDirBytes + riverHalfBytes + riverIdxBytes;
+        + riverPosBytes + riverDirBytes + riverHalfBytes + riverIdxBytes + borderBytes;
     const out = new Uint8Array(total);
     const view = new DataView(out.buffer);
 
@@ -413,6 +476,17 @@ export function encodePtm(input: PtmEncodeInput): Uint8Array {
     const riverHalf = new Uint16Array(out.buffer, off, riverVertCount);
     off += riverHalfBytes;
     const riverIdx = new Uint16Array(out.buffer, off, riverIndexCount);
+    off += riverIdxBytes;
+    if (border) {
+        const counts = new Uint32Array(out.buffer, off, 2);
+        counts[0] = border.vertices.length;
+        counts[1] = border.edges.length / 2;
+        const at = borderViews(out.buffer, off, counts[0], counts[1]);
+        at.vertices.set(border.vertices);
+        at.vertexParams.set(border.vertexParams);
+        at.edges.set(border.edges);
+        at.edgeParams.set(border.edgeParams);
+    }
 
     let v = 0;
     for (let t = 0; t < landTriCount; t++) {
@@ -501,7 +575,7 @@ export function encodePtm(input: PtmEncodeInput): Uint8Array {
     view.setUint32(12, input.id.y, true);
     view.setFloat32(16, input.centerHeightM, true);
     view.setFloat32(20, quantScale, true);
-    view.setUint32(24, 0, true);
+    view.setUint32(24, borderBytes, true);
     view.setFloat32(28, Math.sqrt(maxRadiusSq), true);
     view.setUint32(32, landVertCount, true);
     view.setUint32(36, waterVertCount, true);
@@ -636,6 +710,18 @@ export function decodePtm(bytes: ArrayBuffer | Uint8Array): PtmTile {
     const riverHalfWidths = new Uint16Array(raw.buffer, off, riverVertCount);
     off += riverHalfBytes;
     const riverIndices = new Uint16Array(raw.buffer, off, riverIndexCount);
+    off += riverIdxBytes;
+
+    // Zero on every tile baked before the border table existed.
+    const borderBytes = view.getUint32(24, true);
+    let border: PtmBorder | undefined;
+    if (borderBytes > 0) {
+        if (raw.byteLength < expected + borderBytes) {
+            throw new Error(`PTM1 truncated border: ${raw.byteLength} < ${expected + borderBytes}`);
+        }
+        const counts = new Uint32Array(raw.buffer, off, 2);
+        border = borderViews(raw.buffer, off, counts[0], counts[1]);
+    }
 
     return {
         id: { z, x, y },
@@ -660,5 +746,23 @@ export function decodePtm(bytes: ArrayBuffer | Uint8Array): PtmTile {
         riverDirections,
         riverHalfWidths,
         riverIndices,
+        border,
     };
+}
+
+/** Two counts, then the vertices, their params, the edges and theirs; all 4-byte. */
+function borderSectionBytes(b: PtmBorder): number {
+    return 8 + b.vertices.length * 8 + b.edges.length * 8;
+}
+
+function borderViews(buffer: ArrayBufferLike, off: number, vertexCount: number, edgeCount: number): PtmBorder {
+    let at = off + 8;
+    const vertices = new Uint32Array(buffer, at, vertexCount);
+    at += vertexCount * 4;
+    const vertexParams = new Float32Array(buffer, at, vertexCount);
+    at += vertexCount * 4;
+    const edges = new Uint32Array(buffer, at, edgeCount * 2);
+    at += edgeCount * 8;
+    const edgeParams = new Float32Array(buffer, at, edgeCount * 2);
+    return { vertices, vertexParams, edges, edgeParams };
 }

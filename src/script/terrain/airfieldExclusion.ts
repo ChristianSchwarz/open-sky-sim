@@ -24,7 +24,14 @@ const APRON_TREE_MARGIN_M = 5;
 const CELL_M = 64;
 
 export type AirfieldExclusion = (x: number, z: number) => boolean;
-type ToEnu = (lat: number, lon: number) => { e: number; n: number };
+/**
+ * Height in metres, the same ellipsoid height the pavement is drawn at. It
+ * moves the answer sideways, not just up: away from the play origin local
+ * vertical leans off the basis's, by distance / earth radius, so projecting
+ * a 450 m field at height 0 put Munich's mask 16 m beside its runways (232 km
+ * out) and an alpine field over 100 m.
+ */
+type ToEnu = (lat: number, lon: number, heightM: number) => { e: number; n: number };
 
 /** East/south tile axes, matching treeBillboards.ts's scatter points. */
 function toTile(e: number, n: number): { x: number; z: number } {
@@ -99,9 +106,13 @@ export function buildAirfieldExclusion(airfields: Airfield[], toEnu: ToEnu): Air
     const rings: Ring[] = [];
 
     for (const airfield of airfields) {
+        // The airfield's plane, as airfieldModel.ts lays the pavement on it;
+        // its gradient is metres across a whole field, centimetres sideways.
+        const h = airfield.plane.heightMsl;
+        const at = (lat: number, lon: number) => toEnu(lat, lon, h);
         for (const runway of airfield.runways) {
-            const centre = toEnu(runway.lat, runway.lon);
-            const axisEn = bearingAxisAt(runway.lat, runway.lon, runway.headingDeg, toEnu);
+            const centre = at(runway.lat, runway.lon);
+            const axisEn = bearingAxisAt(runway.lat, runway.lon, runway.headingDeg, at);
             const c = toTile(centre.e, centre.n);
             // East/south flips the sign of the north component only.
             const ax = axisEn.e, az = -axisEn.n;
@@ -113,7 +124,7 @@ export function buildAirfieldExclusion(airfields: Airfield[], toEnu: ToEnu): Air
         }
         for (const taxiway of airfield.taxiways) {
             const pts = taxiway.points.map(p => {
-                const enu = toEnu(p[0], p[1]);
+                const enu = at(p[0], p[1]);
                 return toTile(enu.e, enu.n);
             });
             const r = taxiway.widthM / 2 + APRON_TREE_MARGIN_M;
@@ -123,7 +134,7 @@ export function buildAirfieldExclusion(airfields: Airfield[], toEnu: ToEnu): Air
         }
         for (const apron of airfield.aprons) {
             const pts = apron.ring.map(p => {
-                const enu = toEnu(p[0], p[1]);
+                const enu = at(p[0], p[1]);
                 return toTile(enu.e, enu.n);
             });
             if (pts.length < 3) {

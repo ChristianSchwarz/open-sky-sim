@@ -525,3 +525,41 @@ face normal, so the crack came out as a strip lit differently from the
 ground on either side. A land skirt now carries the normal of the surface
 facet it hangs from, so whatever shows of it reads as that ground. Water
 skirts have no normal.
+
+## Outlines, river rims and a 5° collapse (2026-10-01)
+
+Measured on a river-heavy urban box (Hamburg, `9.85,53.48,10.05,53.58`),
+z12, per tile: 36728 triangles, of which 18823 strokes - and only ~1.4k
+of those watercourses. The rest were land-use outlines, which the
+runtime has never drawn (`terrainEntity.ts`, "baked ... but are not
+drawn"). Three changes:
+
+1. **Outlines are no longer baked.** `PTM_STROKE_KIND_OUTLINE` stays in
+   the format so older tiles decode.
+2. **Rivers and canals have no shallow rim.** Flowing water (an inland
+   body with no measured surface: NaN or a river profile) is one tone,
+   the same deep water colour as the watercourse strokes. Lakes, reservoirs
+   and the sea keep the 80 m rim. This is a look change, not a saving:
+   river water is sloped, so the collapse height-tests it and the class
+   contour was never what held it (Hamburg shallow 1491 -> 517 per tile,
+   total water unchanged).
+3. **`COLLAPSE_MAX_ANGLE_DEG` 2 -> 5.** The height test still bounds every
+   collapse.
+
+| z12 mean per tile | before | no outlines | + 3° | + 4° | + 5° |
+|---|---|---|---|---|---|
+| Hamburg | 36728 | 19166 | 18516 | 18178 | 17921 |
+| Bernese Oberland | | 20403 | 19971 | 19477 | 19039 |
+| Gran Canaria | | 9913 | 9437 | 8988 | 8608 |
+
+z12 surface 2° -> 5°: Hamburg 4818 -> 4013, Oberland 5186 -> 4517, Gran
+Canaria 6739 -> 5712. Open edges 0 throughout; the 74 tall walls in the
+Oberland are there at 2° too. Hamburg output 7.8 -> 4.5 MB.
+Checked in the pane over the Oberland (FACETED, same fixed camera, 2° and
+5° baked in turn): no visible tone step, overview or close-up. For a
+close-up A/B raise `terrainTriangleBudget` first - at the default 600k
+the heavier 2° tiles were coarsened to fit and the frames did not match.
+The dark sliver triangles on that slope are there at 2° too.
+
+What is left at z12 is the land-use fill (11k in Hamburg, 14k in the
+Oberland) and, on coast-only tiles, the marching-squares shoreline cut.

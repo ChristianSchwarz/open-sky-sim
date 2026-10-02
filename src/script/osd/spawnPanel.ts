@@ -1,5 +1,10 @@
 import { SpawnMode } from '../config/settingsStorage';
 import { AircraftModelGroup } from '../state/aircraftRegistry';
+import {
+    AirfieldEntry, SpawnDestination, airfieldDestination, coordinateDestination, parseCoordinates,
+    searchAirfields, searchPlaces,
+} from '../state/spawnSearch';
+import type { TerrainArea } from '../terrain/manifest';
 import { closeSettingsDialog, openSettingsDialog, registerSpawnMenu } from '../ui/settings/settingsLauncher';
 
 /** One airfield the player can be based at. */
@@ -28,6 +33,9 @@ export interface SpawnMenuState {
  */
 export class SpawnPanel {
     private airfieldChoices: AirfieldChoice[] = [];
+    private searchEntries: readonly AirfieldEntry[] = [];
+    private searchAreas: readonly TerrainArea[] = [];
+    private currentArea = '';
     private state: SpawnMenuState = {
         aircraft: [], aircraftIndex: 0, liveries: [], liveryIndex: 0, airfields: [], airfieldIndex: 0,
     };
@@ -38,6 +46,7 @@ export class SpawnPanel {
         private readonly onLiverySelect: (liveryIndex: number) => void,
         private readonly onAirfieldSelect: (icao: string) => void,
         private readonly onSpawn: (mode: SpawnMode) => void,
+        private readonly onDestination: (destination: SpawnDestination) => void,
         private readonly onOpened: () => void,
         private readonly onClosed: () => void,
     ) {
@@ -72,6 +81,45 @@ export class SpawnPanel {
 
     spawn(mode: SpawnMode): void {
         this.onSpawn(mode);
+    }
+
+    /** What the search box searches: every baked area's airfields, and the areas themselves. */
+    setSearchIndex(entries: readonly AirfieldEntry[], areas: readonly TerrainArea[], currentArea: string): void {
+        this.searchEntries = entries;
+        this.searchAreas = areas;
+        this.currentArea = currentArea;
+    }
+
+    /**
+     * Matches that need no network, as the player types: a coordinate pair,
+     * and airfields of every baked area.
+     */
+    quickSearch(query: string): SpawnDestination[] {
+        const out: SpawnDestination[] = [];
+        const coords = parseCoordinates(query);
+        if (coords !== undefined) {
+            out.push(coordinateDestination(coords.lat, coords.lon, this.searchAreas, this.currentArea));
+        }
+        for (const entry of searchAirfields(this.searchEntries, query)) {
+            out.push(airfieldDestination(entry, this.currentArea));
+        }
+        return out;
+    }
+
+    /** Places by name, from the geocoder; only on an explicit search. */
+    searchPlaces(query: string): Promise<SpawnDestination[]> {
+        return searchPlaces(query, this.searchAreas, this.currentArea);
+    }
+
+    /**
+     * Go to a search result: an airfield becomes the base the start buttons
+     * use, a place starts an airborne flight over it. Either may reload into
+     * another area first. Nothing happens for one with no terrain.
+     */
+    goTo(destination: SpawnDestination): void {
+        if (destination.area !== undefined) {
+            this.onDestination(destination);
+        }
     }
 
     /**

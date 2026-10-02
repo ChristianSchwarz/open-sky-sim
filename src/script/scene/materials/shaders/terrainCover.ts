@@ -1,4 +1,5 @@
 import { CLASS_COUNT, LAND_TONE_COUNT, TerrainClass, TerrainColourMode } from '../../../terrain/tones';
+import { COLOUR_ADJUST_PARS } from './colourAdjust';
 
 /**
  * How many colours the swatch table holds. Compile-time, because a GLSL ES
@@ -62,7 +63,9 @@ export const TERRAIN_COVER_PARS: string = `
    * tone, the rest from its sampled imagery colour. 0..1, a player setting.
    */
   uniform float uLanduseBlend;
-
+  /** The player's terrain saturation, brightness and hue; see colourAdjust.ts. */
+  uniform vec3 uAdjTerrain;
+${COLOUR_ADJUST_PARS}
   const vec3 COVER_LUMA = vec3(0.2126, 0.7152, 0.0722);
 
   /**
@@ -132,7 +135,7 @@ export const TERRAIN_COVER_PARS: string = `
    * fragment program instead and arrives here with shown = 1, as does a
    * texel, whose region is long since averaged away.
    */
-  vec3 facetColor(vec3 coverColor, float coverClass, float shown) {
+  vec3 facetColorAuthored(vec3 coverColor, float coverClass, float shown) {
     // srgbToLinear(coverColor) only ever feeds the two branches below - it
     // used to run unconditionally ahead of every branch instead, which is a
     // pow(x, 2.4) every one of Hybrid/Swatch-table/Plain mode's vertices paid
@@ -178,5 +181,10 @@ export const TERRAIN_COVER_PARS: string = `
       return mix(srgbToLinear(coverColor) * uRawLight, toned, uLanduseBlend * shown);
     }
     return mix(srgbToLinear(coverColor) * uRawLight, tone, shown);
+  }
+
+  /** The colour every mode picked, leaned on by the player's sliders. */
+  vec3 facetColor(vec3 coverColor, float coverClass, float shown) {
+    return adjustColour(facetColorAuthored(coverColor, coverClass, shown), uAdjTerrain);
   }
 `;

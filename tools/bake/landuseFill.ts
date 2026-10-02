@@ -351,3 +351,139 @@ function mergeGroup(group: FillPiece[], facet: GridTri): FillPiece[] | undefined
     }
     return merged;
 }
+
+export interface ShoreSnapOptions {
+    /** Whether a region's edge may be snapped to the shore. */
+    snaps: (region: number) => boolean;
+    /** True for a point the coast cut put on the shoreline. */
+    onShore: (p: GridPoint) => boolean;
+    /** Distance from a point to the drawn shoreline, in cells. */
+    shoreDistance: (p: GridPoint) => number;
+    /** Gaps narrower than this, in cells, are closed. */
+    maxCells: number;
+}
+
+/**
+ * Closes the thin strip OSM leaves between a landuse polygon and the water.
+ *
+ * Forest and coastline are mapped separately, and the forest usually stops a
+ * few metres short of the shore. Drawn exactly, that is a pale band along
+ * every wooded bank, and it costs triangles too: each shore facet is cut a
+ * second time along the forest edge, a fan of pieces where one would do.
+ *
+ * A facet whose uncovered part lies wholly within `maxCells` of the shore is
+ * handed to the region whole. Where the strip is wider than one facet, a
+ * facet with no fill at all is handed over too when each of its corners is
+ * either on the shore or a corner of a facet the region now covers whole -
+ * the shore row behind a snapped one. Those second-row facets never anchor
+ * further facets, so the fill cannot creep along the bank.
+ *
+ * Facets carrying more than one region are left alone: that is a real
+ * boundary between two covers, not a gap.
+ */
+export function snapToShore(
+    pieces: FillPiece[],
+    facets: readonly GridTri[],
+    opts: ShoreSnapOptions,
+): FillPiece[] {
+    const byFacet = new Map<number, FillPiece[]>();
+    for (const piece of pieces) {
+        const list = byFacet.get(piece.facet);
+        if (list) {
+            list.push(piece);
+        } else {
+            byFacet.set(piece.facet, [piece]);
+        }
+    }
+    const same = (a: GridPoint, b: GridPoint) =>
+        Math.abs(a.x - b.x) <= MERGE_SNAP && Math.abs(a.y - b.y) <= MERGE_SNAP;
+    const near = (p: GridPoint) => opts.shoreDistance(p) <= opts.maxCells;
+    const key = (p: GridPoint) => `${p.x.toFixed(4)},${p.y.toFixed(4)}`;
+
+    /** Region owning the facet whole, after snapping. */
+    const whole = new Map<number, number>();
+    for (const [f, list] of byFacet) {
+        const region = list[0].region;
+        if (list.some(p => p.region !== region)) {
+            continue;
+        }
+        const facet = facets[f];
+        const facetArea = Math.abs(signedArea(facet));
+        const covered = list.reduce((s, p) => s + Math.abs(signedArea(p.pts)), 0);
+        if (covered >= facetArea * (1 - 1e-6)) {
+            whole.set(f, region);
+            continue;
+        }
+        if (!opts.snaps(region)) {
+            continue;
+        }
+        const reached = (c: GridPoint) => list.some(p => p.pts.some(q => same(q, c)));
+        const open = facet.filter(c => !reached(c));
+        if (open.length === 0 || !open.every(near)) {
+            continue;
+        }
+        // The polygon's own edge inside the facet has to hug the shore too,
+        // or this is a polygon ending at the water, not a gap before it.
+        const edge = list.flatMap(p => p.pts).filter(q => !facet.some(c => same(q, c)));
+        if (!edge.every(near)) {
+            continue;
+        }
+        whole.set(f, region);
+    }
+
+    // Regions covering each corner whole, for the second row.
+    const anchors = new Map<string, Set<number>>();
+    for (const [f, region] of whole) {
+        if (!opts.snaps(region)) {
+            continue;
+        }
+        for (const c of facets[f]) {
+            const k = key(c);
+            const set = anchors.get(k);
+            if (set) {
+                set.add(region);
+            } else {
+                anchors.set(k, new Set([region]));
+            }
+        }
+    }
+    const behind = new Map<number, number>();
+    for (let f = 0; f < facets.length; f++) {
+        if (byFacet.has(f)) {
+            continue;
+        }
+        const facet = facets[f];
+        if (!facet.every(near)) {
+            continue;
+        }
+        const inland = facet.filter(c => !opts.onShore(c));
+        if (inland.length === 0 || inland.length === 3) {
+            continue;
+        }
+        const sets = inland.map(c => anchors.get(key(c)));
+        if (sets.some(set => set === undefined)) {
+            continue;
+        }
+        const shared = [...sets[0]!].filter(r => sets.every(set => set!.has(r)));
+        if (shared.length > 0) {
+            behind.set(f, Math.min(...shared));
+        }
+    }
+
+    const out: FillPiece[] = [];
+    for (const [f, list] of byFacet) {
+        // A whole facet is one triangle, however many pieces it took before.
+        const region = whole.get(f);
+        const alreadyWhole = list.length === 1
+            && Math.abs(signedArea(list[0].pts)) >= Math.abs(signedArea(facets[f])) * (1 - 1e-6);
+        if (region !== undefined && !alreadyWhole) {
+            out.push({ facet: f, region, pts: [facets[f][0], facets[f][1], facets[f][2]] });
+        } else {
+            out.push(...list);
+        }
+    }
+    for (const [f, region] of behind) {
+        out.push({ facet: f, region, pts: [facets[f][0], facets[f][1], facets[f][2]] });
+    }
+    return out;
+}

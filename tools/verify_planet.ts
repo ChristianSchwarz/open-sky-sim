@@ -126,6 +126,7 @@ function main(): void {
     let checked = 0;
     let totalTris = 0;
     let maxTris = 0;
+    let overBudget = 0;
     let totalBytes = 0;
 
     for (let i = 0; i < onDisk.length; i += step) {
@@ -154,11 +155,15 @@ function main(): void {
         if (tile.id.z !== z || tile.id.x !== x || tile.id.y !== y) {
             note(`${key}: header says ${tile.id.z}/${tile.id.x}/${tile.id.y}`);
         }
-        const tris = tile.landPositions.length / 9 + tile.waterIndices.length / 3;
+        const landTris = tile.landPositions.length / 9;
+        const tris = landTris + tile.waterIndices.length / 3;
         totalTris += tris;
         maxTris = Math.max(maxTris, tris);
+        // The budget binds the surface search only; the land-use fill and
+        // strokes share the land buffer and are not budgeted (see
+        // docs/terrain-triangle-merge.md), so an overrun is a statistic here.
         if (tris > budget) {
-            note(`${key}: ${tris} triangles exceeds budget ${budget}`);
+            overBudget++;
         }
         if (tris === 0) {
             note(`${key}: empty tile`);
@@ -169,7 +174,9 @@ function main(): void {
         if (!Number.isFinite(tile.centerHeightM)) {
             note(`${key}: bad centre height`);
         }
-        if (!(tile.geometricErrorM > 0) || !Number.isFinite(tile.geometricErrorM)) {
+        // A tile that is all flat water sheet is exact: 0 m is its honest error.
+        if (!(tile.geometricErrorM >= 0) || !Number.isFinite(tile.geometricErrorM)
+            || (tile.geometricErrorM === 0 && landTris > 0)) {
             note(`${key}: bad geometric error ${tile.geometricErrorM}`);
         }
         if (!(tile.quantScale > 0)) {
@@ -201,7 +208,7 @@ function main(): void {
     console.log(`  checked ${checked}${step > 1 ? ` (every ${step}th)` : ''}`);
     if (checked > 0) {
         console.log(`  triangles: mean ${Math.round(totalTris / checked)}, max ${maxTris}`
-            + `, budget ${budget}`);
+            + `, budget ${budget} (${overBudget} tiles over, fill included)`);
         console.log(`  total ${(totalBytes / 1048576).toFixed(1)} MB`);
     }
     if (problems.length === 0) {

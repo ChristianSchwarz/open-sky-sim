@@ -102,6 +102,11 @@ class PlanSources(unittest.TestCase):
         near = regions_near({'features': [self.GERMANY]}, box_)
         self.assertEqual(_ids(plan_sources(box_, near, [])), ['germany'])
 
+    def test_sea_only_the_continent_reaches_needs_no_extract(self):
+        box_ = (13.0, 54.0, 15.0, 56.0)  # Europe's polygon covers the sea north of Germany
+        near = regions_near({'features': [self.GERMANY, self.EUROPE]}, box_)
+        self.assertEqual(_ids(plan_sources(box_, near, [])), ['germany'])
+
     def test_no_region_near_the_box_is_an_error(self):
         with self.assertRaises(LookupError):
             plan_sources((100, 0, 101, 1), [], [])

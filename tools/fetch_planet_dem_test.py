@@ -541,6 +541,17 @@ class MosaicIntoTest(unittest.TestCase):
         self.assertEqual(used, 1)
         np.testing.assert_array_equal(out, [[NODATA, NODATA], [NODATA, 3.0]])
 
+    def test_404s_are_reported_as_absent(self):
+        out = np.full((2, 2), NODATA, dtype=np.float32)
+        absent = []
+        mosaic_into(out, None, ['sea', 'down', 'ok'], ARCSEC_DEG, cache_dir=None, absent=absent,
+                    fetch=self._fetch({
+                        'sea': (None, None, '404 Client Error: Not Found for url: x'),
+                        'down': (None, None, 'Read timed out'),
+                        'ok': (Window(0, 0, 1, 1), np.full((1, 1), 3.0, np.float32), None),
+                    }))
+        self.assertEqual(absent, ['sea'])
+
     def test_block_lands_at_its_window(self):
         out = np.full((5, 6), NODATA, dtype=np.float32)
         mosaic_into(out, None, ['a'], ARCSEC_DEG, cache_dir=None, fetch=self._fetch({
@@ -553,6 +564,47 @@ class MosaicIntoTest(unittest.TestCase):
     def test_no_sources_is_zero(self):
         out = np.full((2, 2), NODATA, dtype=np.float32)
         self.assertEqual(mosaic_into(out, None, [], ARCSEC_DEG, cache_dir=None, fetch=self._fetch({})), 0)
+
+
+class NoLandExitTest(unittest.TestCase):
+    """An all-sea bbox exits EXIT_NO_LAND, not 1, so a chunked import can
+    tell open sea from a failed fetch."""
+
+    BBOX = '--bbox=14.7216796875,54.4921875,14.8095703125,54.755859375'
+
+    def _main(self, fill, all_missing=False):
+        # fill None: no square could be read - all of them 404s if all_missing.
+        def mosaic(out, transform, urls, step_deg, jobs, cache_dir, absent=None):
+            if fill is None:
+                if all_missing and absent is not None:
+                    absent.extend(urls)
+                return 0
+            out[...] = fill
+            return 1
+        with tempfile.TemporaryDirectory() as tmp,                 mock.patch.object(fetch_planet_dem, 'mosaic_into', mosaic),                 mock.patch.object(fetch_planet_dem, 'write_tif') as write:
+            code = fetch_planet_dem.main([self.BBOX, '--out', os.path.join(tmp, 'x.tif')])
+        return code, write
+
+    def test_code_is_distinct(self):
+        self.assertNotIn(fetch_planet_dem.EXIT_NO_LAND, (0, 1, 2))
+
+    def test_all_sea_heights_exit_no_land(self):
+        code, write = self._main(0.0)
+        self.assertEqual(code, fetch_planet_dem.EXIT_NO_LAND)
+        write.assert_not_called()
+
+    def test_every_square_missing_exits_no_land(self):
+        code, _ = self._main(None, all_missing=True)
+        self.assertEqual(code, fetch_planet_dem.EXIT_NO_LAND)
+
+    def test_unreadable_squares_still_fail(self):
+        code, _ = self._main(None)
+        self.assertEqual(code, 1)
+
+    def test_land_is_written(self):
+        code, write = self._main(12.0)
+        self.assertEqual(code, 0)
+        write.assert_called_once()
 
 
 if __name__ == '__main__':

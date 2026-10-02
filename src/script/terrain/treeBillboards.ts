@@ -161,7 +161,7 @@ export function clampTreeDensityMultiplier(value: number): number {
  * often fewer), or an empty array for a tile with no forest.
  */
 export function scatterTreeSpecies(
-    tile: PtmTile, densityScale = 1, onRoad?: (x: number, z: number) => boolean,
+    tile: PtmTile, densityScale = 1, onRoad?: (x: number, z: number, y: number) => boolean,
 ): SpeciesGroup[] {
     const triCount = tile.landAttrs.length / 4 / 3;
     const bySpecies = new Map<Species, SpeciesGroup>();
@@ -214,7 +214,7 @@ export function scatterTreeSpecies(
             const r1 = hash01(seed + i * 2.371);
             const r2 = hash01(seed + i * 2.371 + 0.5);
             const point = pointInTriangle(v0, v1, v2, r1, r2);
-            if (onRoad && onRoad(point.x, point.z)) {
+            if (onRoad && onRoad(point.x, point.z, point.y)) {
                 continue;
             }
             const species = (cls === SHRUB_CLASS ? Species.SHRUB : Math.min(
@@ -305,7 +305,7 @@ export function buildTreeMesh(
             shade[i * 4] = group.tints[k * 3];
             shade[i * 4 + 1] = group.tints[k * 3 + 1];
             shade[i * 4 + 2] = group.tints[k * 3 + 2];
-            shade[i * 4 + 3] = (0.3 + hash01(i * 6.451 + group.species * 17.3 + 2) * 0.3) * 0.9;
+            shade[i * 4 + 3] = (0.3 + hash01(i * 6.451 + group.species * 17.3 + 2) * 0.3) * 0.72;
         }
     }
     mesh.instanceMatrix.needsUpdate = true;

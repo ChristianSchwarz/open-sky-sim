@@ -26,7 +26,8 @@
 import * as THREE from 'three';
 import { TerrainShading } from '../state/gameDefs';
 import { EnuBasis, ecefToEnu, geodeticToEcef, sceneFromEnu } from './geodesy';
-import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmTile } from './ptm';
+import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmBorder, PtmTile } from './ptm';
+import type { SeamState } from './seamStitch';
 import type { BridgeMeshSet } from './bridgeMeshes';
 import type { RoadMeshes } from './roadStrokes';
 import { TileKey, tileBounds } from './tiling';
@@ -110,6 +111,12 @@ export interface TileMeshes {
      * that was evicted before that resolved.
      */
     disposed?: boolean;
+    /** Where the land border lies, from the tile; see seamStitch.ts. */
+    border?: PtmBorder;
+    /** The stitcher's state for this tile, once it has been stitched. */
+    seam?: SeamState;
+    /** The stitcher's T-junction fill, while the tile has one. */
+    seamFill?: THREE.Mesh;
     /** Bytes of GPU buffer, for the cache budget. */
     bytes: number;
 }
@@ -600,7 +607,7 @@ export function buildTileMeshes(
     group.matrixAutoUpdate = false;
 
     let bytes = 0;
-    const meshes: TileMeshes = { group, bytes: 0, geometricErrorM: tile.geometricErrorM };
+    const meshes: TileMeshes = { group, bytes: 0, geometricErrorM: tile.geometricErrorM, border: tile.border };
 
     const lg = landGeometry(tile);
     if (lg) {
@@ -696,6 +703,7 @@ export function disposeTileMeshes(m: TileMeshes): void {
     m.landGeometryFaceted?.dispose();
     m.landGeometrySmooth?.dispose();
     m.water?.geometry.dispose();
+    m.seamFill?.geometry.dispose();
     m.rivers?.geometry.dispose();
     m.outlines?.geometry.dispose();
     if (m.cover instanceof THREE.DataTexture) {

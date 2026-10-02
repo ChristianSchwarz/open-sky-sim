@@ -29,7 +29,8 @@ import {
 } from '../../src/script/terrain/flattenPad';
 import { CLASS_TO_TONE, TerrainClass, TerrainTone } from '../../src/script/terrain/tones';
 import {
-    PTM_MAX_RIVER_VERTS, PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmTileId, encodePtm,
+    PTM_MAX_RIVER_VERTS, PTM_SIDE_E, PTM_SIDE_N, PTM_SIDE_S, PTM_SIDE_W, PTM_STROKE_KIND_WATER,
+    PtmTileId, encodePtm, packBorderEntry,
 } from '../../src/script/terrain/ptm';
 import { GridTriangle, decimate } from './decimate';
 import { Vec2 } from './marchingSquares';
@@ -39,7 +40,7 @@ import {
 } from './shoreline';
 import { Watercourse } from './lvr';
 import { RegionPolygon, buildRegionField, regionFieldFromShoreline } from './regions';
-import { GridPoint, landuseFill } from './landuseFill';
+import { GridPoint, landuseFill, snapToShore } from './landuseFill';
 
 /** Heights at or below seaLevel + this are open water. Matches the old bake. */
 export const WATER_HEIGHT_EPS_M = 0.5;
@@ -132,6 +133,14 @@ export const LANDUSE_SIMPLIFY_CELLS = 0.5;
  * edge does at that scale can show.
  */
 export const LANDUSE_LEAF_SIMPLIFY_CELLS = 0.25;
+/**
+ * A forest edge closer to the shore than this, in metres, is snapped onto it.
+ * OSM maps the two separately, and the forest usually stops a few metres short
+ * of the water; drawn exactly, that is a pale strip along every wooded bank and
+ * a second cut through every shore facet. 40 m is two z12 cells: measured on 77
+ * DACH z12 water tiles it closed 9.3k strip facets and saved 0.9 % of triangles.
+ */
+export const LANDUSE_SHORE_SNAP_M = 40;
 /** A landuse ring smaller than this, in cells^2, is not worth a fill. */
 export const LANDUSE_MIN_RING_AREA_CELLS = 1;
 
@@ -165,20 +174,15 @@ const RIVER_MAX_SUBDIVISIONS = 512;
 const RIVER_LIFT_CELLS = 0.05;
 
 /**
- * Half the true width of a landuse outline stroke, metres. Thin on purpose:
- * RiverVertProgram's pixel floor is what keeps it visible from altitude, and
- * the baked width only matters once the edge is close enough to outgrow it.
- */
-export const OUTLINE_HALF_WIDTH_M = 2;
-
-/**
  * Largest normal deviation (deg) inside a vertex's ring that the coplanar
- * collapse pass will try to remove; see collapse.ts. Two degrees: the pool
- * roughly doubles at four, but the facets that survive are what the
- * fixed-sun shading paints, and a four-degree kink merged away is a visible
- * tone step in FACETED mode.
+ * collapse pass will try to remove; see collapse.ts. The height test still
+ * bounds every collapse by the tile's error, so the angle only decides how
+ * much shading detail survives: a merged kink can show as a tone step in
+ * FACETED mode. Raised from 2 to 5 on 2026-10-01 - z12 surface -13 to -17 %,
+ * whole tiles -6 to -13 % (Hamburg, Bernese Oberland, Gran Canaria), open
+ * edges still 0.
  */
-export const COLLAPSE_MAX_ANGLE_DEG = 2;
+export const COLLAPSE_MAX_ANGLE_DEG = 5;
 
 /**
  * Extra collapse passes over the water sheet. It is a flat plane with no
@@ -225,6 +229,12 @@ export interface BuildTileInput {
      * border needs (see SKIRT_SEAM_FACTOR); a quarter of the skirt otherwise.
      */
     borderErrorM?: number;
+    /**
+     * Tolerance (m) a land edge lying on the tile border is split down to,
+     * after decimation; see densifyBorder. Omit to leave the border as
+     * decimate cut it.
+     */
+    borderSplitErrorM?: number;
     /** Recorded in the header so tools/deepen_skirts.ts leaves the tile alone. */
     skirtSeamFactor?: number;
     /**
@@ -340,6 +350,8 @@ export interface BuildTileResult {
     searchTriangles: number;
     /** Vertices the coplanar collapse pass removed from the final mesh. */
     collapsedVertices: number;
+    /** Vertices densifyBorder added along the tile border. */
+    borderSplits: number;
     /**
      * Triangles in the decimated surface itself, before walls, skirts, the
      * landuse fill and the water sheet. The budget governs this number; the
@@ -593,6 +605,88 @@ function shorePositionsOf(tris: GridTriangle[]): Set<string> {
         }
     }
     return out;
+}
+
+/**
+ * Split land triangles along the tile border until every border edge runs
+ * within `tolM` of the DEM nodes it passes over.
+ *
+ * decimate holds a border block to borderErrorM only while the block is
+ * still being merged: a leaf at minLeafSize, which the triangle budget
+ * raises to 8 cells on a busy coarse tile, and a chord leaf, tested against
+ * the interior tolerance, are never checked against it. Measured on DACH
+ * 2026-10-01: a z8 border ran in ~8-cell chords up to 118 m off its own
+ * nodes, and every finer tile meeting it (which follows those nodes, see
+ * borderConform.ts) showed the difference as a skirt wall.
+ *
+ * Splitting a border edge at its worst node is safe where splitting any
+ * other edge is not: nothing else in the tile shares a border edge, so the
+ * new vertex cannot open a T-junction. The neighbouring tile is a separate
+ * mesh, and what the split buys is that both sides now follow the nodes.
+ */
+export function densifyBorder(
+    tris: GridTriangle[], size: number, heightAt: (gx: number, gy: number) => number,
+    tolM: number, isLand: (t: GridTriangle) => boolean,
+): { triangles: GridTriangle[]; inserted: number } {
+    const cells = size - 1;
+    const out: GridTriangle[] = [];
+    const stack = tris.slice().reverse();
+    let inserted = 0;
+    /** The interior node on the border edge a-b farthest from its chord, if over tolerance. */
+    const worstNode = (a: Vec2, b: Vec2): Vec2 | undefined => {
+        const alongX = (a.y === 0 && b.y === 0) || (a.y === cells && b.y === cells);
+        const alongY = (a.x === 0 && b.x === 0) || (a.x === cells && b.x === cells);
+        if (!alongX && !alongY) {
+            return undefined;
+        }
+        const ta = alongX ? a.x : a.y;
+        const tb = alongX ? b.x : b.y;
+        const lo = Math.min(ta, tb), hi = Math.max(ta, tb);
+        const ha = heightAt(a.x, a.y), hb = heightAt(b.x, b.y);
+        if (!Number.isFinite(ha) || !Number.isFinite(hb)) {
+            return undefined;
+        }
+        let worst = tolM;
+        let at: number | undefined;
+        for (let k = Math.floor(lo) + 1; k < hi; k++) {
+            const x = alongX ? k : a.x, y = alongX ? a.y : k;
+            const h = heightAt(x, y);
+            if (!Number.isFinite(h)) {
+                continue;
+            }
+            const d = Math.abs(h - (ha + (hb - ha) * ((k - ta) / (tb - ta))));
+            if (d > worst) {
+                worst = d;
+                at = k;
+            }
+        }
+        if (at === undefined) {
+            return undefined;
+        }
+        return alongX ? { x: at, y: a.y } : { x: a.x, y: at };
+    };
+    while (stack.length > 0) {
+        const t = stack.pop()!;
+        let split = false;
+        if (isLand(t)) {
+            for (let e = 0; e < 3 && !split; e++) {
+                const a = t.pts[e], b = t.pts[(e + 1) % 3], c = t.pts[(e + 2) % 3];
+                const m = worstNode(a, b);
+                if (m === undefined) {
+                    continue;
+                }
+                // Same winding as the parent; the second is pushed last so the
+                // pieces come out in border order.
+                stack.push({ ...t, pts: [m, b, c] }, { ...t, pts: [a, m, c] });
+                inserted++;
+                split = true;
+            }
+        }
+        if (!split) {
+            out.push(t);
+        }
+    }
+    return { triangles: out, inserted };
 }
 
 /** See BuildTileResult.borderWaterNodes. */
@@ -1127,9 +1221,32 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         const surface = inlandSurfaceAt((p0.x + p1.x + p2.x) / 3, (p0.y + p1.y + p2.y) / 3);
         return surface === undefined || Number.isFinite(surface);
     };
+    /**
+     * True where the water under a point flows: a river or canal. Told apart
+     * from a lake by its surface - the coast bake gives every flat body a
+     * measured height and a flowing one none (NaN, or a river profile) - so
+     * no new field is needed in the .lvr. A lake the DEM could not measure
+     * reads as flowing too, which only costs it its rim.
+     */
+    const flowingAt = (gx: number, gy: number): boolean => {
+        if (inlandSlopedAt(gx, gy)) {
+            return true;
+        }
+        const surface = inlandSurfaceAt(gx, gy);
+        return surface !== undefined && !Number.isFinite(surface);
+    };
     const waterClassOf = (t: GridTriangle): number => {
         const [p0, p1, p2] = t.pts;
-        const d = sampleDist((p0.x + p1.x + p2.x) / 3, (p0.y + p1.y + p2.y) / 3);
+        const cx = (p0.x + p1.x + p2.x) / 3;
+        const cy = (p0.y + p1.y + p2.y) / 3;
+        // Rivers and canals are one tone, bank to bank, like the watercourse
+        // strokes drawn in the same water colour. A shallow rim inside every
+        // river was a second contour as long as both banks that the collapse
+        // had to keep.
+        if (flowingAt(cx, cy)) {
+            return TerrainTone.Water;
+        }
+        const d = sampleDist(cx, cy);
         if (d <= waterBandM) {
             return TerrainTone.ShallowWater;
         }
@@ -1168,6 +1285,12 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     });
     tris = collapsed.triangles;
     collapsedVertices = collapsed.collapsed;
+    let borderSplits = 0;
+    if (input.borderSplitErrorM !== undefined) {
+        const dense = densifyBorder(tris, size, sampleHeight, input.borderSplitErrorM, isLandTriangle);
+        tris = dense.triangles;
+        borderSplits = dense.inserted;
+    }
     const meshTriangles = tris.length;
     const openEdges = countOpenEdges(tris, size);
 
@@ -1250,6 +1373,20 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
      * built below. Only the water side changes here, skipping its depth bias at
      * the shoreline so the wall has a single height to meet.
      */
+    /**
+     * Grid position of every projected point on the tile border, by object,
+     * so the land stream can say which of its vertices lie there; see the
+     * border table at the end.
+     */
+    const borderGrid = new WeakMap<Enu, readonly [number, number]>();
+    const onTileBorder = (gx: number, gy: number) => gx === 0 || gy === 0 || gx === cells || gy === cells;
+    const atGrid = (p: Enu, gx: number, gy: number): Enu => {
+        if (onTileBorder(gx, gy)) {
+            borderGrid.set(p, [gx, gy]);
+        }
+        return p;
+    };
+
     const project = (
         gx: number, gy: number, land: boolean, tagged = false, dropM = 0,
     ): Enu => {
@@ -1286,7 +1423,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         h -= dropM;
         geodeticToEcef(lat, lon, h, _ecef);
         ecefToEnu(basis, _ecef, _enu);
-        return { e: _enu.e, n: _enu.n, u: _enu.u };
+        return atGrid({ e: _enu.e, n: _enu.n, u: _enu.u }, gx, gy);
     };
 
     /**
@@ -1302,7 +1439,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         const lat = bounds.north - (gy / cells) * latSpan;
         geodeticToEcef(lat, lon, waterSurfaceAt(gx, gy, true), _ecef);
         ecefToEnu(basis, _ecef, _enu);
-        return { e: _enu.e, n: _enu.n, u: _enu.u };
+        return atGrid({ e: _enu.e, n: _enu.n, u: _enu.u }, gx, gy);
     };
 
     // Tile centre, which is what the runtime will place the mesh at.
@@ -1503,6 +1640,20 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
 
     const landPos: number[] = [];
     const landNrm: number[] = [];
+    /** The border table: see PtmBorder. */
+    const borderVerts: number[] = [];
+    const borderVertParams: number[] = [];
+    const borderEdges: number[] = [];
+    const borderEdgeParams: number[] = [];
+    /** Sides a border grid point lies on, each with its param along that side. */
+    const sidesAt = (gx: number, gy: number): Array<readonly [number, number]> => {
+        const out: Array<readonly [number, number]> = [];
+        if (gx === 0) out.push([PTM_SIDE_W, gy / cells]);
+        if (gx === cells) out.push([PTM_SIDE_E, gy / cells]);
+        if (gy === 0) out.push([PTM_SIDE_N, gx / cells]);
+        if (gy === cells) out.push([PTM_SIDE_S, gx / cells]);
+        return out;
+    };
     const landClass: number[] = [];
     const landColor: number[] = [];
     /** 9 per triangle; only encoded when regional ground colour is in use. */
@@ -1563,6 +1714,14 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         const bx = b.e - centre.e, by = b.u - centre.u, bz = centre.n - b.n;
         const cx = c.e - centre.e, cy = c.u - centre.u, cz = centre.n - c.n;
         const [nx, ny, nz] = normal ?? upNormal(a, b, c);
+        const base = landPos.length / 3;
+        [a, b, c].forEach((p, k) => {
+            const g = borderGrid.get(p);
+            for (const [side, param] of g ? sidesAt(g[0], g[1]) : []) {
+                borderVerts.push(packBorderEntry(side, base + k));
+                borderVertParams.push(param);
+            }
+        });
         landPos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
         landNrm.push(nx, ny, nz);
         // With regions, the mesh is untagged ground: the polygons are laid over
@@ -1666,6 +1825,19 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             const e1 = project(p1.x, p1.y, true, p1.shore);
             const e2 = project(p2.x, p2.y, true, p2.shore);
             pushLandTriangle(e0, e1, e2, cover, t);
+            // The drawn border, edge by edge: what a neighbour stitches to.
+            const base = landPos.length / 3 - 3;
+            for (let k = 0; k < 3; k++) {
+                const a = t.pts[k];
+                const b = t.pts[(k + 1) % 3];
+                for (const [side, pa] of sidesAt(a.x, a.y)) {
+                    const pb = sidesAt(b.x, b.y).find(([s]) => s === side)?.[1];
+                    if (pb !== undefined) {
+                        borderEdges.push(packBorderEntry(side, base + k), packBorderEntry(side, base + (k + 1) % 3));
+                        borderEdgeParams.push(pa, pb);
+                    }
+                }
+            }
             const voted = landuseVote(t);
             if (voted !== undefined) {
                 // Coarse tile: the polygon colours the whole facet, as the
@@ -1731,13 +1903,65 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             .map((region, index) => ({ region, index }))
             .filter(({ region }) => region.isLand && region.landuseClass !== undefined);
         const landTris = tris.filter(isLandTriangle);
-        const pieces = landuseFill(
-            landTris.map(t => t.pts),
-            tagged.map(({ region }) => ({
-                exterior: landuseRing(region.exterior) ?? [],
-                holes: region.holes.map(landuseRing).filter((h): h is GridPoint[] => h !== undefined),
-            })),
-            cells,
+        // The drawn shoreline, as the shore chords the walls hang from,
+        // bucketed per cell for the snap's distance test.
+        const shoreKeys = shorePositionsOf(tris);
+        const shoreChords = new Map<number, Array<[Vec2, Vec2]>>();
+        const chordCell = (v: number) => Math.min(cells - 1, Math.max(0, Math.floor(v)));
+        for (const t of landTris) {
+            for (let e = 0; e < 3; e++) {
+                const a = t.pts[e];
+                const b = t.pts[(e + 1) % 3];
+                if (!canWall(t, a, b) || !shoreKeys.has(gridKey(a.x, a.y)) || !shoreKeys.has(gridKey(b.x, b.y))) {
+                    continue;
+                }
+                const k = chordCell((a.y + b.y) / 2) * cells + chordCell((a.x + b.x) / 2);
+                const list = shoreChords.get(k);
+                if (list) {
+                    list.push([a, b]);
+                } else {
+                    shoreChords.set(k, [[a, b]]);
+                }
+            }
+        }
+        const snapReach = Math.ceil(LANDUSE_SHORE_SNAP_M / metresPerCell) + 1;
+        const shoreDistanceCells = (p: GridPoint): number => {
+            let best = Infinity;
+            const cx = chordCell(p.x);
+            const cy = chordCell(p.y);
+            for (let y = cy - snapReach; y <= cy + snapReach; y++) {
+                for (let x = cx - snapReach; x <= cx + snapReach; x++) {
+                    if (x < 0 || y < 0 || x >= cells || y >= cells) {
+                        continue;
+                    }
+                    for (const [a, b] of shoreChords.get(y * cells + x) ?? []) {
+                        const dx = b.x - a.x;
+                        const dy = b.y - a.y;
+                        const len2 = dx * dx + dy * dy;
+                        const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
+                        best = Math.min(best, Math.hypot(p.x - a.x - dx * t, p.y - a.y - dy * t));
+                    }
+                }
+            }
+            return best;
+        };
+        const facetPts = landTris.map(t => t.pts);
+        const pieces = snapToShore(
+            landuseFill(
+                facetPts,
+                tagged.map(({ region }) => ({
+                    exterior: landuseRing(region.exterior) ?? [],
+                    holes: region.holes.map(landuseRing).filter((h): h is GridPoint[] => h !== undefined),
+                })),
+                cells,
+            ),
+            facetPts,
+            {
+                snaps: r => tagged[r].region.landuseClass === TerrainClass.Tree,
+                onShore: p => shoreKeys.has(gridKey(p.x, p.y)),
+                shoreDistance: shoreDistanceCells,
+                maxCells: LANDUSE_SHORE_SNAP_M / metresPerCell,
+            },
         );
         for (const piece of pieces) {
             const facet = landTris[piece.facet];
@@ -1755,11 +1979,11 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
                 const l0 = ((f1.y - f2.y) * (p.x - f2.x) + (f2.x - f1.x) * (p.y - f2.y)) / det;
                 const l1 = ((f2.y - f0.y) * (p.x - f2.x) + (f0.x - f2.x) * (p.y - f2.y)) / det;
                 const l2 = 1 - l0 - l1;
-                return {
+                return atGrid({
                     e: e0.e * l0 + e1.e * l1 + e2.e * l2 + localUpX * liftM,
                     u: e0.u * l0 + e1.u * l1 + e2.u * l2 + localUpY * liftM,
                     n: e0.n * l0 + e1.n * l1 + e2.n * l2 - localUpZ * liftM,
-                };
+                }, p.x, p.y);
             };
             const { region, index } = tagged[piece.region];
             const cover = coverOf(facet);
@@ -1931,7 +2155,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     const riverDir: number[] = [];
     const riverHalf: number[] = [];
     const riverIdx: number[] = [];
-    /** PTM_STROKE_KIND_* per vertex: watercourse or landuse outline. */
+    /** PTM_STROKE_KIND_* per vertex; the bake writes watercourses only. */
     const riverKind: number[] = [];
 
     /**
@@ -1947,12 +2171,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
      * minority of them.
      */
     const surfaceBuckets = new Map<number, number[]>();
-    // Only a tagged land region has an edge worth drawing: untagged land is
-    // just "not mapped", and water already has a shoreline of its own.
-    const outlineRegions = landuseDetail
-        ? (input.regions ?? []).filter(r => r.isLand && r.landuseClass !== undefined)
-        : [];
-    if ((input.watercourses?.length ?? 0) > 0 || outlineRegions.length > 0) {
+    if ((input.watercourses?.length ?? 0) > 0) {
         for (let t = 0; t < tris.length; t++) {
             const [a, b, c] = tris[t].pts;
             const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x, c.x)));
@@ -2174,7 +2393,6 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // budget. The leaf level may fill the stream; a coarser tile is drawn from
     // far enough away that its strokes get the budget's worth of vertices and
     // no more, so a river-laced z9 tile cannot cost a z12's worth of ribbon.
-    // Watercourses are pushed before outlines, so outlines are what give way.
     const strokeVertexCap = leafZoom
         ? PTM_MAX_RIVER_VERTS
         : Math.min(PTM_MAX_RIVER_VERTS, input.triangleBudget ?? PTM_MAX_RIVER_VERTS);
@@ -2237,40 +2455,10 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         }
     }
 
-    // Landuse outlines, after every watercourse so a full stream drops field
-    // edges rather than rivers. A ring is clipped to the tile, so part of it
-    // runs along the tile border; stroking that would draw a grid of lines
-    // over the world at every tile edge, so a run breaks wherever both ends of
-    // a segment sit on the same border.
-    const BORDER_EPS = 1e-6;
-    const onSameBorder = (a: GridPoint, b: GridPoint): boolean =>
-        (a.x <= BORDER_EPS && b.x <= BORDER_EPS)
-        || (a.x >= cells - BORDER_EPS && b.x >= cells - BORDER_EPS)
-        || (a.y <= BORDER_EPS && b.y <= BORDER_EPS)
-        || (a.y >= cells - BORDER_EPS && b.y >= cells - BORDER_EPS);
-    for (const region of outlineRegions) {
-        for (const ring of [region.exterior, ...region.holes]) {
-            const pts = landuseRing(ring);
-            if (pts === undefined || pts.length < 2) {
-                continue;
-            }
-            const first = pts[0];
-            const last = pts[pts.length - 1];
-            if (first.x !== last.x || first.y !== last.y) {
-                pts.push(first);
-            }
-            let run: GridPoint[] = [pts[0]];
-            for (let i = 1; i < pts.length; i++) {
-                if (onSameBorder(pts[i - 1], pts[i])) {
-                    pushStroke(resample(run), OUTLINE_HALF_WIDTH_M, PTM_STROKE_KIND_OUTLINE);
-                    run = [pts[i]];
-                } else {
-                    run.push(pts[i]);
-                }
-            }
-            pushStroke(resample(run), OUTLINE_HALF_WIDTH_M, PTM_STROKE_KIND_OUTLINE);
-        }
-    }
+    // Landuse outlines are not baked. The runtime never drew them - the exact
+    // fills carry the shape, and a line round every field read as a road net -
+    // yet on a built-up z12 tile they were half its triangles (Hamburg, 17k
+    // of 37k). PTM_STROKE_KIND_OUTLINE stays in the format for older tiles.
 
     // --- 7. encode ---------------------------------------------------------
     const tileHalfWidthM = Math.max(
@@ -2315,6 +2503,12 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
             indices: new Uint32Array(riverIdx),
             kinds: new Uint8Array(riverKind),
         },
+        border: {
+            vertices: new Uint32Array(borderVerts),
+            vertexParams: new Float32Array(borderVertParams),
+            edges: new Uint32Array(borderEdges),
+            edgeParams: new Float32Array(borderEdgeParams),
+        },
     });
 
     return {
@@ -2336,6 +2530,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         attempts,
         searchTriangles,
         collapsedVertices,
+        borderSplits,
         meshTriangles,
         centerHeightM,
         landColors: new Uint8Array(landColor),

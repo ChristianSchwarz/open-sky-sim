@@ -1,12 +1,13 @@
 import { KeyboardControlLayoutId } from "../input/devices/keyboardControlDevice";
 import { KeyboardPitchStickMode } from "../input/keyboardLayouts";
+import { ColourAdjust, clampColourAdjust, defaultColourAdjust } from "../scene/materials/shaders/colourAdjust";
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
 import { AiPilotModels, FlightModels, RoadsMode, TechProfiles, TerrainColours, TerrainShading } from "../state/gameDefs";
 import {
     LANDUSE_REVEAL_MIN_PX, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
     LEAF_REFINE_DISTANCE_SCALE, LEAF_REFINE_DISTANCE_SCALE_MAX, LEAF_REFINE_DISTANCE_SCALE_MIN,
     TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET, TERRAIN_TRIANGLE_BUDGET_MAX,
-    TERRAIN_TRIANGLE_BUDGET_MIN,
+    TERRAIN_TRIANGLE_BUDGET_MIN, TERRAIN_VISIBLE_ZOOM_MAX, TERRAIN_VISIBLE_ZOOM_MIN,
 } from "../terrain/lod";
 import { LANDUSE_BLEND_DEFAULT } from "../terrain/tones";
 import { TREE_DENSITY_MULTIPLIER_DEFAULT, TREE_DENSITY_MULTIPLIER_MAX, TREE_DENSITY_MULTIPLIER_MIN } from "../terrain/treeBillboards";
@@ -34,6 +35,8 @@ export interface AppSettings {
     landuseBlend: number;
     /** Overall tree density multiplier, 0..20; 1 is the baked-in default. */
     treeDensity: number;
+    /** Hue (degrees), saturation and brightness (0..2) per scenery group; 0/1/1 is as authored. */
+    colourAdjust: ColourAdjust;
     /** Last aircraft (+ livery) id chosen in the spawn menu. */
     aircraftId: string;
     /** Last spawn mode used to start a flight. */
@@ -64,6 +67,8 @@ export interface AppSettings {
      * land-use fills, replace their parent. 1 is no bias.
      */
     landuseReach: number;
+    /** Deepest terrain zoom level drawn; the baked leaf (12) is no cap. */
+    visibleZoom: number;
     /** Pixels of width a land-use region must reach on screen before it is drawn. */
     landuseRevealPx: number;
     /** Hard ceiling on terrain triangles drawn per frame. */
@@ -90,12 +95,14 @@ const DEFAULT_SETTINGS: AppSettings = {
     terrainShading: TerrainShading.FACETED,
     landuseBlend: LANDUSE_BLEND_DEFAULT,
     treeDensity: TREE_DENSITY_MULTIPLIER_DEFAULT,
+    colourAdjust: defaultColourAdjust(),
     aircraftId: 'f22',
     spawnMode: 'headon',
     daytime: DEFAULT_SUN_HOURS,
     terrainArea: '',
     terrainDetailDistanceM: TERRAIN_DETAIL_DISTANCE_DEFAULT_M,
     landuseReach: LEAF_REFINE_DISTANCE_SCALE,
+    visibleZoom: TERRAIN_VISIBLE_ZOOM_MAX,
     landuseRevealPx: LANDUSE_REVEAL_MIN_PX,
     terrainTriangleBudget: TERRAIN_TRIANGLE_BUDGET,
     farTileTextures: true,
@@ -136,6 +143,7 @@ export function loadSettings(): AppSettings {
             landuseBlend: isValidLanduseBlend(parsed.landuseBlend) ? parsed.landuseBlend : DEFAULT_SETTINGS.landuseBlend,
             treeDensity: isValidTreeDensity(parsed.treeDensity)
                 ? parsed.treeDensity : DEFAULT_SETTINGS.treeDensity,
+            colourAdjust: clampColourAdjust(parsed.colourAdjust),
             aircraftId: isValidAircraftId(parsed.aircraftId) ? parsed.aircraftId : DEFAULT_SETTINGS.aircraftId,
             spawnMode: isValidSpawnMode(parsed.spawnMode) ? parsed.spawnMode : DEFAULT_SETTINGS.spawnMode,
             daytime: isValidDaytime(parsed.daytime) ? parsed.daytime : DEFAULT_SETTINGS.daytime,
@@ -148,6 +156,7 @@ export function loadSettings(): AppSettings {
                 ? parsed.terrainDetailDistanceM
                 : DEFAULT_SETTINGS.terrainDetailDistanceM,
             landuseReach: isValidLanduseReach(parsed.landuseReach) ? parsed.landuseReach : DEFAULT_SETTINGS.landuseReach,
+            visibleZoom: isValidVisibleZoom(parsed.visibleZoom) ? parsed.visibleZoom : DEFAULT_SETTINGS.visibleZoom,
             landuseRevealPx: isValidLanduseRevealPx(parsed.landuseRevealPx)
                 ? parsed.landuseRevealPx : DEFAULT_SETTINGS.landuseRevealPx,
             terrainTriangleBudget: isValidTriangleBudget(parsed.terrainTriangleBudget)
@@ -223,6 +232,11 @@ function isValidTreeDensity(value: unknown): value is number {
 function isValidLanduseReach(value: unknown): value is number {
     return typeof value === 'number' && Number.isFinite(value)
         && value >= LEAF_REFINE_DISTANCE_SCALE_MIN && value <= LEAF_REFINE_DISTANCE_SCALE_MAX;
+}
+
+function isValidVisibleZoom(value: unknown): value is number {
+    return typeof value === 'number' && Number.isInteger(value)
+        && value >= TERRAIN_VISIBLE_ZOOM_MIN && value <= TERRAIN_VISIBLE_ZOOM_MAX;
 }
 
 function isValidLanduseRevealPx(value: unknown): value is number {

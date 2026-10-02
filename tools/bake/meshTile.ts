@@ -69,6 +69,8 @@ export interface TileProcessResult {
     maxErrorM: number;
     /** Vertices the coplanar collapse pass removed. */
     collapsedVertices: number;
+    /** See BuildTileResult.borderSplits. */
+    borderSplits: number;
     /** See BuildTileResult.meshTriangles. */
     meshTriangles: number;
     fillTriangles: number;
@@ -139,11 +141,37 @@ export const SKIRT_SEAM_FACTOR = 5;
 export const BORDER_ERROR_FRACTION = 1 / 16;
 
 /**
+ * Ceiling (m) on how far a finished border edge may run from the DEM nodes
+ * under it; see densifyBorder. BORDER_ERROR_FRACTION alone left a z8 border
+ * free to stray 20 m in the Erzgebirge and 220 m in the Alps - and decimate
+ * did not even hold it to that - while every finer tile meeting it follows
+ * the nodes. Only border vertices pay for it.
+ */
+export const BORDER_SPLIT_ERROR_M = 4;
+
+/**
  * Where the deepening stops. A coarse tile's own skirt is already kilometres
  * deep, and the factor would make it ten; below the cut it gains nothing a
  * neighbour at that scale could show.
  */
 export const SKIRT_DEEPEN_CAP_M = 2500;
+
+/**
+ * Skirt depth on the coarsest tiles that conform their borders
+ * (MIN_SEAM_ZOOM). The runtime stitches every border onto its neighbour's
+ * drawn edge (seamStitch.ts), so what a skirt still has to close is the
+ * difference between two border polylines that both follow the same nodes:
+ * the border split tolerance on each side, a few metres. The deepened skirt
+ * at z8 hung 2.5 km walls for that, and showed them wherever a neighbour
+ * strayed.
+ */
+export const STITCHED_SKIRT_M = 25;
+export const STITCHED_SKIRT_ZOOM = 8;
+
+/** The skirt a tile at `z` hangs, given its seam-against-one-level-coarser figure. */
+export function skirtDepthAt(z: number, baseM: number): number {
+    return z === STITCHED_SKIRT_ZOOM ? Math.min(baseM, STITCHED_SKIRT_M) : deepenedSkirtM(baseM);
+}
 
 /** The depth a tile whose seam-against-one-level-coarser figure is `baseM` hangs. */
 export function deepenedSkirtM(baseM: number): number {
@@ -346,7 +374,7 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
     const bounds = tileBounds(z, x, y);
     const edgeM = tileEdgeMetres(z, x, y);
     const baseSkirtM = skirtDepthForTile(parentErrorM(cfg.src, z, x, y, dem.geometricErrorM), edgeM);
-    const skirtDepthM = deepenedSkirtM(baseSkirtM);
+    const skirtDepthM = skirtDepthAt(z, baseSkirtM);
     const cellM = edgeM / (dem.size - 1);
     const maxErrorM = maxErrorForTile(dem.geometricErrorM, cellM, z);
     // Simplify the coast to roughly the interior tolerance, in cells, floored
@@ -364,6 +392,7 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         maxErrorM,
         skirtDepthM,
         borderErrorM: baseSkirtM * BORDER_ERROR_FRACTION,
+        borderSplitErrorM: Math.min(baseSkirtM * BORDER_ERROR_FRACTION, BORDER_SPLIT_ERROR_M),
         skirtSeamFactor: SKIRT_SEAM_FACTOR,
         geometricErrorM: dem.geometricErrorM,
         maxZoom: cfg.maxZoom,
@@ -396,6 +425,7 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         geometricErrorM: r.geometricErrorM,
         maxErrorM: r.maxErrorM,
         collapsedVertices: r.collapsedVertices,
+        borderSplits: r.borderSplits,
         meshTriangles: r.meshTriangles,
         fillTriangles: r.fillTriangles,
         wallTriangles: r.wallTriangles,

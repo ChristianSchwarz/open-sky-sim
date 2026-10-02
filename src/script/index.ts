@@ -16,6 +16,7 @@ import { SimProxyFlightModel } from './physics/model/simProxyFlightModel';
 import { PLAYER_SIM_ID } from './physics/sim/simIds';
 import { Renderer } from './render/renderer';
 import { SceneMaterialManager } from './scene/materials/materials';
+import { ColourAdjust, setColourAdjustUniforms } from './scene/materials/shaders/colourAdjust';
 import { setSunTime } from './scene/materials/shaders/sun';
 import { CIRRUS_STREAK_SHAPES, CirrusModelLibBuilder } from './scene/models/lib/cirrusModelBuilder';
 import { CLOUD_PUFF_SHAPES, CloudModelLibBuilder } from './scene/models/lib/cloudModelBuilder';
@@ -61,12 +62,20 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
         settings.supersampling,
         settings.roads,
         settings.treeDensity,
+        settings.visibleZoom,
+        settings.colourAdjust,
     );
     config.flightModels.getActive().activate();
     // Place the sun before the first material is built, so the shaded ramp and
     // the planform silhouettes start on the persisted time of day.
     setSunTime(config.daytime.getActive());
     const materials = new SceneMaterialManager(HDNoonPalette, FogQuality.HIGH, DisplayShading.FULL);
+    const applyColourAdjust = (adjust: ColourAdjust) => {
+        setColourAdjustUniforms(adjust);
+        materials.setWaterTweak(adjust.water);
+    };
+    applyColourAdjust(config.colourAdjust.getActive());
+    config.colourAdjust.addChangeListener(applyColourAdjust);
     const renderer = new Renderer(materials, H_RES, V_RES, HDNoonPalette);
     const models = new ModelManager(materials, [
         new SkyDomeModelLibBuilder('skyDome'),

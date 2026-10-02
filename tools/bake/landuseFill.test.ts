@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { GridPoint, GridTri, clipToTriangle, landuseFill, mergePieces } from './landuseFill';
+import { FillPiece, GridPoint, GridTri, clipToTriangle, landuseFill, mergePieces, snapToShore } from './landuseFill';
 
 describe('mergePieces', () => {
     const tri = (a: [number, number], b: [number, number], c: [number, number]): [GridPoint, GridPoint, GridPoint] =>
@@ -140,5 +140,65 @@ describe('landuseFill', () => {
             { exterior: square(3, 3, 4, 4), holes: [] },
         ], CELLS);
         assert.deepEqual(new Set(pieces.map(p => p.region)), new Set([0, 1]));
+    });
+});
+
+describe('snapToShore', () => {
+    // Land is a 4 x 3 strip of unit cells, each split into two facets; the
+    // shore runs along y = 3 and the water lies beyond it.
+    const facets: GridTri[] = [];
+    for (let y = 0; y < 3; y++) {
+        for (let x = 0; x < 4; x++) {
+            facets.push([{ x, y }, { x: x + 1, y }, { x, y: y + 1 }]);
+            facets.push([{ x: x + 1, y }, { x: x + 1, y: y + 1 }, { x, y: y + 1 }]);
+        }
+    }
+    const rect = (x0: number, y0: number, x1: number, y1: number) => ({
+        exterior: [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }],
+        holes: [],
+    });
+    const area = (pieces: FillPiece[]) => pieces.reduce((s, p) => {
+        const [a, b, c] = p.pts;
+        return s + Math.abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) / 2;
+    }, 0);
+    const snap = (pieces: FillPiece[], maxCells: number, snaps = true) => snapToShore(pieces, facets, {
+        snaps: () => snaps,
+        onShore: p => p.y === 3,
+        shoreDistance: p => 3 - p.y,
+        maxCells,
+    });
+
+    it('closes a strip inside the shore row with fewer pieces', () => {
+        const before = landuseFill(facets, [rect(0, 0, 4, 2.6)], 4);
+        const after = snap(before, 1);
+        assert.ok(Math.abs(area(after) - 12) < 1e-9);
+        assert.ok(after.length < before.length);
+    });
+
+    it('closes a strip two facets wide through the shore row behind it', () => {
+        const after = snap(landuseFill(facets, [rect(0, 0, 4, 1.5)], 4), 2);
+        assert.ok(Math.abs(area(after) - 12) < 1e-9);
+        assert.equal(after.length, facets.length);
+    });
+
+    it('does not creep along the bank past the end of the forest', () => {
+        const after = snap(landuseFill(facets, [rect(0, 0, 2, 2.6)], 4), 1);
+        assert.ok(Math.abs(area(after) - 6) < 1e-9);
+    });
+
+    it('leaves a gap wider than the reach alone', () => {
+        const before = landuseFill(facets, [rect(0, 0, 4, 1)], 4);
+        assert.ok(Math.abs(area(snap(before, 1)) - 4) < 1e-9);
+    });
+
+    it('leaves regions that do not snap alone', () => {
+        const before = landuseFill(facets, [rect(0, 0, 4, 2.6)], 4);
+        assert.ok(Math.abs(area(snap(before, 1, false)) - 4 * 2.6) < 1e-9);
+    });
+
+    it('does not fill a facet shared with another region', () => {
+        const before = landuseFill(facets, [rect(0, 0, 4, 2.6), rect(0, 2.8, 4, 3)], 4);
+        const after = snap(before, 1);
+        assert.ok(Math.abs(area(after) - (4 * 2.6 + 4 * 0.2)) < 1e-9);
     });
 });

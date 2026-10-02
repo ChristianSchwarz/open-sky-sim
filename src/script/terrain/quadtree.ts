@@ -193,6 +193,8 @@ export class Quadtree {
         leafScale: number = LEAF_REFINE_DISTANCE_SCALE,
         /** The clock the leaf dissolve's time ramp runs on; see LOD_FADE_MS. */
         nowMs: number = performance.now(),
+        /** Deepest zoom drawn (the *Finest terrain level* setting); the bake's leaf when higher. */
+        visibleZoomCap: number = Infinity,
     ): QuadtreeUpdate {
         this.generation++;
         const draw: QuadNode[] = [];
@@ -208,6 +210,7 @@ export class Quadtree {
         const range = terrainViewRangeM(altitude);
         const zoomCap = Math.min(
             this.maxZoom,
+            visibleZoomCap,
             terrainMaxZoomForAltitudeM(altitude, this.maxZoom, true),
         );
 

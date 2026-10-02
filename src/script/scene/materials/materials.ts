@@ -20,6 +20,7 @@ import { TerrainFragProgram } from './shaders/terrainFP';
 import {
     TERRAIN_CLASS_COUNT, TERRAIN_SWATCH_COUNT, TERRAIN_TONE_COUNT, TerrainVertProgram,
 } from './shaders/terrainVP';
+import { COLOUR_ADJUST_UNIFORMS, ColourTweak, adjustColourInPlace, defaultColourTweak } from './shaders/colourAdjust';
 import { SUN_UNIFORMS } from './shaders/sun';
 import { LANDUSE_BLEND_DEFAULT } from '../../terrain/tones';
 import { makeNoCoverTexture } from '../../terrain/coverTextures';
@@ -242,6 +243,7 @@ export class SceneMaterialManager implements KernelTask {
     private shading: DisplayShading;
     private materials: THREE.ShaderMaterial[] = [];
     private fxFire: THREE.ShaderMaterial[] = [];
+    private waterTweak: ColourTweak = defaultColourTweak();
 
     constructor(palette: Palette, fog: FogQuality, shading: DisplayShading) {
         this.palette = palette;
@@ -340,6 +342,9 @@ export class SceneMaterialManager implements KernelTask {
         material.depthWrite = p.depthWrite;
         material.userData = data;
         material.uniforms = this.buildUniforms(p);
+        if (!p.rawColor) {
+            this.applyWaterTweak(p.category, material.uniforms as SceneMaterialUniforms);
+        }
         this.materials.push(material);
         if (data.category === PaletteCategory.FX_FIRE) {
             this.fxFire.push(material);
@@ -488,6 +493,8 @@ export class SceneMaterialManager implements KernelTask {
                 // Shared by reference: moving the sun (time of day) rewrites
                 // these once and every material sees it.
                 ...SUN_UNIFORMS,
+                // Likewise the player's colour sliders.
+                ...COLOUR_ADJUST_UNIFORMS,
             },
             ...(properties.type === SceneMaterialPrimitiveType.MESH && properties.shaded) ? {
                 distance: { value: 0 },
@@ -612,6 +619,7 @@ export class SceneMaterialManager implements KernelTask {
             if (!d.rawColor) {
                 u.color.value.copy(this.colorCache.getColor(PaletteColor(palette, c)));
                 u.colorSecondary.value.copy(this.colorCache.getColor(PaletteColorShade(palette, c)));
+                this.applyWaterTweak(c, u);
             } else if (palette.light) {
                 // A raw colour opted out of the palette, so the blend above
                 // never reaches it: a mod's camo used to stay at noon
@@ -650,6 +658,24 @@ export class SceneMaterialManager implements KernelTask {
             }
         }
         this.updateFxFire();
+    }
+
+    /**
+     * The player's water saturation and brightness. Water is a flat palette
+     * colour drawn by the shader nearly every mesh shares, so it is adjusted
+     * here, on the two colour uniforms, rather than in that shader.
+     */
+    setWaterTweak(tweak: ColourTweak) {
+        this.waterTweak = { ...tweak };
+        this.setPalette(this.palette);
+    }
+
+    private applyWaterTweak(category: PaletteCategory, u: SceneMaterialUniforms) {
+        if (category !== PaletteCategory.TERRAIN_WATER && category !== PaletteCategory.TERRAIN_SHALLOW_WATER) {
+            return;
+        }
+        adjustColourInPlace(u.color.value, this.waterTweak);
+        adjustColourInPlace(u.colorSecondary.value, this.waterTweak);
     }
 
     // This shouldn't be handled by the material system

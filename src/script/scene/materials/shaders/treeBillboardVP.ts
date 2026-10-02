@@ -1,3 +1,4 @@
+import { COLOUR_ADJUST_PARS } from './colourAdjust';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 
 /**
@@ -26,7 +27,9 @@ export const TreeBillboardVertProgram: string = `
   uniform vec3 uSunDir;
   uniform vec3 uSunAmbient;
   uniform vec3 uSunDirect;
-
+  /** The player's tree saturation, brightness and hue; see colourAdjust.ts. */
+  uniform vec3 uAdjTrees;
+${COLOUR_ADJUST_PARS}
   attribute vec4 instanceShade;
   attribute float instanceSpecies;
   attribute vec3 instanceNormal;
@@ -76,6 +79,7 @@ ${LOG_DEPTH_PARS_VERTEX}
     vec3 leaf = color * mix(vec3(1.0), groundRatio, 0.5) * instanceShade.a;
     float leafLuma = dot(leaf, vec3(0.299, 0.587, 0.114));
     vLeaf = max(mix(vec3(leafLuma), leaf, 1.6), 0.0);
+    vLeaf = adjustColour(vLeaf, uAdjTrees);
 
     // Lit exactly the way the terrain is (same sun uniforms, same ambient and
     // direct terms, same facet normal), in absolute terms: the leaves darken

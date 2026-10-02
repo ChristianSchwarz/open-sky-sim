@@ -370,26 +370,36 @@ export function formatDuration(ms: number): string {
 }
 
 /**
+ * `tools/fetch_planet_dem.py`'s exit code for a box that is all open sea
+ * (EXIT_NO_LAND there): nothing failed, there is just no land to bake.
+ */
+export const EXIT_NO_LAND = 3;
+
+export type StepOutcome = 'done' | 'partial' | 'skipped' | 'failed';
+
+/**
  * What a step's exit code means for the job. Zero is done; a step's declared
  * `partialCode` is done-with-a-warning, the tool having written its outputs
- * but left part of the work for a re-run; anything else fails the job.
+ * but left part of the work for a re-run; its `skipCode` is "nothing to do
+ * here", whose consequences the caller decides; anything else fails the job.
  */
 export function stepOutcome(
-    code: number | null, step: Pick<Step, 'partialCode'>,
-): 'done' | 'partial' | 'failed' {
+    code: number | null, step: Pick<Step, 'partialCode' | 'skipCode'>,
+): StepOutcome {
     if (code === 0) {
         return 'done';
     }
     if (step.partialCode !== undefined && code === step.partialCode) {
         return 'partial';
     }
+    if (step.skipCode !== undefined && code === step.skipCode) {
+        return 'skipped';
+    }
     return 'failed';
 }
 
-function runStep(
-    job: Job, label: string, index: number, cmd: string, args: string[],
-    partial?: { code: number; warning: string },
-): Promise<void> {
+function runStep(job: Job, s: Step, index: number): Promise<Exclude<StepOutcome, 'failed'>> {
+    const { label, cmd, args } = s;
     return new Promise((resolve, reject) => {
         job.step = label;
         job.stepIndex = index;
@@ -418,16 +428,19 @@ function runStep(
                 line(job, tail);
             }
             const elapsed = formatDuration(Date.now() - startedAt);
-            const outcome = stepOutcome(code, { partialCode: partial?.code });
+            const outcome = stepOutcome(code, s);
             if (outcome === 'done') {
                 line(job, `${label} - done in ${elapsed}`);
-                resolve();
-            } else if (outcome === 'partial' && partial) {
+                resolve(outcome);
+            } else if (outcome === 'partial' && s.partialWarning) {
                 // The tool wrote what it could and said so on its own last
                 // lines; the steps after it still have everything they need.
-                job.warnings.push(`${label}: ${partial.warning}`);
-                line(job, `${label} - done with a warning in ${elapsed}: ${partial.warning}`);
-                resolve();
+                job.warnings.push(`${label}: ${s.partialWarning}`);
+                line(job, `${label} - done with a warning in ${elapsed}: ${s.partialWarning}`);
+                resolve(outcome);
+            } else if (outcome === 'skipped') {
+                line(job, `${label} - nothing to do (${elapsed})`);
+                resolve(outcome);
             } else {
                 reject(new Error(`${label} exited with code ${code} after ${elapsed}`));
             }
@@ -529,6 +542,12 @@ export interface Step {
     partialCode?: number;
     partialWarning?: string;
     /**
+     * An exit code that means "nothing here to do" - no outputs, but no
+     * failure either. Only a foreground step may declare one, and
+     * `runImport` decides what the rest of the chunk does about it.
+     */
+    skipCode?: number;
+    /**
      * Which of the import's lanes runs it - see `runImport`. The foreground
      * lanes ('dem', 'prefetch', 'coast') run one step at a time and drive the
      * progress bar; every other lane runs its chunks in order alongside them.
@@ -587,7 +606,10 @@ export function plan(job: { name: string; bbox: readonly number[] }): Step[] {
 
 /**
  * Chunks an import is cut into: tile-aligned boxes of at most `maxSpan`
- * degrees a side, west to east then north to south.
+ * degrees a side, west to east then north to south. Each axis is split into
+ * as few parts as fit under `maxSpan`, as evenly as whole tiles allow - not
+ * `maxSpan` after `maxSpan` then whatever is left over, which ended a 4.09
+ * degree wide box on a 0.09 degree sliver of a column that was pure Baltic.
  *
  * Every cut lies on a z12 tile edge counted from the (already snapped) box's
  * own corner, which is what `snapBboxToTiles` exists to guarantee - a stage
@@ -602,11 +624,13 @@ export function chunkBbox(
 ): [number, number, number, number][] {
     const [west, south, east, north] = bbox;
     const tile = 180 / (1 << SNAP_ZOOM);
-    const step = Math.max(1, Math.floor(maxSpan / tile)) * tile;
+    const perChunk = Math.max(1, Math.floor(maxSpan / tile));
     const cuts = (lo: number, hi: number): number[] => {
+        const tiles = Math.max(1, Math.round((hi - lo) / tile));
+        const parts = Math.ceil(tiles / perChunk);
         const out = [lo];
-        for (let i = 1; i * step < hi - lo - tile / 2; i++) {
-            out.push(lo + i * step);
+        for (let i = 1; i < parts; i++) {
+            out.push(lo + Math.round((i * tiles) / parts) * tile);
         }
         out.push(hi);
         return out;
@@ -643,9 +667,11 @@ export function dataSteps(
     // chunk's fetch overwrite the rasters a cover bake was still reading.
     const coverDir = path.join('data', 'cover', 'chunks', job.bbox.join('_'));
     return [
+        // An all-sea box is skipped, not failed - see runImport.
         {
             label: 'fetching heights', cmd: PYTHON, lane: 'dem',
             args: ['tools/fetch_planet_dem.py', `--bbox=${bbox}`, '--out', tif],
+            skipCode: EXIT_NO_LAND,
         },
         // The merge needs a pyramid to merge into; the first area of a fresh
         // checkout founds one instead.
@@ -734,6 +760,38 @@ export function meshSteps(box: readonly number[]): Step[] {
     ];
 }
 
+/**
+ * Runs each chunk's heights stages in turn and returns the data steps of the
+ * chunks that hold land. A chunk whose heights fetch is skipped (open sea) is
+ * reported to `onSea` and dropped, merge and all; `stepsFor` is told whether
+ * a land chunk came before, so the first land chunk founds the pyramid or
+ * starts the area whichever chunk it happens to be.
+ */
+export async function landChunks(
+    count: number,
+    stepsFor: (ci: number, landBefore: boolean) => Step[],
+    run: (s: Step) => Promise<StepOutcome>,
+    onSea: (ci: number, steps: Step[]) => void,
+): Promise<Step[][]> {
+    const land: Step[][] = [];
+    for (let ci = 0; ci < count; ci++) {
+        const steps = stepsFor(ci, land.length > 0);
+        const [fetchHeights, ...merge] = steps.filter(s => s.lane === 'dem');
+        if (await run(fetchHeights) === 'skipped') {
+            onSea(ci, steps);
+            continue;
+        }
+        for (const s of merge) {
+            await run(s);
+        }
+        land.push(steps);
+    }
+    if (land.length === 0) {
+        throw new Error('no land above sea level anywhere in the import box');
+    }
+    return land;
+}
+
 async function runImport(job: Job): Promise<void> {
     fs.mkdirSync(IMPORTS_DIR, { recursive: true });
     fs.mkdirSync(path.join(PROJECT_ROOT, 'data', 'imports', 'pbf'), { recursive: true });
@@ -747,22 +805,22 @@ async function runImport(job: Job): Promise<void> {
     // resolving (and re-downloading) their own slice of it.
     const pbf = extractPathFor(job.bbox);
     job.pbf = pbf;
-    const stepsPerChunk = chunks.map((c, ci) =>
-        dataSteps({ name: job.name, bbox: c, pbf }, ci > 0).map(s => ({
+    // Built as each chunk's turn comes (see the heights loop below): whether
+    // a chunk founds the pyramid or starts the area depends on which of the
+    // chunks before it turned out to hold land.
+    const chunkSteps = (ci: number, landBefore: boolean) =>
+        dataSteps({ name: job.name, bbox: chunks[ci], pbf }, landBefore).map(s => ({
             ...s, label: many ? `chunk ${ci + 1}/${chunks.length}: ${s.label}` : s.label,
-        })));
+        }));
     const tail = meshSteps(job.bbox);
     const foreground = (s: Step) => s.lane === undefined || FOREGROUND_LANES.has(s.lane);
+    const foregroundCount = (steps: Step[]) => steps.filter(foreground).length;
     // Background lanes never take a numbered slot.
-    job.stepCount = 1 + stepsPerChunk.reduce((n, s) => n + s.filter(foreground).length, 0) + tail.length;
+    job.stepCount = 1 + chunks.reduce((n, _, ci) => n + foregroundCount(chunkSteps(ci, ci > 0)), 0)
+        + tail.length;
 
     let index = 0;
-    const run = async (s: Step) => {
-        const partial = s.partialCode !== undefined && s.partialWarning
-            ? { code: s.partialCode, warning: s.partialWarning }
-            : undefined;
-        await runStep(job, s.label, index++, s.cmd, s.args, partial);
-    };
+    const run = (s: Step) => runStep(job, s, index++);
     const lanes = new Lanes();
     const inLane = (steps: Step[], lane: Lane) => steps.filter(s => s.lane === lane);
     const laneRun = (steps: Step[], lane: Lane) => async () => {
@@ -776,7 +834,7 @@ async function runImport(job: Job): Promise<void> {
         if (lanes.error !== undefined) {
             throw lanes.error;
         }
-        await run(s);
+        return run(s);
     };
 
     try {
@@ -784,11 +842,19 @@ async function runImport(job: Job): Promise<void> {
         // Heights first, every chunk: each merge rewrites the pyramid's shared
         // ancestors and the manifest's area, and every later stage samples
         // the merged DEM.
-        for (const steps of stepsPerChunk) {
-            for (const s of inLane(steps, 'dem')) {
-                await runForeground(s);
-            }
-        }
+        //
+        // A chunk whose heights fetch finds only open sea is dropped here,
+        // with every stage after it: there is no DEM to merge, no coast to
+        // trace and nothing to cover. The mesh bake still runs over the whole
+        // box and simply finds no height tiles there, and a tile missing from
+        // the mesh index is drawn as a flat sea-level patch - just as the DEM
+        // bake already leaves out an all-sea leaf inside a land chunk.
+        const stepsPerChunk = await landChunks(chunks.length, chunkSteps, runForeground, (ci, steps) => {
+            job.stepCount -= foregroundCount(steps) - 1;
+            line(job, many
+                ? `chunk ${ci + 1}/${chunks.length} is open sea - skipping its data stages`
+                : 'the import box is open sea');
+        });
         // Then a pipeline. The foreground takes each chunk's OSM read and
         // coast bake in turn - the two stages that need most memory, never
         // two at once. Everything else runs beside it in its own lane, one
@@ -995,7 +1061,7 @@ export function startDelete(req: Request, res: Response): void {
     const steps = deletePlan(name, bbox);
     finishJob(job, (async () => {
         for (let i = 0; i < steps.length; i++) {
-            await runStep(job, steps[i].label, i, steps[i].cmd, steps[i].args);
+            await runStep(job, steps[i], i);
         }
     })(), `deleted "${name}" — reload the page`);
 }
@@ -1071,7 +1137,7 @@ export function ensureTerrain(): void {
             const steps = meshSteps([]).map(s => ({ ...s, args: s.args.slice(0, 3) }));
             job.stepCount = steps.length;
             for (let i = 0; i < steps.length; i++) {
-                await runStep(job, steps[i].label, i, steps[i].cmd, steps[i].args);
+                await runStep(job, steps[i], i);
             }
         })()
         : (async () => {

@@ -2,6 +2,9 @@
     "name": "retroflightsim",
     "description": "Simulating early 90s flight sim visuals",
     "version": "0.0.1",
+    "bin": {
+        "sim": "tools/dev.mjs"
+    },
     "scripts": {
         "pack-mods": "node tools/run-python.mjs tools/pack_aircraft_mods.py",
         "build": "webpack --mode=development && npm run pack-mods",

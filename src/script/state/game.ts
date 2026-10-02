@@ -89,7 +89,9 @@ import { FixedCameraUpdater } from './cameraUpdaters/fixedCameraUpdater';
 import {
     FixedCameraRates, FixedCameraTuning, fixedCameraInput, stepFixedCameraRates, zeroFixedCameraRates,
 } from './cameraUpdaters/fixedCameraControl';
-import { CameraRoute, cameraRouteFromLocation, writeCameraRouteToLocation } from './cameraRoute';
+import { CameraRoute, cameraRouteFromLocation, clearCameraRouteFromLocation, writeCameraRouteToLocation } from './cameraRoute';
+import { SpawnDestination, airfieldEntryOf, savePendingDestination, takePendingDestination } from './spawnSearch';
+import type { TerrainArea } from '../terrain/manifest';
 import { restoreMainCameraParameters } from './stateUtils';
 import {
     StaticModelView, buildStaticModelViews, forEachStaticAircraftSlot,
@@ -308,6 +310,11 @@ const PLAYER_SPACE_SPAWN: PlayerSpawnState = {
     airborne: true,
 };
 
+/** Height above the ground of a start over a searched place (m). */
+const LOCATION_SPAWN_AGL_M = 600;
+/** North: scene headings face +Z at 0, and north is scene -Z. */
+const LOCATION_SPAWN_HEADING = Math.PI;
+
 /** Kuznetsov cruise speed (45 km/h → m/s), bow heading world −Z at identity. */
 const CARRIER_SPEED_KMH = 45;
 const CARRIER_SPEED_MPS = CARRIER_SPEED_KMH / 3.6;
@@ -485,6 +492,8 @@ export class Game {
      * Ignored when that airfield is not in the area being flown.
      */
     private preferredIcao: string | undefined;
+    /** A search result picked in another area, carried over the reload into it. */
+    private readonly pendingDestination: SpawnDestination | undefined = takePendingDestination();
     /**
      * The area's main airfield, chosen once at boot.
      *
@@ -542,6 +551,8 @@ export class Game {
 
     /** Baked area this session flies in; decides the ENU origin and the scenery. */
     private playArea!: ActivePlayArea;
+    /** Every baked area, for the spawn search to place what it finds. */
+    private areaList: TerrainArea[] = [];
     /** Edge-detect for {@link captureCrashProbe}. */
     private wasCrashed = false;
     private wasLanded = true;
@@ -686,6 +697,7 @@ export class Game {
                 }
                 void this.beginFlight(mode);
             },
+            (destination) => this.goToDestination(destination),
             () => this.pauseForMenu(),
             () => this.resumeFromMenu(),
         );
@@ -832,7 +844,9 @@ export class Game {
         // own pose (see syncSpawnCameraUrl), so the URL's route has to be
         // captured before that call to still know whether to boot into it.
         const urlCameraRoute = this.cameraRoute;
-        await this.beginFlight(settings.spawnMode);
+        const pending = this.pendingDestination;
+        await this.beginFlight(settings.spawnMode,
+            pending !== undefined && pending.kind !== 'airfield' ? pending : undefined);
         if (urlCameraRoute) {
             this.enterFixedCamera(urlCameraRoute);
         }
@@ -3111,7 +3125,7 @@ export class Game {
     }
 
     /** Begin a flight using the aircraft + livery chosen in the spawn menu. */
-    private async beginFlight(requested: SpawnMode) {
+    private async beginFlight(requested: SpawnMode, at?: { lat: number; lon: number }) {
         // Persist what was asked for, fly what this area allows: coming back
         // home should restore the runway start rather than the one an
         // imported area forced.
@@ -3138,9 +3152,11 @@ export class Game {
         this.damageSmoke?.reset();
         // A respawn at another airfield of a big area can land where nothing
         // has streamed in yet: build it, and its neighbours, before placing.
-        if (this.activeRunway !== undefined) {
-            await this.buildAirfieldsNear(
-                this.activeRunway.center.x, this.activeRunway.center.z);
+        const near = at !== undefined
+            ? geodeticToWorld(this.planetTerrain.basis, at.lat, at.lon, 0)
+            : this.activeRunway?.center;
+        if (near !== undefined) {
+            await this.buildAirfieldsNear(near.x, near.z);
         }
 
         // Place the plane first, then warm DEM/meshes around it with the
@@ -3151,7 +3167,13 @@ export class Game {
         // than stepping through the wait means an airborne spawn does not
         // spend its groove falling into terrain that is not there yet.
         const place = () => {
-            if (spawn === 'runway') {
+            if (at !== undefined) {
+                this.player.reset(this.locationSpawnPosition(at), LOCATION_SPAWN_HEADING, {
+                    velocity: headingForward(LOCATION_SPAWN_HEADING).multiplyScalar(APPROACH_SPEED_MPS),
+                    throttle: PLAYER_APPROACH_SPAWN.throttle,
+                    airborne: true,
+                });
+            } else if (spawn === 'runway') {
                 this.player.reset(this.runwaySpawnPosition(), this.baseHeading, PLAYER_LAND_SPAWN);
             } else if (spawn === 'carrier') {
                 this.player.reset(
@@ -3184,14 +3206,14 @@ export class Game {
             }
         };
         place();
-        const center = this.spawnCenterEnu(spawn);
-        await this.preloadTerrainAroundPlane(center.x, center.z, spawn);
+        const center = at !== undefined ? this.locationSpawnPosition(at) : this.spawnCenterEnu(spawn);
+        await this.preloadTerrainAroundPlane(center.x, center.z, at !== undefined ? 'approach' : spawn);
         // Again, now that the DEM under the spawn is resident: a runway or
         // final picked at another airfield was placed above whatever height
         // the coarse tier answered.
         place();
-        const spawnHeading = spawn === 'carrier' || spawn === 'carrierBarricade'
-            ? PLAYER_CARRIER_HEADING
+        const spawnHeading = at !== undefined ? LOCATION_SPAWN_HEADING
+            : spawn === 'carrier' || spawn === 'carrierBarricade' ? PLAYER_CARRIER_HEADING
             : spawn === 'carrierTakeoff' ? PLAYER_CARRIER_TAKEOFF_HEADING : this.baseHeading;
         this.syncSpawnCameraUrl(spawnHeading);
         this.player.setSimulationPaused(false);
@@ -3199,7 +3221,7 @@ export class Game {
             void this.holdUntilStreamed();
         }
 
-        if (spawn === 'carrierBarricade') {
+        if (at === undefined && spawn === 'carrierBarricade') {
             // A barricade arrival is a deck exercise, not a sortie: an opponent
             // spawned a few hundred metres ahead would be inside the ship.
             this.clearOtherAircraft();
@@ -3596,6 +3618,10 @@ export class Game {
         this.playArea = resolvePlayArea(
             manifest, PLAY_ORIGIN, routeArea?.name ?? loadSettings().terrainArea,
         );
+        this.areaList = terrainAreas(manifest);
+        if (this.pendingDestination?.kind === 'airfield') {
+            this.preferredIcao = this.pendingDestination.airfieldKey;
+        }
         if (!this.playArea.isHome) {
             console.log(`flying in imported area "${this.playArea.area.name}" `
                 + `(${this.playArea.origin.lat.toFixed(4)}, `
@@ -3693,6 +3719,7 @@ export class Game {
             terrainDetail: this.configService.terrainDetail,
             landuseBlend: this.configService.landuseBlend,
             landuseReach: this.configService.landuseReach,
+            visibleZoom: this.configService.visibleZoom,
             landuseReveal: this.configService.landuseReveal,
             triangleBudget: this.configService.triangleBudget,
             farTileTextures: this.configService.farTileTextures,
@@ -3800,6 +3827,8 @@ export class Game {
      */
     private async addOsmAirfields(scene: Scene): Promise<void> {
         const file = await this.planetTerrain.loadAirfields();
+        this.spawnPanel.setSearchIndex(
+            file.items.map(airfieldEntryOf), this.areaList, this.playArea.area.name);
         const here = airfieldsInArea(file, this.playArea.area.name);
         this.sceneRunways = sceneRunwaysOf(
             here, this.planetTerrain.basis, AIRFIELD_SURFACE_EPS_M);
@@ -3949,6 +3978,45 @@ export class Game {
         if (picked !== undefined) {
             this.activeRunway = picked;
         }
+    }
+
+    /**
+     * Go to a spawn search result.
+     *
+     * In another area that means rebooting into it, the same way the World
+     * tab's "Fly here" does, with the result carried over the reload. Here,
+     * an airfield becomes the base the start buttons use, and a place or a
+     * coordinate starts an airborne flight over it straight away.
+     */
+    private goToDestination(destination: SpawnDestination): void {
+        if (destination.area === undefined) {
+            return;
+        }
+        if (destination.area !== this.playArea.area.name) {
+            savePendingDestination(destination);
+            updateSettings({ terrainArea: destination.area });
+            clearCameraRouteFromLocation();
+            window.location.reload();
+            return;
+        }
+        if (destination.kind === 'airfield' && destination.airfieldKey !== undefined) {
+            this.selectAirfield(destination.airfieldKey);
+            const active = this.activeRunway;
+            this.spawnPanel.setAirfields(
+                airfieldChoices(this.sceneRunways),
+                active ? (active.icao || active.name) : undefined);
+            return;
+        }
+        if (this.state !== GameState.SPAWN_MENU) {
+            this.enterSpawnMenu();
+        }
+        void this.beginFlight(loadSettings().spawnMode, destination);
+    }
+
+    /** Airborne over a geodetic point, LOCATION_SPAWN_AGL_M above the ground, heading north. */
+    private locationSpawnPosition(at: { lat: number; lon: number }): THREE.Vector3 {
+        const p = geodeticToWorld(this.planetTerrain.basis, at.lat, at.lon, 0);
+        return new THREE.Vector3(p.x, this.groundHeightAt(p.x, p.z) + LOCATION_SPAWN_AGL_M, p.z);
     }
 
     /**

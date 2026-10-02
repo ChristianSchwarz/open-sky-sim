@@ -18,13 +18,15 @@
  * from those nodes to a tolerance of a few metres. The cost is that a border
  * node can sit tens of metres off the true ground, for one cell's width.
  *
- * Only ancestors from MIN_SEAM_ZOOM down are followed. A side on a coarser
- * line (a z7 boundary) would flatten 156 km of border to 600 m nodes, and
- * what meets there is drawn from too far off for a seam to read.
+ * Only ancestors from MIN_SEAM_ZOOM down are followed. A side on a z8 line
+ * flattens 78 km of border to 300 m nodes, which is what the far field is
+ * drawn with anyway; stopping at z9 left z8 against z10/z11 at ~30 km as
+ * 50-125 m walls. A z7 line would cost 600 m nodes, and what meets there is
+ * stitched at run time instead (seamStitch.ts).
  */
 
 /** Coarsest ancestor whose border a fine tile conforms to. */
-export const MIN_SEAM_ZOOM = 9;
+export const MIN_SEAM_ZOOM = 8;
 
 export type Side = 'W' | 'E' | 'N' | 'S';
 

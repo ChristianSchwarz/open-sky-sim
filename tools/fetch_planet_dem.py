@@ -126,6 +126,12 @@ TILE_SIZE = 257
 # fat-fingered bbox is worth stopping before it downloads for an hour.
 DEFAULT_MAX_SPAN_DEG = 6.0
 
+# Exit code for "this bbox is open sea": nothing failed, there is just no land
+# to bake. Distinct from 1 (a real failure) so a chunked import can skip the
+# chunk's data stages instead of failing the whole run - see
+# tools/areaImport.ts. Never 2, which is argparse's and the bbox checks'.
+EXIT_NO_LAND = 3
+
 # Pixels fetched beyond the claimed tiles. A node landing exactly on the raster
 # edge has no pixel centre to its outside, so the sampler clamps it to the
 # first one - half a pixel off, which on an alpine slope is metres. The tile
@@ -526,6 +532,13 @@ def fetch_square(
     return name, dst_win, block, None
 
 
+def is_absent_error(err: str) -> bool:
+    """Whether a square's fetch error says the archive has no such file -
+    a 404, as the cached download's HTTPError or GDAL's /vsicurl reports it -
+    rather than that reading it failed."""
+    return '404' in err
+
+
 def mosaic_into(
     out: np.ndarray,
     dst_transform,
@@ -534,12 +547,15 @@ def mosaic_into(
     jobs: int = DEFAULT_JOBS,
     cache_dir: Optional[str] = DEM_CACHE_DIR,
     fetch: Callable[..., FetchResult] = fetch_square,
+    absent: Optional[List[str]] = None,
 ) -> int:
     """Reproject each square onto the target grid, first real height wins.
 
     The squares do not overlap, so precedence never actually arbitrates - the
     filled mask is here to report coverage and to notice a square that came
-    back entirely void. Up to `jobs` squares are fetched at once; the merge
+    back entirely void. A square the archive does not have (HTTP 404 - the
+    FABDEM archive simply has no file for an all-ocean square) is appended to
+    `absent` when given. Up to `jobs` squares are fetched at once; the merge
     itself walks the results in the order the squares were given, so the
     output does not depend on which fetch finished first.
     """
@@ -555,6 +571,8 @@ def mosaic_into(
         for i, (name, win, block, err) in enumerate(results):
             if err is not None:
                 print(f'  [{i + 1}/{total}] skipped {name}: {err}', flush=True)
+                if absent is not None and is_absent_error(err):
+                    absent.append(name)
                 continue
             if win is None:
                 print(f'  [{i + 1}/{total}] {name} lies outside the grid', flush=True)
@@ -707,7 +725,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not wanted:
             print('error: the archive publishes no squares for this bbox - it is all '
                   'open ocean. Pick an area with land in it.', file=sys.stderr)
-            return 1
+            return EXIT_NO_LAND
         urls = [f'/vsicurl/{COP_TILE_URL.format(name=n)}' for n in wanted]
     else:
         cells = list(iter_bbox_cells(bounds))
@@ -722,8 +740,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f'cache     {cache_dir or "off"}, {max(1, args.jobs)} squares at a time')
 
     t_mosaic = time.perf_counter()
-    used = mosaic_into(out, transform, urls, step_deg, jobs=args.jobs, cache_dir=cache_dir)
+    absent: List[str] = []
+    used = mosaic_into(out, transform, urls, step_deg, jobs=args.jobs, cache_dir=cache_dir,
+                       absent=absent)
     print(f'mosaic    {time.perf_counter() - t_mosaic:.1f} s')
+    if used == 0 and urls and len(absent) == len(urls):
+        # Every square answered "no such file": FABDEM has no index of its
+        # land squares, so this is how an all-ocean box shows up there.
+        print('error: the archive has no squares for this bbox - it is all open '
+              'ocean. Pick an area with land in it.', file=sys.stderr)
+        return EXIT_NO_LAND
     if used == 0:
         print('error: no DEM squares could be read', file=sys.stderr)
         return 1
@@ -736,7 +762,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not land.any():
         print('error: no land above sea level in this bbox - the bake would '
               'write an empty pyramid.', file=sys.stderr)
-        return 1
+        return EXIT_NO_LAND
 
     heights = out[real]
     print(f'heights   {heights.min():.1f} .. {heights.max():.1f} m, '

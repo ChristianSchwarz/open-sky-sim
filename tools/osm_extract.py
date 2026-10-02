@@ -197,7 +197,11 @@ def plan_sources(
         raise LookupError(
             f'no Geofabrik region reaches [{west},{south},{east},{north}] - '
             'the bbox may be open sea; pass a covering extract by hand with --pbf instead')
-    need = target.intersection(unary_union([g for _, g in near]))
+    # A continent's polygon runs far out to sea, past every country's - so
+    # where any country reaches, only countries say what needs covering.
+    # Otherwise a North Sea box asked for all of Europe (33 GB) for water.
+    countries = [g for f, g in near if f['properties'].get('parent')]
+    need = target.intersection(unary_union(countries or [g for _, g in near]))
     need_area = need.area
     enough = COVER_TOLERANCE * need_area
     chosen: List[Source] = []

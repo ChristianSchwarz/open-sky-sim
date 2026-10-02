@@ -4,12 +4,15 @@ import {
     ecefToEnu, ecefToGeodetic, enuToEcef, geodeticToEcef, makeEnuBasis,
 } from '../../src/script/terrain/geodesy';
 import { padBlendWeight } from '../../src/script/terrain/flattenPad';
-import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, decodePtm } from '../../src/script/terrain/ptm';
-import { TerrainClass } from '../../src/script/terrain/tones';
+import {
+    PTM_STROKE_KIND_WATER, PtmBorder, borderEntryIndex, borderEntrySide, decodePtm,
+} from '../../src/script/terrain/ptm';
+import { TerrainClass, TerrainTone } from '../../src/script/terrain/tones';
 import { Watercourse } from './lvr';
 import { CoastPolygon, LonLatBounds } from './shoreline';
-import { BuildTileInput, COAST_BUDGET_CEILING, TileCover, buildTile } from './buildTile';
+import { BuildTileInput, COAST_BUDGET_CEILING, TileCover, buildTile, countOpenEdges, densifyBorder } from './buildTile';
 import { RegionPolygon } from './regions';
+import { GridTriangle } from './decimate';
 
 const SIZE = 33;
 const CELLS = SIZE - 1;
@@ -1087,35 +1090,18 @@ describe('buildTile regions', () => {
             return kinds;
         };
 
-        it('strokes the edge of a tagged region, marked as an outline', () => {
+        it('bakes no outline round a tagged region - the runtime never drew one', () => {
             const west = regionAt(-1, -1, SIZE / 2, CELLS + 1, true, TerrainClass.Tree);
             const east = regionAt(SIZE / 2, -1, CELLS + 1, CELLS + 1, true, undefined);
-            const r = buildTile(base({
+            const r = decodePtm(buildTile(base({
                 polygons: [coastAt(CELLS + 2)],
                 heights: heightsFrom(() => 50),
                 regions: [west, east],
-            }));
-            assert.deepEqual(kindsOf(r.bytes), new Set([PTM_STROKE_KIND_OUTLINE]));
-            assert.equal(r.riverTriangles, 0, 'an outline is not a watercourse');
+            })).bytes);
+            assert.equal(r.riverIndices.length, 0);
         });
 
-        it('draws nothing along the tile border or around untagged land', () => {
-            // A tagged region filling the tile has no edge but the border, and
-            // an untagged one has no edge worth drawing at all.
-            const whole = regionAt(-1, -1, CELLS + 1, CELLS + 1, true, TerrainClass.Crop);
-            const filled = decodePtm(buildTile(base({
-                polygons: [coastAt(CELLS + 2)], regions: [whole],
-            })).bytes);
-            assert.equal(filled.riverIndices.length, 0);
-
-            const bare = regionAt(-1, -1, CELLS + 1, CELLS + 1, true, undefined);
-            const untagged = decodePtm(buildTile(base({
-                polygons: [coastAt(CELLS + 2)], regions: [bare],
-            })).bytes);
-            assert.equal(untagged.riverIndices.length, 0);
-        });
-
-        it('keeps watercourses marked as water beside outlines', () => {
+        it('still strokes watercourses beside tagged regions, marked as water', () => {
             const west = regionAt(-1, -1, SIZE / 2, CELLS + 1, true, TerrainClass.Tree);
             const course: Watercourse = {
                 widthM: 12,
@@ -1129,7 +1115,7 @@ describe('buildTile regions', () => {
                 regions: [west],
                 watercourses: [course],
             }));
-            assert.deepEqual(kindsOf(r.bytes), new Set([PTM_STROKE_KIND_WATER, PTM_STROKE_KIND_OUTLINE]));
+            assert.deepEqual(kindsOf(r.bytes), new Set([PTM_STROKE_KIND_WATER]));
             assert.ok(r.riverTriangles > 0);
         });
     });
@@ -1288,6 +1274,20 @@ describe('inland water height', () => {
         const max = Math.max(...hs);
         assert.ok(min > 700, `river bottomed out at ${min.toFixed(1)} m, nowhere near sea level`);
         assert.ok(max - min > 50, `river spans only ${(max - min).toFixed(1)} m; it should descend`);
+    });
+
+    it('gives a lake a shallow rim and a river none', () => {
+        const tonesOf = (inland: ReturnType<typeof inlandRect>) => new Set(decodePtm(buildTile(base({
+            heights: heightsFrom(() => 820),
+            polygons: [landWithHole(4, 4, 28, 28)],
+            inland: [inland],
+        })).bytes).waterTones);
+        // A measured surface is a lake; none is flowing water.
+        const lake = tonesOf(inlandRect(4, 4, 28, 28, 800));
+        const river = tonesOf(inlandRect(4, 4, 28, 28));
+        assert.ok(lake.has(TerrainTone.ShallowWater), 'the lake lost its rim');
+        assert.ok(lake.has(TerrainTone.Water), 'the lake is all rim');
+        assert.deepEqual(river, new Set([TerrainTone.Water]));
     });
 
     it('clamps the rim of a lake down to the ground it meets', () => {
@@ -1573,5 +1573,121 @@ describe('watercourse strokes', () => {
         // no east component to speak of.
         assert.ok(Math.abs(tile.riverDirections[0]) < 16, `east ${tile.riverDirections[0]}`);
         assert.ok(Math.abs(tile.riverDirections[2]) > 100, `south ${tile.riverDirections[2]}`);
+    });
+});
+
+describe('buildTile border table', () => {
+    /** Each side's surface edges as [lo, hi] param spans, sorted. */
+    const spans = (b: PtmBorder, side: number) => {
+        const out: Array<[number, number]> = [];
+        for (let i = 0; i < b.edges.length; i += 2) {
+            if (borderEntrySide(b.edges[i]) === side) {
+                const pa = b.edgeParams[i], pb = b.edgeParams[i + 1];
+                out.push([Math.min(pa, pb), Math.max(pa, pb)]);
+            }
+        }
+        return out.sort((p, q) => p[0] - q[0]);
+    };
+
+    it('runs the surface edge along the whole of every side of a land tile', () => {
+        const tile = decodePtm(buildTile(base({ polygons: [coastAt(CELLS + 2)] })).bytes);
+        const b = tile.border!;
+        for (let side = 0; side < 4; side++) {
+            const s = spans(b, side);
+            assert.ok(s.length > 0, `side ${side} has edges`);
+            assert.equal(s[0][0], 0);
+            assert.equal(s[s.length - 1][1], 1);
+            for (let i = 1; i < s.length; i++) {
+                assert.ok(Math.abs(s[i][0] - s[i - 1][1]) < 1e-6, `side ${side} is contiguous at ${s[i][0]}`);
+            }
+        }
+    });
+
+    it('lists every edge end as a border vertex at the same place along the same side', () => {
+        const b = decodePtm(buildTile(base({ polygons: [coastAt(CELLS + 2)] })).bytes).border!;
+        const at = new Map<string, number>();
+        for (let i = 0; i < b.vertices.length; i++) {
+            at.set(`${b.vertices[i]}`, b.vertexParams[i]);
+        }
+        for (let i = 0; i < b.edges.length; i++) {
+            assert.equal(at.get(`${b.edges[i]}`), b.edgeParams[i]);
+        }
+    });
+
+    it('lists the skirt under the edge too, straight below it', () => {
+        const tile = decodePtm(buildTile(base({ polygons: [coastAt(CELLS + 2)] })).bytes);
+        const b = tile.border!;
+        const onEdges = new Set(Array.from(b.edges, borderEntryIndex));
+        const below = Array.from(b.vertices).filter(p => !onEdges.has(borderEntryIndex(p)));
+        assert.ok(below.length > 0, 'skirt vertices are in the table');
+        // Every listed vertex shares its place along the side with a surface
+        // vertex, within a metre horizontally.
+        const q = tile.quantScale;
+        const surface = new Map<string, [number, number]>();
+        for (let i = 0; i < b.edges.length; i++) {
+            const v = borderEntryIndex(b.edges[i]);
+            surface.set(`${borderEntrySide(b.edges[i])}:${b.edgeParams[i]}`,
+                [tile.landPositions[v * 3] * q, tile.landPositions[v * 3 + 2] * q]);
+        }
+        for (let i = 0; i < b.vertices.length; i++) {
+            const v = borderEntryIndex(b.vertices[i]);
+            const s = surface.get(`${borderEntrySide(b.vertices[i])}:${b.vertexParams[i]}`);
+            assert.ok(s, `vertex ${v} sits under a surface vertex`);
+            assert.ok(Math.hypot(tile.landPositions[v * 3] * q - s[0], tile.landPositions[v * 3 + 2] * q - s[1]) < 1);
+        }
+    });
+
+    it('has edges only where the side has land', () => {
+        // Land in the west half only: the north and south sides stop half way.
+        const tile = decodePtm(buildTile(base({ polygons: [coastAt(16)] })).bytes);
+        const b = tile.border!;
+        for (const side of [2, 3]) {
+            const s = spans(b, side);
+            assert.ok(s.length > 0);
+            assert.ok(s[s.length - 1][1] < 0.9, `side ${side} ends at ${s[s.length - 1][1]}`);
+        }
+    });
+});
+
+describe('densifyBorder', () => {
+    // 9 nodes a side; heights are flat except a 100 m valley on the north
+    // border (y = 0) at x = 3, which a two-triangle tile chords straight over.
+    const size = 9;
+    const heightAt = (x: number, y: number) => (y === 0 && x === 3 ? -100 : 0);
+    const square = (): GridTriangle[] => [
+        { pts: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 8, y: 8 }], regionId: 0 },
+        { pts: [{ x: 0, y: 0 }, { x: 8, y: 8 }, { x: 0, y: 8 }], regionId: 0 },
+    ];
+    const area = (t: GridTriangle) => {
+        const [a, b, c] = t.pts;
+        return ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) / 2;
+    };
+
+    it('splits a border edge at the node that strays past tolerance', () => {
+        const r = densifyBorder(square(), size, heightAt, 4, () => true);
+        assert.ok(r.inserted > 0);
+        assert.equal(r.triangles.length, 2 + r.inserted);
+        assert.ok(r.triangles.some(t => t.pts.some(p => p.x === 3 && p.y === 0)), 'the valley node is a vertex');
+        // Every north-border node now lies within tolerance of the edge over it.
+        const xs = [...new Set(r.triangles.flatMap(t => t.pts).filter(p => p.y === 0).map(p => p.x))].sort((a, b) => a - b);
+        for (let i = 0; i + 1 < xs.length; i++) {
+            for (let x = xs[i] + 1; x < xs[i + 1]; x++) {
+                const f = (x - xs[i]) / (xs[i + 1] - xs[i]);
+                const chord = heightAt(xs[i], 0) + (heightAt(xs[i + 1], 0) - heightAt(xs[i], 0)) * f;
+                assert.ok(Math.abs(heightAt(x, 0) - chord) <= 4, `node ${x} is ${heightAt(x, 0) - chord} m off`);
+            }
+        }
+        // Same total area, same winding, and still watertight inside the tile.
+        const before = square().reduce((s, t) => s + area(t), 0);
+        assert.equal(r.triangles.reduce((s, t) => s + area(t), 0), before);
+        assert.ok(r.triangles.every(t => Math.sign(area(t)) === Math.sign(area(square()[0]))));
+        assert.equal(countOpenEdges(r.triangles, size), 0);
+    });
+
+    it('leaves a border within tolerance, interior edges and water alone', () => {
+        assert.equal(densifyBorder(square(), size, heightAt, 150, () => true).inserted, 0);
+        assert.equal(densifyBorder(square(), size, heightAt, 4, () => false).inserted, 0);
+        const interiorDip = (x: number, y: number) => (x === 4 && y === 4 ? -100 : 0);
+        assert.equal(densifyBorder(square(), size, interiorDip, 4, () => true).inserted, 0);
     });
 });

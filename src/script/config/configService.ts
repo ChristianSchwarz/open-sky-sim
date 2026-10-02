@@ -1,10 +1,14 @@
 import { FlightModel } from "../physics/model/flightModel";
+import {
+    ColourAdjust, ColourAdjustGroup, ColourTweak, clampColourAdjust,
+} from "../scene/materials/shaders/colourAdjust";
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
 import { AiPilotModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from "../state/gameDefs";
 import { assertExpr, assertIsDefined } from "../utils/asserts";
 import {
     LANDUSE_REVEAL_MIN_PX, LEAF_REFINE_DISTANCE_SCALE, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
-    clampDetailDistanceM, clampLanduseRevealPx, clampLeafRefineScale, clampTriangleBudget,
+    TERRAIN_VISIBLE_ZOOM_MAX,
+    clampDetailDistanceM, clampLanduseRevealPx, clampLeafRefineScale, clampTriangleBudget, clampVisibleZoom,
 } from "../terrain/lod";
 import { LANDUSE_BLEND_DEFAULT, clampLanduseBlend } from "../terrain/tones";
 import { TREE_DENSITY_MULTIPLIER_DEFAULT, clampTreeDensityMultiplier } from "../terrain/treeBillboards";
@@ -16,9 +20,11 @@ export type TerrainColourChangeListener = (mode: TerrainColours) => void;
 export type TerrainShadingChangeListener = (mode: TerrainShading) => void;
 export type LanduseBlendChangeListener = (blend: number) => void;
 export type TreeDensityChangeListener = (multiplier: number) => void;
+export type ColourAdjustChangeListener = (adjust: ColourAdjust) => void;
 export type DaytimeChangeListener = (hours: number) => void;
 export type TerrainDetailChangeListener = (distanceM: number) => void;
 export type LanduseReachChangeListener = (scale: number) => void;
+export type VisibleZoomChangeListener = (zoom: number) => void;
 export type LanduseRevealChangeListener = (px: number) => void;
 export type TriangleBudgetChangeListener = (triangles: number) => void;
 export type FarTileTexturesChangeListener = (enabled: boolean) => void;
@@ -47,6 +53,7 @@ export class ConfigService {
     readonly treeDensity: TreeDensitySetting;
     readonly terrainDetail: TerrainDetailSetting;
     readonly landuseReach: LanduseReachSetting;
+    readonly visibleZoom: VisibleZoomSetting;
     readonly landuseReveal: LanduseRevealSetting;
     readonly triangleBudget: TriangleBudgetSetting;
     readonly farTileTextures: FarTileTexturesSetting;
@@ -54,6 +61,7 @@ export class ConfigService {
     readonly renderScale: RenderScaleSetting;
     readonly supersampling: SupersamplingSetting;
     readonly daytime: DaytimeSetting;
+    readonly colourAdjust: ColourAdjustSetting;
 
     constructor(
         profiles: { [id: string]: TechProfile },
@@ -74,6 +82,8 @@ export class ConfigService {
         initialSupersampling?: boolean,
         initialRoads?: RoadsMode,
         initialTreeDensity?: number,
+        initialVisibleZoom?: number,
+        initialColourAdjust?: ColourAdjust,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -84,6 +94,7 @@ export class ConfigService {
         this.landuseBlend = new LanduseBlendSetting(initialLanduseBlend);
         this.terrainDetail = new TerrainDetailSetting(initialTerrainDetailM);
         this.landuseReach = new LanduseReachSetting(initialLanduseReach);
+        this.visibleZoom = new VisibleZoomSetting(initialVisibleZoom);
         this.landuseReveal = new LanduseRevealSetting(initialLanduseRevealPx);
         this.triangleBudget = new TriangleBudgetSetting(initialTriangleBudget);
         this.farTileTextures = new FarTileTexturesSetting(initialFarTileTextures);
@@ -92,6 +103,7 @@ export class ConfigService {
         this.supersampling = new SupersamplingSetting(initialSupersampling);
         this.treeDensity = new TreeDensitySetting(initialTreeDensity);
         this.daytime = new DaytimeSetting(initialDaytime);
+        this.colourAdjust = new ColourAdjustSetting(initialColourAdjust);
     }
 }
 
@@ -215,6 +227,45 @@ export class LanduseReachSetting {
     }
 
     removeChangeListener(listener: LanduseReachChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * The deepest terrain zoom level drawn. The top of the range is the baked
+ * leaf, so no cap; lower keeps the whole terrain at that level, trading
+ * detail near the aircraft for triangles and tile fetches.
+ */
+export class VisibleZoomSetting {
+    private active: number;
+    private listeners: Set<VisibleZoomChangeListener> = new Set();
+
+    constructor(initialActive: number = TERRAIN_VISIBLE_ZOOM_MAX) {
+        this.active = clampVisibleZoom(initialActive);
+    }
+
+    getActive(): number {
+        return this.active;
+    }
+
+    setActive(zoom: number) {
+        const clamped = clampVisibleZoom(zoom);
+        if (clamped === this.active) return;
+        this.active = clamped;
+        this.notifyActive();
+    }
+
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: VisibleZoomChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: VisibleZoomChangeListener) {
         this.listeners.delete(listener);
     }
 }
@@ -645,6 +696,50 @@ export class LanduseBlendSetting {
     }
 
     removeChangeListener(listener: LanduseBlendChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * Hue, saturation and brightness per kind of scenery (trees, terrain, water,
+ * sky); see colourAdjust.ts for the ranges and what each one does. Uniform writes
+ * only, so a slider re-streams and re-bakes nothing.
+ */
+export class ColourAdjustSetting {
+    private active: ColourAdjust;
+    private listeners: Set<ColourAdjustChangeListener> = new Set();
+
+    constructor(initialActive?: unknown) {
+        this.active = clampColourAdjust(initialActive);
+    }
+
+    /** A copy: the setting only changes through setTweak. */
+    getActive(): ColourAdjust {
+        return clampColourAdjust(this.active);
+    }
+
+    setTweak(group: ColourAdjustGroup, tweak: ColourTweak) {
+        const next = clampColourAdjust({ ...this.active, [group]: tweak });
+        const before = this.active[group];
+        const after = next[group];
+        if (after.hue === before.hue && after.saturation === before.saturation
+            && after.brightness === before.brightness) return;
+        this.active = next;
+        this.notifyActive();
+    }
+
+    /** Push the current value to listeners (used once after they register). */
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.getActive());
+        }
+    }
+
+    addChangeListener(listener: ColourAdjustChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: ColourAdjustChangeListener) {
         this.listeners.delete(listener);
     }
 }

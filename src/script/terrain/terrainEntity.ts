@@ -60,6 +60,7 @@ import { Airfield } from './airfields';
 import { OceanPatch, buildOceanPatch, disposeOceanPatch } from './oceanPatch';
 import { PtmTile, decodePtm } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
+import { stitchSeams } from './seamStitch';
 import { TileIndex } from './tileIndex';
 import { TileMeshes, buildSmoothLandGeometryFromFaceted, buildTileMeshes, disposeTileMeshes, tileOriginWorld } from './tileMesh';
 import { TileStore } from './tileStore';
@@ -73,7 +74,7 @@ import {
 import { RoadsMode, TERRAIN_COLOUR_MODE_INDEX, TerrainColours, TerrainShading } from '../state/gameDefs';
 import {
     FarTileTexturesSetting, LanduseBlendSetting, LanduseReachSetting, LanduseRevealSetting, RoadsSetting, TerrainColourSetting,
-    TerrainDetailSetting, TerrainShadingSetting, TreeDensitySetting, TriangleBudgetSetting,
+    TerrainDetailSetting, TerrainShadingSetting, TreeDensitySetting, TriangleBudgetSetting, VisibleZoomSetting,
 } from '../config/configService';
 import { publishTerrainStats, trackTerrainMaterial } from './debug';
 
@@ -208,6 +209,8 @@ export interface TerrainEntityOptions {
     landuseBlend?: LanduseBlendSetting;
     /** Live leaf-refine reach. Omit and the LOD default stays. */
     landuseReach?: LanduseReachSetting;
+    /** Live finest-drawn-level cap. Omit and the bake's leaf is drawn. */
+    visibleZoom?: VisibleZoomSetting;
     /** Live land-use region size threshold. Omit and LANDUSE_REVEAL_MIN_PX stays. */
     landuseReveal?: LanduseRevealSetting;
     /** Live per-frame triangle ceiling. Omit and TERRAIN_TRIANGLE_BUDGET stays. */
@@ -450,7 +453,7 @@ export class TerrainEntity implements Entity {
         const onRoad = ptr ? buildRoadExclusion(ptr) : undefined;
         const onManMade = this.sceneExclusionFor(tile);
         const isExcluded = onRoad || onManMade
-            ? (x: number, z: number) => (onRoad?.(x, z) ?? false) || (onManMade?.(x, z) ?? false)
+            ? (x: number, z: number, y: number) => (onRoad?.(x, z) ?? false) || (onManMade?.(x, z, y) ?? false)
             : undefined;
         const groups = scatterTreeSpecies(tile, densityScale, isExcluded);
         // Ground clutter (rocks + extra shrubs on open, non-forested ground -
@@ -517,8 +520,14 @@ export class TerrainEntity implements Entity {
      * road strokes are in, which is why roadExclusion needs no conversion and
      * these do. Testing the raw offset only ever matched the tile at the play
      * origin, so everywhere else shrubs grew on aprons and taxiways.
+     *
+     * The point's height has to go through the rotation too. The bake's axes
+     * are its own origin's (Gran Canaria for the shared pyramid), and 3000 km
+     * away in DACH they lean ~28 degrees off the play frame's, so a point a
+     * few hundred metres "up" in tile terms is a few hundred metres sideways
+     * in the scene: dropping it left shrubs all over LHZA's strip.
      */
-    private sceneExclusionFor(tile: PtmTile): ((x: number, z: number) => boolean) | undefined {
+    private sceneExclusionFor(tile: PtmTile): ((x: number, z: number, y: number) => boolean) | undefined {
         const onAirfield = this.airfieldExclusion;
         const onSurface = this.surfaceExclusion;
         if (!onAirfield && !onSurface) {
@@ -527,8 +536,8 @@ export class TerrainEntity implements Entity {
         const origin = tileOriginWorld(tile.id, tile.centerHeightM, this.basis);
         const q = this.frameFix;
         const v = new THREE.Vector3();
-        return (x, z) => {
-            v.set(x, 0, z).applyQuaternion(q);
+        return (x, z, y) => {
+            v.set(x, y, z).applyQuaternion(q);
             const wx = origin.x + v.x;
             const wz = origin.z + v.z;
             return (onAirfield?.(wx, wz) ?? false) || (onSurface?.(wx, wz) ?? false);
@@ -592,6 +601,7 @@ export class TerrainEntity implements Entity {
      */
     private detailDistanceM = TERRAIN_DETAIL_DISTANCE_DEFAULT_M;
     private leafScale = LEAF_REFINE_DISTANCE_SCALE;
+    private visibleZoomCap = Infinity;
     /** Pixels of width a land-use region needs before it is drawn; see LANDUSE_REVEAL_MIN_PX. */
     private revealPx = LANDUSE_REVEAL_MIN_PX;
     private triangleBudget = TERRAIN_TRIANGLE_BUDGET;
@@ -738,6 +748,10 @@ export class TerrainEntity implements Entity {
         if (opts.landuseReach) {
             this.leafScale = opts.landuseReach.getActive();
             opts.landuseReach.addChangeListener(s => { this.leafScale = s; });
+        }
+        if (opts.visibleZoom) {
+            this.visibleZoomCap = opts.visibleZoom.getActive();
+            opts.visibleZoom.addChangeListener(z => { this.visibleZoomCap = z; });
         }
         if (opts.landuseReveal) {
             this.revealPx = opts.landuseReveal.getActive();
@@ -976,8 +990,8 @@ export class TerrainEntity implements Entity {
      * area, not per tile - so no incremental update path is needed.
      */
     setAirfieldExclusion(airfields: Airfield[]): void {
-        const toEnu = (lat: number, lon: number) => {
-            const enu = ecefToEnu(this.basis, geodeticToEcef(lat, lon, 0));
+        const toEnu = (lat: number, lon: number, heightM: number) => {
+            const enu = ecefToEnu(this.basis, geodeticToEcef(lat, lon, heightM));
             return { e: enu.e, n: enu.n };
         };
         this.airfieldExclusion = buildAirfieldExclusion(airfields, toEnu);
@@ -1386,6 +1400,7 @@ export class TerrainEntity implements Entity {
             (id) => this.pinned.has(tileKeyString(id)),
             this.leafScale,
             now,
+            this.visibleZoomCap,
         );
 
         const fit = this.coarsenToBudget(r.draw, camera.position);
@@ -1489,9 +1504,12 @@ export class TerrainEntity implements Entity {
     private coarsenToBudget(
         draw: QuadNode[], camPos: THREE.Vector3,
     ): { draw: QuadNode[]; merged: number; wants: TileWant[] } {
+        // The same count syncGroup caps on, roads and bridges included: a
+        // fold that fitted land alone left the cap to cut a road-laced view
+        // short anyway (2026-10-01), and what the cap cuts is a hole.
         const cost = (node: QuadNode): number => {
             const meshes = this.streamer.get(node.id);
-            return meshes ? countTriangles(meshes) : OCEAN_PATCH_TRIANGLES;
+            return meshes ? this.tileTriangles(meshes) : OCEAN_PATCH_TRIANGLES;
         };
         let total = 0;
         const cut = new Map<string, QuadNode>();
@@ -1603,11 +1621,18 @@ export class TerrainEntity implements Entity {
         this.pruneDrawnHeightIndices();
         // Nearest first: when the triangle budget below has to cut the list
         // short, it is always the farthest (already coarsest, least missed)
-        // tiles that go missing, never ones near the camera.
+        // tiles that go missing, never ones near the camera. Measured to the
+        // tile's near edge, not its centre: a z6 tile's centre can be 260 km
+        // off while its edge is 27 km away, and cutting it by its centre
+        // opened a hole there, filled by the skirts of the tiles beyond it
+        // (2026-10-01).
+        const nearM = (n: QuadNode) => Math.max(0, n.center.distanceTo(camPos) - n.radius);
         const ordered = this.drawList.length > 1
-            ? [...this.drawList].sort((a, b) =>
-                a.center.distanceToSquared(camPos) - b.center.distanceToSquared(camPos))
+            ? [...this.drawList].sort((a, b) => nearM(a) - nearM(b))
             : this.drawList;
+        // What neighbours meet: not an ancestor drawn under its dissolving
+        // children, and not a tile the budget left out. See seamStitch.ts.
+        const stitched: Array<{ id: TileKey; tile: TileMeshes }> = [];
         for (const node of ordered) {
             const meshes = this.streamer.get(node.id);
             if (meshes) {
@@ -1639,6 +1664,9 @@ export class TerrainEntity implements Entity {
                 lod.fadeM = node.fadeM;
                 lod.fadeFromMs = node.fadeFromMs;
                 this.group.add(meshes.group);
+                if (!node.under) {
+                    stitched.push({ id: node.id, tile: meshes });
+                }
                 // Trees follow the draw selection, not residency: a cached
                 // ancestor drawn beneath its children stays bare (they carry
                 // the trees), while a coarse tile that is the real LOD
@@ -1667,8 +1695,7 @@ export class TerrainEntity implements Entity {
                         void this.attachTrees(meshes.treeSource, meshes, this.treeMaterials);
                     }
                 }
-                this.drawnTriangles += countTriangles(meshes) + this.roads.trianglesOf(meshes)
-                    + this.bridges.trianglesOf(meshes);
+                this.drawnTriangles += this.tileTriangles(meshes);
                 // Nearest first, like the meshes; a leaf never has one and
                 // returns from this at once.
                 const priority = PRIORITY_IN_FRUSTUM - Math.sqrt(node.center.distanceToSquared(camPos));
@@ -1689,7 +1716,13 @@ export class TerrainEntity implements Entity {
             }
             this.group.add(patch.group);
         }
+        stitchSeams(stitched);
         this.pruneOceans();
+    }
+
+    /** What a drawn tile costs the triangle budget: land, water, roads and bridges. */
+    private tileTriangles(meshes: TileMeshes): number {
+        return countTriangles(meshes) + this.roads.trianglesOf(meshes) + this.bridges.trianglesOf(meshes);
     }
 
     /**

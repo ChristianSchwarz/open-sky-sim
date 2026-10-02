@@ -379,4 +379,60 @@ describe('terrain triangle budget (safety valve)', () => {
         assert.equal(entity.stats.triangles, 2 * each + 600);
         assert.equal(entity.stats.triangleBudgetHit, false, 'the cap never had to engage');
     });
+
+    it('folds for road triangles too, so the cap does not cut the cut short (regression)', () => {
+        const entity = makeEntity();
+        stage(entity, 4, 100_000); // 400k of land fits the 600k budget...
+        // ...but each tile carries 100k of roads, which syncGroup counts.
+        (entity as unknown as { roads: { trianglesOf: (m: TileMeshes) => number } })
+            .roads.trianglesOf = (m: TileMeshes) => (m.group.name.startsWith('5/') ? 100_000 : 0);
+        const leaves = (entity as unknown as { drawList: QuadNode[] }).drawList;
+        const streamer = (entity as unknown as {
+            streamer: { get: (id: unknown) => TileMeshes | undefined };
+        }).streamer;
+        const inner = streamer.get;
+        const parentMeshes = new Map<string, TileMeshes>([
+            ['4/0/0', fakeMeshes(300, '4/0/0')],
+            ['4/1/0', fakeMeshes(300, '4/1/0')],
+        ]);
+        streamer.get = (wantedId: unknown) => {
+            const { z, x, y } = wantedId as { z: number; x: number; y: number };
+            return parentMeshes.get(`${z}/${x}/${y}`) ?? inner(wantedId);
+        };
+        const parents = new Map<string, QuadNode>();
+        for (let x = 0; x < 2; x++) {
+            parents.set(`4/${x}/0`, {
+                id: { z: 4, x, y: 0 }, key: `4/${x}/0`, children: leaves.filter(n => (n.id.x >> 1) === x),
+                center: new THREE.Vector3((2 * x + 1.5) * 1000, 0, 0), radius: 1,
+                geometricErrorM: 10, errorFromTile: true, lastSeen: 0,
+                resident: true, ocean: false, under: false, fadeM: 0, fadeFromMs: 0,
+            });
+        }
+        (entity as unknown as { quadtree: { node: (k: string) => QuadNode | undefined } }).quadtree = {
+            node: (k: string) => parents.get(k),
+        };
+        const fit = (entity as unknown as {
+            coarsenToBudget: (d: QuadNode[], p: THREE.Vector3) => { draw: QuadNode[]; merged: number };
+        }).coarsenToBudget(leaves, new THREE.Vector3());
+
+        assert.equal(fit.merged, 1, '800k with roads: the farther pair folds');
+        (entity as unknown as { drawList: QuadNode[] }).drawList = fit.draw;
+        syncGroup(entity, new THREE.Vector3());
+        assert.equal(entity.stats.triangleBudgetHit, false, 'the cap never had to engage');
+        const group = (entity as unknown as { group: THREE.Group }).group;
+        assert.equal(group.children.length, 3, 'nothing was dropped');
+    });
+
+    it('cuts by a tile\'s near edge, not its centre (regression)', () => {
+        const entity = makeEntity();
+        stage(entity, 4, 200_000);
+        // 5/3/0 is a huge tile: centre the farthest, edge the nearest.
+        const list = (entity as unknown as { drawList: Array<{ key: string; radius: number }> }).drawList;
+        list.find(n => n.key === '5/3/0')!.radius = 3900;
+        syncGroup(entity, new THREE.Vector3());
+
+        assert.equal(entity.stats.triangleBudgetHit, true);
+        const group = (entity as unknown as { group: THREE.Group }).group;
+        assert.deepEqual(group.children.map(c => c.name).sort(), ['5/0/0', '5/1/0', '5/3/0']);
+    });
 });

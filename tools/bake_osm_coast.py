@@ -810,9 +810,10 @@ def _polygons_from_osm(
     if water_union.is_empty:
         water_union = Polygon()
 
-    land_mp = land_union if isinstance(land_union, MultiPolygon) else (
-        MultiPolygon([land_union]) if isinstance(land_union, Polygon) and not land_union.is_empty else MultiPolygon()
-    )
+    # The water subtraction can leave zero-width slivers, which make it a
+    # GeometryCollection; taking only a Polygon or MultiPolygon threw away
+    # all 2.1 deg² of East Frisia's land and failed the bake.
+    land_mp = _polygonal(land_union)
     # One body per connected piece: two lakes that touch are one surface, and
     # a lake mapped twice (as a way and again in a relation) must not become
     # two bodies fighting over the same water at two different heights.

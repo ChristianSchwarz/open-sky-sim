@@ -1,8 +1,16 @@
 import { DITHER_PARS_FRAGMENT } from './dither';
 import { LOG_DEPTH_FRAGMENT, LOG_DEPTH_PARS_FRAGMENT } from './logDepth';
 
+/**
+ * highp, not lowp: this program writes the logarithmic gl_FragDepth, and the
+ * surfaces it draws - road strokes, runways, rivers - lie on the terrain and
+ * win or lose the depth test against it by centimetres. Desktop GPUs run lowp
+ * as fp32 anyway, which hid it; Android GPUs honour it (fp16 or less), the
+ * depth came out coarser than the highp terrain's and every overlay vanished
+ * under the ground. The fog distance needs the range too.
+ */
 export const DepthFragProgram: string = `
-  precision lowp float;
+  precision highp float;
 
   uniform vec3 vCameraPos;
   uniform vec3 vCameraNormal;

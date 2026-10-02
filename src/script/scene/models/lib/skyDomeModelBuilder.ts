@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { domeShade } from '../../atmosphere/skyModel';
 import { Palette, PaletteCategory, PaletteColor } from '../../../config/palettes/palette';
 import { SceneMaterialManager } from "../../materials/materials";
+import { COLOUR_ADJUST_PARS, COLOUR_ADJUST_UNIFORMS } from '../../materials/shaders/colourAdjust';
 import { LOG_DEPTH_FRAGMENT, LOG_DEPTH_PARS_FRAGMENT, LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from '../../materials/shaders/logDepth';
 import {
     SCENE_DEPTH_PARS_FRAGMENT, SCENE_DEPTH_SKY_CUT, SCENE_DEPTH_UNIFORMS,
@@ -106,6 +107,9 @@ const SKY_FRAGMENT_PROGRAM = `
   precision highp float;
 
   uniform float uSkyOverbright;
+  /** The player's sky saturation, brightness and hue; see colourAdjust.ts. */
+  uniform vec3 uAdjSky;
+${COLOUR_ADJUST_PARS}
   varying vec3 vSkyColor;
   varying float vSkyFalloff;
 #ifdef SKY_GLARE
@@ -154,7 +158,7 @@ ${LOG_DEPTH_PARS_FRAGMENT}
     // thing in this pipeline that ever draws last, over an already-finished
     // frame, with depth testing off: nothing behind it still needs to sort
     // against it, so blending it costs nothing a discard doesn't already.
-    vec3 toned = vSkyColor * mix(1.0, uSkyOverbright, vSkyFalloff);
+    vec3 toned = adjustColour(vSkyColor, uAdjSky) * mix(1.0, uSkyOverbright, vSkyFalloff);
     toned = clamp(toned, 0.0, 1.0);
 #ifdef SKY_GLARE
     // The glare's cap is drawn over the sun's own disc, so it has to be the
@@ -214,6 +218,7 @@ export function createSkyMaterial(
             // resolves them, as SUN_UNIFORMS are with the sun.
             uVeilDensity: { value: 0 },
             ...SCENE_DEPTH_UNIFORMS,
+            uAdjSky: COLOUR_ADJUST_UNIFORMS.uAdjSky,
         },
         side,
         depthWrite: false,

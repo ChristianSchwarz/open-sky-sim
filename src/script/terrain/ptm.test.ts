@@ -8,9 +8,14 @@ import {
     PTM_STROKE_KIND_OUTLINE,
     PTM_STROKE_KIND_WATER,
     PTM_VERSION,
+    PTM_SIDE_E,
+    PTM_SIDE_N,
     PtmEncodeInput,
+    borderEntryIndex,
+    borderEntrySide,
     decodePtm,
     encodePtm,
+    packBorderEntry,
 } from './ptm';
 import { TerrainClass, TerrainTone } from './tones';
 
@@ -50,6 +55,46 @@ function sampleTile(): PtmEncodeInput {
         },
     };
 }
+
+describe('PTM1 border table', () => {
+    const withBorder = (): PtmEncodeInput => ({
+        ...sampleTile(),
+        border: {
+            vertices: new Uint32Array([packBorderEntry(PTM_SIDE_N, 0), packBorderEntry(PTM_SIDE_E, 8)]),
+            vertexParams: new Float32Array([0, 0.75]),
+            edges: new Uint32Array([packBorderEntry(PTM_SIDE_N, 0), packBorderEntry(PTM_SIDE_N, 1)]),
+            edgeParams: new Float32Array([0, 0.5]),
+        },
+    });
+
+    it('round-trips the table and leaves the rest of the tile as it was', () => {
+        const plain = decodePtm(encodePtm(sampleTile()));
+        const tile = decodePtm(encodePtm(withBorder()));
+        const b = tile.border!;
+        assert.deepEqual(Array.from(b.vertices, borderEntrySide), [PTM_SIDE_N, PTM_SIDE_E]);
+        assert.deepEqual(Array.from(b.vertices, borderEntryIndex), [0, 8]);
+        assert.deepEqual(Array.from(b.vertexParams), [0, 0.75]);
+        assert.deepEqual(Array.from(b.edges, borderEntryIndex), [0, 1]);
+        assert.deepEqual(Array.from(b.edgeParams), [0, 0.5]);
+        assert.deepEqual(Array.from(tile.landPositions), Array.from(plain.landPositions));
+        assert.deepEqual(Array.from(tile.riverIndices), Array.from(plain.riverIndices));
+    });
+
+    it('decodes a tile without one as having none', () => {
+        assert.equal(decodePtm(encodePtm(sampleTile())).border, undefined);
+    });
+
+    it('rejects an entry past the land stream', () => {
+        const input = withBorder();
+        input.border!.vertices[1] = packBorderEntry(PTM_SIDE_E, 9);
+        assert.throws(() => encodePtm(input), /past the land stream/);
+    });
+
+    it('throws on a tile cut short inside the table', () => {
+        const bytes = encodePtm(withBorder());
+        assert.throws(() => decodePtm(bytes.slice(0, bytes.byteLength - 4)), /truncated border/);
+    });
+});
 
 describe('PTM1 codec', () => {
     it('round-trips positions within a quantisation step', () => {
