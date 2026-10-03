@@ -570,4 +570,47 @@ describe('river profile heights', () => {
         assert.equal(s.inlandHeights[12 * SIZE + 12], 50);
         assert.equal(s.inlandSloped[12 * SIZE + 12], 0);
     });
+
+    // A small tile, ~33 m per cell, so the reach is a few cells and not the
+    // whole tile.
+    const SMALL: LonLatBounds = { west: 9.75, south: 47.36, east: 9.764, north: 47.37 };
+    const smallAt = (gx: number, gy: number, heightM: number) => ({
+        lon: SMALL.west + (gx / (SIZE - 1)) * (SMALL.east - SMALL.west),
+        lat: SMALL.north - (gy / (SIZE - 1)) * (SMALL.north - SMALL.south),
+        heightM,
+    });
+    const smallRing = (pts: Array<[number, number]>) => pts.map(([gx, gy]) => smallAt(gx, gy, 0));
+
+    it('follows the DEM where no profile sample is within reach', () => {
+        // A river across the tile whose only samples sit in one corner: the
+        // gorge of tile 12/4318/970, which stood 240 m above its banks.
+        const exterior = smallRing([[0, 14], [32, 14], [32, 18], [0, 18]]);
+        const s = buildShoreline({
+            polygons: [],
+            inland: [{ exterior, holes: [], profile: [smallAt(0, 16, 940), smallAt(1, 16, 939)] }],
+            bounds: SMALL,
+            size: SIZE,
+        });
+        const row = 16 * SIZE;
+        assert.equal(s.inlandNodes[row + 2], 1);
+        assert.equal(s.inlandHeights[row + 2], 939);
+        assert.equal(s.inlandNodes[row + 30], 1);
+        assert.ok(Number.isNaN(s.inlandHeights[row + 30]), 'a node far from every sample follows the DEM');
+        assert.equal(s.inlandSloped[row + 30], 0);
+    });
+
+    it('never puts river water far above the ground at its node', () => {
+        const exterior = smallRing([[0, 14], [32, 14], [32, 18], [0, 18]]);
+        const heights = new Float32Array(SIZE * SIZE).fill(700);
+        const samples = Array.from({ length: 17 }, (_, k) => smallAt(k * 2, 16, 720));
+        const s = buildShoreline({
+            polygons: [],
+            inland: [{ exterior, holes: [], profile: samples }],
+            bounds: SMALL,
+            size: SIZE,
+            heights,
+        });
+        assert.equal(s.inlandHeights[16 * SIZE + 10], 705);
+        assert.equal(s.inlandSloped[16 * SIZE + 10], 1);
+    });
 });

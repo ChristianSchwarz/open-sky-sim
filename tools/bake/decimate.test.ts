@@ -357,6 +357,24 @@ describe('restricted-quadtree decimation', () => {
         assert.ok(Math.abs(totalArea(r.triangles) - cells * cells) < 1e-6);
     });
 
+    it('fans a leaf with no midpoint-free corner without a zero-area triangle', () => {
+        // Smooth relief at a loose tolerance gives leaves with finer
+        // neighbours on two opposite edges, or on three or four (52 such fan
+        // triangles here before the fix). A corner apex there makes corner,
+        // midpoint, corner: no area in plan, a vertical sliver once lifted
+        // onto the heights.
+        const r = decimate({
+            size: SIZE,
+            heights: grid(SIZE, (x, y) => 100 * Math.sin(x * 0.7) * Math.cos(y * 0.3)),
+            regionNodes: allLand(SIZE),
+            maxErrorM: 5,
+        });
+        const flat = r.triangles.filter(t => area(t) < 1e-9);
+        assert.equal(flat.length, 0, `zero-area triangles: ${JSON.stringify(flat.slice(0, 3).map(t => t.pts))}`);
+        assert.equal(openEdges(r.triangles, SIZE), 0);
+        assert.ok(Math.abs(totalArea(r.triangles) - 32 * 32) < 1e-6, 'covers the tile exactly');
+    });
+
     it('honours minLeafSize, coarsening the boundary with it', () => {
         const cls = regions(SIZE, (x, y) => Math.hypot(x - 16, y - 16) < 9);
         const fine = decimate({

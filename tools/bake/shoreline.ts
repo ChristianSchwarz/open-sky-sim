@@ -261,6 +261,29 @@ export const INLAND_SEA_MIN_M = 50;
 export const EDGE_SLIVER_CELLS = 3;
 export const EDGE_SLIVER_MIN_M = 10;
 
+/**
+ * A river node takes its height from the nearest profile sample only when
+ * one lies within this many metres, or PROFILE_REACH_SPACINGS times the
+ * profile's own sample spacing where that is wider (a coarse tile thins its
+ * samples). Beyond it the node follows the DEM.
+ *
+ * A body's profile is every fitted sample near the body, not the samples of
+ * its own river: where the body's river has no chain of its own the profile
+ * can be a tributary touching one corner. The Dornbirner Ach gorge, tile
+ * 12/4318/970, had six samples at 916-946 m 2.5 km from a gorge at 700 m,
+ * and the whole river stood up to 240 m above its banks.
+ */
+export const PROFILE_REACH_M = 300;
+export const PROFILE_REACH_SPACINGS = 3;
+
+/**
+ * River water never sits more than this far above the DEM at its own node.
+ * The fit is monotone, so a dip in the DEM along the river becomes a pool
+ * level with the lip below it; over a real dip that is fine for a few metres
+ * and a wall beyond it. Shore vertices are clamped to the ground separately.
+ */
+export const PROFILE_MAX_ABOVE_GROUND_M = 5;
+
 export function buildShoreline(input: ShorelineInput): Shoreline {
     const { polygons, bounds, size } = input;
     const cells = size - 1;
@@ -274,6 +297,9 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
     const snapCells = Math.max(BORDER_SNAP_CELLS, simplify);
     const toGridX = (lon: number) => snapToBorder(((lon - bounds.west) / lonSpan) * cells, cells, snapCells);
     const toGridY = (lat: number) => snapToBorder(((bounds.north - lat) / latSpan) * cells, cells, snapCells);
+    // Metres per cell, for distances between grid points.
+    const cellMy = (latSpan / cells) * 110540;
+    const cellMx = (lonSpan / cells) * 111320 * Math.cos(((bounds.north + bounds.south) / 2) * Math.PI / 180);
     const rings: Ring[] = [];
     const outerRings: Ring[] = [];
     const holeRings: Ring[] = [];
@@ -440,13 +466,22 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
             ? body.profile : undefined;
         let profileX: Float64Array | undefined;
         let profileY: Float64Array | undefined;
+        let reachSq = 0;
         if (profile !== undefined) {
             profileX = new Float64Array(profile.length);
             profileY = new Float64Array(profile.length);
             for (let k = 0; k < profile.length; k++) {
-                profileX[k] = toGridX(profile[k].lon);
-                profileY[k] = toGridY(profile[k].lat);
+                // In metres, east and south, so one reach serves both axes.
+                profileX[k] = toGridX(profile[k].lon) * cellMx;
+                profileY[k] = toGridY(profile[k].lat) * cellMy;
             }
+            const gaps: number[] = [];
+            for (let k = 1; k < profile.length; k++) {
+                gaps.push(Math.hypot(profileX[k] - profileX[k - 1], profileY[k] - profileY[k - 1]));
+            }
+            gaps.sort((a, b) => a - b);
+            const spacing = gaps.length > 0 ? gaps[gaps.length >> 1] : 0;
+            reachSq = Math.max(PROFILE_REACH_M, PROFILE_REACH_SPACINGS * spacing) ** 2;
         }
         scanline(bodyRings, (row, from, to) => {
             for (let col = from; col <= to; col++) {
@@ -457,15 +492,26 @@ export function buildShoreline(input: ShorelineInput): Shoreline {
                 }
                 let best = 0;
                 let bestD = Infinity;
+                const mx = col * cellMx;
+                const my = row * cellMy;
                 for (let k = 0; k < profileX.length; k++) {
-                    const d = (profileX[k] - col) ** 2 + (profileY[k] - row) ** 2;
+                    const d = (profileX[k] - mx) ** 2 + (profileY[k] - my) ** 2;
                     if (d < bestD) {
                         bestD = d;
                         best = k;
                     }
                 }
-                inlandHeights[row * size + col] = profile[best].heightM;
-                inlandSloped[row * size + col] = 1;
+                const i = row * size + col;
+                if (bestD > reachSq) {
+                    // No sample of this river nearby: follow the DEM.
+                    inlandHeights[i] = NaN;
+                    continue;
+                }
+                const ground = input.heights?.[i];
+                inlandHeights[i] = ground !== undefined && Number.isFinite(ground)
+                    ? Math.min(profile[best].heightM, ground + PROFILE_MAX_ABOVE_GROUND_M)
+                    : profile[best].heightM;
+                inlandSloped[i] = 1;
             }
         });
     }

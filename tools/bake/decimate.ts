@@ -799,14 +799,28 @@ export function decimate(input: DecimateInput): DecimateResult {
         }
         // Fan from a corner with no midpoint on either of its edges when there
         // is one, so no fan triangle is a sliver between a corner and the
-        // midpoint next to it; any corner is a valid triangulation of the
-        // ring otherwise.
-        let apexCorner = 0;
+        // midpoint next to it.
+        //
+        // With midpoints on two opposite edges, or on three or four, there is
+        // no such corner, and a corner apex is *not* a valid triangulation:
+        // corner, midpoint and the next corner are collinear, so that fan
+        // triangle has no area in plan. Lifted onto the DEM it stands
+        // vertical, spanning the gap between this leaf's straight edge and
+        // the neighbour's bent one: a long dark sliver on a slope (Bernese
+        // Oberland, 2026-10-01). fanConvexRing picks a midpoint apex there
+        // instead, which costs the same n - 2 triangles.
+        let apexCorner = -1;
         for (let c = 0; c < 4; c++) {
             if (!needMid[c] && !needMid[(c + 3) % 4]) {
                 apexCorner = c;
                 break;
             }
+        }
+        if (apexCorner < 0) {
+            for (const t of fanConvexRing(ring)) {
+                triangles.push({ pts: t, regionId: l.regionId });
+            }
+            continue;
         }
         const apexAt = ring.findIndex(p => p === corners[apexCorner]);
         const apex = ring[apexAt];
