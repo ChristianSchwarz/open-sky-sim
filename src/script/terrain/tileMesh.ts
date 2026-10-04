@@ -86,6 +86,8 @@ export interface TileMeshes {
      * the graded one; undefined for a tile with no track to grade.
      */
     railBed?: Promise<TileRailBed | undefined>;
+    /** Concrete retaining walls the railway beds needed (railBed.ts retainingWalls); disposed with the tile. */
+    railWalls?: THREE.Mesh;
     /** The tile's bridge geometry, once attached (see BridgeMeshes); same states as `roads`. */
     bridges?: BridgeMeshSet | 'pending' | 'none';
     /**
@@ -731,6 +733,7 @@ export function disposeTileMeshes(m: TileMeshes): void {
     m.seamFill?.geometry.dispose();
     m.rivers?.geometry.dispose();
     m.outlines?.geometry.dispose();
+    m.railWalls?.geometry.dispose();
     if (m.cover instanceof THREE.DataTexture) {
         m.cover.dispose();
     }

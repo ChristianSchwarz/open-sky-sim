@@ -245,7 +245,9 @@ land:
   at 6 m: past that the grade gives way, at a steep cost, so rack railways
   and mountain lines stay steep instead of becoming canyons. Grade breaks
   are then rounded into 80 m vertical curves. Track drawn more than 2 m
-  off the land (viaduct approaches) is held where it is, with no bed.
+  off the land is held where it was drawn, and the land is built up (or
+  cut down) to it. Only past 15 m is it treated as a structure and given
+  no bed.
 - **Bridges.** The bake raises a rail deck to clear what it crosses,
   typically 4.4 m above where the approach was draped and 2.4 m beyond
   its end, so the approach used to run into the abutment. A track end
@@ -256,13 +258,39 @@ land:
   The track's last point is then put on the deck's first. The
   approach then climbs to the bridge on an embankment that stops square
   at the abutment (an open bed end), so nothing under the span is buried.
-- **Roads** in the tile are bands of their own, at their baked ground
-  height with 1:2 sides, applied after the beds where both reach. An
-  embankment slopes down to a road and never covers it.
+- **Keeping clear.** Some things must stay as baked: the tile's roads,
+  bridges (every deck, pier and abutment triangle of the tile's and its
+  neighbours' `.pbr`), lakes and the sea, and watercourses. Near one of
+  them, the ground may move at most half its distance to it (1:2): not at
+  all on it, a slope away from it. So a batter runs out before it reaches
+  a road, a bridge or the water. On the bed itself the track still wins.
+- **Retaining walls.** Where that squeezes the earthworks past 45 degrees,
+  a straight concrete wall goes in: a vertical face parallel to the track,
+  just clear of the steep ground (at most 3 m past the bed's edge), from
+  below the ground in front up to the bed, and a flat top back to the
+  bed's edge that covers the steep facets. Each run is simplified to the
+  fewest straight pieces within 15 cm of its line, so a wall is a few
+  quads, about 165 triangles per leaf tile around Garmisch. Walls are only
+  built on leaves, and use the bridges' concrete material. A face counts
+  as steep only if the beds made it so (moved 0.3 m, steepened by 0.3 per
+  metre): a natural cliff a batter touches stays rock.
 - **Land.** Triangles are bisected (conforming, longest edge) only where
-  the bed and its 1:2 batters cannot be followed within 0.75 m.
-  Triangles touching the tile border are never touched, so the seam
-  stitcher's indices hold. It costs about +50 % land triangles on a leaf
+  the bed and its 1:2 batters cannot be followed within 0.75 m. That fit
+  is checked at the bed's own creases inside a triangle (track samples,
+  bed edges, batter toes) as well as on a grid, since merged fields run
+  to 1,400 m and a grid steps over a 5 m bed.
+  - **Border triangles** may be split, but never along an edge between
+    two border vertices. Border vertices never move, keep their exact
+    bytes, and stay in their original soup slot and corner, so the seam
+    stitcher's indices hold.
+  - **Fade at borders:** the beds fade out over the last 30 m before the
+    border, since land beside a fixed border could never fit them.
+  - **Walls:** zero-area vertical faces are only split along an edge a
+    real neighbour splits. Bisecting them on their own looped to the
+    triangle cap.
+  - **Stroke on top:** on the bed itself the track beats a road alongside
+    (a steep edge, then a wall, rather than floating track). Beside the
+    bed, kept features win. It costs about +50 % land triangles on a leaf
   with track up a valley side, much less in flat valleys.
 - **Coarser tiles** (z9-z11) get the same profile with lengths scaled to
   the tile, but no new triangles, only existing vertices moved: a cutting

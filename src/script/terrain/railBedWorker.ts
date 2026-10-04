@@ -20,6 +20,9 @@ ctx.onmessage = (e) => {
         const transfer: Transferable[] = [];
         if (result) {
             transfer.push(result.strokePositions.buffer, result.beds.buffer);
+            if (result.walls) {
+                transfer.push(result.walls.positions.buffer, result.walls.normals.buffer, result.walls.indices.buffer);
+            }
             if (result.land) {
                 transfer.push(result.land.positions.buffer, result.land.normals.buffer, result.land.attrs.buffer);
             }

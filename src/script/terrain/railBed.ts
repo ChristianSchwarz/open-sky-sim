@@ -67,8 +67,10 @@ const FIT_SAMPLE_M = 2;
 const MIN_EDGE_M = 1.5;
 /** Weight of the held samples (chain ends, level crossings) in the fit. */
 const HOLD_WEIGHT = 1e4;
-/** A drawn track this far off the land is not on it, metres. */
+/** A drawn track this far off the land is held where it was drawn, metres; the land is brought to it. */
 const OFF_LAND_M = 2;
+/** ... and this far off, it is a structure, and the land is left alone, metres. */
+const NO_BED_OFF_LAND_M = 15;
 /** Deepest cutting or highest embankment a bed may need, metres. */
 const MAX_EARTHWORK_M = 6;
 /** Half length of the vertical curve a grade break is rounded into, metres. */
@@ -133,6 +135,13 @@ export interface RailBedInput {
      * running into the abutment.
      */
     deckEnds?: Float64Array;
+    /**
+     * What else the earthworks must leave as baked, besides the tile's roads
+     * (read from `strokes`): `tris` 9 per triangle (water, bridge decks,
+     * piers and abutments), `segs` 7 per segment (both ends, then a half
+     * width: watercourses), all in this tile's frame, metres.
+     */
+    keep?: { tris?: Float64Array; segs?: Float64Array };
 }
 
 export interface RailBedStats {
@@ -144,6 +153,8 @@ export interface RailBedStats {
     overLimitM: number;
     trianglesAdded: number;
     verticesMoved: number;
+    /** Triangles of the concrete retaining walls built where earthworks were too steep for a slope. */
+    wallTriangles: number;
 }
 
 export interface RailBedResult {
@@ -158,6 +169,8 @@ export interface RailBedResult {
      * which ends are open (BED_OPEN_A | BED_OPEN_B).
      */
     beds: Float64Array;
+    /** Concrete retaining walls, where the earthworks are too steep to stand as slopes. */
+    walls?: RailWalls;
     stats: RailBedStats;
 }
 
@@ -167,7 +180,9 @@ interface Sample {
     ground: number;
     weight: number;
     h: number;
-    /** Drawn well off the land: held, and no bed. */
+    /** The land under it, as baked. */
+    land: number;
+    /** Drawn far off the land: held, and no bed. */
     off: boolean;
 }
 
@@ -199,7 +214,7 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
     const ground = new GroundIndex(land.positions, q, frame, dims.cell);
 
     // --- profiles ------------------------------------------------------------
-    const stats: RailBedStats = { chains: chains.length, trackM: 0, steepM: 0, overLimitM: 0, trianglesAdded: 0, verticesMoved: 0 };
+    const stats: RailBedStats = { chains: chains.length, trackM: 0, steepM: 0, overLimitM: 0, trianglesAdded: 0, verticesMoved: 0, wallTriangles: 0 };
     const beds: BedSegment[] = [];
     const sq = strokes.quantScale;
     for (const chain of chains) {
@@ -238,11 +253,16 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
             const u = a.u + (b.u - a.u) * t, v = a.v + (b.v - a.v) * t;
             const draped = a.h + (b.h - a.h) * t;
             const land = ground.at(u, v) ?? draped;
-            // Track not on the land - a viaduct's approach, a stroke over a
-            // cliff - stays where it was drawn, with no bed.
-            const off = Math.abs(land - draped) > dims.offLand;
+            // Track drawn well off the land - an approach the bake raised, a
+            // stroke over a dip the mesh lost - stays where it was drawn,
+            // and the land comes to it: an embankment under it rather than
+            // track in the air. Past NO_BED_OFF_LAND_M it is a structure the
+            // land has nothing to do with, and gets no bed at all.
+            const gap = Math.abs(land - draped);
+            const off = gap > dims.offLand;
+            const noBed = gap > NO_BED_OFF_LAND_M;
             const hold = off || k === 0 || k === n - 1 || (t < 0.5 ? a.hold : b.hold);
-            samples.push({ u, v, ground: off ? draped : land, weight: hold ? HOLD_WEIGHT : 1, h: 0, off });
+            samples.push({ u, v, ground: off ? draped : land, land, weight: hold ? HOLD_WEIGHT : 1, h: 0, off: noBed });
         }
         // The limit, unless that takes more earthworks than a real line
         // would move: a rack railway or a line up a mountainside climbs
@@ -316,24 +336,31 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
 
     // --- the mesh, deduplicated by position for adjacency ---------------------
     const mesh = new SoupMesh(land, q, frame, input.pinned, triCount, dims);
-    // Roads keep their ground: a road is drawn on the land as it was baked,
-    // so an embankment spilling onto one (beside a bridge's abutment, along
-    // a road that follows the line) would bury it. Each road is a band of
-    // its own, at its own ground height, and the earthworks slope down to
-    // it at 1:2 rather than stopping in a cliff the refinement would chase.
-    const roads = new RoadIndex(strokes, frame, dims.cell, ground);
-    // Where the two disagree - a road beside a bridge's abutment - the
-    // road wins.
+    // Roads, bridges, water keep their ground: they are drawn as baked, so
+    // a batter spilling onto one would bury it. See KeepIndex.
+    const keep = new KeepIndex(strokes, input.keep, frame, dims.cell, (u0, v0, u1, v1) => bedIndex.anyNear(u0, v0, u1, v1));
+    // The border's vertices never move (the seam stitcher's), so the beds
+    // fade out over the last BORDER_TAPER_M before it: held hard, the land
+    // beside a fixed border could never fit them, and the refinement would
+    // grind a strip along the border down to its smallest triangles.
+    const border = new BorderIndex(land.positions, input.pinned, q, frame, dims.cell);
     const band = { lo: 0, hi: 0 };
     const target = (u: number, v: number, h: number): number => {
+        const fade = border.fade(u, v);
+        return fade === 0 ? h : h + (bedTarget(u, v, h) - h) * fade;
+    };
+    const bedTarget = (u: number, v: number, h: number): number => {
         if (!bedIndex.band(u, v, band)) {
             return h;
         }
         const bed = band.lo > band.hi ? (band.lo + band.hi) / 2 : Math.min(band.hi, Math.max(band.lo, h));
-        band.lo = -Infinity;
-        band.hi = Infinity;
-        roads.narrow(u, v, band);
-        return Math.min(band.hi, Math.max(band.lo, bed));
+        // On the bed itself (its band closed to a height) the track wins:
+        // a road alongside gets a steep edge rather than the track floating.
+        if (band.hi - band.lo < 1e-6) {
+            return bed;
+        }
+        const allow = keep.allowance(u, v);
+        return allow === Infinity ? bed : Math.min(h + allow, Math.max(h - allow, bed));
     };
 
     // --- refine where the bed moves the ground -------------------------------
@@ -343,8 +370,7 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
     }
     while (input.refine !== false && queue.length > 0 && mesh.added < MAX_NEW_TRIANGLES) {
         const t = queue.pop()!;
-        const tri = mesh.tris[t];
-        if (!tri.alive || tri.pinned) {
+        if (!mesh.tris[t].alive) {
             continue;
         }
         if (!mesh.needsSplit(t, target, bedIndex)) {
@@ -363,7 +389,15 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
     }
     stats.trianglesAdded = mesh.added;
     stats.verticesMoved = moved;
-    return { land: mesh.toSoup(), strokePositions, beds: bedFloats, stats };
+    mesh.markWalls();
+    // Walls only where the land was refined to need them: a coarse tile's
+    // cutting is a few pixels, its vertices only moved.
+    const walls = input.refine === false ? undefined : retainingWalls(beds, mesh.wallPoints(), frame, (u, v) => {
+        const h = ground.at(u, v);
+        return h === undefined ? -Infinity : target(u, v, h);
+    });
+    stats.wallTriangles = walls ? walls.indices.length / 3 : 0;
+    return { land: mesh.toSoup(), strokePositions, beds: bedFloats, walls, stats };
 }
 
 interface DeckEnd {
@@ -418,6 +452,220 @@ function nearestDeckEnd(decks: readonly DeckEnd[], u: number, v: number): DeckEn
     return best;
 }
 
+/** Farthest out from the bed's edge a retaining wall goes to clear the steep ground, metres. */
+const WALL_REACH_M = 3;
+/** Clear of the steepest ground a wall's face stands, metres. */
+const WALL_CLEAR_M = 0.2;
+/** How far a wall's top stands above the bed, so it never fights the land at the bed's edge, metres. */
+const WALL_PROUD_M = 0.05;
+/** How far a wall's foot is sunk below the ground in front of it, metres. */
+const WALL_FOOT_M = 0.5;
+/** A wall's line may stray this far from its run's samples once simplified, metres. */
+const WALL_SIMPLIFY_M = 0.15;
+
+/** Retaining walls as one flat-shaded mesh: tile frame, metres. */
+export interface RailWalls {
+    positions: Float32Array;
+    normals: Float32Array;
+    indices: Uint32Array;
+}
+
+/**
+ * Straight concrete retaining walls where the earthworks are too steep to
+ * stand as slopes (SoupMesh.markWalls): a vertical face parallel to the
+ * track, clear of the steep ground, from below the ground in front of it
+ * up to the bed, and a flat top back to the bed's edge that covers the
+ * steep facets behind it. Each run is simplified to the fewest straight
+ * pieces that keep within WALL_SIMPLIFY_M of it, so a straight wall is a
+ * handful of quads however many samples it spans.
+ */
+function retainingWalls(
+    beds: readonly BedSegment[], steep: readonly number[], frame: PlanFrame,
+    low: (u: number, v: number) => number,
+): RailWalls | undefined {
+    if (steep.length === 0) {
+        return undefined;
+    }
+    const CELL = 16;
+    const grid = new Map<number, number[]>();
+    for (let i = 0; i < steep.length; i += 2) {
+        const key = cellKey(Math.floor(steep[i] / CELL), Math.floor(steep[i + 1] / CELL));
+        const list = grid.get(key);
+        if (list) {
+            list.push(i);
+        } else {
+            grid.set(key, [i]);
+        }
+    }
+    const pos: number[] = [];
+    const nrm: number[] = [];
+    const idx: number[] = [];
+    const toTile = (u: number, v: number, h: number) => [
+        u * frame.a[0] + v * frame.b[0] + h * frame.up[0],
+        u * frame.a[1] + v * frame.b[1] + h * frame.up[1],
+        u * frame.a[2] + v * frame.b[2] + h * frame.up[2],
+    ];
+    const toTileDir = (u: number, v: number, h: number) => toTile(u, v, h);
+    const quad = (corners: number[][], normal: number[]) => {
+        const base = pos.length / 3;
+        for (const c of corners) {
+            pos.push(...c);
+            nrm.push(...normal);
+        }
+        idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    };
+
+    for (const side of [1, -1]) {
+        // How far out each segment's steep ground reaches, or -1 for none.
+        const reach = beds.map(s => {
+            const du = s.b.u - s.a.u, dv = s.b.v - s.a.v;
+            const len = Math.hypot(du, dv);
+            if (len < 1e-6) {
+                return -1;
+            }
+            const tu = du / len, tv = dv / len, nu = -tv * side, nv = tu * side;
+            const edge = s.half + SHOULDER_M;
+            let out = -1;
+            const pad = edge + WALL_REACH_M;
+            const u0 = Math.floor((Math.min(s.a.u, s.b.u) - pad) / CELL), u1 = Math.floor((Math.max(s.a.u, s.b.u) + pad) / CELL);
+            const v0 = Math.floor((Math.min(s.a.v, s.b.v) - pad) / CELL), v1 = Math.floor((Math.max(s.a.v, s.b.v) + pad) / CELL);
+            for (let cu = u0; cu <= u1; cu++) {
+                for (let cv = v0; cv <= v1; cv++) {
+                    for (const i of grid.get(cellKey(cu, cv)) ?? []) {
+                        const ru = steep[i] - s.a.u, rv = steep[i + 1] - s.a.v;
+                        const t = (ru * tu + rv * tv) / len;
+                        const d = ru * nu + rv * nv;
+                        if (t >= -0.1 && t <= 1.1 && d >= edge - 0.5 && d <= edge + WALL_REACH_M) {
+                            out = Math.max(out, d);
+                        }
+                    }
+                }
+            }
+            return out;
+        });
+        const buildRun = (first: number, last: number): void => {
+            const run = beds.slice(first, last + 1);
+            const edge = Math.max(...run.map(s => s.half)) + SHOULDER_M;
+            const out = Math.max(...reach.slice(first, last + 1)) + WALL_CLEAR_M;
+            const samples = [run[0].a, ...run.map(s => s.b)];
+            // The normal at each sample: the mean of its segments'.
+            const normals = samples.map((_, k) => {
+                let nu = 0, nv = 0;
+                for (const s of [run[k - 1], run[k]]) {
+                    if (!s) {
+                        continue;
+                    }
+                    const du = s.b.u - s.a.u, dv = s.b.v - s.a.v;
+                    const len = Math.hypot(du, dv) || 1;
+                    nu += (-dv / len) * side;
+                    nv += (du / len) * side;
+                }
+                const len = Math.hypot(nu, nv) || 1;
+                return [nu / len, nv / len];
+            });
+            const face = samples.map((p, k) => ({
+                u: p.u + normals[k][0] * out, v: p.v + normals[k][1] * out, h: p.h + WALL_PROUD_M,
+                foot: low(p.u + normals[k][0] * (out + 0.5), p.v + normals[k][1] * (out + 0.5)) - WALL_FOOT_M,
+            }));
+            const keep = simplify(face.map(f => [f.u, f.v, f.h]), WALL_SIMPLIFY_M);
+            for (let k = 0; k + 1 < keep.length; k++) {
+                const ia = keep[k], ib = keep[k + 1];
+                // The foot follows the lowest ground the span stands on.
+                let foot = Infinity;
+                for (let m = ia; m <= ib; m++) {
+                    foot = Math.min(foot, face[m].foot, face[m].h - 0.5);
+                }
+                const A = face[ia], B = face[ib];
+                const su = B.u - A.u, sv = B.v - A.v;
+                const sl = Math.hypot(su, sv) || 1;
+                // Outward: away from the track, horizontal.
+                let ou = sv / sl, ov = -su / sl;
+                const mid = samples[Math.floor((ia + ib) / 2)];
+                if ((A.u - mid.u) * ou + (A.v - mid.v) * ov < 0) {
+                    ou = -ou;
+                    ov = -ov;
+                }
+                const outward = toTileDir(ou, ov, 0);
+                quad([toTile(A.u, A.v, foot), toTile(B.u, B.v, foot), toTile(B.u, B.v, B.h), toTile(A.u, A.v, A.h)], outward);
+                // The top, back to the bed's edge, over the steep ground.
+                const back = out - edge;
+                quad([
+                    toTile(A.u, A.v, A.h), toTile(B.u, B.v, B.h),
+                    toTile(B.u - ou * back, B.v - ov * back, B.h), toTile(A.u - ou * back, A.v - ov * back, A.h),
+                ], frame.up);
+                // Closed at the run's two ends.
+                for (const [P, along] of [[A, -1], [B, 1]] as const) {
+                    if ((along < 0 && k !== 0) || (along > 0 && k + 2 !== keep.length)) {
+                        continue;
+                    }
+                    const end = toTileDir(su / sl * along, sv / sl * along, 0);
+                    quad([
+                        toTile(P.u, P.v, foot), toTile(P.u - ou * back, P.v - ov * back, foot),
+                        toTile(P.u - ou * back, P.v - ov * back, P.h), toTile(P.u, P.v, P.h),
+                    ], end);
+                }
+            }
+        };
+        // Runs of steep segments along one chain; a single quiet segment
+        // between two steep ones is bridged rather than leaving a gap.
+        let i = 0;
+        while (i < beds.length) {
+            if (reach[i] < 0) {
+                i++;
+                continue;
+            }
+            let j = i;
+            while (j + 1 < beds.length && beds[j + 1].a === beds[j].b
+                && (reach[j + 1] >= 0 || (j + 2 < beds.length && reach[j + 2] >= 0 && beds[j + 2].a === beds[j + 1].b))) {
+                j++;
+            }
+            buildRun(i, j);
+            i = j + 1;
+        }
+
+
+    }
+    if (idx.length === 0) {
+        return undefined;
+    }
+    return { positions: Float32Array.from(pos), normals: Float32Array.from(nrm), indices: Uint32Array.from(idx) };
+}
+
+/** Douglas-Peucker over (u, v, h) points: the indices kept, first and last always. */
+function simplify(points: readonly number[][], tolerance: number): number[] {
+    const keep = new Uint8Array(points.length);
+    keep[0] = 1;
+    keep[points.length - 1] = 1;
+    const stack: Array<[number, number]> = [[0, points.length - 1]];
+    while (stack.length > 0) {
+        const [i, j] = stack.pop()!;
+        const a = points[i], b = points[j];
+        const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        const l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        let worst = -1, at = -1;
+        for (let k = i + 1; k < j; k++) {
+            const p = points[k];
+            const t = l2 > 1e-12 ? Math.min(1, Math.max(0, ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1] + (p[2] - a[2]) * d[2]) / l2)) : 0;
+            const e = Math.hypot(p[0] - a[0] - d[0] * t, p[1] - a[1] - d[1] * t, p[2] - a[2] - d[2] * t);
+            if (e > worst) {
+                worst = e;
+                at = k;
+            }
+        }
+        if (worst > tolerance) {
+            keep[at] = 1;
+            stack.push([i, at], [at, j]);
+        }
+    }
+    const out: number[] = [];
+    keep.forEach((k, i) => {
+        if (k) {
+            out.push(i);
+        }
+    });
+    return out;
+}
+
 /** The lengths one tile works in; see layRailBeds. */
 interface Dims {
     step: number;
@@ -441,7 +689,7 @@ function bedSegmentFloats(beds: readonly BedSegment[], frame: PlanFrame): Float6
             out[o + k * 3 + 2] = p.u * a[2] + p.v * b[2] + p.h * up[2];
         });
         out[o + 6] = s.half;
-        out[o + 7] = Math.max(Math.abs(s.a.h - s.a.ground), Math.abs(s.b.h - s.b.ground));
+        out[o + 7] = Math.max(Math.abs(s.a.h - s.a.land), Math.abs(s.b.h - s.b.land));
         out[o + 8] = s.open;
     });
     return out;
@@ -748,68 +996,201 @@ export function bedSegmentParam(
     return Math.min(1, Math.max(0, t));
 }
 
-/** Road clear of the bed's earthworks beyond a road's own half width, metres. */
-const ROAD_KEEP_MARGIN_M = 0.5;
+/** Rise per metre past which an earthwork face is a retaining wall: 45 degrees. */
+const WALL_SLOPE = 1;
+/** ... when the earthworks steepened it by at least this much (rise per metre), */
+const WALL_STEEPENED = 0.3;
+/** ... and moved it at least this far, metres. */
+const WALL_MIN_MOVE_M = 0.3;
+/** Plan area under which a triangle is a vertical wall, square metres. */
+const WALL_PLAN_AREA_M2 = 0.01;
+/** Distance from the tile border over which the beds fade in, metres. */
+const BORDER_TAPER_M = 30;
 
-/** The tile's roads (every stroke not a track), answering "is this on a road". */
-class RoadIndex {
+/** The tile's border vertices in plan, answering how far in from the border a point is. */
+class BorderIndex {
     private readonly cells = new Map<number, number[]>();
-    private readonly segs: number[] = []; // ua, va, ha, ub, vb, hb, half
+    private readonly pts: number[] = [];
 
-    constructor(t: PtrTile, frame: PlanFrame, private readonly cell: number, ground: GroundIndex) {
-        const q = t.quantScale;
-        const at = (vi: number) => frame.toPlan([t.positions[vi * 3] * q, t.positions[vi * 3 + 1] * q, t.positions[vi * 3 + 2] * q]);
-        for (let i = 0; i + 5 < t.indices.length; i += 6) {
-            const a = t.indices[i], b = t.indices[i + 5];
-            const cls = t.directions[a * 4 + 3] & ROAD_CLASS_MASK;
+    constructor(positions: Int16Array, border: ReadonlySet<number>, q: number, frame: PlanFrame, private readonly cell: number) {
+        const seen = new Set<string>();
+        for (const vi of border) {
+            const key = `${positions[vi * 3]},${positions[vi * 3 + 1]},${positions[vi * 3 + 2]}`;
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            const [u, v] = frame.toPlan([positions[vi * 3] * q, positions[vi * 3 + 1] * q, positions[vi * 3 + 2] * q]);
+            const k = this.pts.length / 2;
+            this.pts.push(u, v);
+            const ck = cellKey(Math.floor(u / cell), Math.floor(v / cell));
+            const list = this.cells.get(ck);
+            if (list) {
+                list.push(k);
+            } else {
+                this.cells.set(ck, [k]);
+            }
+        }
+    }
+
+    /** 0 on the border, rising smoothly to 1 at BORDER_TAPER_M in. */
+    fade(u: number, v: number): number {
+        if (this.pts.length === 0) {
+            return 1;
+        }
+        const r = Math.ceil(BORDER_TAPER_M / this.cell);
+        const cu = Math.floor(u / this.cell), cv = Math.floor(v / this.cell);
+        let d2 = BORDER_TAPER_M * BORDER_TAPER_M;
+        for (let du = -r; du <= r; du++) {
+            for (let dv = -r; dv <= r; dv++) {
+                for (const k of this.cells.get(cellKey(cu + du, cv + dv)) ?? []) {
+                    const x = this.pts[k * 2] - u, y = this.pts[k * 2 + 1] - v;
+                    d2 = Math.min(d2, x * x + y * y);
+                }
+            }
+        }
+        const t = Math.sqrt(d2) / BORDER_TAPER_M;
+        return t * t * (3 - 2 * t);
+    }
+}
+
+/** Clear of the earthworks beyond a kept feature's own edge (a road's half width), metres. */
+const KEEP_MARGIN_M = 0.5;
+/** Farthest a kept feature limits the earthworks: past it, 1:2 allows more than any bed moves, metres. */
+const KEEP_REACH_M = 2 * (NO_BED_OFF_LAND_M + KEEP_MARGIN_M);
+
+/** Whether any bed reaches into a plan box. */
+type Near = (u0: number, v0: number, u1: number, v1: number) => boolean;
+
+/**
+ * What the earthworks must leave as baked: the tile's roads, other
+ * structures' footprints (bridge decks, piers and abutments, this tile's and
+ * the neighbours'), lakes and the sea, and watercourses. Answers how far a
+ * plan point is from the nearest of them; the ground there may then move at
+ * most 1:2 of that distance - not at all on one, a cutting's or an
+ * embankment's slope away from it - so a bed's batter runs out before it
+ * reaches a road, a bridge or the water rather than burying it.
+ */
+class KeepIndex {
+    private readonly cells = new Map<number, number[]>();
+    /** Segments: ua, va, ub, vb, half. */
+    private readonly segs: number[] = [];
+    /** Triangles: u0, v0, u1, v1, u2, v2. */
+    private readonly tris: number[] = [];
+
+    constructor(
+        strokes: PtrTile, keep: RailBedInput['keep'], frame: PlanFrame,
+        private readonly cell: number, near: Near,
+    ) {
+        const q = strokes.quantScale;
+        const at = (vi: number) => frame.toPlan([strokes.positions[vi * 3] * q, strokes.positions[vi * 3 + 1] * q, strokes.positions[vi * 3 + 2] * q]);
+        // Roads: every stroke that is not a track.
+        for (let i = 0; i + 5 < strokes.indices.length; i += 6) {
+            const a = strokes.indices[i], b = strokes.indices[i + 5];
+            const cls = strokes.directions[a * 4 + 3] & ROAD_CLASS_MASK;
             if (isRailClass(cls) || isZoneClass(cls)) {
                 continue;
             }
             const pa = at(a), pb = at(b);
-            const half = Math.max(t.halfWidths[a], t.halfWidths[b]) / 10 + ROAD_KEEP_MARGIN_M;
-            const ha = ground.at(pa[0], pa[1]), hb = ground.at(pb[0], pb[1]);
-            if (ha === undefined || hb === undefined) {
+            this.addSeg(pa[0], pa[1], pb[0], pb[1], Math.max(strokes.halfWidths[a], strokes.halfWidths[b]) / 10, near);
+        }
+        const segs = keep?.segs;
+        for (let o = 0; segs && o + 6 < segs.length; o += 7) {
+            const pa = frame.toPlan([segs[o], segs[o + 1], segs[o + 2]]);
+            const pb = frame.toPlan([segs[o + 3], segs[o + 4], segs[o + 5]]);
+            this.addSeg(pa[0], pa[1], pb[0], pb[1], segs[o + 6], near);
+        }
+        const tris = keep?.tris;
+        for (let o = 0; tris && o + 8 < tris.length; o += 9) {
+            const p = [0, 3, 6].map(k => frame.toPlan([tris[o + k], tris[o + k + 1], tris[o + k + 2]]));
+            const u0 = Math.min(p[0][0], p[1][0], p[2][0]), u1 = Math.max(p[0][0], p[1][0], p[2][0]);
+            const v0 = Math.min(p[0][1], p[1][1], p[2][1]), v1 = Math.max(p[0][1], p[1][1], p[2][1]);
+            if (!near(u0 - KEEP_REACH_M, v0 - KEEP_REACH_M, u1 + KEEP_REACH_M, v1 + KEEP_REACH_M)) {
                 continue;
             }
-            const reach = half + BATTER_REACH_M;
-            const k = this.segs.length / 7;
-            this.segs.push(pa[0], pa[1], ha, pb[0], pb[1], hb, half);
-            const u0 = Math.floor((Math.min(pa[0], pb[0]) - reach) / cell), u1 = Math.floor((Math.max(pa[0], pb[0]) + reach) / cell);
-            const v0 = Math.floor((Math.min(pa[1], pb[1]) - reach) / cell), v1 = Math.floor((Math.max(pa[1], pb[1]) + reach) / cell);
-            for (let cu = u0; cu <= u1; cu++) {
-                for (let cv = v0; cv <= v1; cv++) {
-                    const key = cellKey(cu, cv);
-                    const list = this.cells.get(key);
-                    if (list) {
-                        list.push(k);
-                    } else {
-                        this.cells.set(key, [k]);
-                    }
+            const k = this.tris.length / 6;
+            this.tris.push(p[0][0], p[0][1], p[1][0], p[1][1], p[2][0], p[2][1]);
+            // Negative ids are triangles.
+            this.bucket(-(k + 1), u0, v0, u1, v1, KEEP_REACH_M, near);
+        }
+    }
+
+    private addSeg(ua: number, va: number, ub: number, vb: number, half: number, near: Near): void {
+        const u0 = Math.min(ua, ub), u1 = Math.max(ua, ub), v0 = Math.min(va, vb), v1 = Math.max(va, vb);
+        const reach = half + KEEP_MARGIN_M + KEEP_REACH_M;
+        if (!near(u0 - reach, v0 - reach, u1 + reach, v1 + reach)) {
+            return;
+        }
+        const k = this.segs.length / 5;
+        this.segs.push(ua, va, ub, vb, half + KEEP_MARGIN_M);
+        this.bucket(k, u0, v0, u1, v1, reach, near);
+    }
+
+    private bucket(
+        id: number, u0: number, v0: number, u1: number, v1: number, reach: number, near: Near,
+    ): void {
+        const c = this.cell;
+        for (let cu = Math.floor((u0 - reach) / c); cu <= Math.floor((u1 + reach) / c); cu++) {
+            for (let cv = Math.floor((v0 - reach) / c); cv <= Math.floor((v1 + reach) / c); cv++) {
+                // Only cells a bed reaches: a lake's triangle can span hundreds.
+                if (!near(cu * c, cv * c, (cu + 1) * c, (cv + 1) * c)) {
+                    continue;
+                }
+                const key = cellKey(cu, cv);
+                const list = this.cells.get(key);
+                if (list) {
+                    list.push(id);
+                } else {
+                    this.cells.set(key, [id]);
                 }
             }
         }
     }
 
-    /** Narrows `band` to every road band reaching (u, v): on a road its ground, beside it 1:2. */
-    narrow(u: number, v: number, band: { lo: number; hi: number }): void {
+    /** How far the ground at (u, v) may leave its baked height, metres; Infinity when nothing kept is near. */
+    allowance(u: number, v: number): number {
         const list = this.cells.get(cellKey(Math.floor(u / this.cell), Math.floor(v / this.cell)));
         if (!list) {
-            return;
+            return Infinity;
         }
-        for (const k of list) {
-            const o = k * 7, s = this.segs;
-            const du = s[o + 3] - s[o], dv = s[o + 4] - s[o + 1];
-            const l2 = du * du + dv * dv;
-            const t = l2 > 1e-12 ? Math.min(1, Math.max(0, ((u - s[o]) * du + (v - s[o + 1]) * dv) / l2)) : 0;
-            const excess = Math.max(0, Math.hypot(u - s[o] - du * t, v - s[o + 1] - dv * t) - s[o + 6]);
-            if (excess > BATTER_REACH_M) {
-                continue;
+        let d = Infinity;
+        for (const id of list) {
+            if (id >= 0) {
+                const o = id * 5, s = this.segs;
+                const du = s[o + 2] - s[o], dv = s[o + 3] - s[o + 1];
+                const l2 = du * du + dv * dv;
+                const t = l2 > 1e-12 ? Math.min(1, Math.max(0, ((u - s[o]) * du + (v - s[o + 1]) * dv) / l2)) : 0;
+                d = Math.min(d, Math.max(0, Math.hypot(u - s[o] - du * t, v - s[o + 1] - dv * t) - s[o + 4]));
+            } else {
+                const o = (-id - 1) * 6;
+                d = Math.min(d, Math.max(0, triangleDistance(u, v, this.tris, o) - KEEP_MARGIN_M));
             }
-            const road = s[o + 2] + (s[o + 5] - s[o + 2]) * t;
-            band.lo = Math.max(band.lo, road - excess * BATTER);
-            band.hi = Math.min(band.hi, road + excess * BATTER);
+            if (d === 0) {
+                return 0;
+            }
+        }
+        return d === Infinity ? Infinity : d * BATTER;
+    }
+}
+
+/** Plan distance from (u, v) to a triangle (u0, v0, u1, v1, u2, v2 at `o`); 0 inside. */
+function triangleDistance(u: number, v: number, t: readonly number[], o: number): number {
+    const ax = t[o], ay = t[o + 1], bx = t[o + 2], by = t[o + 3], cx = t[o + 4], cy = t[o + 5];
+    const det = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (Math.abs(det) > 1e-12) {
+        const l0 = ((by - cy) * (u - cx) + (cx - bx) * (v - cy)) / det;
+        const l1 = ((cy - ay) * (u - cx) + (ax - cx) * (v - cy)) / det;
+        if (l0 >= 0 && l1 >= 0 && l0 + l1 <= 1) {
+            return 0;
         }
     }
+    const seg = (px: number, py: number, qx: number, qy: number) => {
+        const dx = qx - px, dy = qy - py;
+        const l2 = dx * dx + dy * dy;
+        const s = l2 > 1e-12 ? Math.min(1, Math.max(0, ((u - px) * dx + (v - py) * dy) / l2)) : 0;
+        return Math.hypot(u - px - dx * s, v - py - dy * s);
+    };
+    return Math.min(seg(ax, ay, bx, by), seg(bx, by, cx, cy), seg(cx, cy, ax, ay));
 }
 
 /** The bed segments, bucketed, answering "how far from the nearest bed, and at what design height". */
@@ -834,6 +1215,42 @@ class BedIndex {
                 }
             }
         });
+    }
+
+    /**
+     * The points where the land has to bend to follow the beds reaching
+     * into a plan box: each sample of the track, and either side of it the
+     * bed's edge and the toe of its batter. A triangle hundreds of metres
+     * across (a merged field) is checked at these, not only on its own
+     * grid, whose points would fall either side of a 5 m bed.
+     */
+    creases(u0: number, v0: number, u1: number, v1: number, out: number[]): void {
+        out.length = 0;
+        const seen = new Set<number>();
+        for (let cu = Math.floor(u0 / this.cell); cu <= Math.floor(u1 / this.cell); cu++) {
+            for (let cv = Math.floor(v0 / this.cell); cv <= Math.floor(v1 / this.cell); cv++) {
+                for (const i of this.cells.get(cellKey(cu, cv)) ?? []) {
+                    if (seen.has(i)) {
+                        continue;
+                    }
+                    seen.add(i);
+                    const s = this.segs[i];
+                    const du = s.b.u - s.a.u, dv = s.b.v - s.a.v;
+                    const len = Math.hypot(du, dv) || 1;
+                    const nu = -dv / len, nv = du / len;
+                    for (const p of [s.a, s.b]) {
+                        const edge = s.half + SHOULDER_M;
+                        const toe = edge + Math.min(BATTER_REACH_M, Math.abs(p.h - p.land) / BATTER);
+                        for (const d of [0, edge, -edge, toe, -toe]) {
+                            const u = p.u + nu * d, v = p.v + nv * d;
+                            if (u >= u0 && u <= u1 && v >= v0 && v <= v1) {
+                                out.push(u, v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /** Whether any bed reaches into the plan box. */
@@ -899,11 +1316,17 @@ interface Tri {
     /** Soup vertex each corner takes its normal and attributes from. */
     s: [number, number, number];
     alive: boolean;
-    pinned: boolean;
-    /** Original soup triangle, or -1 for a piece. */
+    /**
+     * The soup triangle whose slot this one is written to, or -1 for a piece
+     * written after them. A triangle with a border vertex hands its slot to
+     * the half that keeps its border vertices, at the same corners, so the
+     * seam stitcher's soup indices still find them.
+     */
     orig: number;
-    /** Touched by a split or a move: its normal is recomputed. */
+    /** Touched by a split or a move: written from its corners, normal recomputed. */
     dirty: boolean;
+    /** Too steep to stand as a slope: a retaining wall goes in front of it (see SoupMesh.markWalls). */
+    wall?: boolean;
 }
 
 /** The soup as shared positions and triangles, for conforming bisection. */
@@ -914,18 +1337,25 @@ class SoupMesh {
     added = 0;
     private readonly edges = new Map<string, number[]>();
     private readonly mids = new Map<string, number>();
-    private readonly pinnedPos = new Set<number>();
+    /** Scratch for the crease points needsSplit checks. */
+    private readonly probe: number[] = [];
+    /** Positions on the tile's border (the stitcher's): never moved, never split between. */
+    private readonly borderPos = new Set<number>();
+    /** Quantised position of each input position id, written back untouched while it has not moved. */
+    private readonly quantised: number[] = [];
+    private readonly moved = new Set<number>();
+    /** The height a moved position had before the earthworks. */
+    private readonly before = new Map<number, number>();
 
     constructor(
         private readonly land: LandSoup, private readonly q: number,
-        private readonly frame: PlanFrame, pinnedVerts: ReadonlySet<number>, triCount: number,
+        private readonly frame: PlanFrame, borderVerts: ReadonlySet<number>, private readonly triCount: number,
         private readonly dims: Dims,
     ) {
         const ids = new Map<string, number>();
         const P = land.positions;
         for (let t = 0; t < triCount; t++) {
             const c: number[] = [];
-            let pinned = false;
             for (let k = 0; k < 3; k++) {
                 const vi = t * 3 + k;
                 const key = `${P[vi * 3]},${P[vi * 3 + 1]},${P[vi * 3 + 2]}`;
@@ -934,23 +1364,18 @@ class SoupMesh {
                     id = this.pos.length / 3;
                     const p = frame.toPlan([P[vi * 3] * q, P[vi * 3 + 1] * q, P[vi * 3 + 2] * q]);
                     this.pos.push(p[0], p[1], p[2]);
+                    this.quantised.push(P[vi * 3], P[vi * 3 + 1], P[vi * 3 + 2]);
                     ids.set(key, id);
                 }
                 c.push(id);
-                if (pinnedVerts.has(vi)) {
-                    pinned = true;
+                if (borderVerts.has(vi)) {
+                    this.borderPos.add(id);
                 }
             }
-            const tri: Tri = {
+            this.tris.push({
                 c: c as [number, number, number], s: [t * 3, t * 3 + 1, t * 3 + 2],
-                alive: true, pinned, orig: t, dirty: false,
-            };
-            this.tris.push(tri);
-            if (pinned) {
-                for (const id of c) {
-                    this.pinnedPos.add(id);
-                }
-            }
+                alive: true, orig: t, dirty: false,
+            });
             this.link(t);
         }
     }
@@ -986,14 +1411,40 @@ class SoupMesh {
         }
     }
 
+    private edgeLength(a: number, b: number): number {
+        return Math.hypot(this.pos[a * 3] - this.pos[b * 3], this.pos[a * 3 + 1] - this.pos[b * 3 + 1]);
+    }
+
     longestEdge(t: number): { k: number; len: number } {
         const c = this.tris[t].c;
         let best = { k: 0, len: -1 };
         for (let k = 0; k < 3; k++) {
-            const a = c[k] * 3, b = c[(k + 1) % 3] * 3;
-            const len = Math.hypot(this.pos[a] - this.pos[b], this.pos[a + 1] - this.pos[b + 1]);
+            const len = this.edgeLength(c[k], c[(k + 1) % 3]);
             if (len > best.len) {
                 best = { k, len };
+            }
+        }
+        return best;
+    }
+
+    /**
+     * The edge `t` is bisected along: its longest, except that an edge
+     * between two border positions is never split - a vertex there would be
+     * off the seam stitcher's table. Undefined when only such edges remain.
+     */
+    private splitEdge(t: number): { a: number; b: number } | undefined {
+        const c = this.tris[t].c;
+        let best: { a: number; b: number } | undefined;
+        let bestLen = -1;
+        for (let k = 0; k < 3; k++) {
+            const a = c[k], b = c[(k + 1) % 3];
+            if (this.borderPos.has(a) && this.borderPos.has(b)) {
+                continue;
+            }
+            const len = this.edgeLength(a, b);
+            if (len > bestLen) {
+                best = { a, b };
+                bestLen = len;
             }
         }
         return best;
@@ -1005,7 +1456,8 @@ class SoupMesh {
      * moved. Error-driven rather than a fixed edge length, so the
      * refinement goes into the bed's creases (its edges, the batter toes)
      * and where the bed really leaves the ground, not into every triangle
-     * the track passes.
+     * the track passes. Checked at the beds' creases inside it as well as
+     * on its own grid (see BedIndex.creases).
      */
     needsSplit(t: number, target: (u: number, v: number, h: number) => number, beds: BedIndex): boolean {
         const c = this.tris[t].c;
@@ -1020,15 +1472,32 @@ class SoupMesh {
             return false;
         }
         const d = P.map(([u, v, h]) => target(u, v, h) - h);
-        const n = Math.min(32, Math.max(2, Math.ceil(longest / this.dims.sample)));
+        const off = (u: number, v: number, h: number, fit: number) => Math.abs(target(u, v, h) - h - fit) > this.dims.tolerance;
+        // The beds' own creases inside the triangle first.
+        beds.creases(u0, v0, u1, v1, this.probe);
+        const det = (P[1][1] - P[2][1]) * (P[0][0] - P[2][0]) + (P[2][0] - P[1][0]) * (P[0][1] - P[2][1]);
+        if (Math.abs(det) > 1e-9) {
+            for (let i = 0; i < this.probe.length; i += 2) {
+                const u = this.probe[i], v = this.probe[i + 1];
+                const l0 = ((P[1][1] - P[2][1]) * (u - P[2][0]) + (P[2][0] - P[1][0]) * (v - P[2][1])) / det;
+                const l1 = ((P[2][1] - P[0][1]) * (u - P[2][0]) + (P[0][0] - P[2][0]) * (v - P[2][1])) / det;
+                const l2 = 1 - l0 - l1;
+                if (l0 < 0 || l1 < 0 || l2 < 0) {
+                    continue;
+                }
+                if (off(u, v, l0 * P[0][2] + l1 * P[1][2] + l2 * P[2][2], l0 * d[0] + l1 * d[1] + l2 * d[2])) {
+                    return true;
+                }
+            }
+        }
+        const n = Math.min(32, Math.ceil(longest / this.dims.sample));
         for (let i = 0; i <= n; i++) {
             for (let j = 0; i + j <= n; j++) {
                 const a = i / n, b = j / n, w = 1 - a - b;
                 const u = P[0][0] * w + P[1][0] * a + P[2][0] * b;
                 const v = P[0][1] * w + P[1][1] * a + P[2][1] * b;
                 const h = P[0][2] * w + P[1][2] * a + P[2][2] * b;
-                const fit = d[0] * w + d[1] * a + d[2] * b;
-                if (Math.abs(target(u, v, h) - h - fit) > this.dims.tolerance) {
+                if (off(u, v, h, d[0] * w + d[1] * a + d[2] * b)) {
                     return true;
                 }
             }
@@ -1036,16 +1505,30 @@ class SoupMesh {
         return false;
     }
 
-    /** Conforming longest-edge bisection of `t`; returns the triangles made. */
+    /**
+     * Whether `t` has (next to) no area in plan: one of the bake's vertical
+     * walls. Bisecting one makes walls again, the same edges over and over;
+     * a wall is only split along an edge a real neighbour is split along.
+     */
+    private isWall(t: number): boolean {
+        const [a, b, c] = this.tris[t].c;
+        const p = this.pos;
+        const area = (p[b * 3] - p[a * 3]) * (p[c * 3 + 1] - p[a * 3 + 1]) - (p[c * 3] - p[a * 3]) * (p[b * 3 + 1] - p[a * 3 + 1]);
+        return Math.abs(area) < WALL_PLAN_AREA_M2 * 2;
+    }
+
+    /** Conforming bisection of `t` (see splitEdge); returns the triangles made. */
     refine(t: number, depth = 0): number[] {
         const made: number[] = [];
-        if (depth > 40) {
+        if (depth > 40 || this.isWall(t)) {
             return made;
         }
         for (let guard = 0; guard < 8 && this.tris[t].alive; guard++) {
-            const { k } = this.longestEdge(t);
-            const c = this.tris[t].c;
-            const a = c[k], b = c[(k + 1) % 3];
+            const e = this.splitEdge(t);
+            if (!e) {
+                return made;
+            }
+            const { a, b } = e;
             const across = (this.edges.get(this.edgeKey(a, b)) ?? []).filter(o => o !== t && this.tris[o].alive);
             if (across.length > 1) {
                 return made;
@@ -1055,18 +1538,13 @@ class SoupMesh {
                 return made;
             }
             const n = across[0];
-            if (this.tris[n].pinned) {
-                return made;
-            }
-            const nk = this.longestEdge(n).k;
-            const nc = this.tris[n].c;
-            const na = nc[nk], nb = nc[(nk + 1) % 3];
-            if ((na === a && nb === b) || (na === b && nb === a)) {
+            const ne = this.splitEdge(n);
+            if (this.isWall(n) || (ne && ((ne.a === a && ne.b === b) || (ne.a === b && ne.b === a)))) {
                 made.push(...this.bisect(t, a, b), ...this.bisect(n, a, b));
                 return made;
             }
-            // The neighbour's own longest edge first, then try again; if
-            // that is blocked (a pinned triangle further on), so is this.
+            // The neighbour's own split edge first, then try again; if that
+            // is blocked, so is this.
             const sub = this.refine(n, depth + 1);
             if (sub.length === 0) {
                 return made;
@@ -1076,6 +1554,11 @@ class SoupMesh {
         return made;
     }
 
+    /**
+     * Splits `t` at the middle of (a, b). Each half is the parent with one
+     * of a and b swapped for the midpoint, corner order kept, so the winding
+     * and the corners' places stay as they were.
+     */
     private bisect(t: number, a: number, b: number): number[] {
         const tri = this.tris[t];
         const key = this.edgeKey(a, b);
@@ -1089,19 +1572,28 @@ class SoupMesh {
             );
             this.mids.set(key, m);
         }
-        // Rotate so the split edge is corners 0-1, keeping the winding.
-        let r = 0;
-        while (!(tri.c[r] === a && tri.c[(r + 1) % 3] === b) && !(tri.c[r] === b && tri.c[(r + 1) % 3] === a)) {
-            r++;
+        const ka = tri.c.indexOf(a), kb = tri.c.indexOf(b);
+        const half = (replaced: number): Tri => {
+            const c = [...tri.c] as [number, number, number];
+            const s = [...tri.s] as [number, number, number];
+            c[replaced] = m!;
+            // The midpoint takes its attributes from a.
+            s[replaced] = tri.s[ka];
+            return { c, s, alive: true, orig: -1, dirty: true };
+        };
+        const kids = [half(kb), half(ka)];
+        // A triangle in its original slot with border vertices passes the
+        // slot to the half that has them all (an edge between two border
+        // positions is never the one split, so one half does).
+        if (tri.orig >= 0) {
+            const border = tri.c.filter(id => this.borderPos.has(id));
+            const heir = border.length > 0 ? kids.find(k => border.every(id => k.c.includes(id))) : undefined;
+            if (heir) {
+                heir.orig = tri.orig;
+            }
         }
-        const c0 = tri.c[r], c1 = tri.c[(r + 1) % 3], c2 = tri.c[(r + 2) % 3];
-        const s0 = tri.s[r], s1 = tri.s[(r + 1) % 3], s2 = tri.s[(r + 2) % 3];
         this.unlink(t);
         tri.alive = false;
-        const kids: Tri[] = [
-            { c: [c0, m, c2], s: [s0, s0, s2], alive: true, pinned: false, orig: -1, dirty: true },
-            { c: [m, c1, c2], s: [s0, s1, s2], alive: true, pinned: false, orig: -1, dirty: true },
-        ];
         const out: number[] = [];
         for (const kid of kids) {
             const id = this.tris.length;
@@ -1123,50 +1615,109 @@ class SoupMesh {
                 }
             }
         }
-        let moved = 0;
-        const movedIds = new Set<number>();
         for (let id = 0; id < used.length; id++) {
-            if (!used[id] || this.pinnedPos.has(id)) {
+            if (!used[id] || this.borderPos.has(id)) {
                 continue;
             }
             const h = this.pos[id * 3 + 2];
             const t = target(this.pos[id * 3], this.pos[id * 3 + 1], h);
             if (Math.abs(t - h) > 0.01) {
                 this.pos[id * 3 + 2] = t;
-                movedIds.add(id);
-                moved++;
+                this.moved.add(id);
+                this.before.set(id, h);
             }
         }
         for (const tri of this.tris) {
-            if (tri.alive && (movedIds.has(tri.c[0]) || movedIds.has(tri.c[1]) || movedIds.has(tri.c[2]))) {
+            if (tri.alive && (this.moved.has(tri.c[0]) || this.moved.has(tri.c[1]) || this.moved.has(tri.c[2]))) {
                 tri.dirty = true;
             }
         }
-        return moved;
+        return this.moved.size;
+    }
+
+    /** Plan points (u, v pairs) of the corners of every face markWalls flagged. */
+    wallPoints(): number[] {
+        const out: number[] = [];
+        for (const tri of this.tris) {
+            if (tri.alive && tri.wall) {
+                for (const id of tri.c) {
+                    out.push(this.pos[id * 3], this.pos[id * 3 + 1]);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Flags the faces the earthworks made too steep to stand as a slope -
+     * over 45 degrees, where a cutting or an embankment is squeezed against
+     * a road, the water, a bridge or the tile border: retaining walls go
+     * there (retainingWalls). Only faces the beds steepened: a natural
+     * cliff a batter happened to touch keeps its rock. Returns how many.
+     */
+    markWalls(): number {
+        let n = 0;
+        const h = (id: number, old: boolean) => old ? this.before.get(id) ?? this.pos[id * 3 + 2] : this.pos[id * 3 + 2];
+        const slope = (c: readonly number[], old: boolean): number => {
+            const [a, b, d] = c;
+            const p = this.pos;
+            const e1 = [p[b * 3] - p[a * 3], p[b * 3 + 1] - p[a * 3 + 1], h(b, old) - h(a, old)];
+            const e2 = [p[d * 3] - p[a * 3], p[d * 3 + 1] - p[a * 3 + 1], h(d, old) - h(a, old)];
+            const nu = e1[1] * e2[2] - e1[2] * e2[1];
+            const nv = e1[2] * e2[0] - e1[0] * e2[2];
+            const nh = e1[0] * e2[1] - e1[1] * e2[0];
+            return Math.abs(nh) < 1e-9 ? Infinity : Math.hypot(nu, nv) / Math.abs(nh);
+        };
+        for (const tri of this.tris) {
+            if (!tri.alive || !tri.dirty) {
+                continue;
+            }
+            let lift = 0;
+            for (const id of tri.c) {
+                lift = Math.max(lift, Math.abs(h(id, false) - h(id, true)));
+            }
+            if (lift < WALL_MIN_MOVE_M) {
+                continue;
+            }
+            const now = slope(tri.c, false);
+            if (now > WALL_SLOPE && now !== Infinity && now > slope(tri.c, true) + WALL_STEEPENED) {
+                tri.wall = true;
+                n++;
+            }
+        }
+        return n;
     }
 
     /** The mesh as a soup again: original slots first, pieces after. */
     toSoup(): LandSoup {
         const pieces = this.tris.filter(t => t.alive && t.orig < 0);
-        const total = this.tris.filter(t => t.orig >= 0).length + pieces.length;
+        const total = this.triCount + pieces.length;
         const positions = new Int16Array(total * 9);
         const normals = new Int8Array(total * 12);
         const attrs = new Uint8Array(total * 12);
         const { a, b, up } = this.frame;
         const q = this.q;
-        const write = (slot: number, tri: Tri, degenerate: boolean) => {
-            const corners = tri.c.map(id => {
-                const u = this.pos[id * 3], v = this.pos[id * 3 + 1], h = this.pos[id * 3 + 2];
-                return [
-                    u * a[0] + v * b[0] + h * up[0],
-                    u * a[1] + v * b[1] + h * up[1],
-                    u * a[2] + v * b[2] + h * up[2],
-                ];
-            });
+        const corner = (id: number): number[] => {
+            // Untouched input positions go back bit for bit: border vertices
+            // above all, which the stitcher and the neighbours must find
+            // exactly where they were.
+            if (id * 3 < this.quantised.length && !this.moved.has(id)) {
+                return [this.quantised[id * 3], this.quantised[id * 3 + 1], this.quantised[id * 3 + 2]];
+            }
+            const u = this.pos[id * 3], v = this.pos[id * 3 + 1], h = this.pos[id * 3 + 2];
+            return [
+                clampI16((u * a[0] + v * b[0] + h * up[0]) / q),
+                clampI16((u * a[1] + v * b[1] + h * up[1]) / q),
+                clampI16((u * a[2] + v * b[2] + h * up[2]) / q),
+            ];
+        };
+        const write = (slot: number, tri: Tri | undefined) => {
+            const corners = tri ? tri.c.map(corner) : undefined;
             let nrm: number[] | undefined;
-            if (tri.dirty && !degenerate) {
-                const e1 = [corners[1][0] - corners[0][0], corners[1][1] - corners[0][1], corners[1][2] - corners[0][2]];
-                const e2 = [corners[2][0] - corners[0][0], corners[2][1] - corners[0][1], corners[2][2] - corners[0][2]];
+            if (tri && corners) {
+                const p = corners.map(c => c.map(x => x * q));
+                const e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+                const e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
                 nrm = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
                 const len = Math.hypot(nrm[0], nrm[1], nrm[2]) || 1;
                 nrm = nrm.map(x => x / len);
@@ -1178,52 +1729,46 @@ class SoupMesh {
                 }
             }
             for (let k = 0; k < 3; k++) {
-                const vo = (slot * 3 + k);
-                const p = degenerate ? corners[0] : corners[k];
-                positions[vo * 3] = clampI16(p[0] / q);
-                positions[vo * 3 + 1] = clampI16(p[1] / q);
-                positions[vo * 3 + 2] = clampI16(p[2] / q);
-                const src = tri.s[k] * 4;
+                const vo = slot * 3 + k;
+                // An emptied slot: degenerate, on the first corner it had.
+                const src = tri ? tri.s[k] * 4 : slot * 12;
+                // (The original triangles are the first triCount, in slot order.)
+                const p = corners ? corners[k] : corner(this.tris[slot].c[0]);
+                positions[vo * 3] = p[0];
+                positions[vo * 3 + 1] = p[1];
+                positions[vo * 3 + 2] = p[2];
                 if (nrm) {
                     normals[vo * 4] = Math.round(nrm[0] * 127);
                     normals[vo * 4 + 1] = Math.round(nrm[1] * 127);
                     normals[vo * 4 + 2] = Math.round(nrm[2] * 127);
                     normals[vo * 4 + 3] = this.land.normals[src + 3];
                 } else {
-                    for (let j = 0; j < 4; j++) {
-                        normals[vo * 4 + j] = this.land.normals[src + j];
-                    }
+                    normals.set(this.land.normals.subarray(src, src + 4), vo * 4);
                 }
-                for (let j = 0; j < 4; j++) {
-                    attrs[vo * 4 + j] = this.land.attrs[src + j];
-                }
+                attrs.set(this.land.attrs.subarray(src, src + 4), vo * 4);
             }
         };
+        // Original slots: untouched bytes, the triangle now holding the slot,
+        // or degenerate when it went to pieces.
+        const holder = new Array<Tri | undefined>(this.triCount);
         for (const tri of this.tris) {
-            if (tri.orig >= 0) {
-                if (tri.alive && !tri.dirty && !tri.pinned) {
-                    // Untouched: bytes as they were, nothing recomputed.
-                    for (let k = 0; k < 3; k++) {
-                        const vo = tri.orig * 3 + k;
-                        positions.set(this.land.positions.subarray(vo * 3, vo * 3 + 3), vo * 3);
-                        normals.set(this.land.normals.subarray(vo * 4, vo * 4 + 4), vo * 4);
-                        attrs.set(this.land.attrs.subarray(vo * 4, vo * 4 + 4), vo * 4);
-                    }
-                } else if (tri.pinned) {
-                    for (let k = 0; k < 3; k++) {
-                        const vo = tri.orig * 3 + k;
-                        positions.set(this.land.positions.subarray(vo * 3, vo * 3 + 3), vo * 3);
-                        normals.set(this.land.normals.subarray(vo * 4, vo * 4 + 4), vo * 4);
-                        attrs.set(this.land.attrs.subarray(vo * 4, vo * 4 + 4), vo * 4);
-                    }
-                } else {
-                    write(tri.orig, tri, !tri.alive);
-                }
+            if (tri.alive && tri.orig >= 0) {
+                holder[tri.orig] = tri;
             }
         }
-        let slot = this.tris.filter(t => t.orig >= 0).length;
+        for (let slot = 0; slot < this.triCount; slot++) {
+            const tri = holder[slot];
+            if (tri && !tri.dirty) {
+                positions.set(this.land.positions.subarray(slot * 9, slot * 9 + 9), slot * 9);
+                normals.set(this.land.normals.subarray(slot * 12, slot * 12 + 12), slot * 12);
+                attrs.set(this.land.attrs.subarray(slot * 12, slot * 12 + 12), slot * 12);
+            } else {
+                write(slot, tri);
+            }
+        }
+        let slot = this.triCount;
         for (const tri of pieces) {
-            write(slot++, tri, false);
+            write(slot++, tri);
         }
         return { positions, normals, attrs };
     }

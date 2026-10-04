@@ -66,7 +66,7 @@ import {
     TileMeshes, TileRailBed, buildSmoothLandGeometryFromFaceted, buildTileMeshes, disposeTileMeshes,
     landGeometryFromArrays, tileOriginWorld,
 } from './tileMesh';
-import { RAIL_BED_SEGMENT_FLOATS, RailBedStats, buildRailBedExclusion, deckTrackEnds, railChains } from './railBed';
+import { RAIL_BED_SEGMENT_FLOATS, RailBedStats, RailWalls, buildRailBedExclusion, deckTrackEnds, railChains } from './railBed';
 import { RailBedClient } from './railBedClient';
 import { RAIL_FIELD_SEGMENT_FLOATS } from './railBedField';
 
@@ -297,6 +297,7 @@ export class TerrainEntity implements Entity {
     private airfieldExclusion: AirfieldExclusion | undefined;
     private surfaceExclusion: ((x: number, z: number) => boolean) | undefined;
     private readonly bridges: BridgeMeshes;
+    private readonly railWallMaterial: THREE.Material;
     private readonly quadtree: Quadtree;
     private readonly oceans = new Map<string, OceanPatch>();
     private readonly pinned = new Set<string>();
@@ -943,6 +944,8 @@ export class TerrainEntity implements Entity {
             trackTerrainMaterial(m);
             return m;
         };
+        // Retaining walls beside railway beds: the bridges' concrete.
+        this.railWallMaterial = bridgeMaterial(PaletteCategory.SCENERY_ROAD_SECONDARY);
         this.bridges = new BridgeMeshes({
             manifest: opts.manifest,
             baseUrl: base,
@@ -1169,8 +1172,9 @@ export class TerrainEntity implements Entity {
         if (w.__railBed === false || railChains(ptr).length === 0) {
             return undefined;
         }
-        // The track on bridge decks, which the approaches climb to.
-        const deckEnds = await this.railDeckEnds(id, meshes);
+        // Bridges: the track on their decks, which the approaches climb to,
+        // and their structure, which the earthworks keep clear of.
+        const bridges = await this.railBridges(id, meshes);
         const faceted = meshes.landGeometryFaceted;
         if (meshes.disposed || !faceted || !meshes.land) {
             return undefined;
@@ -1215,7 +1219,8 @@ export class TerrainEntity implements Entity {
             scale,
             // Only a leaf is close enough for a cutting to be worth triangles.
             refine: id.z === this.manifest.mesh.maxZoom,
-            deckEnds,
+            deckEnds: bridges.deckEnds,
+            keep: this.railKeep(meshes, bridges.tris),
         }, id.z);
         const result = run.result;
         const waited = performance.now() - t0;
@@ -1241,6 +1246,10 @@ export class TerrainEntity implements Entity {
                 this.drawnHeightIndices.delete(tileKeyString(id));
             }
         }
+        if (result.walls && !meshes.railWalls) {
+            meshes.railWalls = this.railWallMesh(result.walls, quantScale);
+            meshes.group.add(meshes.railWalls);
+        }
         // The collision surface takes the leaf's beds, the finest there are.
         if (id.z === this.manifest.mesh.maxZoom && result.beds.length > 0) {
             this.heights.railBeds.set(tileKeyString(id), this.railBedsToGeodetic(result.beds, meshes));
@@ -1248,7 +1257,7 @@ export class TerrainEntity implements Entity {
         const totals = w.__railBedStats ??= {};
         const s = totals[`z${id.z}`] ??= {
             tiles: 0, workerMs: 0, waitMs: 0, applyMs: 0, chains: 0, trackM: 0, steepM: 0, overLimitM: 0,
-            trianglesAdded: 0, verticesMoved: 0,
+            trianglesAdded: 0, verticesMoved: 0, wallTriangles: 0,
         };
         s.tiles++;
         s.workerMs += run.ms;
@@ -1260,6 +1269,7 @@ export class TerrainEntity implements Entity {
         s.overLimitM += result.stats.overLimitM;
         s.trianglesAdded += result.stats.trianglesAdded;
         s.verticesMoved += result.stats.verticesMoved;
+        s.wallTriangles += result.stats.wallTriangles;
         return {
             strokePositions: result.strokePositions,
             onBed: buildRailBedExclusion(result.beds, up, 32 * scale),
@@ -1267,18 +1277,21 @@ export class TerrainEntity implements Entity {
     }
 
     /**
-     * The ends of the track on the bridge decks of a tile and its eight
-     * neighbours, in the tile's own frame (railBed.ts RailBedInput.deckEnds).
-     * The neighbours' too: a deck can start a few metres across the border
-     * from the track that climbs to it. Every tile's frame has the bake's
-     * axes, so a neighbour's points only shift by the difference between
-     * the two tiles' origins.
+     * The bridges of a tile and its eight neighbours, in the tile's own frame
+     * (metres): the ends of the track on their decks, which the approaches
+     * climb to (railBed.ts RailBedInput.deckEnds), and every triangle of
+     * them, which the earthworks keep clear of (RailBedInput.keep). The
+     * neighbours' too: a deck can start a few metres across the border from
+     * the track that climbs to it. Every tile's frame has the bake's axes,
+     * so a neighbour's points only shift by the difference between the two
+     * tiles' origins.
      */
-    private async railDeckEnds(id: TileKey, meshes: TileMeshes): Promise<Float64Array | undefined> {
+    private async railBridges(id: TileKey, meshes: TileMeshes): Promise<{ deckEnds?: Float64Array; tris?: Float64Array }> {
         if (id.z !== this.manifest.mesh.maxZoom) {
-            return undefined;
+            return {};
         }
-        const parts: Float64Array[] = [];
+        const ends: number[] = [];
+        const tris: number[] = [];
         let own: { e: number; u: number; n: number } | undefined;
         for (let dy = -1; dy <= 1; dy++) {
             for (let dx = -1; dx <= 1; dx++) {
@@ -1287,10 +1300,10 @@ export class TerrainEntity implements Entity {
                     continue;
                 }
                 const pbr = await this.bridges.load(nb, id.z).catch(() => null);
-                if (!pbr?.track || pbr.track.indices.length === 0) {
+                if (!pbr || pbr.indices.length === 0) {
                     continue;
                 }
-                const ends = deckTrackEnds(pbr.track, pbr.quantScale);
+                let ox = 0, oy = 0, oz = 0;
                 if (dx !== 0 || dy !== 0) {
                     own ??= await this.tileCentreEnu(id, meshes);
                     const theirs = await this.tileCentreEnu(nb, this.streamer.get(nb));
@@ -1298,26 +1311,82 @@ export class TerrainEntity implements Entity {
                         continue;
                     }
                     // Tile frames: x east, y up, z south, from each tile's own centre.
-                    const ox = theirs.e - own.e, oy = theirs.u - own.u, oz = own.n - theirs.n;
-                    for (let i = 0; i < ends.length; i += 3) {
-                        ends[i] += ox;
-                        ends[i + 1] += oy;
-                        ends[i + 2] += oz;
+                    ox = theirs.e - own.e;
+                    oy = theirs.u - own.u;
+                    oz = own.n - theirs.n;
+                }
+                if (pbr.track && pbr.track.indices.length > 0) {
+                    const e = deckTrackEnds(pbr.track, pbr.quantScale);
+                    for (let i = 0; i < e.length; i += 3) {
+                        ends.push(e[i] + ox, e[i + 1] + oy, e[i + 2] + oz);
                     }
                 }
-                parts.push(ends);
+                const q = pbr.quantScale, P = pbr.positions;
+                for (const vi of pbr.indices) {
+                    tris.push(P[vi * 3] * q + ox, P[vi * 3 + 1] * q + oy, P[vi * 3 + 2] * q + oz);
+                }
             }
         }
-        if (parts.length === 0) {
-            return undefined;
+        return {
+            deckEnds: ends.length > 0 ? Float64Array.from(ends) : undefined,
+            tris: tris.length > 0 ? Float64Array.from(tris) : undefined,
+        };
+    }
+
+    /** Everything the tile's earthworks keep clear of besides its roads. */
+    private railKeep(meshes: TileMeshes, bridgeTris: Float64Array | undefined): { tris?: Float64Array; segs?: Float64Array } {
+        const water = this.railKeepWater(meshes);
+        const tris = new Float64Array(water.tris.length + (bridgeTris?.length ?? 0));
+        tris.set(water.tris, 0);
+        if (bridgeTris) {
+            tris.set(bridgeTris, water.tris.length);
         }
-        const out = new Float64Array(parts.reduce((n, p) => n + p.length, 0));
-        let o = 0;
-        for (const p of parts) {
-            out.set(p, o);
-            o += p.length;
+        return {
+            tris: tris.length > 0 ? tris : undefined,
+            segs: water.segs.length > 0 ? Float64Array.from(water.segs) : undefined,
+        };
+    }
+
+    /**
+     * The tile's water - lakes and sea as triangles, watercourses as
+     * segments with their half widths - in its own frame, metres, for the
+     * earthworks to keep clear of (railBed.ts RailBedInput.keep).
+     */
+    private railKeepWater(meshes: TileMeshes): { tris: number[]; segs: number[] } {
+        const q = meshes.group.scale.x;
+        const tris: number[] = [];
+        const segs: number[] = [];
+        const water = meshes.water?.geometry;
+        const wp = water?.getAttribute('position')?.array as Int16Array | undefined;
+        const wi = water?.getIndex()?.array;
+        if (wp && wi) {
+            for (let i = 0; i < wi.length; i++) {
+                const v = wi[i];
+                tris.push(wp[v * 3] * q, wp[v * 3 + 1] * q, wp[v * 3 + 2] * q);
+            }
         }
-        return out;
+        const rivers = meshes.rivers?.geometry;
+        const rp = rivers?.getAttribute('position')?.array as Int16Array | undefined;
+        const rh = rivers?.getAttribute('riverHalf')?.array as Uint16Array | undefined;
+        const ri = rivers?.getIndex()?.array;
+        if (rp && rh && ri) {
+            // A ribbon is pairs of vertices on its centreline: its segments
+            // are the triangle edges between two different points.
+            const seen = new Set<number>();
+            for (let i = 0; i + 2 < ri.length; i += 3) {
+                for (let e = 0; e < 3; e++) {
+                    const a = ri[i + e], b = ri[i + (e + 1) % 3];
+                    const key = a < b ? a * 65536 + b : b * 65536 + a;
+                    if (seen.has(key) || (rp[a * 3] === rp[b * 3] && rp[a * 3 + 1] === rp[b * 3 + 1] && rp[a * 3 + 2] === rp[b * 3 + 2])) {
+                        continue;
+                    }
+                    seen.add(key);
+                    segs.push(rp[a * 3] * q, rp[a * 3 + 1] * q, rp[a * 3 + 2] * q,
+                        rp[b * 3] * q, rp[b * 3 + 1] * q, rp[b * 3 + 2] * q, Math.max(rh[a], rh[b]) / 10);
+                }
+            }
+        }
+        return { tris, segs };
     }
 
     /**
@@ -1339,6 +1408,24 @@ export class TerrainEntity implements Entity {
         }
         const b = tileBounds(id);
         return ecefToEnu(this.railBedBasis, geodeticToEcef((b.south + b.north) / 2, (b.west + b.east) / 2, height));
+    }
+
+    /** A tile's retaining walls as a mesh in its group, whose units are quanta. */
+    private railWallMesh(walls: RailWalls, quantScale: number): THREE.Mesh {
+        const pos = new Float32Array(walls.positions.length);
+        for (let i = 0; i < pos.length; i++) {
+            pos[i] = walls.positions[i] / quantScale;
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        g.setAttribute('normal', new THREE.BufferAttribute(walls.normals, 3));
+        g.setIndex(new THREE.BufferAttribute(walls.indices, 1));
+        const mesh = new THREE.Mesh(g, this.railWallMaterial);
+        mesh.name = 'railWalls';
+        mesh.frustumCulled = false;
+        mesh.matrixAutoUpdate = false;
+        mesh.onBeforeRender = tileBeforeRender;
+        return mesh;
     }
 
     /**
