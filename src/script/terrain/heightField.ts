@@ -77,6 +77,15 @@ export class HeightField {
         return this.manifest.height.coarseZoom;
     }
 
+    /**
+     * Replace the flatten pads, as a re-base must: their centres are in the
+     * frame's east/north. In place, because the sampler holds the same array.
+     */
+    setPads(pads: readonly FlattenPad[]): void {
+        this.pads.length = 0;
+        this.pads.push(...pads);
+    }
+
     /** Airbase flatten pads, so a mirror can apply the same flattening. */
     get flattenPads(): readonly FlattenPad[] {
         return this.pads;

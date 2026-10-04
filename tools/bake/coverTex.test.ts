@@ -235,4 +235,17 @@ describe('paintRoads', () => {
         const o = (1 * size + 4) * 4;
         assert.equal(raster[o + 3], PTX_NO_DATA);
     });
+
+    it('paints a railway past the class cut, in ballast brown', async () => {
+        const { paintRoads, RAIL_TEXEL_RGB } = await import('./coverTex');
+        const size = 8;
+        const raster = emptyRaster(size);
+        const bounds = { west: 0, south: 0, east: 1, north: 1 };
+        paintRoads(raster, size, bounds, [
+            { cls: 7, points: [{ lon: 0.5, lat: 0.99 }, { lon: 0.5, lat: 0.01 }] },
+        ], 3, 5);
+        const o = (1 * size + 4) * 4;
+        assert.deepEqual([raster[o], raster[o + 1], raster[o + 2]], [...RAIL_TEXEL_RGB]);
+        assert.equal(raster[o + 3], 5);
+    });
 });

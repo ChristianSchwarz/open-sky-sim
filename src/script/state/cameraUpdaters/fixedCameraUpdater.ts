@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { UP } from '../../utils/math';
 import { CameraUpdater } from './cameraUpdater';
 
@@ -33,6 +34,14 @@ export class FixedCameraUpdater extends CameraUpdater {
             Math.sin(p),
             -Math.cos(h) * Math.cos(p),
         );
+    }
+
+    /** Carry the pose into a re-based frame: same place, same view of it. */
+    rebase(shift: FrameShift): void {
+        shift.point(this.position);
+        const d = shift.vector(this.direction);
+        this.headingDeg = ((Math.atan2(d.x, -d.z) * 180 / Math.PI) + 360) % 360;
+        this.pitchDeg = Math.asin(Math.max(-1, Math.min(1, d.y))) * 180 / Math.PI;
     }
 
     /** Where the camera is, in scene metres. */

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { Palette, PaletteCategory } from '../../config/palettes/palette';
 import { DEBRIS_PARTICLE_COUNT } from '../../defs';
 import { SphereEmitter } from '../../physics/particles/emitters/sphereEmitter';
@@ -66,6 +67,11 @@ export class DebrisField implements Entity {
     private readonly hitVel = new THREE.Vector3();
     private readonly tmpQuat = new THREE.Quaternion();
     private readonly tmpFwd = new THREE.Vector3();
+
+    rebase(shift: FrameShift): void {
+        this.system.rebase(shift);
+        this.sparkSystem.rebase(shift);
+    }
 
     constructor(materials: SceneMaterialManager) {
         // Tight shell + low kick so chips peel off the hull instead of exploding out.

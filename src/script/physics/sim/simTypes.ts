@@ -144,6 +144,8 @@ export type SimToWorkerMessage =
     | { type: 'init' }
     | { type: 'attachSharedState'; buffer: SharedArrayBuffer }
     | { type: 'setWorld'; world: SerializedWorld }
+    /** Re-base the scene frame; see CombatSim.rebase. Followed by setHeightField and setWorld. */
+    | { type: 'rebase'; rotation: [number, number, number, number]; offset: [number, number, number] }
     | { type: 'addStaticColliders'; colliders: SerializedStaticColliders }
     | { type: 'setHeightField'; config: SerializedHeightField }
     | { type: 'heightTiles'; update: HeightTileUpdate }

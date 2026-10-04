@@ -17,8 +17,10 @@
 import { Airfield } from './airfields';
 import { bearingAxisAt } from './flattenPad';
 
-/** Clear ground kept beyond a runway's own strip, metres. */
-const RUNWAY_TREE_MARGIN_M = 15;
+/** Clear ground kept either side of a runway's edge, metres. */
+const RUNWAY_SIDE_TREE_MARGIN_M = 25;
+/** Clear approach/departure ground kept beyond each runway end, metres. */
+const RUNWAY_END_TREE_MARGIN_M = 500;
 /** Clear ground kept beyond a taxiway's or apron's own edge, metres. */
 const APRON_TREE_MARGIN_M = 5;
 const CELL_M = 64;
@@ -118,8 +120,8 @@ export function buildAirfieldExclusion(airfields: Airfield[], toEnu: ToEnu): Air
             const ax = axisEn.e, az = -axisEn.n;
             rects.push({
                 cx: c.x, cz: c.z, ax, az,
-                halfLen: runway.lengthM / 2 + RUNWAY_TREE_MARGIN_M,
-                halfWid: runway.widthM / 2 + RUNWAY_TREE_MARGIN_M,
+                halfLen: runway.lengthM / 2 + RUNWAY_END_TREE_MARGIN_M,
+                halfWid: runway.widthM / 2 + RUNWAY_SIDE_TREE_MARGIN_M,
             });
         }
         for (const taxiway of airfield.taxiways) {

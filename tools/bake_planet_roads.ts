@@ -135,6 +135,7 @@ function main(): void {
     const emptied: TileKey[] = [];
     const perLevel = new Map<number, { tiles: number; roads: number; strokes: number; dropped: number; tris: number; gz: number }>();
     let lastLine = 0;
+    let zonePoints = 0;
     for (let i = 0; i < tiles.length; i++) {
         const k = tiles[i];
         const outPath = tilePath(args.dir, k, '.ptr');
@@ -160,7 +161,8 @@ function main(): void {
         } else {
             const bytes = encodePtr({
                 id: k, quantScale: tile.quantScale, positions: draped.positions, directions: draped.directions,
-                halfWidthsM: draped.halfWidthsM, classes: draped.classes, indices: draped.indices,
+                halfWidthsM: draped.halfWidthsM, classes: draped.classes, alongM: draped.alongM, flags: draped.flags,
+                indices: draped.indices,
             });
             const gz = zlib.gzipSync(bytes, { level: 9 });
             fs.mkdirSync(path.dirname(outPath), { recursive: true });
@@ -171,6 +173,7 @@ function main(): void {
             level.dropped += draped.dropped;
             level.tris += draped.triangles;
             level.gz += gz.byteLength;
+            zonePoints += draped.zonePoints;
         }
         if (Date.now() - lastLine > 500 || i === tiles.length - 1) {
             process.stdout.write(`\r  ${i + 1}/${tiles.length} (${((i + 1) / tiles.length * 100).toFixed(1)}%)`);
@@ -219,6 +222,7 @@ function main(): void {
     if (carried > 0) {
         console.log(`index: ${written.length} baked + ${carried} carried - ${emptied.length} emptied -> ${all.length} tiles`);
     }
+    console.log(`switch zones ${zonePoints} track points flagged (long timbers or no sleepers)`);
     console.log(`wrote ${written.length} road sidecars, ${mb(totalGz)} MB in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 }
 

@@ -20,7 +20,7 @@ from typing import Sequence
 
 from bake_osm_airports import PBF_GROUPS as AIRFIELD_GROUPS
 from bake_osm_coast import coast_tag_predicate
-from bake_osm_roads import road_tag_predicate
+from bake_osm_roads import rail_service_tag_predicate, rail_tag_predicate, road_tag_predicate
 from osm_common import glue_negative_bbox, parse_bbox
 from osm_landuse import landuse_tag_predicate
 from osm_pbf import pbf_prefetch
@@ -30,6 +30,8 @@ SPECS = (
     ('coast', coast_tag_predicate, True),
     ('landuse', landuse_tag_predicate, True),
     ('roads', road_tag_predicate, False),
+    ('rails', rail_tag_predicate, False),
+    ('rail_service', rail_service_tag_predicate, False),
 ) + tuple((key, predicate, True) for key, predicate in AIRFIELD_GROUPS)
 
 

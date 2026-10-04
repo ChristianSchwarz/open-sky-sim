@@ -48,10 +48,22 @@ ${LOG_DEPTH_PARS_VERTEX}
     // trees over whenever the plane banks. Instead build a right axis
     // perpendicular to both world up and the line of sight, so the quad
     // always stands vertical in world space regardless of camera roll.
+    // The quad's up axis then tilts back so the quad faces the camera:
+    // keeping it world-vertical showed it edge-on when looking steeply down,
+    // squashing the near trees into slivers radiating from the nadir (and
+    // the 60/90 degree top-down sprites onto a quad seen side-on).
     vec3 toCamWorld = cameraPosition - worldBase.xyz;
     vec3 worldUp = vec3(0.0, 1.0, 0.0);
-    vec3 rightW = normalize(cross(worldUp, normalize(vec3(toCamWorld.x, 0.0, toCamWorld.z))));
-    vec3 worldOffset = (rightW * position.x + worldUp * position.y) * s;
+    vec2 toCamH = toCamWorld.xz;
+    vec3 rightW;
+    if (dot(toCamH, toCamH) > 1e-6) {
+      rightW = normalize(cross(worldUp, vec3(toCamH.x, 0.0, toCamH.y)));
+    } else {
+      // Straight overhead: no horizontal direction, use the camera's right.
+      rightW = normalize(vec3(viewMatrix[0][0], 0.0, viewMatrix[2][0]) + vec3(1e-6, 0.0, 0.0));
+    }
+    vec3 upW = normalize(cross(normalize(toCamWorld), rightW));
+    vec3 worldOffset = (rightW * position.x + upW * position.y) * s;
 
     vec4 viewCenter = viewMatrix * (worldBase + vec4(worldOffset, 0.0));
     // The quad is screen-aligned, so looking steeply down its "up" runs along

@@ -14,7 +14,7 @@
 
 import * as THREE from 'three';
 import { behindHorizon, sphereInFrustum } from './culling';
-import { WGS84_A } from './geodesy';
+import { FrameShift, WGS84_A } from './geodesy';
 import {
     DETAIL_DISTANCE_OFF, FRUSTUM_CULL_MARGIN_TAN, LEAF_REFINE_DISTANCE_SCALE,
     LOD_FADE_MS, LOD_FADE_NEAR, LOD_FADE_SOFTNESS,
@@ -110,6 +110,13 @@ export class Quadtree {
     constructor(private readonly opts: QuadtreeOptions) {
         this.maxZoom = opts.maxZoom ?? opts.manifest.mesh.maxZoom;
         this.roots = rootTiles().map(id => this.makeNode(id));
+    }
+
+    /** Carry every node's cached centre into a new frame; see TerrainEntity.rebaseTo. */
+    rebase(shift: FrameShift): void {
+        for (const node of this.nodes.values()) {
+            shift.point(node.center);
+        }
     }
 
     private makeNode(id: TileKey): QuadNode {

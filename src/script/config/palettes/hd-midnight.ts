@@ -52,6 +52,7 @@ const colors: PaletteColors = {
 
     [PaletteCategory.SCENERY_ROAD_MAIN]: '#181818',
     [PaletteCategory.SCENERY_ROAD_SECONDARY]: '#202020',
+    [PaletteCategory.SCENERY_RAIL]: '#151311',
 
     [PaletteCategory.SCENERY_FIELD_GREEN]: '#2a4830',
     [PaletteCategory.SCENERY_FIELD_GREEN_LIGHT]: '#182820',

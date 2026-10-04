@@ -11,7 +11,7 @@
  * Layout, little-endian, 24-byte header:
  *
  *    0  u32  magic 'PBR1'        8  u32  x
- *    4  u8   version = 1        12  u32  y
+ *    4  u8   version = 3        12  u32  y
  *    5  u8   z                  16  f32  quantScale
  *    6  u16  reserved           20  u16  vertCount   22  u16  triCount
  *
@@ -20,13 +20,32 @@
  *     nrm    i8  x4 per vertex   unit face normal /127 + BridgeRole byte
  *     idx    u16 x3 per triangle
  *
+ *   version 2 appends the track drawn on rail bridge decks, a stroke in the
+ *   PTR1 layout (see ptr.ts) so the road strokes' rail material draws it:
+ *     u16 trackVertCount, u16 trackTriCount
+ *     pos    i16 x3 per vertex   centreline point, two vertices per point
+ *     dir    i8  x4 per vertex   unit offset across the track + class byte
+ *     half   u16 x1 per vertex   half the track bed's width, decimetres
+ *     along  u16 x1 per vertex   ALONG_STEP_M units, wrapped
+ *     idx    u16 x3 per triangle
+ *
+ *   version 3 appends the level-crossing furniture, as boxes in float32:
+ *   a sign board is 2.4 cm thick, far below the quantisation step, and
+ *   snapped to it the boxes came out kinked and torn.
+ *     u32 boxCount
+ *     box    f32 x16 per box     centre xyz (tile-local metres), three unit
+ *                                axes xyz, half sizes along them, BridgeRole
+ *
  * Decode is typed-array views over the received buffer, no per-vertex pass.
  */
 
+import { ALONG_STEP_M, ALONG_WRAP_M } from './ptr';
 import { TileKey } from './tiling';
 
 const PBR_MAGIC = 0x31524250; // 'PBR1' little-endian
-const PBR_VERSION = 1;
+const PBR_VERSION = 3;
+/** Floats per furniture box: centre 3, axes 9, half sizes 3, role 1. */
+export const PBR_BOX_FLOATS = 16;
 const PBR_HEADER_BYTES = 24;
 export const PBR_MAX_VERTS = 65535;
 
@@ -36,6 +55,14 @@ export const enum BridgeRole {
     Deck = 0,
     /** Everything else: undersides, sides, parapets, piers, abutments. */
     Concrete = 1,
+    /** Track bed on top of a rail bridge deck. */
+    RailDeck = 2,
+    /** Level-crossing furniture (tools/bake/crossingFurniture.ts): the red stripes, */
+    SignRed = 3,
+    /** the white ones and the barrier posts, */
+    SignWhite = 4,
+    /** and the grey post a St Andrew's cross stands on. */
+    SignPost = 5,
 }
 
 export interface PbrEncodeInput {
@@ -49,6 +76,29 @@ export interface PbrEncodeInput {
     roles: Uint8Array;
     /** 3 indices per triangle. */
     indices: Uint32Array;
+    /** The track on rail decks, or absent. */
+    track?: PbrTrackInput;
+    /** Furniture boxes, PBR_BOX_FLOATS each, or absent. */
+    boxes?: Float32Array;
+}
+
+/** A track stroke, as ptr.ts's PtrEncodeInput has it. */
+export interface PbrTrackInput {
+    positions: Float32Array;
+    directions: Float32Array;
+    halfWidthsM: Float32Array;
+    classes: Uint8Array;
+    alongM: Float32Array;
+    indices: Uint32Array;
+}
+
+/** A decoded track stroke: the PtrTile fields, bound the same way. */
+export interface PbrTrack {
+    positions: Int16Array;
+    directions: Int8Array;
+    halfWidths: Uint16Array;
+    along: Uint16Array;
+    indices: Uint16Array;
 }
 
 export interface PbrTile {
@@ -59,6 +109,10 @@ export interface PbrTile {
     /** Bind normalized: true, stride 4; the 4th byte is the BridgeRole. */
     normals: Int8Array;
     indices: Uint16Array;
+    /** Version 2 with rail decks only. */
+    track?: PbrTrack;
+    /** Version 3: furniture boxes, PBR_BOX_FLOATS each, tile-local metres. */
+    boxes?: Float32Array;
 }
 
 const align4 = (n: number) => (n + 3) & ~3;
@@ -85,7 +139,16 @@ export function encodePbr(input: PbrEncodeInput): Uint8Array {
     const posBytes = align4(vertCount * 6);
     const nrmBytes = align4(vertCount * 4);
     const idxBytes = align4(triCount * 6);
-    const out = new Uint8Array(PBR_HEADER_BYTES + posBytes + nrmBytes + idxBytes);
+    const track = input.track;
+    const tVerts = track ? track.positions.length / 3 : 0;
+    const tTris = track ? track.indices.length / 3 : 0;
+    if (tVerts > PBR_MAX_VERTS || tTris > 0xffff) {
+        throw new Error(`PBR1: track of ${tVerts} vertices / ${tTris} triangles is too big`);
+    }
+    const trackBytes = 4 + align4(tVerts * 6) + align4(tVerts * 4) + align4(tVerts * 2) * 2 + align4(tTris * 6);
+    const boxFloats = input.boxes ? input.boxes.length : 0;
+    const boxBytes = 4 + boxFloats * 4;
+    const out = new Uint8Array(PBR_HEADER_BYTES + posBytes + nrmBytes + idxBytes + trackBytes + boxBytes);
     const view = new DataView(out.buffer);
     view.setUint32(0, PBR_MAGIC, true);
     view.setUint8(4, PBR_VERSION);
@@ -102,6 +165,7 @@ export function encodePbr(input: PbrEncodeInput): Uint8Array {
     const nrm = new Int8Array(out.buffer, off, vertCount * 4);
     off += nrmBytes;
     const idx = new Uint16Array(out.buffer, off, triCount * 3);
+    off += idxBytes;
     const q = input.quantScale;
     for (let i = 0; i < vertCount; i++) {
         pos[i * 3] = quantise(input.positions[i * 3], q);
@@ -114,6 +178,36 @@ export function encodePbr(input: PbrEncodeInput): Uint8Array {
     }
     for (let i = 0; i < triCount * 3; i++) {
         idx[i] = input.indices[i];
+    }
+    view.setUint16(off, tVerts, true);
+    view.setUint16(off + 2, tTris, true);
+    off += 4;
+    if (track) {
+        const tPos = new Int16Array(out.buffer, off, tVerts * 3);
+        off += align4(tVerts * 6);
+        const tDir = new Int8Array(out.buffer, off, tVerts * 4);
+        off += align4(tVerts * 4);
+        const tHalf = new Uint16Array(out.buffer, off, tVerts);
+        off += align4(tVerts * 2);
+        const tAlong = new Uint16Array(out.buffer, off, tVerts);
+        off += align4(tVerts * 2);
+        const tIdx = new Uint16Array(out.buffer, off, tTris * 3);
+        for (let i = 0; i < tVerts; i++) {
+            for (let c = 0; c < 3; c++) {
+                tPos[i * 3 + c] = quantise(track.positions[i * 3 + c], q);
+                tDir[i * 4 + c] = quantiseNormal(track.directions[i * 3 + c]);
+            }
+            tDir[i * 4 + 3] = track.classes[i];
+            tHalf[i] = Math.round(Math.min(6553.5, Math.max(0, track.halfWidthsM[i])) * 10);
+            const a = track.alongM[i] % ALONG_WRAP_M;
+            tAlong[i] = Math.round((a < 0 ? a + ALONG_WRAP_M : a) / ALONG_STEP_M) & 0xffff;
+        }
+        tIdx.set(track.indices);
+    }
+    const boxAt = PBR_HEADER_BYTES + posBytes + nrmBytes + idxBytes + trackBytes;
+    view.setUint32(boxAt, boxFloats / PBR_BOX_FLOATS, true);
+    if (input.boxes) {
+        new Float32Array(out.buffer, boxAt + 4, boxFloats).set(input.boxes);
     }
     return out;
 }
@@ -129,8 +223,8 @@ export function decodePbr(bytes: ArrayBuffer | Uint8Array): PbrTile {
         throw new Error(`Bad PBR1 magic: 0x${magic.toString(16)}`);
     }
     const version = view.getUint8(4);
-    if (version !== PBR_VERSION) {
-        throw new Error(`PBR1 version ${version}, expected ${PBR_VERSION}`);
+    if (version !== 1 && version !== PBR_VERSION) {
+        throw new Error(`PBR1 version ${version}, expected 1 or ${PBR_VERSION}`);
     }
     const z = view.getUint8(5);
     const x = view.getUint32(8, true);
@@ -151,5 +245,41 @@ export function decodePbr(bytes: ArrayBuffer | Uint8Array): PbrTile {
     const normals = new Int8Array(raw.buffer, off, vertCount * 4);
     off += nrmBytes;
     const indices = new Uint16Array(raw.buffer, off, triCount * 3);
-    return { id: { z, x, y }, quantScale, positions, normals, indices };
+    off += idxBytes;
+    let track: PbrTrack | undefined;
+    if (version >= 2 && off + 4 <= raw.byteOffset + raw.byteLength) {
+        const tVerts = view.getUint16(off - raw.byteOffset, true);
+        const tTris = view.getUint16(off - raw.byteOffset + 2, true);
+        off += 4;
+        const tNeed = align4(tVerts * 6) + align4(tVerts * 4) + align4(tVerts * 2) * 2 + align4(tTris * 6);
+        if (off + tNeed > raw.byteOffset + raw.byteLength) {
+            throw new Error(`PBR1 ${z}/${x}/${y}: track truncated`);
+        }
+        const trackEnd = off + tNeed;
+        if (tVerts > 0 && tTris > 0) {
+            const tPositions = new Int16Array(raw.buffer, off, tVerts * 3);
+            off += align4(tVerts * 6);
+            const tDirections = new Int8Array(raw.buffer, off, tVerts * 4);
+            off += align4(tVerts * 4);
+            const tHalf = new Uint16Array(raw.buffer, off, tVerts);
+            off += align4(tVerts * 2);
+            const tAlong = new Uint16Array(raw.buffer, off, tVerts);
+            off += align4(tVerts * 2);
+            const tIndices = new Uint16Array(raw.buffer, off, tTris * 3);
+            track = { positions: tPositions, directions: tDirections, halfWidths: tHalf, along: tAlong, indices: tIndices };
+        }
+        off = trackEnd;
+    }
+    let boxes: Float32Array | undefined;
+    if (version >= 3 && off + 4 <= raw.byteOffset + raw.byteLength) {
+        const count = view.getUint32(off - raw.byteOffset, true);
+        off += 4;
+        if (off + count * PBR_BOX_FLOATS * 4 > raw.byteOffset + raw.byteLength) {
+            throw new Error(`PBR1 ${z}/${x}/${y}: furniture truncated`);
+        }
+        if (count > 0) {
+            boxes = new Float32Array(raw.buffer, off, count * PBR_BOX_FLOATS);
+        }
+    }
+    return { id: { z, x, y }, quantScale, positions, normals, indices, track, boxes };
 }

@@ -5,7 +5,8 @@ import { ForceVectorSample } from '../model/flightModel';
 import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
 import { SerializedArrestorCables, SerializedStaticColliders, SerializedWorld } from './serializedWorld';
 import { HeightTileUpdate, SerializedHeightField } from '../../terrain/heightMirror';
-import { AC_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
+import { AC_STRIDE, PROJ_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
+import { FrameShift } from '../../terrain/geodesy';
 import {
     createSimSharedState,
     isSharedBusy,
@@ -109,6 +110,38 @@ export class CombatSimClient {
 
     setWorld(world: SerializedWorld): void {
         this.post({ type: 'setWorld', world });
+    }
+
+    /** True when no step is in flight, after taking in any pose it published. */
+    isIdle(): boolean {
+        this.pullSharedPose();
+        this.syncBusyFromShared();
+        return !this.busy;
+    }
+
+    /**
+     * Carry the sim into a re-based scene frame. Refused (false) while a step
+     * is in flight: its snapshot would come back in the old frame after the
+     * render side had already moved to the new one. The caller retries next
+     * frame, and must follow a success with setHeightField and setWorld.
+     */
+    rebase(shift: FrameShift): boolean {
+        if (!this.isIdle()) {
+            return false;
+        }
+        // Rounds already drawn keep being drawn from this buffer until the next
+        // snapshot. A copy, since on the shared path it is the worker's memory.
+        const rounds = this.projectiles.slice(0, this.projectileCount * PROJ_STRIDE);
+        const p = new THREE.Vector3();
+        const q = new THREE.Quaternion();
+        for (let i = 0; i < this.projectileCount; i++) {
+            const base = i * PROJ_STRIDE;
+            shift.point(p.fromArray(rounds, base)).toArray(rounds, base);
+            shift.orientation(q.fromArray(rounds, base + 3)).toArray(rounds, base + 3);
+        }
+        this.projectiles = rounds;
+        this.post({ type: 'rebase', ...shift.toArrays() });
+        return true;
     }
 
     /** More static ground for the world already sent - see CombatSim.addStaticColliders. */

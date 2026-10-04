@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import * as THREE from 'three';
 import { RoadsMode } from '../state/gameDefs';
-import { RoadClass, decodePtr, encodePtr } from './ptr';
+import { ROAD_SIDE_BIT, RoadClass, decodePtr, encodePtr } from './ptr';
 import { RoadStrokes, buildRoadMeshes, roadTriangles } from './roadStrokes';
 import { TileMeshes } from './tileMesh';
 
@@ -33,10 +33,12 @@ function sidecar(quantScale: number = Q) {
 
 const major = new THREE.MeshBasicMaterial();
 const minor = new THREE.MeshBasicMaterial();
+const rail = new THREE.MeshBasicMaterial();
+const mats = { major, minor, rail };
 
 describe('buildRoadMeshes', () => {
     it('splits the one vertex buffer into a major and a minor mesh by class', () => {
-        const roads = buildRoadMeshes(sidecar(), Q, major, minor);
+        const roads = buildRoadMeshes(sidecar(), Q, mats);
         assert.ok(roads.major && roads.minor);
         assert.equal(roads.major.geometry.getIndex()!.count, 6);
         assert.equal(roads.minor.geometry.getIndex()!.count, 6);
@@ -56,14 +58,48 @@ describe('buildRoadMeshes', () => {
         for (let v = 0; v < 8; v++) {
             tile.directions[v * 4 + 3] = RoadClass.Primary;
         }
-        const roads = buildRoadMeshes(tile, Q, major, minor);
+        const roads = buildRoadMeshes(tile, Q, mats);
         assert.ok(roads.major);
         assert.equal(roads.minor, undefined);
         assert.equal(roads.major.geometry.getIndex()!.count, 12);
     });
 
+    it('puts railways in a mesh of their own, shown with the major roads', () => {
+        const tile = sidecar();
+        // The second stroke becomes a railway, its negative bank marked.
+        for (let v = 4; v < 8; v++) {
+            tile.directions[v * 4 + 3] = RoadClass.Rail | (v % 2 === 1 ? ROAD_SIDE_BIT : 0);
+        }
+        const roads = buildRoadMeshes(tile, Q, mats);
+        assert.ok(roads.major && roads.rail);
+        assert.equal(roads.minor, undefined);
+        assert.equal(roads.rail.material, rail);
+        assert.equal(roads.rail.geometry.getIndex()!.count, 6);
+        // Service track (a siding beside the main line) draws as rail too.
+        const service = sidecar();
+        for (let v = 4; v < 8; v++) {
+            service.directions[v * 4 + 3] = RoadClass.RailService | (v % 2 === 1 ? ROAD_SIDE_BIT : 0);
+        }
+        assert.equal(buildRoadMeshes(service, Q, mats).rail!.geometry.getIndex()!.count, 6);
+        // Only the rail mesh carries the track attributes its program reads.
+        assert.ok(roads.rail.geometry.getAttribute('riverMeta'));
+        assert.ok(roads.rail.geometry.getAttribute('railAlong'));
+        assert.equal(roads.major.geometry.getAttribute('railAlong'), undefined);
+        assert.equal(roadTriangles(roads), 4);
+
+        const strokes = new RoadStrokes({
+            manifest: { roads: { path: '', indexPath: '', encoding: 'PTR1', minZoom: 8, maxZoom: 12 } } as never,
+            baseUrl: '.', majorMaterial: major, minorMaterial: minor, railMaterial: rail,
+        });
+        (strokes as unknown as { attached: Set<unknown> }).attached.add(roads);
+        strokes.setMode(RoadsMode.MAJOR);
+        assert.equal(roads.rail.visible, true);
+        strokes.setMode(RoadsMode.OFF);
+        assert.equal(roads.rail.visible, false);
+    });
+
     it('rescales a sidecar quantised in another step than its tile', () => {
-        const roads = buildRoadMeshes(sidecar(0.2), Q, major, minor);
+        const roads = buildRoadMeshes(sidecar(0.2), Q, mats);
         assert.ok(Math.abs(roads.group.scale.x - 2) < 1e-6);
     });
 });
@@ -82,7 +118,7 @@ describe('RoadStrokes', () => {
     };
 
     it('is disabled, and attaches nothing, on a pyramid baked without roads', () => {
-        const strokes = new RoadStrokes({ manifest, baseUrl: '.', majorMaterial: major, minorMaterial: minor });
+        const strokes = new RoadStrokes({ manifest, baseUrl: '.', majorMaterial: major, minorMaterial: minor, railMaterial: rail });
         assert.equal(strokes.enabled, false);
         assert.equal(strokes.has({ z: 12, x: 1, y: 1 }), false);
         const meshes: TileMeshes = { group: new THREE.Group(), bytes: 0, geometricErrorM: 0 };
@@ -92,14 +128,14 @@ describe('RoadStrokes', () => {
 
     it('the mode is a visibility flip on what is bound: MAJOR hides the streets, OFF both', () => {
         const withRoads = { ...manifest, roads: { path: '{z}/{x}/{y}.ptr', indexPath: 'index_roads.bin', encoding: 'PTR1', minZoom: 8, maxZoom: 12 } };
-        const strokes = new RoadStrokes({ manifest: withRoads, baseUrl: '.', majorMaterial: major, minorMaterial: minor });
+        const strokes = new RoadStrokes({ manifest: withRoads, baseUrl: '.', majorMaterial: major, minorMaterial: minor, railMaterial: rail });
         assert.equal(strokes.enabled, true);
         assert.equal(strokes.has({ z: 7, x: 1, y: 1 }), false, 'below the baked range');
         assert.equal(strokes.has({ z: 12, x: 1, y: 1 }), true, 'no index yet: assume present');
         // Bind by hand, the way attach() does once the sidecar lands.
         const meshes: TileMeshes = { group: new THREE.Group(), bytes: 0, geometricErrorM: 0 };
         meshes.group.scale.setScalar(Q);
-        const roads = buildRoadMeshes(sidecar(), Q, major, minor);
+        const roads = buildRoadMeshes(sidecar(), Q, mats);
         (strokes as unknown as { attached: Set<unknown> }).attached.add(roads);
         meshes.roads = roads;
         strokes.setMode(RoadsMode.MAJOR);

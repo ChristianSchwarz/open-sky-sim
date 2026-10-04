@@ -26,6 +26,8 @@
  *     over the ground).
  */
 
+import { BridgeRole } from '../../src/script/terrain/pbr';
+
 export const STRUCTURES = [
     'slab', 'beam', 'arch', 'truss', 'cable_stayed', 'suspension', 'floating', 'tunnel',
 ] as const;
@@ -86,6 +88,8 @@ export interface BridgePlan {
     abutmentLiftM: [number, number];
     /** Stations where the deck ended up at or below ground; must be 0. */
     buried: number;
+    /** What the deck top is drawn as; a road surface when absent. */
+    deckRole?: BridgeRole;
 }
 
 /** Metres between profile stations. */

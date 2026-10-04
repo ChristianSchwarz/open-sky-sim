@@ -201,6 +201,138 @@ function finish(s: Soup): BridgeMesh {
     };
 }
 
+/**
+ * How far the track floats over the deck top, metres. Far less than a
+ * ground stroke's lift (a share of a cell, most of a metre at the leaf): the
+ * deck is a flat face drawn from close, and the track only has to clear it
+ * in the depth test.
+ */
+export const TRACK_LIFT_M = 0.2;
+
+/** A track stroke in the PTR1 layout, tile-local metres (see pbr.ts). */
+export interface TrackStroke {
+    positions: Float32Array;
+    directions: Float32Array;
+    halfWidthsM: Float32Array;
+    classes: Uint8Array;
+    alongM: Float32Array;
+    indices: Uint32Array;
+}
+
+/**
+ * The track along a rail deck's top, as a stroke the road strokes' rail
+ * material draws (sleepers, rails): one vertex pair per deck station the deck
+ * itself kept, so the stroke lies on the very faces the deck is built from.
+ * `halfM` is half the track bed's width; `classByte` the rail class, which
+ * gets sideBit on the second vertex of each pair.
+ */
+export function buildTrackStroke(
+    plan: BridgePlan, frame: BridgeFrame, halfM: number, classByte: number, sideBit: number,
+    tolerance: number = DECK_SIMPLIFY_TOLERANCE_M,
+): TrackStroke | undefined {
+    if (plan.structure === 'tunnel' || plan.stations.length < 2) {
+        return undefined;
+    }
+    const kept = keptStations(plan, tolerance);
+    const { a, b, up } = frame;
+    const real = (u: number, h: number, v: number): P => [
+        u * a[0] + v * b[0] + h * up[0],
+        u * a[1] + v * b[1] + h * up[1],
+        u * a[2] + v * b[2] + h * up[2],
+    ];
+    const pos: number[] = [], dir: number[] = [], half: number[] = [], cls: number[] = [], along: number[] = [];
+    const idx: number[] = [];
+    let run = 0;
+    let prev: P | undefined;
+    for (let k = 0; k < kept.length; k++) {
+        const i = kept[k];
+        const st = plan.stations[i];
+        const [tx, tz] = tangentAt(plan, i);
+        const p = real(st.x, st.deckY + TRACK_LIFT_M, st.z);
+        const d = real(-tz, 0, tx);
+        const dl = Math.hypot(d[0], d[1], d[2]) || 1;
+        if (prev) {
+            run += Math.hypot(p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]);
+        }
+        prev = p;
+        pos.push(...p, ...p);
+        dir.push(d[0] / dl, d[1] / dl, d[2] / dl, -d[0] / dl, -d[1] / dl, -d[2] / dl);
+        half.push(halfM, halfM);
+        cls.push(classByte, classByte | sideBit);
+        along.push(run, run);
+        if (k > 0) {
+            const l0 = (k - 1) * 2;
+            idx.push(l0, l0 + 1, l0 + 3, l0, l0 + 3, l0 + 2);
+        }
+    }
+    return {
+        positions: Float32Array.from(pos), directions: Float32Array.from(dir),
+        halfWidthsM: Float32Array.from(half), classes: Uint8Array.from(cls),
+        alongM: Float32Array.from(along), indices: Uint32Array.from(idx),
+    };
+}
+
+/** Several track strokes as one, indices rebased. */
+export function concatTracks(tracks: readonly TrackStroke[]): TrackStroke {
+    const verts = tracks.reduce((n, t) => n + t.positions.length / 3, 0);
+    const tris = tracks.reduce((n, t) => n + t.indices.length / 3, 0);
+    const out: TrackStroke = {
+        positions: new Float32Array(verts * 3), directions: new Float32Array(verts * 3),
+        halfWidthsM: new Float32Array(verts), classes: new Uint8Array(verts),
+        alongM: new Float32Array(verts), indices: new Uint32Array(tris * 3),
+    };
+    let v = 0, i = 0;
+    for (const t of tracks) {
+        const n = t.positions.length / 3;
+        out.positions.set(t.positions, v * 3);
+        out.directions.set(t.directions, v * 3);
+        out.halfWidthsM.set(t.halfWidthsM, v);
+        out.classes.set(t.classes, v);
+        out.alongM.set(t.alongM, v);
+        for (let k = 0; k < t.indices.length; k++) {
+            out.indices[i + k] = t.indices[k] + v;
+        }
+        v += n;
+        i += t.indices.length;
+    }
+    return out;
+}
+
+/** A box in a plan's true frame (u, h, v): centre, three unit axes, half sizes along them. */
+export interface PlanBox {
+    centre: P;
+    axes: [P, P, P];
+    half: [number, number, number];
+    role: number;
+}
+
+/**
+ * Boxes as flat-shaded triangles in the tile's axes, every face in the box's
+ * own role: the level-crossing furniture (crossingFurniture.ts).
+ */
+export function buildBoxMesh(boxes: readonly PlanBox[], frame: BridgeFrame): BridgeMesh {
+    const s = new Soup(frame);
+    for (const b of boxes) {
+        const corner = (i: number, j: number, k: number): P => [
+            b.centre[0] + b.axes[0][0] * b.half[0] * i + b.axes[1][0] * b.half[1] * j + b.axes[2][0] * b.half[2] * k,
+            b.centre[1] + b.axes[0][1] * b.half[0] * i + b.axes[1][1] * b.half[1] * j + b.axes[2][1] * b.half[2] * k,
+            b.centre[2] + b.axes[0][2] * b.half[0] * i + b.axes[1][2] * b.half[1] * j + b.axes[2][2] * b.half[2] * k,
+        ];
+        const faces: [P, P, P, P][] = [
+            [corner(1, -1, -1), corner(1, 1, -1), corner(1, 1, 1), corner(1, -1, 1)],
+            [corner(-1, -1, -1), corner(-1, -1, 1), corner(-1, 1, 1), corner(-1, 1, -1)],
+            [corner(-1, 1, -1), corner(-1, 1, 1), corner(1, 1, 1), corner(1, 1, -1)],
+            [corner(-1, -1, -1), corner(1, -1, -1), corner(1, -1, 1), corner(-1, -1, 1)],
+            [corner(-1, -1, 1), corner(1, -1, 1), corner(1, 1, 1), corner(-1, 1, 1)],
+            [corner(-1, -1, -1), corner(-1, 1, -1), corner(1, 1, -1), corner(1, -1, -1)],
+        ];
+        for (const [a, bb, c, d] of faces) {
+            s.quad(a, bb, c, d, b.role, b.centre);
+        }
+    }
+    return finish(s);
+}
+
 /** One bridge's triangles, put into the tile's axes with `frame` (see tileSurface.ts). */
 export function buildBridgeMesh(
     plan: BridgePlan, frame: BridgeFrame, tolerance: number = DECK_SIMPLIFY_TOLERANCE_M,
@@ -239,7 +371,7 @@ function addDeck(s: Soup, plan: BridgePlan, tolerance: number): void {
     const kept = keptStations(plan, tolerance);
     for (let k = 0; k + 1 < kept.length; k++) {
         const i = kept[k], j = kept[k + 1];
-        s.prism(section(i, half, -half, 0, -T), section(j, half, -half, 0, -T), BridgeRole.Deck, false);
+        s.prism(section(i, half, -half, 0, -T), section(j, half, -half, 0, -T), plan.deckRole ?? BridgeRole.Deck, false);
         // Parapets, both sides: outer edge at the deck's edge, inner a kerb in.
         // Their undersides sit on the deck, so they are not built.
         const inner = half - PARAPET_WIDTH_M;

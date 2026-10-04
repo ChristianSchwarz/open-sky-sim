@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { AudioClip } from '../../audio/audioSystem';
 import { isOverlayKeyEvent } from '../../input/overlayKeys';
 import { Palette } from "../../config/palettes/palette";
@@ -198,6 +199,19 @@ export class PlayerEntity implements Entity {
     private readonly carrierRideLocal = new THREE.Vector3();
 
     readonly tags: string[] = [ENTITY_TAGS.AIRCRAFT];
+
+    rebase(shift: FrameShift): void {
+        this.flightModel.rebase(shift);
+        shift.object(this.obj);
+        shift.vector(this.velocity);
+        shift.point(this.displayPosition);
+        shift.orientation(this.displayQuaternion);
+        shift.vector(this.displayVelocity);
+        shift.point(this.shadowPosition);
+        shift.orientation(this.shadowQuaternion);
+        shift.vector(this.carrierRideLocal);
+        this.fx.rebase(shift);
+    }
 
     enabled: boolean = true;
     private simulationPaused = false;

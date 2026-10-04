@@ -42,7 +42,10 @@ ${LOG_DEPTH_PARS_FRAGMENT}
     // brown and fails this, so it keeps its own baked colour untinted.
     float canopyMask = step(mx - mn, 0.12);
     vec3 leaf = vLeaf * texel.r;
-    vec3 tinted = mix(texel.rgb * vTrunk, leaf, canopyMask);
+    // Trunks are darkened here rather than in the sprite colours: darker
+    // sprite browns would also lose saturation and start passing the canopy
+    // test above (fir's #45482a is already right at the 0.12 edge).
+    vec3 tinted = mix(texel.rgb * vTrunk * 0.7, leaf, canopyMask);
 
     float distance = 0.0;
     float fogSteps = 12.0;

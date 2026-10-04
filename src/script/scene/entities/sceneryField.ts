@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift, WGS84_A } from '../../terrain/geodesy';
 import { Palette } from '../../config/palettes/palette';
 import { CanvasPainter } from '../../render/screen/canvasPainter';
 import { UP } from '../../utils/math';
@@ -65,6 +66,28 @@ export class SceneryField implements Entity {
 
     enabled: boolean = true;
 
+    /**
+     * Scene -> field coordinates. The layout is a pure function of field x/z,
+     * so a re-base, which moves the scene's x/z under the camera, would deal
+     * the camera a different patch of sky; this offset keeps the same one.
+     */
+    private readonly fieldOffset = new THREE.Vector2();
+    private readonly _anchor = new THREE.Vector3();
+    private readonly _inverse = new THREE.Quaternion();
+
+    /**
+     * Keep the field where it was around the new origin, which is where the
+     * aircraft is. The field's own axes do not turn with the frame: a fifth of
+     * a degree, which only moves cells far off by more than nobody can see.
+     */
+    rebase(shift: FrameShift): void {
+        // The new origin in old scene coordinates.
+        const anchor = this._anchor.copy(shift.offset).negate()
+            .applyQuaternion(this._inverse.copy(shift.rotation).invert());
+        this.fieldOffset.x += anchor.x;
+        this.fieldOffset.y += anchor.z;
+    }
+
     constructor(
         models: ModelManager,
         private area: THREE.Box2,
@@ -95,7 +118,9 @@ export class SceneryField implements Entity {
 
     render3D(targetWidth: number, targetHeight: number, camera: THREE.Camera, layers: Map<string, THREE.Scene>, palette: Palette): void {
         if (!layers.has(SceneLayers.EntityFlats) && !layers.has(SceneLayers.EntityVolumes)) return;
-        this.tmpVector2.set(camera.position.x, camera.position.z);
+        const camX = camera.position.x + this.fieldOffset.x;
+        const camZ = camera.position.z + this.fieldOffset.y;
+        this.tmpVector2.set(camX, camZ);
         if (!this.paddedArea.containsPoint(this.tmpVector2)) return;
 
         // Built once per pass (not per cell): frustum-cull cells before
@@ -108,16 +133,23 @@ export class SceneryField implements Entity {
         let triangles = 0;
         let idx = 0;
         for (let row = this.tileMinIndex; row < this.tileMaxIndex; row++) {
-            const z = Math.floor((camera.position.z + row * this.options.tileLength) / this.fieldLength + 0.5) * this.fieldLength - row * this.options.tileLength;
+            const z = Math.floor((camZ + row * this.options.tileLength) / this.fieldLength + 0.5) * this.fieldLength - row * this.options.tileLength;
             for (let col = this.tileMinIndex; col < this.tileMaxIndex; col++) {
-                const x = Math.floor((camera.position.x + col * this.options.tileLength) / this.fieldLength + 0.5) * this.fieldLength - col * this.options.tileLength;
+                const x = Math.floor((camX + col * this.options.tileLength) / this.fieldLength + 0.5) * this.fieldLength - col * this.options.tileLength;
                 const tile = this.tiles[idx++];
                 for (let i = 0; i < tile.length; i++) {
                     const item = tile[i];
-                    const wx = x + item.offset.x;
-                    const wz = z + item.offset.z;
-                    item.entity.position.set(wx, this.heightAt(wx, wz), wz);
-                    this.tmpVector2.set(item.entity.position.x, item.entity.position.z);
+                    const fx = x + item.offset.x;
+                    const fz = z + item.offset.z;
+                    const wx = fx - this.fieldOffset.x;
+                    const wz = fz - this.fieldOffset.y;
+                    // The deck follows the earth down from the frame's
+                    // origin rather than running on along its tangent plane:
+                    // 20 km out the two differ by 31 m, and that much would
+                    // jump at every re-base.
+                    const drop = (wx * wx + wz * wz) / (2 * WGS84_A);
+                    item.entity.position.set(wx, this.heightAt(fx, fz) - drop, wz);
+                    this.tmpVector2.set(fx, fz);
                     if (!this.area.containsPoint(this.tmpVector2)) continue;
                     this.tmpSphere.center.copy(item.entity.position);
                     this.tmpSphere.radius = this.cullRadius;

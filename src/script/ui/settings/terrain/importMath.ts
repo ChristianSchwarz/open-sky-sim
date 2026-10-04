@@ -8,10 +8,6 @@ export const TILE_PX = 256;
 export const MIN_ZOOM = 2;
 /** Matches OSM_MAX_ZOOM in tools/areaImport.ts. */
 export const MAX_ZOOM = 12;
-/** Matches --max-span in tools/fetch_planet_dem.py. */
-export const MAX_SPAN_DEG = 6;
-/** Largest ground size, per side, the importer offers. */
-export const MAX_SIDE_KM = 250;
 /** The pyramid's finest level, for estimating what a box will cost to bake. */
 export const BAKE_ZOOM = 12;
 
@@ -75,17 +71,6 @@ export function boxKm(b: Box): { w: number; h: number } {
     };
 }
 
-/** The larger side of a box in degrees, which is what the bake's limit is on. */
-export function boxSpanDeg(b: Box): number {
-    return Math.max(b.east - b.west, b.north - b.south);
-}
-
-/** A box over the size limit: either side past MAX_SIDE_KM, or past the DEM tool's degree cap. */
-export function boxTooBig(b: Box): boolean {
-    const km = boxKm(b);
-    return Math.max(km.w, km.h) > MAX_SIDE_KM || boxSpanDeg(b) > MAX_SPAN_DEG;
-}
-
 /** How many z12 terrain tiles the bake will touch — the cost that matters. */
 export function bakeTiles(b: Box): number {
     const span = 180 / (1 << BAKE_ZOOM);
@@ -107,11 +92,6 @@ export function blockedReason(running: boolean, selection: Box | undefined, name
     }
     if (!selection) {
         return 'shift-drag on the map to choose an area';
-    }
-    if (boxTooBig(selection)) {
-        const km = boxKm(selection);
-        return `too big — ${km.w.toFixed(0)} x ${km.h.toFixed(0)} km exceeds the `
-            + `${MAX_SIDE_KM} x ${MAX_SIDE_KM} km limit`;
     }
     if (crossesAntimeridian(selection)) {
         return 'crosses the antimeridian — keep the box on one side of 180°';

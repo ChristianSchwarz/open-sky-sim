@@ -121,6 +121,17 @@ export function makeEnuBasis(lat0: number, lon0: number, height0: number = 0): E
     return { origin, lat0, lon0, ecefToEnu: ecefToEnuMat, enuToEcef: enuToEcefMat };
 }
 
+/** An independent copy: the matrices are not shared. */
+export function cloneEnuBasis(b: EnuBasis): EnuBasis {
+    return {
+        origin: { ...b.origin },
+        lat0: b.lat0,
+        lon0: b.lon0,
+        ecefToEnu: b.ecefToEnu.slice(),
+        enuToEcef: b.enuToEcef.slice(),
+    };
+}
+
 export function ecefToEnu(basis: EnuBasis, ecef: Ecef, out: Enu = { e: 0, n: 0, u: 0 }): Enu {
     const dx = ecef.x - basis.origin.x;
     const dy = ecef.y - basis.origin.y;
@@ -283,3 +294,98 @@ export function enuFrameRotation(from: EnuBasis, to: EnuBasis): THREE.Quaternion
     return new THREE.Quaternion().setFromRotationMatrix(_to.multiply(_from));
 }
 
+
+/**
+ * The rigid move that re-expresses scene coordinates of one ENU frame in
+ * another: `p' = rotation·p + offset` for points, `rotation·v` for
+ * directions and velocities, `rotation·q` for orientations.
+ *
+ * This is what a mid-flight re-base hands every holder of scene state. Both
+ * frames describe the same physical world, so applying it moves nothing on
+ * the ground; it only turns the axes so that "up" is up again where the
+ * aircraft now is.
+ */
+export class FrameShift {
+    private readonly _v = new THREE.Vector3();
+    private readonly _yaw = new THREE.Vector3();
+
+    constructor(readonly rotation: THREE.Quaternion, readonly offset: THREE.Vector3) {}
+
+    /** The shift from one ENU frame's scene coordinates to another's. */
+    static between(from: EnuBasis, to: EnuBasis): FrameShift {
+        // Offset: where the old origin lands in the new frame.
+        return new FrameShift(enuFrameRotation(from, to), sceneFromEnu(ecefToEnu(to, from.origin)));
+    }
+
+    /** Structured-clone-safe form, for the sim worker. */
+    toArrays(): { rotation: [number, number, number, number]; offset: [number, number, number] } {
+        return {
+            rotation: this.rotation.toArray() as [number, number, number, number],
+            offset: this.offset.toArray() as [number, number, number],
+        };
+    }
+
+    static fromArrays(a: { rotation: number[]; offset: number[] }): FrameShift {
+        return new FrameShift(
+            new THREE.Quaternion().fromArray(a.rotation), new THREE.Vector3().fromArray(a.offset));
+    }
+
+    /**
+     * A scene heading (0 = +Z, see vectorHeading) turned into the new frame.
+     * Only the yaw survives; the tilt a heading cannot hold is the caller's to
+     * drop or carry (see {@link slopedHeading}).
+     */
+    heading(h: number): number {
+        return this.slopedHeading(h, 0).heading;
+    }
+
+    /**
+     * A heading with a rise per metre along it, turned into the new frame. The
+     * part of the tilt that lies along the axis comes out as a change of slope.
+     */
+    slopedHeading(h: number, slope: number): { heading: number; slope: number } {
+        const d = this.vector(this._yaw.set(Math.sin(h), slope, Math.cos(h)));
+        const run = Math.hypot(d.x, d.z);
+        return { heading: Math.atan2(d.x, d.z), slope: d.y / run };
+    }
+
+    /** A position, in place. */
+    point<T extends THREE.Vector3>(p: T): T {
+        p.applyQuaternion(this.rotation).add(this.offset);
+        return p;
+    }
+
+    /** A direction, velocity or angular rate, in place. */
+    vector<T extends THREE.Vector3>(v: T): T {
+        v.applyQuaternion(this.rotation);
+        return v;
+    }
+
+    /** An orientation (local → scene), in place. */
+    orientation<T extends THREE.Quaternion>(q: T): T {
+        q.premultiply(this.rotation);
+        return q;
+    }
+
+    /** An object's position and quaternion, in place; its own matrix is refreshed if it does not auto-update. */
+    object(o: THREE.Object3D): void {
+        this.point(o.position);
+        this.orientation(o.quaternion);
+        if (!o.matrixAutoUpdate) {
+            o.updateMatrix();
+        }
+    }
+
+    /** xyz triples in a flat array, from `start` to `end` (exclusive, in triples), in place. */
+    points(a: { [i: number]: number }, start: number, end: number, stride = 3): void {
+        const v = this._v;
+        for (let i = start; i < end; i++) {
+            const k = i * stride;
+            v.set(a[k], a[k + 1], a[k + 2]);
+            this.point(v);
+            a[k] = v.x;
+            a[k + 1] = v.y;
+            a[k + 2] = v.z;
+        }
+    }
+}

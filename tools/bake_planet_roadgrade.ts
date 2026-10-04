@@ -28,6 +28,7 @@ import { decodePdm } from '../src/script/terrain/demTile';
 import { tileAtLonLat, tileBounds } from '../src/script/terrain/tiling';
 import { decodeRbr } from './bake/rbr';
 import { decodeRvr } from './bake/rvr';
+import { isZoneClass } from '../src/script/terrain/ptr';
 import { CrossingEnv, CrossingStats, MAX_CROSSING_WORK_M, RoadPiece, planCrossings } from './bake/crossings';
 import {
     BATTER_REACH_M, GRADE_STEP_M, GradeLine, GradePoint, ROAD_GRADE_MAX, ROADBED_SHOULDER_M, encodeRgr, gradeProfile,
@@ -115,7 +116,7 @@ function readRoads(src: string, bbox?: number[]): Map<number, Piece[]> {
                 if (b.east <= bbox[0] || b.west >= bbox[2] || b.north <= bbox[1] || b.south >= bbox[3]) continue;
             }
             for (const r of decodeRvr(fs.readFileSync(path.join(root, xs, f)))) {
-                if (r.points.length < 2) continue;
+                if (r.points.length < 2 || isZoneClass(r.cls)) continue;
                 const list = byClass.get(r.cls) ?? byClass.set(r.cls, []).get(r.cls)!;
                 list.push({ halfM: r.widthM / 2, pts: r.points.map(p => ({ lon: p.lon, lat: p.lat })) });
             }
@@ -376,7 +377,8 @@ function main(): void {
         if (roads === undefined) {
             const p = path.join(rbrRoot, String(x), `${y}.rvr`);
             roads = fs.existsSync(p)
-                ? decodeRvr(fs.readFileSync(p)).map(r => ({ cls: r.cls, halfM: r.widthM / 2, points: r.points }))
+                ? decodeRvr(fs.readFileSync(p)).filter(r => !isZoneClass(r.cls))
+                    .map(r => ({ cls: r.cls, halfM: r.widthM / 2, points: r.points }))
                 : [];
             if (rvrCache.size > 48) rvrCache.clear();
             rvrCache.set(key, roads);

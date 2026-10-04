@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CombatSim } from '../sim/combatSim';
 import { Faction } from '../../weapons/combatant';
 import { SimToWorkerMessage } from '../sim/simTypes';
+import { FrameShift } from '../../terrain/geodesy';
 import {
     aircraftBank,
     projectileBank,
@@ -42,6 +43,9 @@ function handleMessage(data: SimToWorkerMessage): void {
             break;
         case 'setWorld':
             sim.setWorld(data.world);
+            break;
+        case 'rebase':
+            sim.rebase(FrameShift.fromArrays(data));
             break;
         case 'addStaticColliders':
             sim.addStaticColliders(data.colliders);

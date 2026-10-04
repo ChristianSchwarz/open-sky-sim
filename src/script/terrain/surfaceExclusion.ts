@@ -17,10 +17,14 @@ const CELL_M = 64;
 export type SurfaceExclusion = (x: number, z: number) => boolean;
 
 /** One test over every pad (edge skirt included), or undefined when there are none. */
-export function buildSurfaceExclusion(pads: readonly SurfacePadCollider[]): SurfaceExclusion | undefined {
-    if (pads.length === 0) {
+export function buildSurfaceExclusion(live: readonly SurfacePadCollider[]): SurfaceExclusion | undefined {
+    if (live.length === 0) {
         return undefined;
     }
+    // A copy: the game rewrites its pads in place on a re-base, and this test
+    // stays in the frame it was built in (see TerrainEntity.rebaseTo), with a
+    // grid that only matches the pads as they were.
+    const pads = live.map(p => ({ ...p }));
     // Bucketed like the other exclusions: a tile's scatter asks this per
     // candidate point, and an area with OSM buildings has hundreds of pads.
     const grid = new Map<number, number[]>();

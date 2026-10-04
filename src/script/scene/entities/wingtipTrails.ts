@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { ShaderMaterial } from 'three';
 import { F16_PROFILE } from '../../physics/f16Profile';
 import { UP } from '../../utils/math';
@@ -158,6 +159,14 @@ class WingTrailSide {
         }
     }
 
+    /** Carry the recorded trail into a re-based frame; see TerrainEntity.rebaseTo. */
+    rebase(shift: FrameShift): void {
+        for (const p of this.history) {
+            shift.point(p);
+        }
+        shift.point(this.lastSample);
+    }
+
     addToRenderList(volumesId: string, lists: Map<string, THREE.Scene>): void {
         if (!this.root.visible) {
             return;
@@ -179,6 +188,11 @@ export class WingtipTrails {
     private readonly _rightTip = new THREE.Vector3();
     private readonly leftTipBody = DEFAULT_LEFT_WINGTIP.clone();
     private readonly rightTipBody = DEFAULT_RIGHT_WINGTIP.clone();
+
+    rebase(shift: FrameShift): void {
+        this.left.rebase(shift);
+        this.right.rebase(shift);
+    }
 
     constructor(materials: SceneMaterialManager, tips?: { left: THREE.Vector3, right: THREE.Vector3 }) {
         if (tips) {

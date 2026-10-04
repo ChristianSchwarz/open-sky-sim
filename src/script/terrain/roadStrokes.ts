@@ -1,6 +1,7 @@
 /**
  * Road strokes at runtime: fetching the PTR1 sidecar a tile has, binding it
- * as two stroke meshes - major roads and minor - in the tile's own group,
+ * as up to three stroke meshes - major roads, minor roads and railways - in
+ * the tile's own group,
  * and switching them with the player's setting.
  *
  * Modelled on CoverTextures: the sidecar arrives on its own store, gated by
@@ -8,7 +9,8 @@
  * Nothing waits on it; a tile drawn before its roads arrive is a tile of a
  * pyramid baked without roads. The setting is a visibility flip on what is
  * attached plus a gate on new fetches, so switching costs no re-stream and
- * no re-upload; "major" keeps motorways to secondaries and hides the rest.
+ * no re-upload; "major" keeps motorways to secondaries and the railways and
+ * hides the rest.
  *
  * The geometry is bound the way the rivers are (see strokeGeometry in
  * tileMesh.ts): positions quantised in the tile's own step, the offset
@@ -20,7 +22,7 @@
 import * as THREE from 'three';
 import { RoadsMode } from '../state/gameDefs';
 import { TerrainManifest, roadTileUrl } from './manifest';
-import { PtrTile, ROAD_MAJOR_MAX_CLASS, decodePtr } from './ptr';
+import { PtrTile, ROAD_CLASS_MASK, ROAD_MAJOR_MAX_CLASS, decodePtr, isRailClass } from './ptr';
 import { TileIndex } from './tileIndex';
 import { TileMeshes } from './tileMesh';
 import { TileStore } from './tileStore';
@@ -41,6 +43,11 @@ export interface RoadMeshes {
     group: THREE.Group;
     major?: THREE.Mesh;
     minor?: THREE.Mesh;
+    rail?: THREE.Mesh;
+    /** The rail stroke's sleeper pass, over every bed: shares `rail`'s geometry. */
+    railDetail?: THREE.Mesh;
+    /** The rail stroke's rail pass, over every sleeper: shares `rail`'s geometry. */
+    railTop?: THREE.Mesh;
     /** GPU bytes bound, for the cache budget. */
     bytes: number;
 }
@@ -52,6 +59,12 @@ export interface RoadStrokesOptions {
     majorMaterial: THREE.Material;
     /** Tertiaries and below. */
     minorMaterial: THREE.Material;
+    /** Railway track beds, the first pass. */
+    railMaterial: THREE.Material;
+    /** Sleepers, the second pass (uRailPass 1, transparent). Absent: beds only. */
+    railDetailMaterial?: THREE.Material;
+    /** Rails, the third pass (uRailPass 2, transparent), drawn after every sleeper. */
+    railTopMaterial?: THREE.Material;
     onBeforeRender?: THREE.Mesh['onBeforeRender'];
 }
 
@@ -60,19 +73,61 @@ export interface RoadStrokesStats {
     inflight: number;
     queued: number;
     failed: number;
-    /** Triangles bound across attached tiles, both classes. */
+    /** Triangles bound across attached tiles, every class. */
     triangles: number;
 }
 
+/** The three meshes a sidecar splits into. */
+type StrokeKind = 'major' | 'minor' | 'rail';
+const STROKE_KINDS: readonly StrokeKind[] = ['major', 'minor', 'rail'];
+
+/** A material per kind, and the rail stroke's second pass when there is one. */
+export type StrokeMaterials = Readonly<Record<StrokeKind, THREE.Material>>
+    & { readonly railDetail?: THREE.Material; readonly railTop?: THREE.Material };
+
 /**
- * One class's index list over the shared stroke vertices, or undefined when
- * the tile has no stroke of that class. A pair, and every vertex of one
+ * Draw order of the rail pass among the transparent meshes: after every
+ * sleeper pass (ROAD_RENDER_ORDER), so no track's timbers cover another's rails.
+ */
+export const RAIL_TOP_RENDER_ORDER = ROAD_RENDER_ORDER + 0.5;
+
+/** The sleeper and rail passes over a rail stroke's geometry, as children of `group`. */
+export function addTrackPasses(
+    group: THREE.Group, geometry: THREE.BufferGeometry,
+    sleepers: THREE.Material | undefined, rails: THREE.Material | undefined,
+    onBeforeRender?: THREE.Mesh['onBeforeRender'],
+): { sleepers?: THREE.Mesh; rails?: THREE.Mesh } {
+    const make = (material: THREE.Material, order: number): THREE.Mesh => {
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.frustumCulled = false;
+        mesh.matrixAutoUpdate = false;
+        mesh.renderOrder = order;
+        if (onBeforeRender) {
+            mesh.onBeforeRender = onBeforeRender;
+        }
+        group.add(mesh);
+        return mesh;
+    };
+    return {
+        sleepers: sleepers ? make(sleepers, ROAD_RENDER_ORDER) : undefined,
+        rails: rails ? make(rails, RAIL_TOP_RENDER_ORDER) : undefined,
+    };
+}
+
+function kindOf(byte: number): StrokeKind {
+    const cls = byte & ROAD_CLASS_MASK;
+    return isRailClass(cls) ? 'rail' : cls <= ROAD_MAJOR_MAX_CLASS ? 'major' : 'minor';
+}
+
+/**
+ * One kind's index list over the shared stroke vertices, or undefined when
+ * the tile has no stroke of that kind. A pair, and every vertex of one
  * stroke, carry the same class, so a triangle's first vertex speaks for it.
  */
-function classIndices(tile: PtrTile, major: boolean): Uint16Array | undefined {
+function classIndices(tile: PtrTile, kind: StrokeKind): Uint16Array | undefined {
     const all = tile.indices;
     const dirs = tile.directions;
-    const wanted = (v: number) => (dirs[v * 4 + 3] <= ROAD_MAJOR_MAX_CLASS) === major;
+    const wanted = (v: number) => kindOf(dirs[v * 4 + 3]) === kind;
     let count = 0;
     for (let i = 0; i < all.length; i += 3) {
         if (wanted(all[i])) {
@@ -97,26 +152,33 @@ function classIndices(tile: PtrTile, major: boolean): Uint16Array | undefined {
     return out;
 }
 
-function strokeGeometry(tile: PtrTile, indices: Uint16Array): THREE.BufferGeometry {
+export function strokeGeometry(tile: PtrTile, indices: Uint16Array, rail: boolean): THREE.BufferGeometry {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(tile.positions, 3));
     const dirBuffer = new THREE.InterleavedBuffer(tile.directions, 4);
     g.setAttribute('riverDir', new THREE.InterleavedBufferAttribute(dirBuffer, 3, 0, true));
     g.setAttribute('riverHalf', new THREE.BufferAttribute(tile.halfWidths, 1, false));
+    if (rail) {
+        // The track drawn into the stroke (RailVertProgram): which bank a
+        // vertex is on rides in the class byte, the sleeper rhythm in `along`.
+        g.setAttribute('riverMeta', new THREE.InterleavedBufferAttribute(dirBuffer, 1, 3, false));
+        g.setAttribute('railAlong', new THREE.BufferAttribute(tile.along, 1, false));
+        g.setAttribute('railFlags', new THREE.BufferAttribute(tile.flags, 1, false));
+    }
     g.setIndex(new THREE.BufferAttribute(indices, 1));
     return g;
 }
 
 /**
- * Bind a decoded sidecar as a group of up to two stroke meshes, major and
- * minor, for a tile whose group scale is `tileScale`. Positions are
+ * Bind a decoded sidecar as a group of up to three stroke meshes, major
+ * roads, minor roads and railways, for a tile whose group scale is `tileScale`. Positions are
  * quantised in the sidecar's own step, so the tile group's scale turns them
  * into metres; a sidecar from another bake of the mesh says so in its
  * header and is rescaled rather than drawn wrong.
  */
 export function buildRoadMeshes(
     tile: PtrTile, tileScale: number,
-    majorMaterial: THREE.Material, minorMaterial: THREE.Material,
+    materials: StrokeMaterials,
     onBeforeRender?: THREE.Mesh['onBeforeRender'],
 ): RoadMeshes {
     const group = new THREE.Group();
@@ -129,12 +191,12 @@ export function buildRoadMeshes(
     group.updateMatrix();
     group.matrixAutoUpdate = false;
     const roads: RoadMeshes = { group, bytes: 0 };
-    for (const major of [true, false]) {
-        const indices = classIndices(tile, major);
+    for (const kind of STROKE_KINDS) {
+        const indices = classIndices(tile, kind);
         if (!indices) {
             continue;
         }
-        const mesh = new THREE.Mesh(strokeGeometry(tile, indices), major ? majorMaterial : minorMaterial);
+        const mesh = new THREE.Mesh(strokeGeometry(tile, indices, kind === 'rail'), materials[kind]);
         mesh.frustumCulled = false;
         mesh.matrixAutoUpdate = false;
         mesh.renderOrder = ROAD_RENDER_ORDER;
@@ -142,21 +204,24 @@ export function buildRoadMeshes(
             mesh.onBeforeRender = onBeforeRender;
         }
         group.add(mesh);
-        if (major) {
-            roads.major = mesh;
-        } else {
-            roads.minor = mesh;
-        }
+        roads[kind] = mesh;
         roads.bytes += indices.byteLength;
+        if (kind === 'rail') {
+            // Every bed is opaque and drawn first; the detail passes are
+            // transparent, so the renderer puts them after all of them.
+            const passes = addTrackPasses(group, mesh.geometry, materials.railDetail, materials.railTop, onBeforeRender);
+            roads.railDetail = passes.sleepers;
+            roads.railTop = passes.rails;
+        }
     }
     roads.bytes += tile.positions.byteLength + tile.directions.byteLength + tile.halfWidths.byteLength;
     return roads;
 }
 
-/** Triangles bound in both meshes, visible or not. */
+/** Triangles bound in every mesh, visible or not. */
 export function roadTriangles(roads: RoadMeshes): number {
     let n = 0;
-    for (const mesh of [roads.major, roads.minor]) {
+    for (const mesh of [roads.major, roads.minor, roads.rail, roads.railDetail, roads.railTop]) {
         if (mesh) {
             n += (mesh.geometry.getIndex()?.count ?? 0) / 3;
         }
@@ -168,8 +233,7 @@ export class RoadStrokes {
     private readonly store: TileStore<PtrTile> | undefined;
     private readonly minZoom: number;
     private readonly maxZoom: number;
-    private readonly majorMaterial: THREE.Material;
-    private readonly minorMaterial: THREE.Material;
+    private readonly materials: StrokeMaterials;
     private readonly onBeforeRender: THREE.Mesh['onBeforeRender'] | undefined;
     private index: TileIndex | undefined;
     private mode: RoadsMode = RoadsMode.ALL;
@@ -180,8 +244,11 @@ export class RoadStrokes {
         const spec = opts.manifest.roads;
         this.minZoom = spec?.minZoom ?? 0;
         this.maxZoom = spec?.maxZoom ?? -1;
-        this.majorMaterial = opts.majorMaterial;
-        this.minorMaterial = opts.minorMaterial;
+        this.materials = {
+            major: opts.majorMaterial, minor: opts.minorMaterial, rail: opts.railMaterial,
+            railDetail: opts.railDetailMaterial,
+            railTop: opts.railTopMaterial,
+        };
         this.onBeforeRender = opts.onBeforeRender;
         this.store = spec === undefined ? undefined : new TileStore<PtrTile>({
             baseUrl: opts.baseUrl,
@@ -201,7 +268,7 @@ export class RoadStrokes {
 
     /**
      * The player's switch. OFF stops new sidecars being fetched and hides
-     * what is attached; MAJOR hides the minor roads only. A tile drawn while
+     * what is attached; MAJOR hides the minor roads only and keeps railways. A tile drawn while
      * off is asked again once on.
      */
     setMode(mode: RoadsMode): void {
@@ -217,6 +284,14 @@ export class RoadStrokes {
         }
         if (roads.minor) {
             roads.minor.visible = this.mode === RoadsMode.ALL;
+        }
+        if (roads.rail) {
+            roads.rail.visible = this.mode !== RoadsMode.OFF;
+        }
+        for (const mesh of [roads.railDetail, roads.railTop]) {
+            if (mesh) {
+                mesh.visible = this.mode !== RoadsMode.OFF;
+            }
         }
     }
 
@@ -273,7 +348,7 @@ export class RoadStrokes {
 
     private bind(id: TileKey, meshes: TileMeshes, tile: PtrTile): void {
         const roads = buildRoadMeshes(
-            tile, meshes.group.scale.x, this.majorMaterial, this.minorMaterial, this.onBeforeRender,
+            tile, meshes.group.scale.x, this.materials, this.onBeforeRender,
         );
         this.applyMode(roads);
         meshes.group.add(roads.group);
@@ -291,6 +366,7 @@ export class RoadStrokes {
             this.triangles -= roadTriangles(roads);
             roads.major?.geometry.dispose();
             roads.minor?.geometry.dispose();
+            roads.rail?.geometry.dispose();
             roads.group.clear();
         }
         // A sidecar still in flight must not bind to a released tile.
@@ -304,11 +380,10 @@ export class RoadStrokes {
             return 0;
         }
         let n = 0;
-        if (roads.major?.visible) {
-            n += (roads.major.geometry.getIndex()?.count ?? 0) / 3;
-        }
-        if (roads.minor?.visible) {
-            n += (roads.minor.geometry.getIndex()?.count ?? 0) / 3;
+        for (const mesh of [roads.major, roads.minor, roads.rail, roads.railDetail, roads.railTop]) {
+            if (mesh?.visible) {
+                n += (mesh.geometry.getIndex()?.count ?? 0) / 3;
+            }
         }
         return n;
     }

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { HighpFlatVertProgram } from './flatVP';
-import { RIVER_MAX_STRETCH, RIVER_MIN_HALF_PIXELS, RiverVertProgram } from './riverVP';
+import { DepthFragProgram, RailDepthFragProgram } from './depthFP';
+import { RIVER_MAX_STRETCH, RIVER_MIN_HALF_PIXELS, RailVertProgram, RiverVertProgram } from './riverVP';
 
 /**
  * Source-level checks, in the style of particlesMesh.test.ts: neither tsc nor a
@@ -59,5 +60,26 @@ describe('river vertex program', () => {
         assert.ok(RIVER_MIN_HALF_PIXELS >= 0.5, `floor ${RIVER_MIN_HALF_PIXELS}`);
         // A cap below 1 would *narrow* a stroke that is already wide enough.
         assert.ok(RIVER_MAX_STRETCH >= 1, `cap ${RIVER_MAX_STRETCH}`);
+    });
+});
+
+describe('rail stroke programs', () => {
+    it('is the river program plus the track attributes, and nothing else changes', () => {
+        for (const name of ['riverDir', 'riverHalf', 'riverMeta', 'railAlong', 'railFlags']) {
+            assert.match(RailVertProgram, new RegExp(`attribute\\s+\\w+\\s+${name}\\s*;`));
+        }
+        assert.doesNotMatch(RiverVertProgram, /riverMeta|railAlong|vRail/);
+        assert.equal([...RailVertProgram.matchAll(/gl_Position\s*=/g)].length, 1);
+    });
+
+    it('hands the fragment program the track coordinates it reads', () => {
+        assert.match(RailVertProgram, /varying\s+vec3\s+vRail\s*;/);
+        assert.match(RailDepthFragProgram, /varying\s+vec3\s+vRail\s*;/);
+        assert.match(RailDepthFragProgram, /boxCoverage/);
+        // The two passes: bed, then the track as coverage in alpha.
+        assert.match(RailDepthFragProgram, /uniform\s+float\s+uRailPass\s*;/);
+        assert.match(RailDepthFragProgram, /gl_FragColor\.a\s*=\s*railAlpha/);
+        assert.doesNotMatch(DepthFragProgram, /railAlpha/);
+        assert.doesNotMatch(DepthFragProgram, /vRail/);
     });
 });

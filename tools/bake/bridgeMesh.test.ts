@@ -4,8 +4,10 @@ import { zlibSync } from 'fflate';
 import { BridgeRole, decodePbr, encodePbr } from '../../src/script/terrain/pbr';
 import { BridgeGround, BridgeSpan, planBridge } from './bridges';
 import {
-    DECK_SIMPLIFY_TOLERANCE_M, IDENTITY_FRAME, buildBridgeMesh, buildTileBridgeMesh, keptStations,
+    DECK_SIMPLIFY_TOLERANCE_M, IDENTITY_FRAME, TRACK_LIFT_M, buildBridgeMesh, buildTileBridgeMesh,
+    buildTrackStroke, concatTracks, keptStations,
 } from './bridgeMesh';
+import { ALONG_STEP_M, ROAD_SIDE_BIT, RoadClass } from '../../src/script/terrain/ptr';
 import { RBR_MAGIC, decodeRbr } from './rbr';
 
 const valley = (len: number, depth: number): BridgeGround => ({
@@ -173,5 +175,63 @@ describe('RBR1', () => {
         assert.equal(got[0].cls, 1);
         assert.equal(got[0].points.length, 2);
         close(got[0].points[1].lat, 52.51, 1e-4);
+    });
+});
+
+describe('buildTrackStroke', () => {
+    const plan = planBridge(span('beam'), valley(300, 40))!;
+    plan.deckRole = BridgeRole.RailDeck;
+
+    it('lays a rail stroke on the deck top, one vertex pair per kept station', () => {
+        const track = buildTrackStroke(plan, NO_SHEAR, 2.5, RoadClass.Rail, ROAD_SIDE_BIT)!;
+        const kept = keptStations(plan, DECK_SIMPLIFY_TOLERANCE_M);
+        assert.equal(track.positions.length / 3, kept.length * 2);
+        assert.equal(track.indices.length / 3, (kept.length - 1) * 2);
+        kept.forEach((i, k) => {
+            close(track.positions[k * 6 + 1], plan.stations[i].deckY + TRACK_LIFT_M, 1e-4);
+            assert.equal(track.classes[k * 2], RoadClass.Rail);
+            assert.equal(track.classes[k * 2 + 1], RoadClass.Rail | ROAD_SIDE_BIT);
+            assert.equal(track.halfWidthsM[k * 2], 2.5);
+        });
+        // Along the deck, from zero to its length.
+        assert.equal(track.alongM[0], 0);
+        close(track.alongM[track.alongM.length - 1], plan.lengthM, 1);
+        // Across: unit, opposite within a pair, horizontal for this flat frame.
+        close(Math.hypot(track.directions[0], track.directions[1], track.directions[2]), 1, 1e-9);
+        close(track.directions[0] + track.directions[3], 0, 1e-9);
+        close(track.directions[1], 0, 1e-9);
+    });
+
+    it('round-trips through the PBR track section and concatenates with rebased indices', () => {
+        const one = buildTrackStroke(plan, NO_SHEAR, 2.5, RoadClass.Rail, ROAD_SIDE_BIT)!;
+        const both = concatTracks([one, one]);
+        const n = one.positions.length / 3;
+        assert.equal(both.indices[one.indices.length], one.indices[0] + n);
+        const mesh = buildBridgeMesh(plan, NO_SHEAR);
+        const bytes = encodePbr({
+            id: { z: 12, x: 1, y: 2 }, quantScale: 0.05, positions: mesh.positions, normals: mesh.normals,
+            roles: mesh.roles, indices: mesh.indices, track: both,
+        });
+        const back = decodePbr(bytes.slice().buffer);
+        assert.ok(back.track);
+        assert.equal(back.track.positions.length, both.positions.length);
+        assert.equal(back.track.indices.length, both.indices.length);
+        assert.equal(back.track.directions[7], RoadClass.Rail | ROAD_SIDE_BIT);
+        close(back.track.along[back.track.along.length - 1] * ALONG_STEP_M, both.alongM[both.alongM.length - 1], ALONG_STEP_M);
+        assert.equal(back.indices.length, mesh.indices.length);
+        assert.ok(mesh.roles.includes(BridgeRole.RailDeck), 'the deck top takes the rail role');
+    });
+
+    it('decodes a version 1 sidecar, which ends after its triangles, with no track', () => {
+        const mesh = buildBridgeMesh(plan, NO_SHEAR);
+        const v2 = encodePbr({
+            id: { z: 12, x: 1, y: 2 }, quantScale: 0.05, positions: mesh.positions, normals: mesh.normals,
+            roles: mesh.roles, indices: mesh.indices,
+        });
+        const v1 = v2.slice(0, v2.byteLength - 4);
+        v1[4] = 1;
+        const back = decodePbr(v1.buffer);
+        assert.equal(back.track, undefined);
+        assert.equal(back.indices.length, mesh.indices.length);
     });
 });

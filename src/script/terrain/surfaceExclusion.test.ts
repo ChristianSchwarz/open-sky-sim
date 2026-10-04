@@ -25,4 +25,14 @@ describe('buildSurfaceExclusion', () => {
         assert.equal(test(12000, -8023), false);
         assert.equal(test(0, 0), false);
     });
+
+    it('keeps answering where the pads were when they are later moved in place', () => {
+        const pad = { ...PAD };
+        const test = buildSurfaceExclusion([pad])!;
+        // What a re-base does to the game's own copy.
+        pad.centerX -= 20_000;
+        pad.centerZ += 5_000;
+        assert.equal(test(12000, -8000), true);
+        assert.equal(test(-8000, -3000), false);
+    });
 });

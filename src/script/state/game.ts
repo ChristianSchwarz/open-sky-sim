@@ -40,7 +40,7 @@ import {
     AIRFIELD_SURFACE_EPS_M, GroundStrip, buildAirfieldModel, buildingHeightM, combineCover, repaintGroundStrip,
     sampleGroundStrip,
 } from '../scene/airfield/airfieldModel';
-import { WGS84_A, WGS84_B, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, worldToGeodetic } from '../terrain/geodesy';
+import { WGS84_A, WGS84_B, cloneEnuBasis, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, worldToGeodetic } from '../terrain/geodesy';
 import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
@@ -111,8 +111,9 @@ import { WeaponsField } from '../scene/entities/weaponsField';
 import { Faction } from '../weapons/combatant';
 import { CombatSimClient } from '../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../physics/model/simProxyFlightModel';
-import { serializeStaticColliders, serializeWorld, defaultArrestorCableField } from '../physics/sim/serializedWorld';
-import { HeightFieldSender, MirrorFocus } from '../terrain/heightMirror';
+import { SerializedWorld, serializeStaticColliders, serializeWorld, defaultArrestorCableField } from '../physics/sim/serializedWorld';
+import { HeightFieldSender, MirrorFocus, SerializedHeightField } from '../terrain/heightMirror';
+import { rebaseMeshCollider, rebaseRunway, rebaseSkiJump, rebaseSurfacePad } from './worldRebase';
 import { SimAircraftSpawn, SimFlightModelKind, SimGunConfig } from '../physics/sim/simTypes';
 import { PLAYER_SIM_ID, WINGMAN_SIM_ID, aiSimId } from '../physics/sim/simIds';
 import { AiPilotModels } from './gameDefs';
@@ -237,6 +238,12 @@ const AIRFIELD_GROUND_RADIUS_M = 4000;
  * five minutes and 2 GB.
  */
 const AIRFIELD_STREAM_RADIUS_M = 50_000;
+/**
+ * How far the aircraft may fly from the scene origin before the origin moves
+ * under it (see Game.maybeRebase). The frame's vertical leans a degree per
+ * 111 km, so this keeps the horizon within 0.18 degrees of level.
+ */
+const REBASE_DISTANCE_M = 20_000;
 /** How often the aircraft's position is checked for airfields to stream in. */
 const AIRFIELD_STREAM_INTERVAL_MS = 1000;
 /** Edge softening on a building's roof pad. A wall is a step, not a ramp. */
@@ -2023,6 +2030,7 @@ export class Game {
             return;
         }
         if (this.state === GameState.PLAYER) {
+            this.maybeRebase();
             this.streamAirfields();
         }
         if (this.state === GameState.PLAYER) {
@@ -2047,6 +2055,7 @@ export class Game {
         } else if (this.state === GameState.SPAWN_MENU || this.state === GameState.FIXED_CAMERA) {
             if (this.state === GameState.FIXED_CAMERA) {
                 this.moveFixedCamera(delta);
+                this.maybeRebase();
             }
             this.advanceCarrier(delta);
             this.syncCarrierSystems();
@@ -2150,19 +2159,25 @@ export class Game {
      */
     private startHeightFieldMirror(): void {
         const heights = this.planetTerrain.heights;
-        this.combatSim.setHeightField({
-            basis: this.planetTerrain.basis,
-            seaLevel: heights.seaLevel,
-            queryZoom: heights.queryZoom,
-            coarseZoom: heights.coarseZoom,
-            pads: [...heights.flattenPads],
-        });
+        this.combatSim.setHeightField(this.heightFieldConfig());
         this.heightSender = new HeightFieldSender(
             heights, update => this.combatSim.postHeightTiles(update),
         );
         this.heightSender.sendCoarse();
         this.heightMirrorTimer = SIM_TERRAIN_MIRROR_INTERVAL_S;
         this.updateHeightFieldMirror(0);
+    }
+
+    /** The sim worker's DEM sampler config, in the current frame. */
+    private heightFieldConfig(): SerializedHeightField {
+        const heights = this.planetTerrain.heights;
+        return {
+            basis: cloneEnuBasis(this.planetTerrain.basis),
+            seaLevel: heights.seaLevel,
+            queryZoom: heights.queryZoom,
+            coarseZoom: heights.coarseZoom,
+            pads: [...heights.flattenPads],
+        };
     }
 
     /** Keep the worker's fine tier over the player (lead included) and the AI. */
@@ -3241,6 +3256,45 @@ export class Game {
      * and obstacle awareness, the projectile pool, the player's gun + AI
      * autopilot, and one AI-flown opponent.
      */
+    /**
+     * The static world as the sim worker wants it: colliders, obstacles, and
+     * every runway with the active one first. Sent once by setupCombat and
+     * again after every re-base.
+     */
+    private serializeSceneWorld(): SerializedWorld {
+        // The AI is handed every runway in the area, with the one this session
+        // is based at first: `runway()` means "the main one" and a pilot picks
+        // its own by proximity. On a pyramid with no airfields this is the
+        // authored airbase, exactly as it always was.
+        const runways: Runway[] = this.sceneRunways.length > 0
+            ? [...this.sceneRunways]
+                .sort((a, b) => Number(b === this.activeRunway) - Number(a === this.activeRunway))
+                .map(r => ({
+                    center: r.center.clone(),
+                    heading: r.heading,
+                    halfLength: r.halfLength,
+                    halfWidth: r.halfWidth,
+                }))
+            : [{
+                center: AIRBASE_RUNWAY.clone(),
+                heading: PLAYER_STARTING_HEADING,
+                halfLength: RUNWAY_HALF_LENGTH_M,
+                halfWidth: RUNWAY_STRIP_HALF_WIDTH,
+            }];
+
+        return serializeWorld(
+            [], this.obstacles, runways, this.skiJumps, this.carrierMeshes,
+            (() => {
+                const pose = this.carrierPose();
+                return [defaultArrestorCableField(
+                    pose.position.x, pose.position.y, pose.position.z, pose.quaternion,
+                )];
+            })(),
+            this.surfacePads.pads,
+            this.sceneryMeshes,
+        );
+    }
+
     private setupCombat() {
         this.obstacles.length = 0;
         // The cylinder stands on the ground, not on Y = 0. Those are the same
@@ -3287,40 +3341,10 @@ export class Game {
             addObstacle(wh.x, wh.z, 45, 22);
         }
 
-        // The AI is handed every runway in the area, with the one this session
-        // is based at first: `runway()` means "the main one" and a pilot picks
-        // its own by proximity. On a pyramid with no airfields this is the
-        // authored airbase, exactly as it always was.
-        const runways: Runway[] = this.sceneRunways.length > 0
-            ? [...this.sceneRunways]
-                .sort((a, b) => Number(b === this.activeRunway) - Number(a === this.activeRunway))
-                .map(r => ({
-                    center: r.center.clone(),
-                    heading: r.heading,
-                    halfLength: r.halfLength,
-                    halfWidth: r.halfWidth,
-                }))
-            : [{
-                center: AIRBASE_RUNWAY.clone(),
-                heading: PLAYER_STARTING_HEADING,
-                halfLength: RUNWAY_HALF_LENGTH_M,
-                halfWidth: RUNWAY_STRIP_HALF_WIDTH,
-            }];
-
         // Hand the static world (terrain hills, ski jump, carrier deck, obstacles, runway)
         // to the sim worker so its AI pilots can navigate; then register the player as a
         // sim-owned aircraft (its physics + gun + autopilot all live there).
-        this.combatSim.setWorld(serializeWorld(
-            [], this.obstacles, runways, this.skiJumps, this.carrierMeshes,
-            (() => {
-                const pose = this.carrierPose();
-                return [defaultArrestorCableField(
-                    pose.position.x, pose.position.y, pose.position.z, pose.quaternion,
-                )];
-            })(),
-            this.surfacePads.pads,
-            this.sceneryMeshes,
-        ));
+        this.combatSim.setWorld(this.serializeSceneWorld());
         this.worldSent = true;
         this.startHeightFieldMirror();
         this.combatSim.addAircraft({
@@ -3944,6 +3968,109 @@ export class Game {
         this.addBuildingColliders(airfield);
     }
 
+    /**
+     * Move the scene's origin under the aircraft - or under the fixed camera,
+     * when that is what is looking - once it is {@link REBASE_DISTANCE_M}
+     * from it.
+     *
+     * The scene is the tangent plane at its origin, so "up" is only up there:
+     * at Leipzig, 175 km from the DACH centre, the horizon leaned 1.6 degrees
+     * and level flight was not level. Re-basing keeps the lean under a fifth
+     * of a degree. Everything holding scene coordinates is carried across by
+     * the same rigid shift, so nothing on the ground moves.
+     *
+     * Only away from home: the carrier, the ski jump and the authored airbase
+     * are colliders that cannot take a tilt, and that area is small enough
+     * not to need it. Waits for a quiet moment - no sim step in flight (its
+     * answer would come back in the old frame) and no airfield half built
+     * from the old one.
+     */
+    private maybeRebase(): void {
+        if (this.playArea.isHome || !this.worldSent || this.airfieldStreamBusy) {
+            return;
+        }
+        const p = this.state === GameState.FIXED_CAMERA
+            ? this.fixedCameraUpdater.getPosition(this._fixedCameraPos)
+            : this.player.position;
+        if (Math.hypot(p.x, p.z) < REBASE_DISTANCE_M || !this.combatSim.isIdle()) {
+            return;
+        }
+        const under = worldToGeodetic(this.planetTerrain.basis, p.x, p.y, p.z);
+        this.rebaseWorld(under.lat, under.lon);
+    }
+
+    private rebaseWorld(lat: number, lon: number): void {
+        const t0 = performance.now();
+        const shift = this.planetTerrain.rebaseTo(lat, lon);
+
+        // Aircraft, trails, particles, scenery, airfields, clouds.
+        this.scene.rebase(shift);
+        this.fixedCameraUpdater.rebase(shift);
+
+        // The game's own records, rewritten in place so references to them
+        // (the active runway, the home runway) stay good.
+        for (const r of this.sceneRunways) {
+            rebaseRunway(r, shift);
+        }
+        const pads = [...this.surfacePads.pads];
+        for (const pad of pads) {
+            rebaseSurfacePad(pad, shift);
+        }
+        this.surfacePads.clear();
+        this.surfacePads.add(pads);
+        for (const s of this.skiJumps) {
+            rebaseSkiJump(s, shift);
+        }
+        for (const m of this.carrierMeshes) {
+            rebaseMeshCollider(m, shift);
+        }
+        for (const m of this.sceneryMeshes) {
+            rebaseMeshCollider(m, shift);
+        }
+        for (const m of this.stagedSceneryMeshes) {
+            rebaseMeshCollider(m, shift);
+        }
+        for (const o of this.obstacles) {
+            shift.point(o.position);
+        }
+        const v = new THREE.Vector3();
+        for (const b of this.osmBuildings) {
+            shift.point(v.set(b.x, 0, b.z));
+            b.x = v.x;
+            b.z = v.z;
+        }
+        for (const a of this.areaAirfields) {
+            shift.point(v.set(a.x, 0, a.z));
+            a.x = v.x;
+            a.z = v.z;
+        }
+        for (const strip of this.pendingGroundStrips) {
+            for (const s of strip.samples) {
+                shift.point(v.set(s.x, 0, s.z));
+                s.x = v.x;
+                s.z = v.z;
+            }
+        }
+        for (const view of this.staticModelViews) {
+            shift.point(view.position);
+            view.heading = shift.heading(view.heading);
+        }
+        // The terrain's tree exclusions stay in the frame they were built in
+        // (see TerrainEntity.rebaseTo), so they need nothing here.
+
+        // The worker: its aircraft and rounds, then the frame its DEM mirror
+        // reads in, then the world, which rebuilds the pilots.
+        this.combatSim.rebase(shift);
+        this.combatSim.setHeightField(this.heightFieldConfig());
+        this.combatSim.setWorld(this.serializeSceneWorld());
+        this.rebaseCount++;
+        console.log(`re-based the scene to (${lat.toFixed(4)}, ${lon.toFixed(4)}) `
+            + `in ${(performance.now() - t0).toFixed(1)} ms`);
+    }
+
+    /** How many times this session's origin has moved; a dev aid, see __rebases. */
+    private rebaseCount = 0;
+
     /** Stream in airfields the aircraft has come within range of; throttled. */
     private streamAirfields(): void {
         if (this.areaAirfields.length === 0 || this.airfieldStreamBusy) {
@@ -4494,6 +4621,14 @@ export class Game {
         (globalThis as Record<string, unknown>).__skyDome = this.skyDome;
         (globalThis as Record<string, unknown>).__shell = ATMOSPHERE_SHELL_UNIFORMS;
         (globalThis as Record<string, unknown>).__player = this.player;
+        // Re-base now - under the aircraft, or onto a given origin - and how
+        // many have happened.
+        (globalThis as Record<string, unknown>).__rebaseNow = (lat?: number, lon?: number) => {
+            const p = this.player.position;
+            const under = worldToGeodetic(this.planetTerrain.basis, p.x, p.y, p.z);
+            this.rebaseWorld(lat ?? under.lat, lon ?? under.lon);
+        };
+        (globalThis as Record<string, unknown>).__rebases = () => this.rebaseCount;
         (globalThis as Record<string, unknown>).__setSunHours = (hours: number) => {
             setSunTime(hours);
             this.refreshDaytimePalette();

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { UP } from '../../utils/math';
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { FcsPitchLimiter } from '../fm2/fcs';
+import { FrameShift } from '../../terrain/geodesy';
 
 const SIM_FPS = 120;
 const SIM_DELTA = 1.0 / SIM_FPS;
@@ -206,6 +207,21 @@ export abstract class FlightModel {
 
     getRenderVelocity(target: THREE.Vector3): THREE.Vector3 {
         return target.lerpVectors(this.prevVelocity, this.velocity, this.getRenderInterpolationAlpha());
+    }
+
+    /**
+     * Carry the state into a re-based scene frame (see TerrainEntity.rebaseTo).
+     * Body-frame state - rates, surfaces, engine - is untouched by a change of
+     * world axes; subclasses holding world-frame state of their own extend this.
+     */
+    rebase(shift: FrameShift): void {
+        shift.point(this.obj.position);
+        shift.orientation(this.obj.quaternion);
+        shift.vector(this.velocity);
+        shift.vector(this.accelWorld);
+        shift.point(this.prevPosition);
+        shift.orientation(this.prevQuaternion);
+        shift.vector(this.prevVelocity);
     }
 
     private savePreviousState(): void {

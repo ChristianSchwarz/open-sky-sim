@@ -5,7 +5,7 @@ import { DisplayShading, FogQuality } from '../../config/profiles/profile';
 import { KernelTask } from '../../core/kernel';
 import { assertExpr } from '../../utils/asserts';
 import { ConstantFragProgram } from './shaders/constantFP';
-import { DepthFragProgram } from './shaders/depthFP';
+import { DepthFragProgram, FlatDepthFragProgram, RailDepthFragProgram } from './shaders/depthFP';
 import { FlatVertProgram, HighpFlatVertProgram } from './shaders/flatVP';
 import { ImpostorVertProgram } from './shaders/impostorVP';
 import { TreeBillboardFragProgram } from './shaders/treeBillboardFP';
@@ -15,7 +15,7 @@ import { ParticleMeshFragProgram } from './shaders/particlesMeshFP';
 import { ParticleMeshVertProgram } from './shaders/particlesMeshVP';
 import { PointVertProgram } from './shaders/pointVP';
 import { ShadedVertProgram } from './shaders/shadedVP';
-import { RIVER_MAX_STRETCH, RIVER_MIN_HALF_PIXELS, RiverVertProgram } from './shaders/riverVP';
+import { RIVER_MAX_STRETCH, RIVER_MIN_HALF_PIXELS, RailVertProgram, RiverVertProgram } from './shaders/riverVP';
 import { TerrainFragProgram } from './shaders/terrainFP';
 import {
     TERRAIN_CLASS_COUNT, TERRAIN_SWATCH_COUNT, TERRAIN_TONE_COUNT, TerrainVertProgram,
@@ -106,6 +106,18 @@ type SceneMaterialMeshProperties = {
              * pixels. Terrain watercourses only — see RiverVertProgram.
              */
             river?: boolean;
+            /**
+             * With `river`: the stroke is a railway, and draws its sleepers
+             * and rails close up. Needs the `riverMeta` and `railAlong`
+             * attributes roadStrokes.ts binds - see RailVertProgram.
+             */
+            rail?: boolean;
+            /**
+             * With `rail`: a detail pass over beds drawn first, as coverage
+             * in alpha - 'sleepers' or 'rails' (see RAIL_FRAGMENT). Built
+             * transparent.
+             */
+            railDetail?: 'sleepers' | 'rails';
             /** Screen-space ordered dither opacity (0 = opaque, 0.5 ≈ half transparent). */
             alphaDither?: number;
             /**
@@ -128,6 +140,28 @@ type SceneMaterialMeshProperties = {
              * angle. Meant for the GLASS fill only - see depthFP.ts.
              */
             grazingHighlight?: boolean;
+            /**
+             * A runway's paint as a two-channel coverage mask over this
+             * pavement (see runwayMarkingTexture.ts): red is drawn in the
+             * first category, green over it in the second. Needs UVs.
+             */
+            markings?: {
+                map: THREE.Texture; categories: [PaletteCategory, PaletteCategory];
+                /**
+                 * Pixel footprints, in metres of ground: the mask is absent
+                 * below `fadeOutM`, where the paint is drawn as geometry, and
+                 * fades in to full strength at `fadeInM`.
+                 */
+                fadeOutM: number;
+                fadeInM: number;
+            };
+            /**
+             * Discard fragments where one pixel spans more than this many
+             * metres of ground. For paint drawn as geometry that is too thin
+             * to rasterise cleanly past that point - and that has a texture
+             * under it taking over there. 0 or undefined = never.
+             */
+            maxFootprintM?: number;
         }
     );
 
@@ -214,6 +248,8 @@ interface SceneCommonMaterialData {
 interface SceneFlatMaterialData {
     shaded: false;
     highp: boolean;
+    /** The two paint categories of a marking mask, re-read on palette changes. */
+    markCategories?: [PaletteCategory, PaletteCategory];
 }
 
 interface SceneShadedMaterialData {
@@ -228,6 +264,7 @@ export class SceneMaterialManager implements KernelTask {
     private readonly flatProto: THREE.ShaderMaterial;
     private readonly highpFlatProto: THREE.ShaderMaterial;
     private readonly riverProto: THREE.ShaderMaterial;
+    private readonly railProto: THREE.ShaderMaterial;
     private readonly lineProto: THREE.ShaderMaterial;
     private readonly shadedProto: THREE.ShaderMaterial;
     private readonly terrainProto: THREE.ShaderMaterial;
@@ -252,7 +289,7 @@ export class SceneMaterialManager implements KernelTask {
 
         this.flatProto = new THREE.ShaderMaterial({
             vertexShader: FlatVertProgram,
-            fragmentShader: DepthFragProgram,
+            fragmentShader: FlatDepthFragProgram,
             side: THREE.FrontSide,
             depthWrite: false,
             userData: {},
@@ -260,7 +297,7 @@ export class SceneMaterialManager implements KernelTask {
         });
         this.highpFlatProto = new THREE.ShaderMaterial({
             vertexShader: HighpFlatVertProgram,
-            fragmentShader: DepthFragProgram,
+            fragmentShader: FlatDepthFragProgram,
             side: THREE.FrontSide,
             depthWrite: false,
             userData: {},
@@ -271,6 +308,14 @@ export class SceneMaterialManager implements KernelTask {
             fragmentShader: DepthFragProgram,
             // A stroke has no inside: the ribbon is built from the centreline
             // out, so which way it winds depends on which way the river runs.
+            side: THREE.DoubleSide,
+            depthWrite: false,
+            userData: {},
+            uniforms: {}
+        });
+        this.railProto = new THREE.ShaderMaterial({
+            vertexShader: RailVertProgram,
+            fragmentShader: RailDepthFragProgram,
             side: THREE.DoubleSide,
             depthWrite: false,
             userData: {},
@@ -342,6 +387,9 @@ export class SceneMaterialManager implements KernelTask {
         material.depthWrite = p.depthWrite;
         material.userData = data;
         material.uniforms = this.buildUniforms(p);
+        if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && p.railDetail) {
+            material.transparent = true;
+        }
         if (!p.rawColor) {
             this.applyWaterTweak(p.category, material.uniforms as SceneMaterialUniforms);
         }
@@ -402,7 +450,9 @@ export class SceneMaterialManager implements KernelTask {
             ...(shaded ? {
                 clipBelowYAbs: typeof properties.clipBelowY === 'number' ? properties.clipBelowY : -1e30,
                 terrain: properties.terrain,
-            } : {}),
+            } : {
+                markCategories: this.markingsOf(properties)?.categories,
+            }),
             ramp: (properties.type === SceneMaterialPrimitiveType.PARTICLE_MESH && (
                 properties.category === PaletteCategory.FX_SMOKE
                 || properties.category === PaletteCategory.FX_FIRE
@@ -480,6 +530,11 @@ export class SceneMaterialManager implements KernelTask {
                         : 0,
                 },
                 uMaxStretch: { value: RIVER_MAX_STRETCH },
+                uRailPass: {
+                    value: properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
+                        ? (properties.railDetail === 'rails' ? 2 : properties.railDetail === 'sleepers' ? 1 : 0)
+                        : 0,
+                },
                 uRenderOrigin: { value: new THREE.Vector3() },
                 // Reference (noon) forest colour, in the same colour space as the
                 // palette's, so the tree shader can dim trunks by how much the
@@ -488,7 +543,20 @@ export class SceneMaterialManager implements KernelTask {
                 uMap: {
                     value: properties.type === SceneMaterialPrimitiveType.TREE_BILLBOARD
                         ? properties.map
-                        : null,
+                        : this.markingsOf(properties)?.map ?? null,
+                },
+                uMarkings: { value: this.markingsOf(properties) ? 1 : 0 },
+                uMarkColorA: { value: this.markColor(properties, 0) },
+                uMarkColorB: { value: this.markColor(properties, 1) },
+                uMarkFade: {
+                    value: new THREE.Vector2(
+                        this.markingsOf(properties)?.fadeOutM ?? 0,
+                        this.markingsOf(properties)?.fadeInM ?? 0),
+                },
+                uMaxFootprint: {
+                    value: properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
+                        ? (properties.maxFootprintM ?? 0)
+                        : 0,
                 },
                 // Shared by reference: moving the sun (time of day) rewrites
                 // these once and every material sees it.
@@ -511,6 +579,19 @@ export class SceneMaterialManager implements KernelTask {
                 vCameraD: { value: 0 }
             }
         };
+    }
+
+    private markingsOf(properties: SceneMaterialProperties) {
+        return properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
+            ? properties.markings
+            : undefined;
+    }
+
+    private markColor(properties: SceneMaterialProperties, i: number): THREE.Color {
+        const category = this.markingsOf(properties)?.categories[i];
+        return category === undefined
+            ? new THREE.Color()
+            : this.colorCache.getColor(PaletteColor(this.palette, category)).clone();
     }
 
     private buildTerrainUniforms(spec: TerrainMaterialSpec): Record<string, THREE.IUniform> {
@@ -589,7 +670,7 @@ export class SceneMaterialManager implements KernelTask {
             if (properties.shaded) {
                 return properties.terrain ? this.terrainProto.clone() : this.shadedProto.clone();
             } else if (properties.river) {
-                return this.riverProto.clone();
+                return properties.rail ? this.railProto.clone() : this.riverProto.clone();
             } else if (properties.highp) {
                 return this.highpFlatProto.clone();
             } else {
@@ -642,6 +723,10 @@ export class SceneMaterialManager implements KernelTask {
                 }
                 const light = palette.light ?? [1, 1, 1];
                 (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);
+            }
+            if (!d.shaded && d.markCategories) {
+                u.uMarkColorA.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[0])));
+                u.uMarkColorB.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[1])));
             }
             u.fogDensity.value = palette.values[FogValueCategory(c)];
             u.fogColor.value.copy(this.colorCache.getColor(PaletteColor(palette, FogColorCategory(c))));

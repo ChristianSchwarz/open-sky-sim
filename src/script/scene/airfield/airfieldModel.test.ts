@@ -221,7 +221,9 @@ describe('airfield model', () => {
         assert.equal(built.model.lod.length, 3);
         const counts = built.model.lod.map(l => triangles(l.flats));
         assert.ok(counts[0] > counts[1], `level 0 ${counts[0]} vs level 1 ${counts[1]}`);
-        assert.ok(counts[1] > counts[2], `level 1 ${counts[1]} vs level 2 ${counts[2]}`);
+        // Paint is geometry at level 0 only - past it the pavement texture
+        // carries it - so with no taxiways to drop, 1 and 2 are the same.
+        assert.ok(counts[1] >= counts[2], `level 1 ${counts[1]} vs level 2 ${counts[2]}`);
         // The coarsest level is the pavement and nothing else: two triangles.
         assert.equal(counts[2], 2);
     });

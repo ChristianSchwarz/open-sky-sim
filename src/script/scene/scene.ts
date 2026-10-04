@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../terrain/geodesy';
 import { CanvasPainter } from '../render/screen/canvasPainter';
 import { Entity } from './entity';
 import { Palette } from '../config/palettes/palette';
@@ -67,6 +68,13 @@ export class Scene {
             if (entity.enabled) {
                 entity.render2D(targetWidth, targetHeight, camera, renderLists, painter, palette);
             }
+        }
+    }
+
+    /** Hand a frame re-base to every entity that holds world state. */
+    rebase(shift: FrameShift): void {
+        for (let i = 0; i < this.entities.length; i++) {
+            this.entities[i].rebase?.(shift);
         }
     }
 

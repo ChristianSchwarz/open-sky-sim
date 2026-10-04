@@ -32,7 +32,7 @@ import { CLUTTER_ELIGIBLE_CLASSES, buildStoneMesh, scatterGroundClutter } from '
 import { sphereInFrustum } from './culling';
 import { DemTile, decodePdm } from './demTile';
 import {
-    EnuBasis, WGS84_A, ecefToEnu, enuFrameRotation, geodeticToEcef, makeEnuBasis,
+    EnuBasis, FrameShift, WGS84_A, cloneEnuBasis, ecefToEnu, enuFrameRotation, geodeticToEcef, makeEnuBasis,
     northFromSceneZ,
 } from './geodesy';
 import { AirfieldsFile, EMPTY_AIRFIELDS, loadAirfields } from './airfields';
@@ -260,6 +260,11 @@ export class TerrainEntity implements Entity {
     readonly tags = [ENTITY_TAGS.GROUND];
     enabled = true;
 
+    /**
+     * The drawing frame. One object for the session: a re-base (see
+     * {@link rebaseTo}) rewrites its contents rather than replacing it, so every
+     * holder of the reference follows without being told.
+     */
     readonly basis: EnuBasis;
     /** Bake frame -> drawing frame, for the baked tile offsets. */
     private readonly frameFix: THREE.Quaternion;
@@ -536,13 +541,32 @@ export class TerrainEntity implements Entity {
         const origin = tileOriginWorld(tile.id, tile.centerHeightM, this.basis);
         const q = this.frameFix;
         const v = new THREE.Vector3();
+        const w = new THREE.Vector3();
+        // Each exclusion answers in the frame it was built in; see rebaseTo.
+        const toAirfield = this.airfieldExclusionFrame;
+        const toSurface = this.surfaceExclusionFrame;
         return (x, z, y) => {
-            v.set(x, y, z).applyQuaternion(q);
-            const wx = origin.x + v.x;
-            const wz = origin.z + v.z;
-            return (onAirfield?.(wx, wz) ?? false) || (onSurface?.(wx, wz) ?? false);
+            v.set(x, y, z).applyQuaternion(q).add(origin);
+            if (onAirfield) {
+                w.copy(v).applyMatrix4(toAirfield);
+                if (onAirfield(w.x, w.z)) return true;
+            }
+            if (onSurface) {
+                w.copy(v).applyMatrix4(toSurface);
+                if (onSurface(w.x, w.z)) return true;
+            }
+            return false;
         };
     }
+
+    /**
+     * Scene -> the frame each exclusion was built in. Identity until a re-base;
+     * after one, the exclusions are left as they were - rebuilding the
+     * airfield one is a quarter of a second for DACH's 919 fields - and points
+     * are carried back to them instead.
+     */
+    private readonly airfieldExclusionFrame = new THREE.Matrix4();
+    private readonly surfaceExclusionFrame = new THREE.Matrix4();
 
     /** True while rebuildResidentTrees is already pacing through the resident set, so a second call (another slider nudge) doesn't start a redundant one. */
     private treeRebuildRunning = false;
@@ -686,21 +710,27 @@ export class TerrainEntity implements Entity {
         trackTerrainMaterial(this.riverMaterial);
 
         // Roads are the same kind of stroke as a river, in the two road
-        // greys: a motorway is not a canal, but the pixel floor that keeps a
+        // greys, and railways in their ballast brown: a motorway is not a canal, but the pixel floor that keeps a
         // canal readable from altitude is exactly what a road needs too.
-        const roadMaterial = (category: PaletteCategory) => {
+        const roadMaterial = (category: PaletteCategory, rail = false, railDetail?: 'sleepers' | 'rails') => {
             const m = opts.materials.build({
                 type: SceneMaterialPrimitiveType.MESH,
                 category,
                 depthWrite: false,
                 shaded: false as const,
                 river: true,
+                rail,
+                railDetail,
             }) as THREE.ShaderMaterial;
             trackTerrainMaterial(m);
             return m;
         };
         const majorRoadMaterial = roadMaterial(PaletteCategory.SCENERY_ROAD_MAIN);
         const minorRoadMaterial = roadMaterial(PaletteCategory.SCENERY_ROAD_SECONDARY);
+        // Three passes for track: every bed, then every sleeper, then every rail.
+        const railMaterial = roadMaterial(PaletteCategory.SCENERY_RAIL, true);
+        const railDetailMaterial = roadMaterial(PaletteCategory.SCENERY_RAIL, true, 'sleepers');
+        const railTopMaterial = roadMaterial(PaletteCategory.SCENERY_RAIL, true, 'rails');
 
         // OSM landuse region edges are baked as a stroke stream beside the
         // rivers but are not drawn: the exact fills carry the shape on their
@@ -820,18 +850,7 @@ export class TerrainEntity implements Entity {
         //
         // Positioned properly, a pad belonging to another area simply lands
         // hundreds of kilometres off and never touches anything.
-        const toEnu = (lat: number, lon: number) => {
-            const enu = ecefToEnu(this.basis, geodeticToEcef(lat, lon, 0));
-            return { e: enu.e, n: enu.n };
-        };
-        // Dropped here rather than carried and rejected per query. The sampler
-        // walks this list on every height read — which is once per contact test
-        // per frame — and the manifest now lists every pad of every airfield in
-        // the pyramid, a hundred or so. A pad in another area is a thousand
-        // kilometres off and can never touch anything here.
-        const pads: FlattenPad[] = (opts.manifest.flattenPads ?? [])
-            .map(p => padFromRecord(p, toEnu))
-            .filter(p => Math.hypot(p.centerX, p.centerZ) - padReachM(p) <= PAD_RELEVANCE_M);
+        const pads = this.relevantPads();
 
         this.heights = new HeightField({
             manifest: opts.manifest,
@@ -880,6 +899,9 @@ export class TerrainEntity implements Entity {
             baseUrl: base,
             majorMaterial: majorRoadMaterial,
             minorMaterial: minorRoadMaterial,
+            railMaterial,
+            railDetailMaterial,
+            railTopMaterial,
             onBeforeRender: tileBeforeRender,
         });
 
@@ -902,6 +924,13 @@ export class TerrainEntity implements Entity {
             baseUrl: base,
             deckMaterial: bridgeMaterial(PaletteCategory.SCENERY_ROAD_MAIN),
             concreteMaterial: bridgeMaterial(PaletteCategory.SCENERY_ROAD_SECONDARY),
+            railDeckMaterial: bridgeMaterial(PaletteCategory.SCENERY_RAIL),
+            signRedMaterial: bridgeMaterial(PaletteCategory.SCENERY_BUILDING_METAL_RED),
+            signWhiteMaterial: bridgeMaterial(PaletteCategory.SCENERY_BUILDING_METAL_WHITE),
+            signPostMaterial: bridgeMaterial(PaletteCategory.SCENERY_BUILDING_METAL),
+            trackMaterial: railMaterial,
+            trackDetailMaterial: railDetailMaterial,
+            trackTopMaterial: railTopMaterial,
             onBeforeRender: tileBeforeRender,
         });
         if (opts.roads) {
@@ -995,7 +1024,73 @@ export class TerrainEntity implements Entity {
             return { e: enu.e, n: enu.n };
         };
         this.airfieldExclusion = buildAirfieldExclusion(airfields, toEnu);
+        this.airfieldExclusionFrame.identity();
         this.rescatterAfterExclusionChange();
+    }
+
+    /**
+     * The manifest's flatten pads that can matter around the current origin.
+     *
+     * Dropped here rather than carried and rejected per query. The sampler
+     * walks this list on every height read — which is once per contact test
+     * per frame — and the manifest now lists every pad of every airfield in
+     * the pyramid, a hundred or so. A pad in another area is a thousand
+     * kilometres off and can never touch anything here.
+     */
+    private relevantPads(): FlattenPad[] {
+        const toEnu = (lat: number, lon: number) => {
+            const enu = ecefToEnu(this.basis, geodeticToEcef(lat, lon, 0));
+            return { e: enu.e, n: enu.n };
+        };
+        return (this.manifest.flattenPads ?? [])
+            .map(p => padFromRecord(p, toEnu))
+            .filter(p => Math.hypot(p.centerX, p.centerZ) - padReachM(p) <= PAD_RELEVANCE_M);
+    }
+
+    /**
+     * Move the drawing frame's origin to (lat, lon) and carry everything
+     * resident across.
+     *
+     * The frame is a tangent plane, so "up" is only up near its origin: 175 km
+     * out the horizon leans 1.6 degrees. Re-basing under the aircraft keeps it
+     * level. Every resident tile, sea patch and quadtree node moves by the
+     * same rigid shift, which is exact - a tile placed fresh in the new frame
+     * lands where the shifted one does - so nothing re-streams or re-meshes.
+     * Trees, roads and bridges are tile-local and ride along.
+     *
+     * Returns the shift, for the caller to apply to everything else in the
+     * scene. The surface exclusion is the caller's (it is built from the
+     * caller's pads) and is not touched here.
+     */
+    rebaseTo(lat: number, lon: number): FrameShift {
+        const to = makeEnuBasis(lat, lon, 0);
+        const shift = FrameShift.between(cloneEnuBasis(this.basis), to);
+        Object.assign(this.basis, cloneEnuBasis(to));
+        shift.orientation(this.frameFix);
+
+        for (const meshes of this.streamer.values()) {
+            shift.object(meshes.group);
+        }
+        for (const patch of this.oceans.values()) {
+            shift.object(patch.group);
+        }
+        this.quadtree.rebase(shift);
+        shift.point(this.earthCenter);
+        // Each index copied its tile's placement when it was built.
+        this.drawnHeightIndices.clear();
+        shift.point(this.prevCameraPos);
+        shift.vector(this.cameraVel);
+
+        this.heights.setPads(this.relevantPads());
+        // Trees already scattered are tile-local and stay put; tiles
+        // scattered from here on carry their points back to the frames the
+        // exclusions were built in.
+        const back = new THREE.Matrix4()
+            .compose(shift.offset, shift.rotation, new THREE.Vector3(1, 1, 1))
+            .invert();
+        this.airfieldExclusionFrame.multiply(back);
+        this.surfaceExclusionFrame.multiply(back);
+        return shift;
     }
 
     /**
@@ -1006,6 +1101,7 @@ export class TerrainEntity implements Entity {
      */
     setSurfaceExclusion(test: ((x: number, z: number) => boolean) | undefined): void {
         this.surfaceExclusion = test;
+        this.surfaceExclusionFrame.identity();
         this.rescatterAfterExclusionChange();
     }
 

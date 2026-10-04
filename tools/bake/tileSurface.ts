@@ -32,6 +32,10 @@ export interface LocalFrame {
 export interface TileSurface {
     /** A lon/lat as (x = u, z = v) in the true local frame; the planner's XZ. */
     toXZ(lon: number, lat: number): { x: number; z: number };
+    /** A point in the tile's own axes (metres) as (x = u, z = v) in the true local frame. */
+    localToXZ(x: number, y: number, z: number): { x: number; z: number };
+    /** A point in the tile's own axes (metres) as its height along up in the true local frame. */
+    localToH(x: number, y: number, z: number): number;
     /** Height along up of the highest land facet over (u, v), or undefined where none is drawn. */
     landH(u: number, v: number): number | undefined;
     /** Height along up of the highest water facet over (u, v), or undefined on dry ground. */
@@ -176,6 +180,8 @@ export function tileSurface(tile: PtmTile, basis: EnuBasis): TileSurface {
             const l = toLocal(lon, lat, tile.centerHeightM);
             return { x: U(l.x, l.y, l.z), z: V(l.x, l.y, l.z) };
         },
+        localToXZ: (x, y, z) => ({ x: U(x, y, z), z: V(x, y, z) }),
+        localToH: (x, y, z) => H(x, y, z),
         landH: (u, v) => landSet?.highest(u, v),
         waterH: (u, v) => waterSet?.highest(u, v),
         frame: { a: [ax, ay, az], b: [bx, by, bz], up: [upX, upY, upZ] },

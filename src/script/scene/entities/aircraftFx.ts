@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { SceneMaterialManager } from '../materials/materials';
 import { Model } from '../models/models';
 import { SceneLayers } from '../scene';
@@ -133,6 +134,11 @@ export class AircraftFx {
         if (this.wingtipsReady) {
             this.wingtipTrails.addToRenderList(SceneLayers.EntityFX, lists, camera);
         }
+    }
+
+    /** Carry the trails into a re-based frame; the plumes are re-posed every frame. */
+    rebase(shift: FrameShift): void {
+        this.wingtipTrails.rebase(shift);
     }
 
     resetTrails(): void {

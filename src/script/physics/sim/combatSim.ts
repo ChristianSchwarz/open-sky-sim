@@ -48,6 +48,7 @@ import {
     SimControlMode, SimHitEvent,
 } from './simTypes';
 import { fm2UsesAfterburner, SimPlayerInput, SimPlayerInputSink } from './simPlayerInput';
+import { FrameShift } from '../../terrain/geodesy';
 
 /** Seconds a tracer lives before self-destructing (mirrors WeaponsField). */
 const PROJECTILE_LIFESPAN = 2.5;
@@ -150,6 +151,10 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     targetFaction: Faction | undefined;
     /** Id of the auto-selected target, so a re-scan can score the incumbent. */
     autoTargetId: string | undefined;
+    /** Id handed to {@link CombatSim.setTarget}, so a rebuilt pilot gets it back. */
+    explicitTargetId: string | undefined;
+    /** Id handed to {@link CombatSim.setFormationLead}, likewise. */
+    formationLeadId: string | undefined;
 
     /** Seconds since last solid-world scrape FX (smoke/sparks). */
     scrapeFxCooldown = 0;
@@ -528,6 +533,11 @@ class ExternalCombatant implements Combatant {
         this.alive = alive;
     }
 
+    rebase(shift: FrameShift): void {
+        shift.point(this.pos);
+        shift.vector(this.vel);
+    }
+
     readPosition(target: THREE.Vector3): THREE.Vector3 { return target.copy(this.pos); }
     readVelocity(target: THREE.Vector3): THREE.Vector3 { return target.copy(this.vel); }
     getHitRadius(): number { return this.hitRadius; }
@@ -626,9 +636,67 @@ export class CombatSim implements ProjectileSink {
         }
         this.pendingColliders = [];
         // Any aircraft added before the world arrived can now get its pilot + terrain.
+        // After a re-base every pilot is rebuilt: each holds the world it was
+        // made with, and its runways and obstacles are in the old frame.
+        const rebuild = this.pilotsStale;
+        this.pilotsStale = false;
         for (const a of this.aircraft.values()) {
             a.bindWorld(this.world);
-            a.buildPilot(undefined, this.world);
+            a.buildPilot(undefined, this.world, rebuild && a.pilot !== undefined);
+            if (rebuild && a.pilot) {
+                this.restorePilotTargets(a);
+            }
+        }
+    }
+
+    /** True between a {@link rebase} and the world that must follow it. */
+    private pilotsStale = false;
+
+    /**
+     * Carry every aircraft, round and mirror into a re-based scene frame.
+     *
+     * The caller follows this with the height field and then the world, both
+     * rebuilt in the new frame; the world is what rebuilds the pilots, which
+     * lose their in-flight bookkeeping (a latched heading, a chosen runway)
+     * but keep their phase, target and lead.
+     */
+    rebase(shift: FrameShift): void {
+        for (const a of this.aircraft.values()) {
+            a.model.rebase(shift);
+            shift.point(a.prevPos);
+            shift.point(a.prevHook);
+            shift.point(a.hookNow);
+            // Deck offsets are in world axes about a carrier that re-bases
+            // only in the home area, where nothing calls this.
+            a.carrierParkLocalValid = false;
+            a.crashedCarrierLocalValid = false;
+        }
+        for (const ext of this.external.values()) {
+            ext.rebase(shift);
+        }
+        for (const p of this.projectiles) {
+            shift.point(p.pos);
+            shift.point(p.prevPos);
+            shift.vector(p.vel);
+        }
+        for (const h of this.hits) {
+            const v = new THREE.Vector3();
+            shift.point(v.fromArray(h.position)).toArray(h.position);
+            if (h.velocity) {
+                shift.vector(v.fromArray(h.velocity)).toArray(h.velocity);
+            }
+        }
+        shift.vector(this.carrierVel);
+        this.pilotsStale = true;
+    }
+
+    private restorePilotTargets(a: SimAircraft): void {
+        const target = a.autoTargetId ?? a.explicitTargetId;
+        if (target !== undefined) {
+            a.pilot?.setTarget(this.resolveCombatant(target));
+        }
+        if (a.formationLeadId !== undefined) {
+            a.pilot?.setFormationLead(this.resolveCombatant(a.formationLeadId));
         }
     }
 
@@ -755,6 +823,7 @@ export class CombatSim implements ProjectileSink {
         // An explicit target wins over — and cancels — faction auto-selection.
         a.targetFaction = undefined;
         a.autoTargetId = undefined;
+        a.explicitTargetId = targetId ?? undefined;
         a.pilot?.setTarget(targetId ? this.resolveCombatant(targetId) : undefined);
     }
 
@@ -769,6 +838,7 @@ export class CombatSim implements ProjectileSink {
         if (!a) return;
         a.buildPilot(undefined, this.world);
         a.autoTargetId = undefined;
+        a.explicitTargetId = undefined;
         a.targetFaction = faction ?? undefined;
         if (faction === null) return;
         this.selectTargetFor(a, true);
@@ -779,6 +849,7 @@ export class CombatSim implements ProjectileSink {
         const a = this.aircraft.get(id);
         if (!a) return;
         a.buildPilot(undefined, this.world);
+        a.formationLeadId = leadId ?? undefined;
         a.pilot?.setFormationLead(leadId ? this.resolveCombatant(leadId) : undefined);
     }
 

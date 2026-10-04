@@ -56,6 +56,8 @@ export enum PaletteCategory {
 
     SCENERY_ROAD_MAIN = 'SCENERY_ROAD_MAIN',
     SCENERY_ROAD_SECONDARY = 'SCENERY_ROAD_SECONDARY',
+    /** Railway main lines: the ballast bed, browner and darker than asphalt. */
+    SCENERY_RAIL = 'SCENERY_RAIL',
 
     SCENERY_FIELD_GREEN = 'SCENERY_FIELD_GREEN',
     SCENERY_FIELD_GREEN_LIGHT = 'SCENERY_FIELD_GREEN_LIGHT',

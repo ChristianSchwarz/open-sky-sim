@@ -34,9 +34,6 @@ const OSM_USER_AGENT = 'retroflightsim/0.0.1 (+https://github.com/ruben3d/retrof
 // island or a valley. Capping it also caps how much of OSM this can ever pull.
 const OSM_MAX_ZOOM = 12;
 
-/** Matches --max-span in tools/fetch_planet_dem.py. */
-const MAX_SPAN_DEG = 6;
-
 /**
  * Zoom whose tile edges an import is snapped to.
  *
@@ -991,14 +988,6 @@ export function startImport(req: Request, res: Response): void {
         res.status(400).json({
             ok: false,
             error: 'bbox must lie inside the WGS84 domain (boxes across the antimeridian are not supported)',
-        });
-        return;
-    }
-    if (Math.max(east - west, north - south) > MAX_SPAN_DEG) {
-        res.status(400).json({
-            ok: false,
-            error: `bbox spans ${(east - west).toFixed(2)} x ${(north - south).toFixed(2)} deg, `
-                + `over the ${MAX_SPAN_DEG} deg limit`,
         });
         return;
     }

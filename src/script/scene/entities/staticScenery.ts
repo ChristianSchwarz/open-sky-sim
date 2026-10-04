@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { DEFAULT_LOD_BIAS, LODHelper } from '../../render/helpers';
 import { CanvasPainter } from "../../render/screen/canvasPainter";
 import { Entity } from "../entity";
@@ -20,6 +21,10 @@ export class StaticSceneryEntity implements Entity {
     }
 
     private obj: THREE.Object3D = new THREE.Object3D();
+
+    rebase(shift: FrameShift): void {
+        shift.object(this.obj);
+    }
 
     set position(p: THREE.Vector3) {
         this.obj.position.copy(p);

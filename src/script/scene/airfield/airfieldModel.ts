@@ -27,7 +27,8 @@ import { TileCover } from '../../terrain/tileHeightIndex';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../materials/materials';
 import { Model } from '../models/models';
 import { updateUniforms } from '../utils';
-import { MarkingKind, MarkingRect, runwayMarkings } from './runwayMarkings';
+import { rasteriseMarkings } from './runwayMarkingTexture';
+import { MarkingKind, MarkingRect, isPaintedSurface, runwayMarkings } from './runwayMarkings';
 
 /**
  * How far the pavement floats over the flattened terrain.
@@ -40,6 +41,25 @@ export const AIRFIELD_SURFACE_EPS_M = 1.5;
 
 /** Paint sits this far over its own pavement. Coplanar flats would z-fight. */
 const PAINT_LIFT_M = 0.05;
+
+/**
+ * Runway paint drawn as geometry is dropped where one pixel spans more ground
+ * than this, and its texture takes over (see runwayMarkingTexture.ts).
+ *
+ * It is also where the texture reaches full strength, so the paint never
+ * dims on the way in. At 1.2 m a pixel the 0.9 m centreline is under a
+ * pixel wide and its geometry is already breaking up, but the texture under
+ * it is at nearly full strength there, so what breaks up is drawn over the
+ * same paint.
+ */
+const PAINT_MAX_FOOTPRINT_M = 1.2;
+
+/**
+ * Closer in than this the texture is gone and only the geometry paint shows.
+ * A magnified texture would only blur the geometry's edges. Between this and
+ * PAINT_MAX_FOOTPRINT_M the two crossfade.
+ */
+const MARKING_TEXTURE_FADE_OUT_M = 0.15;
 
 /** Taxiway centreline stripe width. */
 const TAXIWAY_STRIPE_M = 0.5;
@@ -128,12 +148,17 @@ const RUNWAY_SEA_LEVEL_GUARD_M = 2;
  * optionally a literal colour in place of the tone (the tone still says how
  * it fogs).
  */
-type Paint = PaletteCategory | { category: PaletteCategory; lighten: number; rawColor?: string };
+type Paint = PaletteCategory | {
+    category: PaletteCategory; lighten: number; rawColor?: string;
+    /** See PAINT_MAX_FOOTPRINT_M. */
+    maxFootprintM?: number;
+};
 
 function paintKey(paint: Paint): string {
     return typeof paint === 'string'
         ? paint
-        : paint.category + '*' + paint.lighten + (paint.rawColor ?? '');
+        : paint.category + '*' + paint.lighten + (paint.rawColor ?? '')
+            + (paint.maxFootprintM !== undefined ? '@' + paint.maxFootprintM : '');
 }
 
 /** The material for a flat, unlit part in one paint. */
@@ -145,6 +170,51 @@ function flatMaterial(materials: SceneMaterialManager, paint: Paint): THREE.Mate
         shaded: false,
         overbright: typeof paint === 'string' ? 1 : paint.lighten,
         rawColor: typeof paint === 'string' ? undefined : paint.rawColor,
+        maxFootprintM: typeof paint === 'string' ? undefined : paint.maxFootprintM,
+    });
+}
+
+/**
+ * A paved runway's pavement with its paint in a texture (see
+ * runwayMarkingTexture.ts), so the far view shows the markings filtered rather
+ * than as geometry too thin to rasterise.
+ *
+ * Built once per runway and shared by every LOD level.
+ */
+function markedPavementMaterial(
+    materials: SceneMaterialManager, runway: AirfieldRunway, paint: Paint,
+): THREE.Material {
+    const mask = rasteriseMarkings(
+        runwayMarkings(runway.lengthM, runway.widthM, runway.ref, runway.surface),
+        runway.lengthM, runway.widthM);
+    const map = new THREE.DataTexture(
+        mask.data, mask.width, mask.height, THREE.RGFormat, THREE.UnsignedByteType);
+    map.unpackAlignment = 1;
+    map.wrapS = THREE.ClampToEdgeWrapping;
+    map.wrapT = THREE.ClampToEdgeWrapping;
+    map.magFilter = THREE.LinearFilter;
+    map.minFilter = THREE.LinearMipmapLinearFilter;
+    map.generateMipmaps = true;
+    // A runway is seen end-on far more often than from above, and without
+    // this the mip level is picked for its foreshortened length and the paint
+    // washes out across its width too. Clamped to what the GPU offers.
+    map.anisotropy = 16;
+    map.needsUpdate = true;
+    return materials.build({
+        type: SceneMaterialPrimitiveType.MESH,
+        category: typeof paint === 'string' ? paint : paint.category,
+        depthWrite: false,
+        shaded: false,
+        overbright: typeof paint === 'string' ? 1 : paint.lighten,
+        rawColor: typeof paint === 'string' ? undefined : paint.rawColor,
+        markings: {
+            map,
+            categories: [MARKING_CATEGORY.threshold, MARKING_CATEGORY.centreline],
+            // Full strength exactly where the geometry paint over it is
+            // dropped.
+            fadeOutM: MARKING_TEXTURE_FADE_OUT_M,
+            fadeInM: PAINT_MAX_FOOTPRINT_M,
+        },
     });
 }
 
@@ -280,16 +350,18 @@ export function buildingHeightM(building: AirfieldBuilding): number {
 }
 
 /**
- * What each level of detail draws.
+ * What each level of detail draws as geometry.
  *
- * The markings are most of the triangles and the first thing to go: a runway
- * two miles out is a grey strip, and a runway ten miles out is a grey strip
- * with numbers nobody can read. Level 2 keeps the pavement alone, which is
- * still the shape that says "airfield" from the air.
+ * Only level 0 draws paint as geometry: a paved runway carries all of its
+ * paint in its pavement texture too, and by the time a coarser level is
+ * picked every pixel spans metres, well past where the geometry gives way to
+ * the texture anyway (see PAINT_MAX_FOOTPRINT_M). Level 2 also drops the
+ * taxiways and buildings and keeps the runways, which are still the shape
+ * that says "airfield" from the air.
  */
 const LOD_KINDS: MarkingKind[][] = [
     ['pavement', 'threshold', 'designator', 'aiming', 'centreline', 'edge'],
-    ['pavement', 'threshold', 'designator'],
+    ['pavement'],
     ['pavement'],
 ];
 /** Coarsest level that still draws taxiways and aprons. */
@@ -305,7 +377,11 @@ const _enu: Enu = { e: 0, n: 0, u: 0 };
  * on the ground and must not write depth, a building is a lit box that must.
  */
 class MeshParts {
-    private readonly parts = new Map<string, { paint: Paint; positions: number[] }>();
+    private readonly parts = new Map<string, {
+        paint: Paint; positions: number[];
+        /** A material of its own and the UVs it needs, for a textured part. */
+        material?: THREE.Material; uvs?: number[];
+    }>();
     /** The mesh each paint became, filled by {@link build}. */
     readonly meshes = new Map<string, THREE.Mesh>();
 
@@ -321,6 +397,23 @@ class MeshParts {
         part.positions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
     }
 
+    /**
+     * A quad in a material of its own, with UVs (0,0), (0,1), (1,1), (1,0) at
+     * a, b, c, d. Never merged: it goes out as its own mesh, in its place in
+     * the drawing order.
+     */
+    addTexturedQuad(
+        paint: Paint, material: THREE.Material,
+        a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, d: THREE.Vector3,
+    ): void {
+        this.parts.set('textured#' + this.parts.size, {
+            paint,
+            material,
+            positions: [a, b, c, a, c, d].flatMap(p => [p.x, p.y, p.z]),
+            uvs: [0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0],
+        });
+    }
+
     /** Two triangles from four corners wound a, b, c, d. */
     addQuad(
         paint: Paint,
@@ -332,23 +425,26 @@ class MeshParts {
 
     build(materials: SceneMaterialManager): THREE.Object3D[] {
         const out: THREE.Object3D[] = [];
-        for (const [key, { paint, positions }] of this.parts) {
+        for (const [key, { paint, positions, material: own, uvs }] of this.parts) {
             const geometry = new THREE.BufferGeometry();
             geometry.setAttribute(
                 'position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+            if (uvs !== undefined) {
+                geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
+            }
             geometry.computeBoundingSphere();
             if (this.shaded) {
                 // Volumes are lit, so they need normals; flats never are.
                 geometry.computeVertexNormals();
             }
-            const material = this.shaded
+            const material = own ?? (this.shaded
                 ? materials.build({
                     type: SceneMaterialPrimitiveType.MESH,
                     category: typeof paint === 'string' ? paint : paint.category,
                     depthWrite: true,
                     shaded: true,
                 })
-                : flatMaterial(materials, paint);
+                : flatMaterial(materials, paint));
             const mesh = new THREE.Mesh(geometry, material);
             mesh.onBeforeRender = updateUniforms;
             this.meshes.set(key, mesh);
@@ -505,6 +601,9 @@ export function buildAirfieldModel(
         return paint;
     };
     const paints = new Map(airfield.runways.map(r => [r, surfacePaint(r)]));
+    const marked = new Map(airfield.runways
+        .filter(r => isPaintedSurface(r.surface))
+        .map(r => [r, markedPavementMaterial(materials, r, paints.get(r)!)]));
 
     const levels: Model['lod'] = [];
     const flatsPerLevel: MeshParts[] = [];
@@ -522,9 +621,14 @@ export function buildAirfieldModel(
             addTaxiways(parts, airfield, toEnu, drape, kinds.has('centreline'), pavement);
             addBuildings(solids, airfield, toEnu, drape);
         }
-        for (const runway of airfield.runways) {
-            maxSize = Math.max(maxSize, runway.lengthM);
-            addRunway(parts, runway, paints.get(runway)!, kinds, toEnu, place);
+        // Every runway's pavement before any runway's paint, so where two
+        // cross, the second one's pavement does not cover the first's paint.
+        for (const pass of ['pavement', 'paint'] as const) {
+            for (const runway of airfield.runways) {
+                maxSize = Math.max(maxSize, runway.lengthM);
+                addRunway(parts, runway, paints.get(runway)!, marked.get(runway),
+                    kinds, pass, toEnu, place);
+            }
         }
         levels.push({ flats: parts.build(materials), volumes: solids.build(materials) });
     }
@@ -581,9 +685,16 @@ function signedArea(ring: readonly { e: number; n: number }[]): number {
 type Place = (e: number, n: number, lift: number) => THREE.Vector3;
 type ToEnu = (lat: number, lon: number) => { e: number; n: number };
 
+/**
+ * One runway's pavement, or its paint.
+ *
+ * `marked` is the pavement material carrying the paint as a texture, on a
+ * paved runway; the paint geometry over it then only draws close in.
+ */
 function addRunway(
-    parts: MeshParts, runway: AirfieldRunway, pavement: Paint, kinds: Set<MarkingKind>,
-    toEnu: ToEnu, place: Place,
+    parts: MeshParts, runway: AirfieldRunway, pavement: Paint,
+    marked: THREE.Material | undefined, kinds: Set<MarkingKind>,
+    pass: 'pavement' | 'paint', toEnu: ToEnu, place: Place,
 ): void {
     const centre = toEnu(runway.lat, runway.lon);
     const axis = bearingAxisAt(runway.lat, runway.lon, runway.headingDeg, toEnu);
@@ -597,12 +708,24 @@ function addRunway(
 
     for (const rect of runwayMarkings(
         runway.lengthM, runway.widthM, runway.ref, runway.surface)) {
-        if (!kinds.has(rect.kind)) {
+        if (!kinds.has(rect.kind) || (rect.kind === 'pavement') !== (pass === 'pavement')) {
             continue;
         }
-        const paint = rect.kind === 'pavement' ? pavement : MARKING_CATEGORY[rect.kind];
-        const lift = AIRFIELD_SURFACE_EPS_M + (rect.kind === 'pavement' ? 0 : PAINT_LIFT_M);
-        parts.addQuad(paint, ...quadCorners(rect, at, lift));
+        if (rect.kind === 'pavement') {
+            const corners = quadCorners(rect, at, AIRFIELD_SURFACE_EPS_M);
+            if (marked !== undefined) {
+                parts.addTexturedQuad(pavement, marked, ...corners);
+            } else {
+                parts.addQuad(pavement, ...corners);
+            }
+            continue;
+        }
+        const paint: Paint = {
+            category: MARKING_CATEGORY[rect.kind],
+            lighten: 1,
+            maxFootprintM: marked !== undefined ? PAINT_MAX_FOOTPRINT_M : undefined,
+        };
+        parts.addQuad(paint, ...quadCorners(rect, at, AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M));
     }
 }
 

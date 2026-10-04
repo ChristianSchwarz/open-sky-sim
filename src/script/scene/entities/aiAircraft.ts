@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { Palette } from '../../config/palettes/palette';
 import { CanvasPainter } from '../../render/screen/canvasPainter';
 import { LODHelper, getLodLevel } from '../../render/helpers';
@@ -85,6 +86,17 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
     private swingWings: SwingWingsConfig | undefined;
 
     private readonly obj = new THREE.Object3D();
+
+    rebase(shift: FrameShift): void {
+        this.flightModel.rebase(shift);
+        shift.object(this.obj);
+        shift.point(this.displayPosition);
+        shift.orientation(this.displayQuaternion);
+        shift.vector(this.displayVelocity);
+        shift.point(this.shadowPosition);
+        shift.orientation(this.shadowQuaternion);
+        this.fx.rebase(shift);
+    }
     private readonly displayPosition = new THREE.Vector3();
     private readonly displayQuaternion = new THREE.Quaternion();
     private readonly displayVelocity = new THREE.Vector3();

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { DEFAULT_LOD_BIAS, LODHelper, modelScaledMaxSize } from '../../render/helpers';
 import { CanvasPainter } from "../../render/screen/canvasPainter";
 import { Entity, ENTITY_TAGS } from "../entity";
@@ -6,6 +7,7 @@ import { Model } from '../models/models';
 import { Palette } from "../../config/palettes/palette";
 import { Scene, SceneLayers } from "../scene";
 import { WeaponsTarget } from './weaponsTarget';
+import { rebaseRunway } from '../../state/worldRebase';
 
 export class GroundTargetEntity implements Entity, WeaponsTarget {
 
@@ -28,6 +30,13 @@ export class GroundTargetEntity implements Entity, WeaponsTarget {
     }
 
     private obj: THREE.Object3D = new THREE.Object3D();
+
+    rebase(shift: FrameShift): void {
+        shift.object(this.obj);
+        if (this.approachRunway) {
+            rebaseRunway(this.approachRunway, shift);
+        }
+    }
 
     set position(p: THREE.Vector3) {
         this.obj.position.copy(p);

@@ -3,7 +3,7 @@ import {
 } from '@angular/core';
 import { AreaImportService } from './areaImportService';
 import {
-    Box, boxTooBig, MAX_ZOOM, MIN_ZOOM, TILE_PX, crossesAntimeridian, latToWorld, lonToWorld,
+    Box, MAX_ZOOM, MIN_ZOOM, TILE_PX, crossesAntimeridian, latToWorld, lonToWorld,
     worldToLat, worldToLon, wrapLon,
 } from './importMath';
 
@@ -270,12 +270,12 @@ export class TerrainMap implements AfterViewInit, OnDestroy {
         }
         const selection = this.service.selection();
         if (selection) {
-            const tooBig = boxTooBig(selection) || crossesAntimeridian(selection);
+            const invalid = crossesAntimeridian(selection);
             this.strokeBox(
                 ctx,
                 selection,
-                tooBig ? 'rgba(255, 110, 90, 0.95)' : 'rgba(255, 210, 90, 0.95)',
-                tooBig ? 'rgba(255, 110, 90, 0.18)' : 'rgba(255, 210, 90, 0.18)',
+                invalid ? 'rgba(255, 110, 90, 0.95)' : 'rgba(255, 210, 90, 0.95)',
+                invalid ? 'rgba(255, 110, 90, 0.18)' : 'rgba(255, 210, 90, 0.18)',
             );
         }
     }

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { Palette, PaletteCategory, PaletteColor, PaletteColorShade } from '../../config/palettes/palette';
 import { DAMAGE_SMOKE_PARTICLE_COUNT } from '../../defs';
 import { PointEmitter } from '../../physics/particles/emitters/pointEmitter';
@@ -91,6 +92,14 @@ export class DamageSmokeField implements Entity {
     private readonly red = new THREE.Color();
     private readonly smoke = new THREE.Color();
     private readonly smokeB = new THREE.Color();
+
+    rebase(shift: FrameShift): void {
+        this.system.rebase(shift);
+        for (const leak of this.leaks) {
+            shift.point(leak.pinPos);
+            shift.point(leak.lastEmitPos);
+        }
+    }
 
     constructor(materials: SceneMaterialManager) {
         // Near-zero emitter kick — we set absolute plume velocity after burst.

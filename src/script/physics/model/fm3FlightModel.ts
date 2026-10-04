@@ -35,6 +35,7 @@ import { Fm3GroundContact } from '../fm3/groundContact';
 import { Fm3Engine } from '../fm3/propulsion';
 import { invert3x3, RigidBody6, rotateBodyToWorld, rotateWorldToBody, WrenchFunction } from '../fm3/rigidBody6';
 import { FlightModel, ForceVectorSample } from './flightModel';
+import { FrameShift } from '../../terrain/geodesy';
 
 const GRAVITY = 9.80665;
 const DEG = Math.PI / 180;
@@ -157,6 +158,11 @@ export class Fm3FlightModel extends FlightModel {
     }
 
     /** Pull externally set pose and velocity into the rigid body. */
+    override rebase(shift: FrameShift): void {
+        super.rebase(shift);
+        this.adoptExternalState();
+    }
+
     private adoptExternalState(): void {
         const p = this.obj.position, q = this.obj.quaternion, v = this.velocity;
         this.rb.pos[0] = p.x; this.rb.pos[1] = p.y; this.rb.pos[2] = p.z;

@@ -40,14 +40,14 @@ describe('blockedReason', () => {
         assert.equal(blockedReason(true, undefined, ''), 'import running');
     });
 
-    it('asks for a box, then a sane size, then a name', () => {
+    it('asks for a box, then a name', () => {
         assert.match(blockedReason(false, undefined, 'alps') ?? '', /shift-drag/);
-        assert.match(blockedReason(false, { ...box, east: 14 }, 'alps') ?? '', /too big/);
         assert.match(blockedReason(false, box, '   ') ?? '', /name/);
     });
 
-    it('is ready with a box within the limit and a name', () => {
+    it('is ready with a box and a name, however large', () => {
         assert.equal(blockedReason(false, box, 'alps'), undefined);
+        assert.equal(blockedReason(false, { west: -10, south: 35, east: 30, north: 60 }, 'europe'), undefined);
     });
 
     it('refuses a box that straddles the antimeridian', () => {

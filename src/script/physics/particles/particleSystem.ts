@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FrameShift } from '../../terrain/geodesy';
 import { lerp } from '../../utils/math';
 
 
@@ -72,6 +73,19 @@ export class ParticleSystem {
             });
         }
         return particles;
+    }
+
+    /** Carry live particles and the emitter into a re-based frame. */
+    rebase(shift: FrameShift): void {
+        shift.object(this.obj);
+        for (let i = 0; i < this.particles.length; i++) {
+            const particle = this.particles[i];
+            shift.point(particle.position);
+            shift.vector(particle.velocity);
+        }
+        // Rebuilt from the particles on the next update.
+        this.aabb.applyMatrix4(new THREE.Matrix4().compose(
+            shift.offset, shift.rotation, new THREE.Vector3(1, 1, 1)));
     }
 
     reset() {

@@ -31,6 +31,7 @@ import { Fm2AircraftConfig, defaultFm2Config, fm2GroundRestHeight } from '../fm2
 import { forebodyAsymmetryCy } from '../fm2/forebodyAsymmetry';
 import { RigidBody } from '../fm2/rigidBody';
 import { FlightModel, ForceVectorSample } from './flightModel';
+import { FrameShift } from '../../terrain/geodesy';
 import { WorldQuery } from '../../ai/worldQuery';
 
 const GRAVITY = 9.80665;
@@ -212,6 +213,12 @@ export class Fm2FlightModel extends FlightModel {
         for (const s of this.allSurfaces) {
             s.resetState();
         }
+    }
+
+    override rebase(shift: FrameShift): void {
+        super.rebase(shift);
+        this.rb.orientation.copy(this.obj.quaternion);
+        this.rb.velocityWorld.copy(this.velocity);
     }
 
     /** Keep the rigid body in sync after external teleports / solid-world pushes. */

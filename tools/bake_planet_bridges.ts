@@ -26,15 +26,79 @@ import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { makeEnuBasis } from '../src/script/terrain/geodesy';
 import { decodePtm } from '../src/script/terrain/ptm';
-import { PBR_MAX_VERTS, encodePbr } from '../src/script/terrain/pbr';
+import { BridgeRole, PBR_BOX_FLOATS, PBR_MAX_VERTS, encodePbr } from '../src/script/terrain/pbr';
+import { ROAD_SIDE_BIT, RoadClass, isRailClass, isZoneClass } from '../src/script/terrain/ptr';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import { boundsOf } from './bake/coverTex';
-import { BridgeMesh, buildBridgeMesh } from './bake/bridgeMesh';
+import { BridgeFrame, BridgeMesh, TrackStroke, buildBridgeMesh, buildTrackStroke, concatTracks } from './bake/bridgeMesh';
+import {
+    CrossingFurnitureStats, DRAWN_ROAD_MARGIN_M, DRAWN_TRACK_CLEARANCE_M, DrawnSegment, FurnitureBox,
+    planCrossingFurniture,
+} from './bake/crossingFurniture';
+import { decodePtr, ROAD_CLASS_MASK } from '../src/script/terrain/ptr';
+import { strokeLiftM } from './bake/drapeRoads';
+
+/**
+ * The tile's drawn road and track centrelines from its .ptr, in the true
+ * local frame, with the clearance furniture keeps from each. Empty without one.
+ */
+function drawnSegments(ptrPath: string, surface: ReturnType<typeof tileSurface>): DrawnSegment[] {
+    if (!fs.existsSync(ptrPath)) {
+        return [];
+    }
+    const t = decodePtr(zlib.gunzipSync(fs.readFileSync(ptrPath)));
+    const q = t.quantScale;
+    const at = (v: number) => surface.localToXZ(t.positions[v * 3] * q, t.positions[v * 3 + 1] * q, t.positions[v * 3 + 2] * q);
+    const hAt = (v: number) => surface.localToH(t.positions[v * 3] * q, t.positions[v * 3 + 1] * q, t.positions[v * 3 + 2] * q);
+    const out: DrawnSegment[] = [];
+    // Each quad is (l0, l0+1, l0+3) (l0, l0+3, l0+2): its centreline runs l0 -> l0+2.
+    for (let i = 0; i + 5 < t.indices.length; i += 6) {
+        const a = t.indices[i], b = t.indices[i + 5];
+        const cls = t.directions[a * 4 + 3] & ROAD_CLASS_MASK;
+        if (isZoneClass(cls)) {
+            continue;
+        }
+        const rail = isRailClass(cls);
+        const clearance = rail ? DRAWN_TRACK_CLEARANCE_M : t.halfWidths[a] / 10 + DRAWN_ROAD_MARGIN_M;
+        out.push(rail ? { a: at(a), b: at(b), clearance } : { a: at(a), b: at(b), clearance, ha: hAt(a), hb: hAt(b) });
+    }
+    return out;
+}
+
+/**
+ * Plan boxes (true frame: u, h, v) into the tile's own axes, as the PBR
+ * furniture section's float records: centre, three axes, half sizes, role.
+ */
+function boxesInTileAxes(boxes: readonly FurnitureBox[], frame: BridgeFrame): Float32Array | undefined {
+    if (boxes.length === 0) {
+        return undefined;
+    }
+    const { a, b, up } = frame;
+    const real = (p: readonly number[]) => [
+        p[0] * a[0] + p[2] * b[0] + p[1] * up[0],
+        p[0] * a[1] + p[2] * b[1] + p[1] * up[1],
+        p[0] * a[2] + p[2] * b[2] + p[1] * up[2],
+    ];
+    const out = new Float32Array(boxes.length * PBR_BOX_FLOATS);
+    boxes.forEach((box, i) => {
+        const o = i * PBR_BOX_FLOATS;
+        out.set(real(box.centre), o);
+        out.set(real(box.axes[0]), o + 3);
+        out.set(real(box.axes[1]), o + 6);
+        out.set(real(box.axes[2]), o + 9);
+        out.set(box.half, o + 12);
+        out[o + 15] = box.role;
+    });
+    return out;
+}
 import { BridgePlan, PIER_SPACING_M, planBridge } from './bake/bridges';
 import { decodeRbr } from './bake/rbr';
 import { decodeRvr } from './bake/rvr';
 import { LonLatBounds } from './bake/shoreline';
 import { tileSurface } from './bake/tileSurface';
+
+/** Parapets and walkways either side of a rail deck's track bed: RAIL_DECK_MARGIN_M in bake_osm_roads.py. */
+const RAIL_DECK_MARGIN_M = 2.0;
 
 /**
  * An abutment block taller than this reads as a pier, not an abutment. Smaller
@@ -63,7 +127,7 @@ function nearbyRoads(src: string, k: TileKey): ReturnType<typeof decodeRvr> {
             let roads = rvrCache.get(key);
             if (roads === undefined) {
                 const p = path.join(src, String(k.z), String(k.x + dx), `${k.y + dy}.rvr`);
-                roads = fs.existsSync(p) ? decodeRvr(fs.readFileSync(p)) : [];
+                roads = fs.existsSync(p) ? decodeRvr(fs.readFileSync(p)).filter(r => !isZoneClass(r.cls)) : [];
                 if (rvrCache.size > 64) {
                     rvrCache.clear();
                 }
@@ -165,20 +229,25 @@ function main(): void {
     const emptied: TileKey[] = [];
     const stat = {
         spans: 0, planned: 0, tunnels: 0, dropped: 0, offMesh: 0, buried: 0,
-        piers: 0, joints: 0, long: 0, liftedEnds: 0, tris: 0, gz: 0, humps2: 0, humps4: 0, humpMax: 0,
+        piers: 0, joints: 0, long: 0, rail: 0, liftedEnds: 0, tris: 0, gz: 0, humps2: 0, humps4: 0, humpMax: 0,
     };
     let lastLine = 0;
+    const furniture: CrossingFurnitureStats & { tris: number } = { crossings: 0, sides: 0, tris: 0 };
     for (let i = 0; i < tiles.length; i++) {
         const k = tiles[i];
         const outPath = tilePath(args.dir, k, '.pbr');
         const rbrPath = tilePath(args.src, k, '.rbr');
         const ptmPath = tilePath(args.dir, k, '.ptm');
         let bytes: Uint8Array | undefined;
-        if (fs.existsSync(rbrPath) && fs.existsSync(ptmPath)) {
-            const spans = decodeRbr(fs.readFileSync(rbrPath));
+        // The tile's own road vectors, unfiltered: its level crossings are there.
+        const rvrPath = tilePath(args.src, k, '.rvr');
+        const ownRoads = fs.existsSync(rvrPath) ? decodeRvr(fs.readFileSync(rvrPath)) : [];
+        const hasCrossings = ownRoads.some(r => r.cls === RoadClass.Crossing);
+        if ((fs.existsSync(rbrPath) || hasCrossings) && fs.existsSync(ptmPath)) {
+            const spans = fs.existsSync(rbrPath) ? decodeRbr(fs.readFileSync(rbrPath)) : [];
             const tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
             const surface = tileSurface(tile, basis);
-            const built: { mesh: BridgeMesh; plan: BridgePlan; lengthM: number }[] = [];
+            const built: { mesh: BridgeMesh; plan: BridgePlan; lengthM: number; track?: TrackStroke }[] = [];
             for (const rec of spans) {
                 stat.spans++;
                 if (rec.structure === 'tunnel') {
@@ -295,25 +364,50 @@ function main(): void {
                     stat.liftedEnds++;
                     if (process.env.DIAG_TALL) console.log(`tall end ${rec.points[0].lat.toFixed(5)},${rec.points[0].lon.toFixed(5)} -> ${rec.points[rec.points.length-1].lat.toFixed(5)},${rec.points[rec.points.length-1].lon.toFixed(5)} lift ${plan.abutmentLiftM.map(v=>v.toFixed(1))}`);
                 }
-                built.push({ mesh: buildBridgeMesh(plan, surface.frame), plan, lengthM: plan.lengthM });
+                let track: TrackStroke | undefined;
+                if (rec.cls !== undefined && isRailClass(rec.cls)) {
+                    plan.deckRole = BridgeRole.RailDeck;
+                    stat.rail++;
+                    // The sleepers and rails carry on across the deck.
+                    track = buildTrackStroke(plan, surface.frame,
+                        Math.max(0.5, (rec.deckWidthM - RAIL_DECK_MARGIN_M) / 2), rec.cls, ROAD_SIDE_BIT);
+                }
+                built.push({ mesh: buildBridgeMesh(plan, surface.frame), plan, lengthM: plan.lengthM, track });
             }
             // Longest first: a full stream drops the short spans, never the viaduct.
             built.sort((a, b) => b.lengthM - a.lengthM);
             const keep: BridgeMesh[] = [];
+            const tracks: TrackStroke[] = [];
             let verts = 0;
+            let trackVerts = 0;
             for (const b of built) {
-                if (verts + b.mesh.vertexCount > PBR_MAX_VERTS) {
+                const tv = b.track ? b.track.positions.length / 3 : 0;
+                if (verts + b.mesh.vertexCount > PBR_MAX_VERTS || trackVerts + tv > PBR_MAX_VERTS) {
                     stat.dropped++;
                     continue;
                 }
                 verts += b.mesh.vertexCount;
                 keep.push(b.mesh);
+                if (b.track) {
+                    trackVerts += tv;
+                    tracks.push(b.track);
+                }
             }
-            if (keep.length > 0) {
+            // Barriers and signs at the level crossings: boxes in float32,
+            // built into triangles at runtime (a board is far thinner than
+            // the quantisation step the triangles above are stored in).
+            const boxes = hasCrossings ? boxesInTileAxes(planCrossingFurniture(ownRoads, surface, furniture, strokeLiftM(k),
+                drawnSegments(tilePath(args.dir, k, '.ptr'), surface)), surface.frame) : undefined;
+            if (boxes) {
+                furniture.tris += (boxes.length / PBR_BOX_FLOATS) * 12;
+            }
+            if (keep.length > 0 || boxes) {
                 const m = concat(keep);
                 bytes = zlib.gzipSync(encodePbr({
                     id: k, quantScale: tile.quantScale, positions: m.positions,
                     normals: m.normals, roles: m.roles, indices: m.indices,
+                    track: tracks.length > 0 ? concatTracks(tracks) : undefined,
+                    boxes,
                 }), { level: 9 });
                 stat.tris += m.triangleCount;
             }
@@ -361,7 +455,8 @@ function main(): void {
     };
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
-    console.log(`spans        ${stat.spans}  (planned ${stat.planned}, tunnels skipped ${stat.tunnels})`);
+    console.log(`crossings    ${furniture.crossings} level crossings, ${furniture.sides} approaches furnished, ${furniture.tris} triangles`);
+    console.log(`spans        ${stat.spans}  (planned ${stat.planned}, ${stat.rail} of them rail, tunnels skipped ${stat.tunnels})`);
     console.log(`piers        ${stat.piers}   of ${stat.joints} joints on ${stat.long} spans long enough for one`);
     console.log(`triangles    ${stat.tris}`);
     console.log(`tall ends    ${stat.liftedEnds}  (abutment taller than a pier: an approach embankment would read better)`);

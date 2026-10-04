@@ -1,4 +1,7 @@
+import { ALONG_STEP_M } from '../../../terrain/ptr';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
+
+const RAIL_ALONG_STEP_GLSL = ALONG_STEP_M.toFixed(4);
 
 /**
  * Minimum half-width of a watercourse stroke, in pixels.
@@ -61,7 +64,7 @@ export const RIVER_MAX_STRETCH = 8.0;
  * to the pixel grid independently collapses it to nothing on some frames and
  * opens it on others: the river itself flickers.
  */
-export const RiverVertProgram: string = `
+const riverVert = (rail: boolean): string => `
   precision highp float;
 
   uniform float halfWidth;
@@ -71,6 +74,20 @@ export const RiverVertProgram: string = `
 
   attribute vec3 riverDir;
   attribute float riverHalf;
+` + (rail ? `
+  // The class byte, ROAD_SIDE_BIT (64) set on the negative bank, and the
+  // distance along the stroke in ALONG_STEP_M units (see ptr.ts).
+  attribute float riverMeta;
+  attribute float railAlong;
+  // Switch-zone flags, ptr.ts TRACK_FLAG_* bits.
+  attribute float railFlags;
+  // Across the drawn stroke in metres, along it in metres, true half-width.
+  varying vec3 vRail;
+  // The flags as 0/1: no own sleepers, long timbers +side, long timbers -side, level crossing.
+  varying vec4 vTrack;
+  // The long timbers' reach level (TRACK_FLAG_REACH_*).
+  varying float vReach;
+` : '') + `
 
   varying vec3 vPosition;
   // Unused (uGrazingHighlight is always 0 here) but declared to match the
@@ -116,6 +133,22 @@ ${LOG_DEPTH_PARS_VERTEX}
     // sky and all — every time a river passes under the aircraft.
     gl_Position = projectionMatrix
         * vec4(centreView.xyz + offsetView * (halfM * stretch), 1.0);
+` + (rail ? `
+    float side = riverMeta >= 64.0 ? -1.0 : 1.0;
+    vRail = vec3(side * halfM * stretch, railAlong * ${RAIL_ALONG_STEP_GLSL}, halfM);
+    vTrack = vec4(mod(railFlags, 2.0), mod(floor(railFlags / 2.0), 2.0), mod(floor(railFlags / 4.0), 2.0),
+        mod(floor(railFlags / 8.0), 2.0));
+    vReach = mod(floor(railFlags / 16.0), 4.0);
+` : '') + `
 ${LOG_DEPTH_VERTEX}
   }
 `;
+
+export const RiverVertProgram: string = riverVert(false);
+
+/**
+ * The same stroke for a railway, also handing the fragment program where on
+ * the track bed it is - metres across and along - so RailDepthFragProgram can
+ * draw sleepers and rails into it close up.
+ */
+export const RailVertProgram: string = riverVert(true);

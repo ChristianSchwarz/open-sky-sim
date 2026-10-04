@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bake OSM roads into per-tile vector files (.rvr) in the planet pyramid.
+"""Bake OSM roads and railways into per-tile vector files (.rvr) in the planet pyramid.
 
 Fetches every ``highway=*`` way of the classes worth drawing from the air,
 chains OSM's junction-split ways back into runs, and writes one zlib
@@ -9,6 +9,13 @@ z12 leaf everything down to residential streets - so a coarse tile never
 carries more line than it can show. ``tools/bake_planet_roads.ts`` drapes
 these over the finished meshes into the ``.ptr`` sidecars the runtime
 strokes.
+
+Railways ride the same files as two more class bytes: ``RAIL_CLASS``
+for main lines (``railway=rail|light_rail|narrow_gauge`` with no
+``service`` tag) from ``RAIL_MIN_ZOOM`` down, and ``RAIL_SERVICE_CLASS``
+for sidings, passing loops, spurs and yards on the leaf only. Tunnels are
+left out. Each is fetched as a query and cache of its own, so a road cache
+filled before railways existed is still used.
 
 Nothing here touches the ``.lvr`` files: roads are their own layer with
 their own bake, so widths and class cuts can change without re-fetching the
@@ -25,6 +32,7 @@ Requires ``shapely`` and ``requests``.
 from __future__ import annotations
 
 import argparse
+import math
 import json
 import os
 import struct
@@ -35,13 +43,14 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:
-    from shapely.geometry import LineString, box
+    from shapely.geometry import LineString, Point, box
+    from shapely.ops import substring
     from shapely.strtree import STRtree
 except ImportError:
     print('error: shapely is required (pip install shapely)', file=sys.stderr)
     raise
 
-from osm_pbf import pbf_elements
+from osm_pbf import pbf_elements_groups
 
 from osm_common import (
     CLASS_BYTE, ROAD_CLASSES, road_class_byte,
@@ -52,7 +61,7 @@ from osm_common import (
     replace_file,
     update_manifest,
     nodes_map,
-    overpass_fetch_cells,
+    overpass_fetch_groups,
     parse_bbox,
     snap_bounds_to_tiles,
     tagged_width_m,
@@ -61,9 +70,16 @@ from osm_common import (
     ways_map,
 )
 from bake_osm_coast import decode_index, scan_pdm_tiles
-from osm_bridges import Bridge, decode_rbr, encode_rbr, extract_bridges, is_span, polyline_length_m
+from osm_turnouts import TurnoutStats, fit_turnouts
+from osm_bridges import (
+    Bridge, _layer, classify_structure, decode_rbr, encode_rbr, extract_bridges, is_span, polyline_length_m,
+)
 
 RVR_MAGIC = b'RVR1'
+# RVR2: the same, but points as float32 offsets from a float64 origin. A
+# float32 longitude resolves only ~0.3-0.4 m at 35 E, enough to set a siding
+# down beside the main line it leaves and to put kinks in every turnout curve.
+RVR2_MAGIC = b'RVR2'
 
 # ROAD_CLASSES / CLASS_BYTE now live in osm_common.py, shared with
 # osm_bridges.py; ROAD_CLASSES is re-exported here so the rest of this module
@@ -92,6 +108,54 @@ CLASS_CUT_BY_ZOOM: Dict[int, int] = {
     12: CLASS_BYTE['residential'],
 }
 DEFAULT_MIN_ZOOM = min(CLASS_CUT_BY_ZOOM)
+
+# Railways: one class byte past the road classes, so every ordering test on
+# road bytes (`cls <= cut`) leaves them out; `keeps_class` lets them in from
+# RAIL_MIN_ZOOM. A main line is as long and as straight as a trunk road and
+# reads from about as far, but there are fewer of them, so they start one
+# level below the motorways.
+RAIL_CLASS = len(ROAD_CLASSES)
+RAIL_MIN_ZOOM = 9
+# Service track - sidings, passing loops beside a main line, spurs, yards -
+# on the leaf only: it is what makes a station read as several tracks close
+# up, and nothing anyone can pick out from where a coarser tile is drawn.
+RAIL_SERVICE_CLASS = RAIL_CLASS + 1
+RAIL_SERVICE_MIN_ZOOM = 12
+RAIL_CLASSES = (RAIL_CLASS, RAIL_SERVICE_CLASS)
+# A turnout's switch zones (osm_turnouts.py), as polylines from the switch:
+# along the diverging track and along the through track. Leaf only, never
+# drawn: the stroke bake flags the track vertices lying on them.
+TRACK_ZONE_DIVERGING_CLASS = RAIL_SERVICE_CLASS + 1
+TRACK_ZONE_THROUGH_CLASS = RAIL_SERVICE_CLASS + 2
+# A level crossing: the stretch of track a road crosses at grade, as a
+# polyline along the track (crossing_parts). Leaf only, never drawn: the
+# stroke bake flags the track on it, which then lets the road show through
+# with the rails over it.
+TRACK_CROSSING_CLASS = RAIL_SERVICE_CLASS + 3
+ZONE_CLASSES = (TRACK_ZONE_DIVERGING_CLASS, TRACK_ZONE_THROUGH_CLASS, TRACK_CROSSING_CLASS)
+# Everything --rails-only owns in a leaf file: the track and its zones.
+TRACK_LAYER_CLASSES = RAIL_CLASSES + ZONE_CLASSES
+# Turnout radius by the diverging track's class: a 1:12 turnout on a main
+# line, the German 190 m siding turnout on service track.
+TURNOUT_RADIUS_M: Dict[int, float] = {RAIL_CLASS: 300.0, RAIL_SERVICE_CLASS: 190.0}
+# Leaf simplification for track, metres: a turnout curve simplified to the
+# roads' 1.5 m is one chord with a kink at the switch.
+RAIL_LEAF_SIMPLIFY_M = 0.05
+CLASS_NAMES: Tuple[str, ...] = ROAD_CLASSES + (
+    'rail', 'rail_service', 'zone_diverging', 'zone_through', 'crossing')
+# A level crossing's track stretch runs this far past the road's edges, metres.
+CROSSING_MARGIN_M = 0.5
+# The shallowest angle a crossing's length is worked out at: a road meeting
+# the track more obliquely is taken as crossing at this.
+CROSSING_MIN_DEG = 20.0
+# Longest a crossing stretch may be either side of the road's centreline, metres.
+CROSSING_MAX_HALF_M = 30.0
+RAIL_TYPES = ('rail', 'light_rail', 'narrow_gauge')
+# Ballast bed per track. Germany maps a double-track line as two ways a few
+# metres apart, so two single-track strokes side by side are the corridor.
+RAIL_TRACK_WIDTH_M = 5.0
+# Parapets and walkways either side of the track bed on a rail bridge deck.
+RAIL_DECK_MARGIN_M = 2.0
 
 # Douglas-Peucker tolerance in grid cells of the level being written. The
 # same figure the coast bake gives a watercourse, for the same reason: the
@@ -127,6 +191,76 @@ def class_cut_for_zoom(z: int) -> Optional[int]:
     if z < min(CLASS_CUT_BY_ZOOM):
         return None
     return CLASS_CUT_BY_ZOOM.get(z, CLASS_CUT_BY_ZOOM[max(CLASS_CUT_BY_ZOOM)])
+
+
+def keeps_class(cls: int, z: int) -> bool:
+    """Whether a tile of zoom `z` carries runs of class byte `cls`."""
+    if cls == RAIL_CLASS:
+        return z >= RAIL_MIN_ZOOM
+    if cls == RAIL_SERVICE_CLASS or cls in ZONE_CLASSES:
+        return z >= RAIL_SERVICE_MIN_ZOOM
+    cut = class_cut_for_zoom(z)
+    return cut is not None and cls <= cut
+
+
+def rail_class_of(tags: dict) -> Optional[int]:
+    """RAIL_CLASS for a main line, RAIL_SERVICE_CLASS for service track, None for neither or underground."""
+    if tags.get('railway') not in RAIL_TYPES or tags.get('area') == 'yes':
+        return None
+    tunnel = tags.get('tunnel')
+    if (tunnel and tunnel != 'no') or tags.get('covered') == 'yes':
+        return None
+    return RAIL_SERVICE_CLASS if tags.get('service') else RAIL_CLASS
+
+
+def is_main_rail(tags: dict) -> bool:
+    """A main line above ground: no sidings or yards."""
+    return rail_class_of(tags) == RAIL_CLASS
+
+
+def is_rail_bridge(tags: dict) -> bool:
+    """A main-line railway way carried on a bridge (tunnels never reach here, see is_main_rail)."""
+    bridge = tags.get('bridge')
+    return rail_class_of(tags) is not None and bool(bridge and bridge != 'no')
+
+
+def rail_bridges(data: dict) -> List[Bridge]:
+    """Every rail bridge span in an answer, one per way, as osm_bridges.extract_bridges does for roads.
+
+    The class byte is the way's rail class, so the bridge bake gives the deck the
+    ballast colour and the level above the leaf adds the span back into its
+    rail stroke (see child_roads).
+    """
+    elements = data.get('elements', [])
+    nodes = nodes_map(elements)
+    out: List[Bridge] = []
+    for way in ways_map(elements).values():
+        tags = way.get('tags', {})
+        if not is_rail_bridge(tags):
+            continue
+        pts = [nodes[n] for n in way.get('nodes', []) if n in nodes]
+        if len(pts) < 2:
+            continue
+        out.append(Bridge(
+            structure=classify_structure(tags, polyline_length_m(pts)),
+            deck_width_m=rail_width_m(tags) + RAIL_DECK_MARGIN_M,
+            layer=_layer(tags),
+            clearance_m=0.0,
+            cls=rail_class_of(tags),
+            points=[(float(lon), float(lat)) for lon, lat in pts],
+        ))
+    return out
+
+
+def rail_width_m(tags: dict) -> float:
+    tagged = tagged_width_m(tags)
+    if tagged is not None:
+        return tagged
+    try:
+        tracks = int(str(tags.get('tracks', '1')).split(';')[0])
+    except ValueError:
+        tracks = 1
+    return max(1, min(tracks, 8)) * RAIL_TRACK_WIDTH_M
 
 
 def road_class(tags: dict) -> Optional[str]:
@@ -165,7 +299,52 @@ def road_tag_predicate(tags: dict) -> bool:
     return road_class_byte(tags) is not None
 
 
-def assemble_roads(data: dict, skip_spans: bool = False) -> List[Road]:
+def overpass_rails_query(c: Bounds) -> str:
+    types = '|'.join(RAIL_TYPES)
+    return f'''[out:json][timeout:240];
+(
+  way["railway"~"^({types})$"][!"service"]({c.as_overpass()});
+);
+{OVERPASS_OUT}
+'''
+
+
+def rail_tag_predicate(tags: dict) -> bool:
+    """`overpass_rails_query` for the PBF path (tunnels are dropped at assembly)."""
+    return tags.get('railway') in RAIL_TYPES and not tags.get('service')
+
+
+def overpass_rail_service_query(c: Bounds) -> str:
+    types = '|'.join(RAIL_TYPES)
+    return f'''[out:json][timeout:240];
+(
+  way["railway"~"^({types})$"]["service"]({c.as_overpass()});
+);
+{OVERPASS_OUT}
+'''
+
+
+def rail_service_tag_predicate(tags: dict) -> bool:
+    """`overpass_rail_service_query` for the PBF path."""
+    return tags.get('railway') in RAIL_TYPES and bool(tags.get('service'))
+
+
+def merge_answers(*answers: Optional[dict]) -> dict:
+    """One element list from several fetches; a node or way in two is kept once."""
+    seen: Set[Tuple[str, int]] = set()
+    out: List[dict] = []
+    for data in answers:
+        for el in (data or {}).get('elements', []):
+            key = (el.get('type', ''), el.get('id', 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(el)
+    return {'elements': out}
+
+
+def assemble_roads(data: dict, skip_spans: bool = False,
+                   turnout_stats: Optional[TurnoutStats] = None) -> List[Road]:
     """Chain the fetched ways into runs, one per class.
 
     OSM splits a road into a new way at every junction and every change of
@@ -183,6 +362,15 @@ def assemble_roads(data: dict, skip_spans: bool = False) -> List[Road]:
     per_class: Dict[int, List[Tuple[List[int], float]]] = {}
     for way in ways.values():
         tags = way.get('tags', {})
+        rail = rail_class_of(tags)
+        if rail is not None:
+            # Like a road bridge: the leaf draws the span as a deck.
+            if skip_spans and is_rail_bridge(tags):
+                continue
+            ids = [nid for nid in way.get('nodes', []) if nid in nodes]
+            if len(ids) >= 2:
+                per_class.setdefault(rail, []).append((ids, rail_width_m(tags)))
+            continue
         cls = road_class(tags)
         if cls is None:
             continue
@@ -196,11 +384,28 @@ def assemble_roads(data: dict, skip_spans: bool = False) -> List[Road]:
         per_class.setdefault(CLASS_BYTE[cls], []).append((ids, road_width_m(tags, cls)))
 
     roads: List[Road] = []
+    track: List[Tuple[int, List[int]]] = []
+    track_widths: List[float] = []
     for cls_byte, items in per_class.items():
         for ids, width in _chain(items):
+            if cls_byte in RAIL_CLASSES:
+                track.append((cls_byte, ids))
+                track_widths.append(width)
+                continue
             coords = [nodes[nid] for nid in ids]
             if len(coords) >= 2:
                 roads.append(Road(cls_byte, width, LineString(coords)))
+    # Track across both classes at once: a siding leaves a main line.
+    stats = turnout_stats if turnout_stats is not None else TurnoutStats()
+    fitted = fit_turnouts(track, nodes, TURNOUT_RADIUS_M, stats)
+    for (cls_byte, _ids), width, coords in zip(track, track_widths, fitted):
+        if len(coords) >= 2:
+            roads.append(Road(cls_byte, width, LineString(coords)))
+    for t in stats.turnouts:
+        if len(t.diverging_zone) >= 2:
+            roads.append(Road(TRACK_ZONE_DIVERGING_CLASS, 0.0, LineString(t.diverging_zone)))
+        if len(t.through_zone) >= 2:
+            roads.append(Road(TRACK_ZONE_THROUGH_CLASS, 0.0, LineString(t.through_zone)))
     return roads
 
 
@@ -253,6 +458,7 @@ def _chain(items: Sequence[Tuple[List[int], float]]) -> List[Tuple[List[int], fl
 
 def clip_roads(
     roads: Sequence[Road], tree: STRtree, b: Bounds, tolerance: float,
+    track_tolerance: Optional[float] = None,
 ) -> List[Tuple[int, float, List[Tuple[float, float]]]]:
     """Clip the runs to a tile as (class, width_m, points) parts, simplified.
 
@@ -274,9 +480,10 @@ def clip_roads(
             continue
         parts = ([clipped] if isinstance(clipped, LineString)
                  else [g for g in getattr(clipped, 'geoms', []) if isinstance(g, LineString)])
+        tol = track_tolerance if track_tolerance is not None and road.cls in TRACK_LAYER_CLASSES else tolerance
         for part in parts:
-            if tolerance > 0:
-                part = part.simplify(tolerance, preserve_topology=False)
+            if tol > 0:
+                part = part.simplify(tol, preserve_topology=False)
             pts = [(float(x), float(y)) for x, y in part.coords]
             if len(pts) >= 2:
                 out.append((road.cls, road.width_m, pts))
@@ -284,23 +491,87 @@ def clip_roads(
     return out
 
 
+def crossing_parts(
+    parts: Sequence[Tuple[int, float, Sequence[Tuple[float, float]]]], b: Bounds,
+) -> List[Tuple[int, float, List[Tuple[float, float]]]]:
+    """Level crossings in one leaf tile's parts, as TRACK_CROSSING_CLASS polylines along the track.
+
+    A road crossing a track in the leaf is at grade: both draw their bridges
+    as decks and their tunnels not at all, so neither carries a span here.
+    The stretch reaches across the road's width at the angle it crosses,
+    plus CROSSING_MARGIN_M either side. Width is the road's, for reference.
+    """
+    lat0 = (b.south + b.north) / 2
+    lon0 = (b.west + b.east) / 2
+    kx = METRES_PER_DEGREE * math.cos(math.radians(lat0))
+    ky = METRES_PER_DEGREE
+
+    def metres(pts: Sequence[Tuple[float, float]]) -> LineString:
+        return LineString([((lon - lon0) * kx, (lat - lat0) * ky) for lon, lat in pts])
+
+    rails = [metres(pts) for cls, _w, pts in parts if cls in RAIL_CLASSES and len(pts) >= 2]
+    roads = [(metres(pts), w) for cls, w, pts in parts if cls < len(ROAD_CLASSES) and len(pts) >= 2]
+    if not rails or not roads:
+        return []
+    tree = STRtree([r for r, _w in roads])
+    out: List[Tuple[int, float, List[Tuple[float, float]]]] = []
+
+    def tangent(line: LineString, d: float) -> Tuple[float, float]:
+        a = line.interpolate(max(0.0, d - 0.5))
+        c = line.interpolate(min(line.length, d + 0.5))
+        dx, dy = c.x - a.x, c.y - a.y
+        n = math.hypot(dx, dy) or 1.0
+        return dx / n, dy / n
+
+    for rail in rails:
+        for idx in tree.query(rail):
+            road, width = roads[int(idx)]
+            hit = rail.intersection(road)
+            if hit.is_empty:
+                continue
+            points = [hit] if isinstance(hit, Point) else [g for g in getattr(hit, 'geoms', []) if isinstance(g, Point)]
+            for pt in points:
+                d = rail.project(pt)
+                tr = tangent(rail, d)
+                tw = tangent(road, road.project(pt))
+                sin = abs(tr[0] * tw[1] - tr[1] * tw[0])
+                sin = max(sin, math.sin(math.radians(CROSSING_MIN_DEG)))
+                half = min(CROSSING_MAX_HALF_M, max(0.5, width / 2) / sin + CROSSING_MARGIN_M)
+                piece = substring(rail, max(0.0, d - half), min(rail.length, d + half))
+                if not isinstance(piece, LineString) or len(piece.coords) < 2:
+                    continue
+                pts = [(lon0 + x / kx, lat0 + y / ky) for x, y in piece.coords]
+                out.append((TRACK_CROSSING_CLASS, float(width), pts))
+    return out
+
+
 def encode_rvr(parts: Sequence[Tuple[int, float, Sequence[Tuple[float, float]]]]) -> bytes:
-    """RVR1: u16 count, then per road u8 class, f32 width, u16 n, n x (f32 lon, f32 lat); zlib."""
-    payload = bytearray(RVR_MAGIC)
-    payload += struct.pack('<H', len(parts))
+    """RVR2: f64 lon0, f64 lat0, u16 count, then per road u8 class, f32 width,
+    u16 n, n x (f32 lon - lon0, f32 lat - lat0); zlib. Sub-millimetre at any
+    tile; RVR1 (absolute f32 lon/lat) still decodes."""
+    all_pts = [p for _c, _w, pts in parts for p in pts]
+    lon0 = min((p[0] for p in all_pts), default=0.0)
+    lat0 = min((p[1] for p in all_pts), default=0.0)
+    payload = bytearray(RVR2_MAGIC)
+    payload += struct.pack('<ddH', lon0, lat0, len(parts))
     for cls, width, pts in parts:
         payload += struct.pack('<Bf H', cls, float(width), len(pts))
         for lon, lat in pts:
-            payload += struct.pack('<ff', float(lon), float(lat))
+            payload += struct.pack('<ff', float(lon) - lon0, float(lat) - lat0)
     return zlib.compress(bytes(payload), 6)
 
 
 def decode_rvr(blob: bytes) -> List[Tuple[int, float, List[Tuple[float, float]]]]:
     payload = zlib.decompress(blob)
-    if payload[:4] != RVR_MAGIC:
+    if payload[:4] == RVR2_MAGIC:
+        lon0, lat0, count = struct.unpack_from('<ddH', payload, 4)
+        off = 4 + struct.calcsize('<ddH')
+    elif payload[:4] == RVR_MAGIC:
+        lon0 = lat0 = 0.0
+        (count,) = struct.unpack_from('<H', payload, 4)
+        off = 6
+    else:
         raise ValueError('bad RVR magic')
-    (count,) = struct.unpack_from('<H', payload, 4)
-    off = 6
     out = []
     for _ in range(count):
         cls, width, n = struct.unpack_from('<Bf H', payload, off)
@@ -309,7 +580,7 @@ def decode_rvr(blob: bytes) -> List[Tuple[int, float, List[Tuple[float, float]]]
         for _p in range(n):
             lon, lat = struct.unpack_from('<ff', payload, off)
             off += 8
-            pts.append((lon, lat))
+            pts.append((lon0 + lon, lat0 + lat))
         out.append((cls, width, pts))
     return out
 
@@ -409,19 +680,24 @@ def child_roads(out_dir: str, z: int, x: int, y: int, max_zoom: int) -> List[Roa
             with open(span_path, 'rb') as fh:
                 for span in decode_rbr(fh.read()):
                     if span.cls != 255 and len(span.points) >= 2:
-                        out.append(Road(span.cls, span.deck_width_m, LineString(span.points)))
+                        # The track bed, not the deck with its parapets.
+                        width = span.deck_width_m - (RAIL_DECK_MARGIN_M if span.cls in RAIL_CLASSES else 0.0)
+                        out.append(Road(span.cls, width, LineString(span.points)))
     return out
 
 
 def write_levels(
     out_dir: str, tiles: Dict[int, Set[Tuple[int, int]]], bbox: Bounds,
     min_zoom: int, max_zoom: int, leaf_roads: Optional[Sequence[Road]],
+    keep_leaf_roads: bool = False,
 ) -> Tuple[int, int, int, int]:
     """Writes the .rvr tiles in `bbox`, finest level first.
 
     The leaf is clipped from `leaf_roads` (None leaves it alone, for
     --rebuild-ancestors); every coarser level from the level below it on
-    disk, see child_roads. Returns (files, bytes, runs, stale files removed).
+    disk, see child_roads. With `keep_leaf_roads` (--rails-only) a leaf
+    keeps the road runs already on disk verbatim and only its railways come
+    from `leaf_roads`. Returns (files, bytes, runs, stale files removed).
     """
     total_files = 0
     total_bytes = 0
@@ -435,17 +711,42 @@ def write_levels(
             continue
         tol = line_tolerance_deg(z, max_zoom)
         if z >= max_zoom:
-            level_roads = [r for r in leaf_roads if r.cls <= cut]
+            level_roads = [r for r in leaf_roads if keeps_class(r.cls, z)]
             tree = STRtree([r.line for r in level_roads])
         files = 0
         parts_written = 0
         level_bytes = 0
+        level_crossings = 0
         for x, y in level_tiles:
             if z < max_zoom:
-                level_roads = [r for r in child_roads(out_dir, z, x, y, max_zoom) if r.cls <= cut]
+                level_roads = [r for r in child_roads(out_dir, z, x, y, max_zoom) if keeps_class(r.cls, z)]
                 tree = STRtree([r.line for r in level_roads])
-            parts = clip_roads(level_roads, tree, tile_bounds(z, x, y), tol) if level_roads else []
+            track_tol = min(tol, RAIL_LEAF_SIMPLIFY_M / METRES_PER_DEGREE) if z >= max_zoom else None
+            parts = clip_roads(level_roads, tree, tile_bounds(z, x, y), tol, track_tol) if level_roads else []
             path = rvr_path(out_dir, z, x, y)
+            if keep_leaf_roads and z >= max_zoom:
+                on_disk = []
+                if os.path.isfile(path):
+                    with open(path, 'rb') as fh:
+                        blob = fh.read()
+                    try:
+                        on_disk = decode_rvr(blob)
+                    except Exception as err:
+                        # A file cut short by an interrupted bake: its roads
+                        # are gone until the next full road bake of the area.
+                        print(f'  warning: {path} unreadable ({err}); rewritten with track only', flush=True)
+                if not parts and not any(p[0] in TRACK_LAYER_CLASSES for p in on_disk):
+                    # No railway here before or now: the file stays as it is.
+                    if on_disk:
+                        files += 1
+                        parts_written += len(on_disk)
+                    continue
+                parts = sorted([p for p in on_disk if p[0] not in TRACK_LAYER_CLASSES] + parts, key=lambda p: p[0])
+            if z >= max_zoom and parts:
+                crossings = crossing_parts(parts, tile_bounds(z, x, y))
+                if crossings:
+                    level_crossings += len(crossings)
+                    parts = sorted(parts + crossings, key=lambda p: p[0])
             if not parts:
                 if os.path.isfile(path):
                     os.remove(path)
@@ -458,7 +759,9 @@ def write_levels(
         total_bytes += level_bytes
         total_parts += parts_written
         print(f'level {z:2d}    {files}/{len(level_tiles)} tiles carry roads, '
-              f'{parts_written} runs, {level_bytes / 1024:.0f} KB, classes <= {ROAD_CLASSES[cut]}',
+              f'{parts_written} runs, {level_bytes / 1024:.0f} KB, classes <= {ROAD_CLASSES[cut]}'
+              + (' + rail' if keeps_class(RAIL_CLASS, z) else '')
+              + (f'; {level_crossings} level crossings' if level_crossings else ''),
               flush=True)
     return total_files, total_bytes, total_parts, removed
 
@@ -502,10 +805,18 @@ def bake(args: argparse.Namespace) -> int:
               + (f'; removed {removed} stale' if removed else '') + f' in {time.time() - started:.1f}s')
         return 0
 
+    if args.rails_only:
+        return bake_rails_only(args, manifest_path, manifest, out_dir, bbox, min_zoom, max_zoom, started)
+
     if args.pbf:
         print(f'reading OSM roads from {args.pbf}', flush=True)
-        data = pbf_elements(args.pbf, bbox, road_tag_predicate, 'roads',
-                             include_relations=False, refresh=args.refresh_osm)
+        # One scan of the file for both; each keeps its own cache entry, so
+        # a road cache from before railways is still a hit.
+        groups = [('roads', road_tag_predicate)] + ([] if args.no_rail else [
+            ('rails', rail_tag_predicate), ('rail_service', rail_service_tag_predicate)])
+        answers = pbf_elements_groups(args.pbf, bbox, groups, include_relations=False,
+                                      refresh=args.refresh_osm)
+        data = merge_answers(*answers.values())
         print(f'  {sum(1 for el in data["elements"] if el["type"] == "way")} ways')
     else:
         print('fetching OSM roads', flush=True)
@@ -516,8 +827,16 @@ def bake(args: argparse.Namespace) -> int:
                 received[0] = n
                 print(f'  {n / 1048576:.1f} MB received', flush=True)
 
-        data = overpass_fetch_cells(overpass_roads_query, bbox, 'roads', args.refresh_osm,
-                                    on_progress=on_progress, zoom=ROAD_CELL_ZOOM)
+        # Railways are their own query and cache: the road cells already
+        # fetched stay valid, and only the rail cells are new.
+        groups = [(overpass_roads_query, 'roads', None)]
+        if not args.no_rail:
+            groups.append((overpass_rails_query, 'rails', None))
+            groups.append((overpass_rail_service_query, 'rail_service', None))
+        answers = overpass_fetch_groups(
+            groups, bbox, args.refresh_osm,
+            on_progress=(lambda _g, n: on_progress(n)), zoom=ROAD_CELL_ZOOM)
+        data = merge_answers(*answers)
     if args.fetch_only:
         print('fetch-only: cache filled, nothing baked')
         return 0
@@ -525,9 +844,12 @@ def bake(args: argparse.Namespace) -> int:
     # The leaf's own set, spans left out, only when there are bridge files to
     # replace them: a run of them missing from the leaf and present nowhere
     # else would be a hole in the road.
-    leaf_roads = assemble_roads(data, skip_spans=not args.no_bridges)
+    turnouts = TurnoutStats()
+    leaf_roads = assemble_roads(data, skip_spans=not args.no_bridges, turnout_stats=turnouts)
     way_count = sum(1 for el in data.get('elements', []) if el.get('type') == 'way')
-    print(f'assembled   {len(roads)} runs from {way_count} ways')
+    rail_runs = sum(1 for r in roads if r.cls in RAIL_CLASSES)
+    print(f'assembled   {len(roads)} runs ({rail_runs} rail) from {way_count} ways')
+    print(f'turnouts    {turnouts.found} found, {turnouts.fitted} curved, {turnouts.refused} left as mapped')
     if not roads:
         print('no roads in this box; nothing written')
         return 0
@@ -541,7 +863,7 @@ def bake(args: argparse.Namespace) -> int:
     # use for them. Filed by midpoint, never clipped (see bridges_by_tile).
     bridge_files = 0
     bridge_spans = 0
-    spans = [] if args.no_bridges else extract_bridges(data)
+    spans = [] if args.no_bridges else extract_bridges(data) + rail_bridges(data)
     owned = bridges_by_tile(spans, max_zoom, bbox)
     on_disk = {t for t in tiles.get(max_zoom, ())}
     for (x, y), items in sorted(owned.items()):
@@ -581,6 +903,87 @@ def bake(args: argparse.Namespace) -> int:
     return 0
 
 
+def merge_rail_bridges(
+    out_dir: str, tiles: Dict[int, Set[Tuple[int, int]]], bbox: Bounds, max_zoom: int,
+    spans: Sequence[Bridge],
+) -> Tuple[int, int]:
+    """Swap the rail spans of every leaf .rbr in `bbox` for `spans`, road spans kept.
+
+    Every leaf in the box is visited, not only those that get a span, so a
+    rail bridge gone from OSM leaves no deck behind. Returns (files written
+    or removed, spans written).
+    """
+    owned = bridges_by_tile(spans, max_zoom, bbox)
+    x0, y0, x1, y1 = tile_range_for_bounds(max_zoom, bbox)
+    files = 0
+    written = 0
+    for x, y in sorted(tiles.get(max_zoom, ())):
+        if not (x0 <= x <= x1 and y0 <= y <= y1):
+            continue
+        path = rbr_path(out_dir, max_zoom, x, y)
+        on_disk: List[Bridge] = []
+        if os.path.isfile(path):
+            with open(path, 'rb') as fh:
+                on_disk = decode_rbr(fh.read())
+        new = owned.get((x, y), [])
+        had_rail = any(b.cls in RAIL_CLASSES for b in on_disk)
+        if not new and not had_rail:
+            continue
+        items = [b for b in on_disk if b.cls not in RAIL_CLASSES] + list(new)
+        if items:
+            write_rbr(out_dir, max_zoom, x, y, encode_rbr(items))
+        else:
+            os.remove(path)
+        files += 1
+        written += len(new)
+    return files, written
+
+
+def bake_rails_only(
+    args: argparse.Namespace, manifest_path: str, manifest: dict, out_dir: str, bbox: Bounds,
+    min_zoom: int, max_zoom: int, started: float,
+) -> int:
+    """Add railways to a pyramid whose roads are already baked.
+
+    Fetches only the railways; every leaf keeps its road runs from disk
+    (see write_levels' keep_leaf_roads) and the coarser levels are derived
+    from the leaves as always. For areas whose OSM extract is gone - a road
+    re-read would mean the whole road net from Overpass.
+    """
+    if args.pbf:
+        print(f'reading OSM railways from {args.pbf}', flush=True)
+        answers = pbf_elements_groups(
+            args.pbf, bbox, [('rails', rail_tag_predicate), ('rail_service', rail_service_tag_predicate)],
+            include_relations=False, refresh=args.refresh_osm)
+        data = merge_answers(*answers.values())
+    else:
+        print('fetching OSM railways', flush=True)
+        data = merge_answers(*overpass_fetch_groups(
+            [(overpass_rails_query, 'rails', None), (overpass_rail_service_query, 'rail_service', None)],
+            bbox, args.refresh_osm, zoom=ROAD_CELL_ZOOM))
+    if args.fetch_only:
+        print('fetch-only: cache filled, nothing baked')
+        return 0
+    # The leaf's rails leave their bridges out, which become decks below.
+    turnouts = TurnoutStats()
+    rails = [r for r in assemble_roads(data, skip_spans=not args.no_bridges, turnout_stats=turnouts)
+             if r.cls in TRACK_LAYER_CLASSES]
+    print(f'assembled   {sum(1 for r in rails if r.cls in RAIL_CLASSES)} rail runs')
+    print(f'turnouts    {turnouts.found} found, {turnouts.fitted} curved, {turnouts.refused} left as mapped')
+    tiles = known_tiles(out_dir, manifest, min_zoom, max_zoom)
+    if not args.no_bridges:
+        # Before the levels: the level above the leaf adds each leaf's spans
+        # back into its strokes (child_roads).
+        files_b, spans_b = merge_rail_bridges(out_dir, tiles, bbox, max_zoom, rail_bridges(data))
+        print(f'bridges     {spans_b} rail spans, {files_b} leaf .rbr rewritten')
+    files, size, parts, removed = write_levels(
+        out_dir, tiles, bbox, min_zoom, max_zoom, rails, keep_leaf_roads=True)
+    print(f'\nwrote {files} road tiles, {parts} runs, {size / 1048576:.1f} MB (.rvr)'
+          + (f'; removed {removed} stale' if removed else ''))
+    print(f'done in {time.time() - started:.1f}s')
+    return 0
+
+
 def main(argv: Optional[Iterable[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -595,6 +998,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                         help='ignore the cached Overpass response and re-fetch')
     parser.add_argument('--no-bridges', action='store_true',
                         help='keep bridge and tunnel ways in the leaf road strokes and write no .rbr')
+    parser.add_argument('--no-rail', action='store_true',
+                        help='leave railways out (roads only, as before railways existed)')
+    parser.add_argument('--rails-only', action='store_true',
+                        help='fetch only railways and add them to the leaf road files already on disk, '
+                             'then re-derive the coarser levels; roads are not re-read')
     parser.add_argument('--fetch-only', action='store_true',
                         help='only fetch the Overpass answers into the cache; bake nothing')
     parser.add_argument('--rebuild-ancestors', action='store_true',

@@ -20,15 +20,24 @@
  * Layout, little-endian, 24-byte header:
  *
  *    0  u32  magic 'PTR1'        8  u32  x
- *    4  u8   version = 1        12  u32  y
+ *    4  u8   version = 3        12  u32  y
  *    5  u8   z                  16  f32  quantScale
  *    6  u16  reserved           20  u16  vertCount   22  u16  indexCount / 3
  *
  *   payload, each section padded to a 4-byte boundary
  *     pos    i16 x3 per vertex   centreline point, two vertices per point
- *     dir    i8  x4 per vertex   unit cross-road offset + ROAD_CLASS byte, /127
+ *     dir    i8  x4 per vertex   unit cross-road offset + RoadClass byte, /127
  *     half   u16 x1 per vertex   half the true width, decimetres
+ *     along  u16 x1 per vertex   distance along the stroke, ALONG_STEP_M units,
+ *                                wrapping at ALONG_WRAP_M (version 2 on)
+ *     flags  u8  x1 per vertex   TRACK_FLAG_* bits (version 3 on)
  *     idx    u16 x3 per triangle
+ *
+ * The class byte carries ROAD_SIDE_BIT on the vertex of each pair offset to
+ * the negative side, so a vertex program knows which bank it is on; mask with
+ * ROAD_CLASS_MASK for the class. Version 1 has neither the bit nor `along`,
+ * and decodes with `along` all zero; versions before 3 decode with `flags`
+ * all zero.
  *
  * Decode is typed-array views over the received buffer, no per-vertex pass,
  * the rule every tile format here lives by.
@@ -37,11 +46,50 @@
 import { TileKey } from './tiling';
 
 const PTR_MAGIC = 0x31525450; // 'PTR1' little-endian
-const PTR_VERSION = 1;
+const PTR_VERSION = 3;
 const PTR_HEADER_BYTES = 24;
 /** Two per centreline point, and u16 indices. */
 export const PTR_MAX_VERTS = 65534;
 const PTR_MAX_HALF_M = 6553.5;
+
+/** Set in the class byte on the negative-offset vertex of each pair. */
+export const ROAD_SIDE_BIT = 0x40;
+export const ROAD_CLASS_MASK = 0x3f;
+/** Resolution of the `along` section, metres. */
+export const ALONG_STEP_M = 0.05;
+/**
+ * Where `along` wraps, metres: the u16 range at ALONG_STEP_M. A whole number
+ * of RAIL_SLEEPER_PITCH_M, so the sleeper rhythm runs through the wrap.
+ */
+export const ALONG_WRAP_M = 65536 * ALONG_STEP_M;
+/** Sleeper pitch the rail shader draws at; ALONG_WRAP_M / this is whole (5120). */
+export const RAIL_SLEEPER_PITCH_M = 0.64;
+
+/**
+ * Per-vertex track flags, set by the stroke bake inside a turnout's switch
+ * zone (see drapeRoads.ts). The diverging track draws no sleepers of its
+ * own there; the through track draws long timbers reaching under it, toward
+ * whichever side of the stroke (the vertex's own offset direction, so the
+ * +side is the vertex without ROAD_SIDE_BIT) the diverging track lies.
+ */
+export const TRACK_FLAG_NO_SLEEPERS = 1;
+export const TRACK_FLAG_LONG_POS = 2;
+export const TRACK_FLAG_LONG_NEG = 4;
+/** A level crossing: no bed and no sleepers, so the road shows with the rails over it. */
+export const TRACK_FLAG_CROSSING = 8;
+/**
+ * Two bits: how much farther than TRACK_LONG_TIMBER_EXTRA_M the long timbers
+ * reach, in TRACK_LONG_TIMBER_STEP_M steps. Where switch zones overlap (a
+ * siding off a siding) one through track carries the timbers for all of
+ * them, out to the farthest diverging track.
+ */
+export const TRACK_FLAG_REACH_SHIFT = 4;
+export const TRACK_FLAG_REACH_MASK = 0x30;
+export const TRACK_REACH_LEVELS = 3;
+/** How far a long timber reaches past an ordinary sleeper at reach level 0, metres. */
+export const TRACK_LONG_TIMBER_EXTRA_M = 2.9;
+/** How much farther each reach level takes it, metres. */
+export const TRACK_LONG_TIMBER_STEP_M = 1.5;
 
 /**
  * Road classes, most important first, as the fourth byte of `dir`. The
@@ -56,6 +104,43 @@ export const enum RoadClass {
     Tertiary = 4,
     Unclassified = 5,
     Residential = 6,
+    /** A railway main line: RAIL_CLASS in tools/bake_osm_roads.py. */
+    Rail = 7,
+    /** Sidings, passing loops, spurs, yards; leaf tiles only (RAIL_SERVICE_CLASS). */
+    RailService = 8,
+    /**
+     * A turnout's switch zone along the diverging and the through track
+     * (TRACK_ZONE_*_CLASS in bake_osm_roads.py): in the .rvr only, read by
+     * the stroke bake to flag the track on them, never drawn.
+     */
+    ZoneDiverging = 9,
+    ZoneThrough = 10,
+    /** A level crossing's stretch of track (TRACK_CROSSING_CLASS); .rvr only, never drawn. */
+    Crossing = 11,
+}
+
+/** Whether a class byte is a switch-zone polyline rather than anything drawn. */
+export function isZoneClass(cls: number): boolean {
+    return cls === RoadClass.ZoneDiverging || cls === RoadClass.ZoneThrough || cls === RoadClass.Crossing;
+}
+
+/** Whether a class byte (side bit masked off) is track of either kind. */
+export function isRailClass(cls: number): boolean {
+    return cls === RoadClass.Rail || cls === RoadClass.RailService;
+}
+
+/**
+ * The order the stroke bake drapes classes in, lowest first, so a full
+ * vertex stream drops the last ones. A main line goes after the tertiary
+ * roads: it outranks a residential street from the air but not a highway.
+ * Service track goes last of all: a yard is a fan of dozens of tracks, and
+ * in a full city tile it is what should give.
+ */
+export function roadDrapeRank(cls: number): number {
+    if (cls === RoadClass.Rail) {
+        return RoadClass.Tertiary + 0.5;
+    }
+    return cls === RoadClass.RailService ? RoadClass.Residential + 0.5 : cls;
 }
 
 /**
@@ -74,8 +159,12 @@ export interface PtrEncodeInput {
     directions: Float32Array;
     /** 1 float per vertex: half the road's true width, metres. */
     halfWidthsM: Float32Array;
-    /** 1 byte per vertex, a RoadClass. */
+    /** 1 byte per vertex, a RoadClass, ROAD_SIDE_BIT on the negative side. */
     classes: Uint8Array;
+    /** 1 float per vertex: metres along the stroke from its start. Zero when absent. */
+    alongM?: Float32Array;
+    /** 1 byte per vertex, TRACK_FLAG_* bits. Zero when absent. */
+    flags?: Uint8Array;
     /** 3 indices per triangle. */
     indices: Uint32Array;
 }
@@ -89,6 +178,10 @@ export interface PtrTile {
     directions: Int8Array;
     /** Decimetres. Bind raw and multiply by 0.1 for metres. */
     halfWidths: Uint16Array;
+    /** ALONG_STEP_M units, wrapped at ALONG_WRAP_M; all zero from a version 1 file. */
+    along: Uint16Array;
+    /** TRACK_FLAG_* bits; all zero before version 3. */
+    flags: Uint8Array;
     indices: Uint16Array;
 }
 
@@ -121,8 +214,10 @@ export function encodePtr(input: PtrEncodeInput): Uint8Array {
     const posBytes = align4(vertCount * 6);
     const dirBytes = align4(vertCount * 4);
     const halfBytes = align4(vertCount * 2);
+    const alongBytes = align4(vertCount * 2);
+    const flagBytes = align4(vertCount);
     const idxBytes = align4(triCount * 6);
-    const out = new Uint8Array(PTR_HEADER_BYTES + posBytes + dirBytes + halfBytes + idxBytes);
+    const out = new Uint8Array(PTR_HEADER_BYTES + posBytes + dirBytes + halfBytes + alongBytes + flagBytes + idxBytes);
     const view = new DataView(out.buffer);
     view.setUint32(0, PTR_MAGIC, true);
     view.setUint8(4, PTR_VERSION);
@@ -140,6 +235,12 @@ export function encodePtr(input: PtrEncodeInput): Uint8Array {
     off += dirBytes;
     const half = new Uint16Array(out.buffer, off, vertCount);
     off += halfBytes;
+    const along = new Uint16Array(out.buffer, off, vertCount);
+    off += alongBytes;
+    if (input.flags) {
+        out.set(input.flags.subarray(0, vertCount), off);
+    }
+    off += flagBytes;
     const idx = new Uint16Array(out.buffer, off, triCount * 3);
 
     const q = input.quantScale;
@@ -152,6 +253,10 @@ export function encodePtr(input: PtrEncodeInput): Uint8Array {
         dir[i * 4 + 2] = quantiseNormal(input.directions[i * 3 + 2]);
         dir[i * 4 + 3] = input.classes[i];
         half[i] = Math.round(Math.min(PTR_MAX_HALF_M, Math.max(0, input.halfWidthsM[i])) * 10);
+        if (input.alongM) {
+            const a = input.alongM[i] % ALONG_WRAP_M;
+            along[i] = Math.round((a < 0 ? a + ALONG_WRAP_M : a) / ALONG_STEP_M) & 0xffff;
+        }
     }
     for (let i = 0; i < triCount * 3; i++) {
         idx[i] = input.indices[i];
@@ -170,8 +275,8 @@ export function decodePtr(bytes: ArrayBuffer | Uint8Array): PtrTile {
         throw new Error(`Bad PTR1 magic: 0x${magic.toString(16)}`);
     }
     const version = view.getUint8(4);
-    if (version !== PTR_VERSION) {
-        throw new Error(`PTR1 version ${version}, expected ${PTR_VERSION}`);
+    if (version < 1 || version > PTR_VERSION) {
+        throw new Error(`PTR1 version ${version}, expected 1 to ${PTR_VERSION}`);
     }
     const z = view.getUint8(5);
     const x = view.getUint32(8, true);
@@ -182,8 +287,10 @@ export function decodePtr(bytes: ArrayBuffer | Uint8Array): PtrTile {
     const posBytes = align4(vertCount * 6);
     const dirBytes = align4(vertCount * 4);
     const halfBytes = align4(vertCount * 2);
+    const alongBytes = version >= 2 ? align4(vertCount * 2) : 0;
+    const flagBytes = version >= 3 ? align4(vertCount) : 0;
     const idxBytes = align4(triCount * 6);
-    const need = PTR_HEADER_BYTES + posBytes + dirBytes + halfBytes + idxBytes;
+    const need = PTR_HEADER_BYTES + posBytes + dirBytes + halfBytes + alongBytes + flagBytes + idxBytes;
     if (raw.byteLength < need) {
         throw new Error(`PTR1 ${z}/${x}/${y}: ${raw.byteLength} bytes, ${need} needed`);
     }
@@ -196,6 +303,10 @@ export function decodePtr(bytes: ArrayBuffer | Uint8Array): PtrTile {
     off += dirBytes;
     const halfWidths = new Uint16Array(raw.buffer, off, vertCount);
     off += halfBytes;
+    const along = alongBytes > 0 ? new Uint16Array(raw.buffer, off, vertCount) : new Uint16Array(vertCount);
+    off += alongBytes;
+    const flags = flagBytes > 0 ? new Uint8Array(raw.buffer, off, vertCount) : new Uint8Array(vertCount);
+    off += flagBytes;
     const indices = new Uint16Array(raw.buffer, off, triCount * 3);
-    return { id: { z, x, y }, quantScale, positions, directions, halfWidths, indices };
+    return { id: { z, x, y }, quantScale, positions, directions, halfWidths, along, flags, indices };
 }

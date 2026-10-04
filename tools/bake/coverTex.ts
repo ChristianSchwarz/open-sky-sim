@@ -24,6 +24,7 @@
 import { EnuBasis, ecefToEnu, ecefToGeodetic, enuToEcef, geodeticToEcef } from '../../src/script/terrain/geodesy';
 import { PtmTile } from '../../src/script/terrain/ptm';
 import { PTX_NO_DATA } from '../../src/script/terrain/ptx';
+import { RoadClass } from '../../src/script/terrain/ptr';
 import { TileKey } from './index';
 import { LonLatBounds } from './shoreline';
 import { tileBounds } from './meshTile';
@@ -277,6 +278,9 @@ export function boundsOf(id: TileKey): LonLatBounds {
  */
 export const ROAD_TEXEL_RGB: readonly [number, number, number] = [0x55, 0x55, 0x55];
 
+/** A railway's texel: the noon palette's ballast brown (SCENERY_RAIL). */
+export const RAIL_TEXEL_RGB: readonly [number, number, number] = [0x4a, 0x42, 0x39];
+
 /**
  * Paint road centrelines into a leaf raster, one texel wide.
  *
@@ -294,7 +298,7 @@ export function paintRoads(
 ): number {
     const lonSpan = bounds.east - bounds.west;
     const latSpan = bounds.north - bounds.south;
-    const [r, g, b] = ROAD_TEXEL_RGB;
+    let [r, g, b] = ROAD_TEXEL_RGB;
     let painted = 0;
     const plot = (x: number, y: number) => {
         if (x < 0 || y < 0 || x >= size || y >= size) {
@@ -308,9 +312,12 @@ export function paintRoads(
         painted++;
     };
     for (const road of roads) {
-        if (road.cls > maxClass) {
+        // Railways sit past every road class and are painted at any cut.
+        const rail = road.cls === RoadClass.Rail;
+        if (road.cls > maxClass && !rail) {
             continue;
         }
+        [r, g, b] = rail ? RAIL_TEXEL_RGB : ROAD_TEXEL_RGB;
         for (let i = 0; i + 1 < road.points.length; i++) {
             const a = road.points[i], c = road.points[i + 1];
             const x0 = ((a.lon - bounds.west) / lonSpan) * size;

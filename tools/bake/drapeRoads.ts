@@ -22,7 +22,12 @@
 
 import { EnuBasis, ecefToEnu, geodeticToEcef } from '../../src/script/terrain/geodesy';
 import { PtmTile } from '../../src/script/terrain/ptm';
-import { PTR_MAX_VERTS } from '../../src/script/terrain/ptr';
+import {
+    ALONG_WRAP_M, PTR_MAX_VERTS, ROAD_SIDE_BIT, RoadClass, TRACK_FLAG_CROSSING, TRACK_FLAG_LONG_NEG, TRACK_FLAG_LONG_POS,
+    TRACK_FLAG_NO_SLEEPERS, TRACK_FLAG_REACH_MASK, TRACK_FLAG_REACH_SHIFT, TRACK_LONG_TIMBER_EXTRA_M,
+    TRACK_LONG_TIMBER_STEP_M, TRACK_REACH_LEVELS,
+    isRailClass, isZoneClass, roadDrapeRank,
+} from '../../src/script/terrain/ptr';
 import { approxTileEdgeMetres, tileBounds } from '../../src/script/terrain/tiling';
 import { RoadLine } from './rvr';
 import { smoothRoad } from './roadSpline';
@@ -38,6 +43,11 @@ const BUCKET_CELLS = 64;
  */
 const ROAD_LIFT_CELLS = 0.05;
 
+/** How far a stroke floats over the drawn surface on tile `id`, metres. */
+export function strokeLiftM(id: { z: number; x: number; y: number }): number {
+    return ROAD_LIFT_CELLS * approxTileEdgeMetres(id) / 256;
+}
+
 /** Cap on the samples one segment may produce, a backstop like the rivers'. */
 const MAX_SUBDIVISIONS = 512;
 
@@ -46,6 +56,12 @@ export interface DrapedRoads {
     directions: Float32Array;
     halfWidthsM: Float32Array;
     classes: Uint8Array;
+    /** Metres along each stroke from its start, per vertex. */
+    alongM: Float32Array;
+    /** TRACK_FLAG_* bits per vertex: switch zones on the track. */
+    flags: Uint8Array;
+    /** Track points flagged inside a switch zone, for the bake summary. */
+    zonePoints: number;
     indices: Uint32Array;
     /** Strokes emitted, and strokes dropped because the stream was full. */
     strokes: number;
@@ -75,6 +91,9 @@ export function drapeRoads(
      */
     smooth: boolean = true,
 ): DrapedRoads | undefined {
+    // Switch zones come in with the roads but are flags, never strokes.
+    const zoneLines = roads.filter(r => isZoneClass(r.cls));
+    roads = roads.filter(r => !isZoneClass(r.cls));
     if (roads.length === 0) {
         return undefined;
     }
@@ -94,7 +113,7 @@ export function drapeRoads(
     let upX = upB.x - upA.x, upY = upB.y - upA.y, upZ = upB.z - upA.z;
     const upLen = Math.hypot(upX, upY, upZ);
     upX /= upLen; upY /= upLen; upZ /= upLen;
-    const liftM = ROAD_LIFT_CELLS * approxTileEdgeMetres(tile.id) / 256;
+    const liftM = strokeLiftM(tile.id);
     // The drape works in a sheared frame: every point slides along the local
     // vertical to the y = 0 plane, so a road point at (lon, lat) and the mesh
     // vertex above it share one (x, z) whatever their height. Without it a
@@ -298,11 +317,23 @@ export function drapeRoads(
     const dir: number[] = [];
     const half: number[] = [];
     const cls: number[] = [];
+    const along: number[] = [];
+    const flagOut: number[] = [];
     const idx: number[] = [];
+    let zonePoints = 0;
+    // The zones in the same sheared horizontal frame as the stroke points.
+    const zones = zoneLines.map(z => ({
+        through: z.cls === RoadClass.ZoneThrough,
+        crossing: z.cls === RoadClass.Crossing,
+        pts: z.points.map(p => {
+            const l = toLocal(p.lon, p.lat, tile.centerHeightM);
+            return { x: l.x - l.y * shearX, z: l.z - l.y * shearZ };
+        }),
+    }));
     let strokes = 0;
     let dropped = 0;
     const cap = Math.min(maxVerts, PTR_MAX_VERTS);
-    const ordered = [...roads].sort((a, b) => a.cls - b.cls);
+    const ordered = [...roads].sort((a, b) => roadDrapeRank(a.cls) - roadDrapeRank(b.cls));
     for (const road of ordered) {
         // Smoothed into a curve first, in the tile's horizontal metres, so the
         // facet crossings and the height simplifier below see the curve and
@@ -312,7 +343,11 @@ export function drapeRoads(
             return { x: l.x - l.y * shearX, y: l.y, z: l.z - l.y * shearZ };
         });
         const track = smooth ? smoothRoad(local) : local;
-        const grid = resample(track.map(p => ({ x: p.x, y: 0, z: p.z })));
+        const sampled = resample(track.map(p => ({ x: p.x, y: 0, z: p.z })));
+        // Near a switch zone or a crossing, track gets a point every metre:
+        // a straight run is otherwise sampled only at the mesh cells, ~19 m
+        // apart at the leaf, and a 33 m zone could hold no point at all.
+        const grid = isRailClass(road.cls) && zones.length > 0 ? densifyNearZones(sampled, zones) : sampled;
         if (grid.length < 2) {
             continue;
         }
@@ -329,7 +364,21 @@ export function drapeRoads(
             dropped++;
             continue;
         }
-        const kept = simplifyDraped(grid, ys as number[], liftM * SIMPLIFY_LIFT_FRACTION);
+        const zoneFlags = isRailClass(road.cls) && zones.length > 0 ? flagSwitchZones(grid, zones) : undefined;
+        let kept = simplifyDraped(grid, ys as number[], liftM * SIMPLIFY_LIFT_FRACTION);
+        if (zoneFlags) {
+            // A flag must change between two points a metre or so apart, not
+            // fade over a long simplified segment: keep both sides of every change.
+            const keep = new Set(kept);
+            for (let i = 1; i < zoneFlags.length; i++) {
+                if (zoneFlags[i] !== zoneFlags[i - 1]) {
+                    keep.add(i - 1);
+                    keep.add(i);
+                }
+            }
+            kept = [...keep].sort((a, b) => a - b);
+            zonePoints += kept.filter(i => zoneFlags[i] !== 0).length;
+        }
         const ys2 = kept.map(i => ys[i]!);
         // Back out of the sheared frame: the point sits at its facet's height.
         const grid2 = kept.map((i, k) => ({
@@ -339,7 +388,7 @@ export function drapeRoads(
             dropped++;
             continue;
         }
-        emitted(grid2, ys2, road);
+        emitted(grid2, ys2, road, zoneFlags ? kept.map(i => zoneFlags[i]) : undefined);
         strokes++;
     }
     if (strokes === 0) {
@@ -350,16 +399,24 @@ export function drapeRoads(
         directions: Float32Array.from(dir),
         halfWidthsM: Float32Array.from(half),
         classes: Uint8Array.from(cls),
+        alongM: Float32Array.from(along),
+        flags: Uint8Array.from(flagOut),
+        zonePoints,
         indices: Uint32Array.from(idx),
         strokes,
         dropped,
         triangles: idx.length / 3,
     };
 
-    function emitted(grid: Local[], ys: number[], road: RoadLine): void {
-        const base = half.length;
+    function emitted(grid: Local[], ys: number[], road: RoadLine, flags?: number[]): void {
         const halfM = Math.max(0.5, road.widthM / 2);
+        // Per point first: position, offset, distance along, flags.
+        const pts: { e: number[]; p: number[]; run: number; f: number; h: number }[] = [];
+        let run = 0;
         for (let i = 0; i < grid.length; i++) {
+            if (i > 0) {
+                run += Math.hypot(grid[i].x - grid[i - 1].x, ys[i]! - ys[i - 1]!, grid[i].z - grid[i - 1].z);
+            }
             const a = grid[Math.max(0, i - 1)];
             const b = grid[Math.min(grid.length - 1, i + 1)];
             const tx = b.x - a.x, ty = (ys[Math.min(grid.length - 1, i + 1)]! - ys[Math.max(0, i - 1)]!), tz = b.z - a.z;
@@ -373,19 +430,231 @@ export function drapeRoads(
             } else {
                 px /= plen; py /= plen; pz /= plen;
             }
-            const ex = grid[i].x + upX * liftM;
-            const ey = ys[i]! + upY * liftM;
-            const ez = grid[i].z + upZ * liftM;
-            pos.push(ex, ey, ez, ex, ey, ez);
-            dir.push(px, py, pz, -px, -py, -pz);
-            half.push(halfM, halfM);
-            cls.push(road.cls, road.cls);
+            const f = flags ? flags[i] : 0;
+            // Long timbers need bed under them: a switch zone's through
+            // track is widened to carry them (one track, see RAIL_FRAGMENT).
+            const level = (f & TRACK_FLAG_REACH_MASK) >> TRACK_FLAG_REACH_SHIFT;
+            const h = f & (TRACK_FLAG_LONG_POS | TRACK_FLAG_LONG_NEG)
+                ? Math.max(halfM, SWITCH_ZONE_HALF_M + level * TRACK_LONG_TIMBER_STEP_M) : halfM;
+            pts.push({
+                e: [grid[i].x + upX * liftM, ys[i]! + upY * liftM, grid[i].z + upZ * liftM],
+                p: [px, py, pz], run, f, h,
+            });
         }
-        for (let i = 0; i + 1 < grid.length; i++) {
-            const l0 = base + i * 2;
-            idx.push(l0, l0 + 1, l0 + 3, l0, l0 + 3, l0 + 2);
+        const pair = (e: number[], pv: number[], at: number, f: number, h: number): number => {
+            const v = half.length;
+            pos.push(e[0], e[1], e[2], e[0], e[1], e[2]);
+            dir.push(pv[0], pv[1], pv[2], -pv[0], -pv[1], -pv[2]);
+            half.push(h, h);
+            cls.push(road.cls, road.cls | ROAD_SIDE_BIT);
+            along.push(at, at);
+            flagOut.push(f, f);
+            return v;
+        };
+        const quad = (l0: number, l1: number) => idx.push(l0, l0 + 1, l1 + 1, l0, l1 + 1, l1);
+        let prev = pair(pts[0].e, pts[0].p, pts[0].run, pts[0].f, pts[0].h);
+        for (let i = 1; i < pts.length; i++) {
+            const a = pts[i - 1], b = pts[i];
+            // The distance along is stored wrapped at ALONG_WRAP_M, and the
+            // shader interpolates it: a segment across a wrap would sweep
+            // back through kilometres of sleepers in a few metres. Split it
+            // there and start a new strip at zero.
+            const k = Math.floor(b.run / ALONG_WRAP_M);
+            if (k > Math.floor(a.run / ALONG_WRAP_M) && b.run > a.run) {
+                const wrapAt = k * ALONG_WRAP_M;
+                const t = (wrapAt - a.run) / (b.run - a.run);
+                const e = a.e.map((v, c) => v + (b.e[c] - v) * t);
+                const end = pair(e, a.p, wrapAt - ALONG_WRAP_END_M, a.f, a.h);
+                quad(prev, end);
+                prev = pair(e, b.p, wrapAt, b.f, b.h);
+            }
+            const next = pair(b.e, b.p, b.run, b.f, b.h);
+            quad(prev, next);
+            prev = next;
         }
     }
+}
+
+/**
+ * Half the bed a switch zone's through track is widened to, metres: an
+ * ordinary sleeper (1.3) plus the long timber's reach (LONG_TIMBER_EXTRA_M
+ * in depthFP.ts, 2.9) and a margin.
+ */
+const SWITCH_ZONE_HALF_M = 4.4;
+/**
+ * How far short of a wrap the vertex ending a strip is put, metres: enough
+ * that it rounds to the last ALONG_STEP_M before the wrap, not onto it.
+ */
+const ALONG_WRAP_END_M = 0.03;
+/** A track point this close to a zone polyline is on it, metres. */
+const ZONE_ON_M = 0.5;
+/**
+ * A track point this close to a diverging zone is that diverging track,
+ * whatever else it is near, metres: the zone is cut from the track's own
+ * coordinates, and a through track strays this close only within a few
+ * metres of the switch toe.
+ */
+const DIVERGING_SAME_M = 0.06;
+/** Diverging tracks are looked for this far from a through track point, metres: two chained switches. */
+const ZONE_REACH_M = 7.5;
+/** Half a sleeper, outer rail head and margin: what a timber must reach past a diverging centreline, metres. */
+const TIMBER_PAST_CENTRE_M = 0.72 + 0.3;
+/** Half an ordinary sleeper, metres (SLEEPER_HALF_LENGTH_M in depthFP.ts). */
+const SLEEPER_HALF_M = 1.3;
+
+/** The smallest reach level whose long timbers cover a diverging track `d` metres off. */
+export function reachLevel(d: number): number {
+    const extra = d + TIMBER_PAST_CENTRE_M - SLEEPER_HALF_M;
+    const level = Math.ceil((extra - TRACK_LONG_TIMBER_EXTRA_M) / TRACK_LONG_TIMBER_STEP_M);
+    return Math.max(0, Math.min(TRACK_REACH_LEVELS, level));
+}
+
+/**
+ * TRACK_FLAG_* for each point of a track stroke: on a turnout's through
+ * zone, long timbers toward the side the diverging zone lies on; on its
+ * diverging zone, no sleepers of its own. Near the switch both zones are a
+ * hair apart, so a point goes with the nearer.
+ */
+export function flagSwitchZones(
+    grid: ReadonlyArray<{ x: number; z: number }>,
+    zones: ReadonlyArray<{ through: boolean; crossing?: boolean; pts: ReadonlyArray<{ x: number; z: number }> }>,
+): number[] {
+    const out = new Array<number>(grid.length).fill(0);
+    const pad = ZONE_REACH_M;
+    const boxes = zones.map(z => {
+        let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        for (const q of z.pts) {
+            x0 = Math.min(x0, q.x); x1 = Math.max(x1, q.x); z0 = Math.min(z0, q.z); z1 = Math.max(z1, q.z);
+        }
+        return { x0: x0 - pad, x1: x1 + pad, z0: z0 - pad, z1: z1 + pad };
+    });
+    for (let i = 0; i < grid.length; i++) {
+        const p = grid[i];
+        let dThrough = Infinity, dDiverging = Infinity, dCrossing = Infinity;
+        // The farthest diverging track within reach on each side of the
+        // stroke (+ = up x tangent, (tz, -tx) in plan): the timbers go to it.
+        const a = grid[Math.max(0, i - 1)], b = grid[Math.min(grid.length - 1, i + 1)];
+        let reachPos = -1, reachNeg = -1;
+        for (let zi = 0; zi < zones.length; zi++) {
+            const zone = zones[zi], bx = boxes[zi];
+            if (p.x < bx.x0 || p.x > bx.x1 || p.z < bx.z0 || p.z > bx.z1) {
+                continue;
+            }
+            const last = zone.pts.length - 2;
+            // This zone's nearest point, for the reach: each diverging track
+            // counts once, at its nearest, however long its zone.
+            let zoneD = Infinity, zoneSide = 0;
+            for (let k = 0; k <= last; k++) {
+                const q = nearestOnSegment(p, zone.pts[k], zone.pts[k + 1]);
+                // Only inside the zone: a point that projects onto its first
+                // or last point lies before the switch or past the zone's end,
+                // and both zones share the switch point.
+                if ((k === 0 && q.t <= 0) || (k === last && q.t >= 1)) {
+                    continue;
+                }
+                if (zone.crossing) {
+                    dCrossing = Math.min(dCrossing, q.d);
+                } else if (zone.through) {
+                    dThrough = Math.min(dThrough, q.d);
+                } else {
+                    dDiverging = Math.min(dDiverging, q.d);
+                    if (q.d < zoneD) {
+                        zoneD = q.d;
+                        zoneSide = (q.x - p.x) * (b.z - a.z) - (q.z - p.z) * (b.x - a.x);
+                    }
+                }
+            }
+            if (!zone.through && !zone.crossing && zoneD <= ZONE_REACH_M) {
+                if (zoneSide >= 0) {
+                    reachPos = Math.max(reachPos, zoneD);
+                } else {
+                    reachNeg = Math.max(reachNeg, zoneD);
+                }
+            }
+        }
+        // A crossing is on top of whatever else the track is doing there.
+        const crossing = dCrossing <= ZONE_ON_M ? TRACK_FLAG_CROSSING : 0;
+        out[i] = crossing;
+        // On a diverging zone itself, the track draws no sleepers of its
+        // own, even where it is also the through track of the next switch:
+        // where switch zones overlap, one set of timbers - the root through
+        // track's - lies under all of them. Near a switch toe the two tracks
+        // are a hair apart, so "on" is DIVERGING_SAME_M; past that, the
+        // nearer zone decides as before.
+        if (dDiverging <= DIVERGING_SAME_M) {
+            out[i] = crossing | TRACK_FLAG_NO_SLEEPERS;
+        } else if (dThrough <= ZONE_ON_M && dThrough <= dDiverging) {
+            if (reachPos < 0 && reachNeg < 0) {
+                continue;
+            }
+            let f = crossing;
+            let needed = 0;
+            if (reachPos >= 0) {
+                f |= TRACK_FLAG_LONG_POS;
+                needed = Math.max(needed, reachPos);
+            }
+            if (reachNeg >= 0) {
+                f |= TRACK_FLAG_LONG_NEG;
+                needed = Math.max(needed, reachNeg);
+            }
+            out[i] = f | (reachLevel(needed) << TRACK_FLAG_REACH_SHIFT);
+        } else if (dDiverging <= ZONE_ON_M) {
+            out[i] = crossing | TRACK_FLAG_NO_SLEEPERS;
+        }
+    }
+    return out;
+}
+
+/** Spacing track is densified to near zones, metres. */
+const ZONE_SAMPLE_M = 1;
+
+/**
+ * `grid` with points added every ZONE_SAMPLE_M along the segments that pass
+ * within ZONE_REACH_M of any zone's bounding box; elsewhere unchanged.
+ */
+export function densifyNearZones(
+    grid: ReadonlyArray<Local>,
+    zones: ReadonlyArray<{ pts: ReadonlyArray<{ x: number; z: number }> }>,
+): Local[] {
+    const boxes = zones.map(z => {
+        let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        for (const q of z.pts) {
+            x0 = Math.min(x0, q.x); x1 = Math.max(x1, q.x); z0 = Math.min(z0, q.z); z1 = Math.max(z1, q.z);
+        }
+        return { x0: x0 - ZONE_REACH_M, x1: x1 + ZONE_REACH_M, z0: z0 - ZONE_REACH_M, z1: z1 + ZONE_REACH_M };
+    });
+    const inside = (p: Local) => boxes.some(bx => p.x >= bx.x0 && p.x <= bx.x1 && p.z >= bx.z0 && p.z <= bx.z1);
+    const touches = (a: Local, b: Local) => boxes.some(bx =>
+        Math.max(a.x, b.x) >= bx.x0 && Math.min(a.x, b.x) <= bx.x1
+        && Math.max(a.z, b.z) >= bx.z0 && Math.min(a.z, b.z) <= bx.z1);
+    const out: Local[] = [grid[0]];
+    for (let i = 1; i < grid.length; i++) {
+        const a = grid[i - 1], b = grid[i];
+        const len = Math.hypot(b.x - a.x, b.z - a.z);
+        if (len > ZONE_SAMPLE_M && touches(a, b)) {
+            // Only the stretch of the segment inside a zone's padded box.
+            const steps = Math.ceil(len / ZONE_SAMPLE_M);
+            for (let s = 1; s < steps; s++) {
+                const t = s / steps;
+                const p = { x: a.x + (b.x - a.x) * t, y: 0, z: a.z + (b.z - a.z) * t };
+                if (inside(p)) {
+                    out.push(p);
+                }
+            }
+        }
+        out.push(b);
+    }
+    return out;
+}
+
+function nearestOnSegment(
+    p: { x: number; z: number }, a: { x: number; z: number }, b: { x: number; z: number },
+): { x: number; z: number; d: number; t: number } {
+    const dx = b.x - a.x, dz = b.z - a.z;
+    const l2 = dx * dx + dz * dz;
+    const t = l2 > 1e-12 ? Math.min(1, Math.max(0, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2)) : 0;
+    const x = a.x + dx * t, z = a.z + dz * t;
+    return { x, z, d: Math.hypot(p.x - x, p.z - z), t };
 }
 
 /**

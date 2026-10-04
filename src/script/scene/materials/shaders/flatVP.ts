@@ -10,6 +10,7 @@ const shader = (highp: boolean): string => `
   varying vec3 vPosition;
   varying vec3 vNormalView;
   varying vec3 vViewDir;
+  varying vec2 vUv;
 ${LOG_DEPTH_PARS_VERTEX}
   void main() {
   #ifdef USE_INSTANCING
@@ -22,6 +23,7 @@ ${LOG_DEPTH_PARS_VERTEX}
     vPosition = vec3(worldPos.x, 0.0, worldPos.z);
     vNormalView = normalize(normalMatrix * normal);
     vViewDir = -viewPos.xyz;
+    vUv = uv;
     vec4 pos = projectionMatrix * viewPos;`+ (highp ? '' : `
     if (shadingType != 3) {
       pos.x = floor(pos.x / pos.w * halfWidth + 0.5) / halfWidth * pos.w;
