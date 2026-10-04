@@ -18,6 +18,7 @@
  * two halves of the mirror cannot disagree about which way north is.
  */
 
+import { RailBedField } from './railBedField';
 import { DemTile } from './demTile';
 import { EnuBasis, northFromSceneZ } from './geodesy';
 import { FlattenPad } from './flattenPad';
@@ -57,6 +58,8 @@ export interface HeightTileUpdate {
      * The coarse tier is the best anyone has there, so it counts as final.
      */
     absent?: string[];
+    /** Railway bed changes (see railBedField.ts), keyed by mesh tile. */
+    railBeds?: { add: Array<{ key: string; segs: Float64Array }>; drop: string[] };
 }
 
 function serializeDemTile(id: TileKey, tile: DemTile): SerializedDemTile {
@@ -85,6 +88,7 @@ export class MirroredHeightField {
     private readonly coarse = new Map<string, DemTile>();
     /** Fine tiles the render thread says do not exist. */
     private readonly absent = new Set<string>();
+    private readonly railBeds = new RailBedField();
     private sampler: HeightSampler | undefined;
 
     /** Replace the sampler config. Tiles survive; they are keyed by zoom anyway. */
@@ -95,6 +99,7 @@ export class MirroredHeightField {
             queryZoom: cfg.queryZoom,
             coarseZoom: cfg.coarseZoom,
             pads: cfg.pads,
+            railBeds: this.railBeds,
             fine: id => this.fine.get(tileKeyString(id)),
             coarse: id => this.coarse.get(tileKeyString(id)),
         });
@@ -105,6 +110,12 @@ export class MirroredHeightField {
     }
 
     applyTiles(update: HeightTileUpdate): void {
+        for (const key of update.railBeds?.drop ?? []) {
+            this.railBeds.delete(key);
+        }
+        for (const { key, segs } of update.railBeds?.add ?? []) {
+            this.railBeds.set(key, segs);
+        }
         const map = update.tier === 'fine' ? this.fine : this.coarse;
         for (const key of update.drop) {
             map.delete(key);
@@ -180,6 +191,8 @@ export interface MirrorSource {
     fineTileIdsAroundWorld(x: number, z: number, radiusM: number): TileKey[];
     peekFine(id: TileKey): DemTile | undefined;
     isFineAbsent(id: TileKey): boolean;
+    /** Railway beds to mirror; absent, none are. */
+    readonly railBeds?: RailBedField;
     ensureLoadedAroundWorld(x: number, z: number, radiusM: number): Promise<void>;
 }
 
@@ -197,6 +210,9 @@ export class HeightFieldSender {
 
     /** Fine tile keys the receiver already holds. */
     private readonly sent = new Set<string>();
+    /** Rail bed tiles the receiver holds, and the field version last compared. */
+    private readonly sentBeds = new Map<string, Float64Array>();
+    private bedsVersion = -1;
     private loading = false;
 
     constructor(
@@ -220,6 +236,34 @@ export class HeightFieldSender {
     /** Forget what the receiver holds (after a worker reset). */
     reset(): void {
         this.sent.clear();
+        this.sentBeds.clear();
+        this.bedsVersion = -1;
+    }
+
+    /** Rail bed changes since the last call, or undefined when there are none. */
+    private railBedChanges(): HeightTileUpdate['railBeds'] {
+        const field = this.source.railBeds;
+        if (!field || field.version === this.bedsVersion) {
+            return undefined;
+        }
+        this.bedsVersion = field.version;
+        const add: Array<{ key: string; segs: Float64Array }> = [];
+        const drop: string[] = [];
+        for (const key of field.keys()) {
+            const segs = field.get(key)!;
+            if (this.sentBeds.get(key) !== segs) {
+                // Copied: the field keeps its own, and a transfer would empty it.
+                add.push({ key, segs: segs.slice() });
+                this.sentBeds.set(key, segs);
+            }
+        }
+        for (const key of [...this.sentBeds.keys()]) {
+            if (!field.has(key)) {
+                drop.push(key);
+                this.sentBeds.delete(key);
+            }
+        }
+        return add.length > 0 || drop.length > 0 ? { add, drop } : undefined;
     }
 
     /**
@@ -269,8 +313,9 @@ export class HeightFieldSender {
             }
         }
 
-        if (add.length > 0 || drop.length > 0 || absent.length > 0) {
-            this.send({ tier: 'fine', add, drop, absent });
+        const railBeds = this.railBedChanges();
+        if (add.length > 0 || drop.length > 0 || absent.length > 0 || railBeds) {
+            this.send({ tier: 'fine', add, drop, absent, railBeds });
         }
         if (missing && !this.loading) {
             this.loading = true;

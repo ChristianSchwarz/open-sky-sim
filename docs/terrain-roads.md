@@ -232,6 +232,53 @@ every road class so the `cls <= cut` tests leave it out and
 Cost on the Frankfurt (Oder) chunk: 53 rail runs, about 5 % of leaf
 stroke triangles, about 30 % at z9 where little else is drawn.
 
+### Graded beds (runtime)
+
+A stroke draped on the DEM climbs every bump: around Garmisch a third of
+the track was steeper than 3 %, some of it past 100 %. `railBed.ts`
+grades each track when its tile's strokes bind, and lays the bed into the
+land:
+
+- **Profile.** The track is resampled every 5 m and a dynamic programme
+  over 5 cm height steps fits it no steeper than 3 %. Chain ends and level
+  crossings are held to the ground, and cuttings and embankments are capped
+  at 6 m: past that the grade gives way, at a steep cost, so rack railways
+  and mountain lines stay steep instead of becoming canyons. Grade breaks
+  are then rounded into 80 m vertical curves. Track drawn more than 2 m
+  off the land (viaduct approaches) is held where it is, with no bed.
+- **Bridges.** The bake raises a rail deck to clear what it crosses,
+  typically 4.4 m above where the approach was draped and 2.4 m beyond
+  its end, so the approach used to run into the abutment. A track end
+  within 6 m of a deck track's end is held at the deck's height. The deck
+  ends come from the `.pbr` of the tile and its eight neighbours, since a
+  deck often starts just across a tile border from its approach. The
+  neighbours' ends are shifted by the difference between the tile origins.
+  The track's last point is then put on the deck's first. The
+  approach then climbs to the bridge on an embankment that stops square
+  at the abutment (an open bed end), so nothing under the span is buried.
+- **Roads** in the tile are bands of their own, at their baked ground
+  height with 1:2 sides, applied after the beds where both reach. An
+  embankment slopes down to a road and never covers it.
+- **Land.** Triangles are bisected (conforming, longest edge) only where
+  the bed and its 1:2 batters cannot be followed within 0.75 m.
+  Triangles touching the tile border are never touched, so the seam
+  stitcher's indices hold. It costs about +50 % land triangles on a leaf
+  with track up a valley side, much less in flat valleys.
+- **Coarser tiles** (z9-z11) get the same profile with lengths scaled to
+  the tile, but no new triangles, only existing vertices moved: a cutting
+  is a few pixels there.
+- **Worker.** Jobs run in up to two workers (`railBedWorker.ts`), finest
+  tile first; the render thread only rebuilds the geometry (a few ms). The
+  track binds when its bed is ready. Trees and rocks wait too, and keep
+  off the bed and batters.
+- **Collision.** Each leaf's beds go into `RailBedField`, as lat/lon plus
+  height above the ellipsoid, so a re-base does not move them. The height
+  sampler clamps the DEM into them the way it applies flatten pads, and the
+  height mirror carries them to the sim worker.
+
+`window.__railBedStats` has per-zoom totals; set `window.__railBed = false`
+before tiles stream in to compare without.
+
 ## Pipeline
 
 ```

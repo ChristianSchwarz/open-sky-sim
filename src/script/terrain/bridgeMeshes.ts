@@ -335,6 +335,17 @@ export class BridgeMeshes {
         this.index = index;
     }
 
+    /**
+     * The decoded sidecar for a tile, or null when it has none; regardless of
+     * the display mode. The railway beds read the deck track's ends from it.
+     */
+    async load(id: TileKey, priority: number): Promise<PbrTile | null> {
+        if (!this.store || !this.has(id) || this.store.isAbsent(id)) {
+            return null;
+        }
+        return this.store.get(id) ?? this.store.request(id, priority).catch(() => null);
+    }
+
     /** Whether the bake wrote a sidecar for this tile. */
     has(id: TileKey): boolean {
         if (id.z < this.minZoom || id.z > this.maxZoom) {

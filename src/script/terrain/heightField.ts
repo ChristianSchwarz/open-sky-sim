@@ -23,6 +23,7 @@ import { DemTile } from './demTile';
 import { EnuBasis, geodeticOnSurfaceAtEnu, northFromSceneZ } from './geodesy';
 import { FlattenPad } from './flattenPad';
 import { HeightSampler, HeightTier } from './heightSampler';
+import { RailBedField } from './railBedField';
 import { TerrainManifest } from './manifest';
 import { LonLatBounds, TileKey } from './tiling';
 import { TileIndex } from './tileIndex';
@@ -46,6 +47,12 @@ export class HeightField {
     /** Always-resident coarse tier, keyed by tile. */
     private readonly coarse = new Map<string, DemTile>();
     private readonly sampler: HeightSampler;
+    /**
+     * Railway beds the drawn land has had laid (railBed.ts): the collision
+     * surface takes the same cuttings and embankments. Filled by the
+     * terrain as tiles get their beds, mirrored to the sim worker.
+     */
+    readonly railBeds = new RailBedField();
 
     constructor(opts: HeightFieldOptions) {
         this.manifest = opts.manifest;
@@ -58,6 +65,7 @@ export class HeightField {
             queryZoom: this.manifest.height.queryZoom,
             coarseZoom: this.manifest.height.coarseZoom,
             pads: this.pads,
+            railBeds: this.railBeds,
             // peek, not get: a CPU height query must never reorder a cache whose
             // eviction the renderer also depends on.
             fine: id => this.store.peek(id),

@@ -33,7 +33,7 @@ import { sphereInFrustum } from './culling';
 import { DemTile, decodePdm } from './demTile';
 import {
     EnuBasis, FrameShift, WGS84_A, cloneEnuBasis, ecefToEnu, enuFrameRotation, geodeticToEcef, makeEnuBasis,
-    northFromSceneZ,
+    northFromSceneZ, worldToGeodetic,
 } from './geodesy';
 import { AirfieldsFile, EMPTY_AIRFIELDS, loadAirfields } from './airfields';
 import { FlattenPad, padFromRecord, padReachM } from './flattenPad';
@@ -62,7 +62,23 @@ import { PtmTile, decodePtm } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
 import { stitchSeams } from './seamStitch';
 import { TileIndex } from './tileIndex';
-import { TileMeshes, buildSmoothLandGeometryFromFaceted, buildTileMeshes, disposeTileMeshes, tileOriginWorld } from './tileMesh';
+import {
+    TileMeshes, TileRailBed, buildSmoothLandGeometryFromFaceted, buildTileMeshes, disposeTileMeshes,
+    landGeometryFromArrays, tileOriginWorld,
+} from './tileMesh';
+import { RAIL_BED_SEGMENT_FLOATS, RailBedStats, buildRailBedExclusion, deckTrackEnds, railChains } from './railBed';
+import { RailBedClient } from './railBedClient';
+import { RAIL_FIELD_SEGMENT_FLOATS } from './railBedField';
+
+/**
+ * Running totals in `window.__railBedStats`, per zoom, for the console:
+ * workerMs is the beds' own cost, waitMs that plus the queue, applyMs the
+ * render thread's share.
+ */
+type RailBedTotals = Record<string, RailBedStats & { tiles: number; workerMs: number; waitMs: number; applyMs: number }>;
+import { borderEntryIndex } from './ptm';
+import { PtrTile } from './ptr';
+import { tileBounds } from './tiling';
 import { TileStore } from './tileStore';
 import { PRIORITY_IN_FRUSTUM, TileStreamer, TileWant, predictViewTarget } from './tileStreamer';
 import { TileCover, TileHeightIndex } from './tileHeightIndex';
@@ -456,9 +472,13 @@ export class TerrainEntity implements Entity {
         meshes.treesBusy = true;
         const ptr = await this.roads.load(tile.id, 0);
         const onRoad = ptr ? buildRoadExclusion(ptr) : undefined;
+        // Trees wait for the tile's railway beds: the ground on and beside
+        // them is no longer where this tile's facets put it.
+        const onBed = ptr && !meshes.disposed ? (await this.railBedJob(tile.id, meshes, ptr))?.onBed : undefined;
         const onManMade = this.sceneExclusionFor(tile);
-        const isExcluded = onRoad || onManMade
-            ? (x: number, z: number, y: number) => (onRoad?.(x, z) ?? false) || (onManMade?.(x, z, y) ?? false)
+        const isExcluded = onRoad || onManMade || onBed
+            ? (x: number, z: number, y: number) => (onRoad?.(x, z) ?? false) || (onBed?.(x, y, z) ?? false)
+                || (onManMade?.(x, z, y) ?? false)
             : undefined;
         const groups = scatterTreeSpecies(tile, densityScale, isExcluded);
         // Ground clutter (rocks + extra shrubs on open, non-forested ground -
@@ -903,6 +923,10 @@ export class TerrainEntity implements Entity {
             railDetailMaterial,
             railTopMaterial,
             onBeforeRender: tileBeforeRender,
+            prepare: async (id, meshes, ptr) => {
+                const bed = await this.railBedJob(id, meshes, ptr);
+                return bed ? { ...ptr, positions: bed.strokePositions } : ptr;
+            },
         });
 
         // Bridges are lit solids on the leaf, in the two road greys: the
@@ -1124,6 +1148,233 @@ export class TerrainEntity implements Entity {
     get coverTextures(): CoverTextures {
         return this.cover;
     }
+
+    /**
+     * A tile's railway beds (railBed.ts): no track steeper than 3 %, the
+     * ground cut and banked under it. Laid once per drawn tile, in a worker,
+     * for whichever of its roads and its trees asks first; both wait for it.
+     * Off with `window.__railBed = false` before the tile streams in; counts
+     * in `window.__railBedStats`.
+     */
+    private railBedJob(id: TileKey, meshes: TileMeshes, ptr: PtrTile): Promise<TileRailBed | undefined> {
+        meshes.railBed ??= this.layRailBeds(id, meshes, ptr).catch(err => {
+            console.error(`[railBed] ${tileKeyString(id)}`, err);
+            return undefined;
+        });
+        return meshes.railBed;
+    }
+
+    private async layRailBeds(id: TileKey, meshes: TileMeshes, ptr: PtrTile): Promise<TileRailBed | undefined> {
+        const w = window as unknown as { __railBed?: boolean; __railBedStats?: RailBedTotals };
+        if (w.__railBed === false || railChains(ptr).length === 0) {
+            return undefined;
+        }
+        // The track on bridge decks, which the approaches climb to.
+        const deckEnds = await this.railDeckEnds(id, meshes);
+        const faceted = meshes.landGeometryFaceted;
+        if (meshes.disposed || !faceted || !meshes.land) {
+            return undefined;
+        }
+        const pos = faceted.getAttribute('position') as THREE.BufferAttribute;
+        const nrm = faceted.getAttribute('normal') as THREE.InterleavedBufferAttribute;
+        const col = faceted.getAttribute('coverColor') as THREE.InterleavedBufferAttribute;
+        const quantScale = meshes.group.scale.x;
+        if (!pos || !nrm || !col || Math.abs(ptr.quantScale - quantScale) > 1e-6 * quantScale) {
+            return undefined;
+        }
+        // The real vertical at the tile's centre, in the bake frame's axes
+        // (x east, y up, z south), which is what the tile's offsets are in.
+        const b = tileBounds(id);
+        const lat = (b.south + b.north) / 2, lon = (b.west + b.east) / 2;
+        const e0 = ecefToEnu(this.railBedBasis, geodeticToEcef(lat, lon, 0));
+        const e1 = ecefToEnu(this.railBedBasis, geodeticToEcef(lat, lon, 1000));
+        const up: [number, number, number] = [(e1.e - e0.e) / 1000, (e1.u - e0.u) / 1000, -(e1.n - e0.n) / 1000];
+        // Copies, handed to the worker; the border as baked, not as the seam
+        // stitcher has moved it: the stitcher moves it again on the new land.
+        const positions = (pos.array as Int16Array).slice();
+        const border = meshes.border?.vertices ?? [];
+        const pinned = new Uint32Array(border.length);
+        border.forEach((entry, i) => {
+            const v = borderEntryIndex(entry);
+            pinned[i] = v;
+            if (meshes.seam) {
+                positions.set(meshes.seam.orig.subarray(i * 3, i * 3 + 3), v * 3);
+            }
+        });
+        const scale = 2 ** Math.max(0, this.manifest.mesh.maxZoom - id.z);
+        const t0 = performance.now();
+        const run = await this.railBedWorker.run({
+            land: {
+                positions,
+                normals: (nrm.data.array as Int8Array).slice(),
+                attrs: (col.data.array as Uint8Array).slice(),
+            },
+            quantScale, strokes: ptr, up,
+            liftM: 0.05 * approxTileEdgeMetres(id) / 256,
+            pinned,
+            scale,
+            // Only a leaf is close enough for a cutting to be worth triangles.
+            refine: id.z === this.manifest.mesh.maxZoom,
+            deckEnds,
+        }, id.z);
+        const result = run.result;
+        const waited = performance.now() - t0;
+        if (!result || meshes.disposed) {
+            return undefined;
+        }
+        const t1 = performance.now();
+        if (result.land && meshes.land && meshes.landGeometryFaceted === faceted) {
+            const g = landGeometryFromArrays(result.land.positions, result.land.normals, result.land.attrs, quantScale);
+            if (g) {
+                const smooth = meshes.landGeometrySmooth ? buildSmoothLandGeometryFromFaceted(g) : undefined;
+                faceted.dispose();
+                meshes.landGeometrySmooth?.dispose();
+                meshes.landGeometryFaceted = g;
+                meshes.landGeometrySmooth = smooth;
+                meshes.land.geometry = this.landShading === TerrainShading.SMOOTH && smooth ? smooth : g;
+                // The new land starts from the baked border: have the
+                // stitcher put it back on its neighbours, and forget the
+                // drawn-height index built over the old one.
+                if (meshes.seam) {
+                    meshes.seam.signature = '';
+                }
+                this.drawnHeightIndices.delete(tileKeyString(id));
+            }
+        }
+        // The collision surface takes the leaf's beds, the finest there are.
+        if (id.z === this.manifest.mesh.maxZoom && result.beds.length > 0) {
+            this.heights.railBeds.set(tileKeyString(id), this.railBedsToGeodetic(result.beds, meshes));
+        }
+        const totals = w.__railBedStats ??= {};
+        const s = totals[`z${id.z}`] ??= {
+            tiles: 0, workerMs: 0, waitMs: 0, applyMs: 0, chains: 0, trackM: 0, steepM: 0, overLimitM: 0,
+            trianglesAdded: 0, verticesMoved: 0,
+        };
+        s.tiles++;
+        s.workerMs += run.ms;
+        s.waitMs += waited;
+        s.applyMs += performance.now() - t1;
+        s.chains += result.stats.chains;
+        s.trackM += result.stats.trackM;
+        s.steepM += result.stats.steepM;
+        s.overLimitM += result.stats.overLimitM;
+        s.trianglesAdded += result.stats.trianglesAdded;
+        s.verticesMoved += result.stats.verticesMoved;
+        return {
+            strokePositions: result.strokePositions,
+            onBed: buildRailBedExclusion(result.beds, up, 32 * scale),
+        };
+    }
+
+    /**
+     * The ends of the track on the bridge decks of a tile and its eight
+     * neighbours, in the tile's own frame (railBed.ts RailBedInput.deckEnds).
+     * The neighbours' too: a deck can start a few metres across the border
+     * from the track that climbs to it. Every tile's frame has the bake's
+     * axes, so a neighbour's points only shift by the difference between
+     * the two tiles' origins.
+     */
+    private async railDeckEnds(id: TileKey, meshes: TileMeshes): Promise<Float64Array | undefined> {
+        if (id.z !== this.manifest.mesh.maxZoom) {
+            return undefined;
+        }
+        const parts: Float64Array[] = [];
+        let own: { e: number; u: number; n: number } | undefined;
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                const nb: TileKey = { z: id.z, x: id.x + dx, y: id.y + dy };
+                if (!this.bridges.has(nb)) {
+                    continue;
+                }
+                const pbr = await this.bridges.load(nb, id.z).catch(() => null);
+                if (!pbr?.track || pbr.track.indices.length === 0) {
+                    continue;
+                }
+                const ends = deckTrackEnds(pbr.track, pbr.quantScale);
+                if (dx !== 0 || dy !== 0) {
+                    own ??= await this.tileCentreEnu(id, meshes);
+                    const theirs = await this.tileCentreEnu(nb, this.streamer.get(nb));
+                    if (!own || !theirs) {
+                        continue;
+                    }
+                    // Tile frames: x east, y up, z south, from each tile's own centre.
+                    const ox = theirs.e - own.e, oy = theirs.u - own.u, oz = own.n - theirs.n;
+                    for (let i = 0; i < ends.length; i += 3) {
+                        ends[i] += ox;
+                        ends[i + 1] += oy;
+                        ends[i + 2] += oz;
+                    }
+                }
+                parts.push(ends);
+            }
+        }
+        if (parts.length === 0) {
+            return undefined;
+        }
+        const out = new Float64Array(parts.reduce((n, p) => n + p.length, 0));
+        let o = 0;
+        for (const p of parts) {
+            out.set(p, o);
+            o += p.length;
+        }
+        return out;
+    }
+
+    /**
+     * A tile's origin in the bake's ENU frame: its centre at its baked
+     * centre height, which a drawn tile's placement gives back and the
+     * decoded mesh tile has in its header.
+     */
+    private async tileCentreEnu(id: TileKey, meshes: TileMeshes | undefined): Promise<{ e: number; u: number; n: number } | undefined> {
+        let height: number | undefined;
+        if (meshes && !meshes.disposed) {
+            const p = meshes.group.position;
+            height = worldToGeodetic(this.basis, p.x, p.y, p.z).height;
+        } else {
+            const tile = this.meshStore.peek(id) ?? await this.meshStore.request(id, id.z).catch(() => null);
+            height = tile?.centerHeightM;
+        }
+        if (height === undefined) {
+            return undefined;
+        }
+        const b = tileBounds(id);
+        return ecefToEnu(this.railBedBasis, geodeticToEcef((b.south + b.north) / 2, (b.west + b.east) / 2, height));
+    }
+
+    /**
+     * Bed segments from a tile's frame (railBed.ts) to lat/lon and height
+     * above the ellipsoid, for the collision field: through the tile's own
+     * placement, so they land where the bed is drawn.
+     */
+    private railBedsToGeodetic(beds: Float64Array, meshes: TileMeshes): Float64Array {
+        const n = beds.length / RAIL_BED_SEGMENT_FLOATS;
+        const out = new Float64Array(n * RAIL_FIELD_SEGMENT_FLOATS);
+        const v = new THREE.Vector3();
+        const q = meshes.group.quaternion;
+        const origin = meshes.group.position;
+        for (let i = 0; i < n; i++) {
+            const o = i * RAIL_BED_SEGMENT_FLOATS;
+            const r = i * RAIL_FIELD_SEGMENT_FLOATS;
+            for (let k = 0; k < 2; k++) {
+                v.set(beds[o + k * 3], beds[o + k * 3 + 1], beds[o + k * 3 + 2]).applyQuaternion(q).add(origin);
+                const g = worldToGeodetic(this.basis, v.x, v.y, v.z);
+                out[r + k * 3] = g.lon;
+                out[r + k * 3 + 1] = g.lat;
+                out[r + k * 3 + 2] = g.height;
+            }
+            out[r + 6] = beds[o + 6];
+            out[r + 7] = beds[o + 8];
+        }
+        return out;
+    }
+
+    /** The bake's ENU frame, which a tile's offsets are in. */
+    private get railBedBasis() {
+        const o = this.manifest.enuOrigin;
+        return this.bakeBasisCache ??= makeEnuBasis(o.lat, o.lon, o.height ?? 0);
+    }
+    private bakeBasisCache?: ReturnType<typeof makeEnuBasis>;
+    private readonly railBedWorker = new RailBedClient();
 
     /** Deepest zoom the baked pyramid provides. */
     get maxZoom(): number {

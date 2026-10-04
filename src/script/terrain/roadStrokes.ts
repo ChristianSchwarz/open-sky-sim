@@ -63,6 +63,14 @@ export interface RoadStrokesOptions {
     railMaterial: THREE.Material;
     /** Sleepers, the second pass (uRailPass 1, transparent). Absent: beds only. */
     railDetailMaterial?: THREE.Material;
+    /**
+     * Called with a tile and its decoded sidecar before the strokes are
+     * bound, which waits for it: the hook that lays railway beds into the
+     * land (railBed.ts) and answers with the strokes to draw, the track on
+     * its graded profile. The decoded sidecar is cached and shared, so the
+     * hook must answer with a copy rather than change it.
+     */
+    prepare?: (id: TileKey, meshes: TileMeshes, tile: PtrTile) => Promise<PtrTile>;
     /** Rails, the third pass (uRailPass 2, transparent), drawn after every sleeper. */
     railTopMaterial?: THREE.Material;
     onBeforeRender?: THREE.Mesh['onBeforeRender'];
@@ -234,6 +242,7 @@ export class RoadStrokes {
     private readonly minZoom: number;
     private readonly maxZoom: number;
     private readonly materials: StrokeMaterials;
+    private readonly prepare?: (id: TileKey, meshes: TileMeshes, tile: PtrTile) => Promise<PtrTile>;
     private readonly onBeforeRender: THREE.Mesh['onBeforeRender'] | undefined;
     private index: TileIndex | undefined;
     private mode: RoadsMode = RoadsMode.ALL;
@@ -249,6 +258,7 @@ export class RoadStrokes {
             railDetail: opts.railDetailMaterial,
             railTop: opts.railTopMaterial,
         };
+        this.prepare = opts.prepare;
         this.onBeforeRender = opts.onBeforeRender;
         this.store = spec === undefined ? undefined : new TileStore<PtrTile>({
             baseUrl: opts.baseUrl,
@@ -347,6 +357,19 @@ export class RoadStrokes {
     }
 
     private bind(id: TileKey, meshes: TileMeshes, tile: PtrTile): void {
+        if (!this.prepare) {
+            this.finishBind(meshes, tile);
+            return;
+        }
+        // Still 'pending' meanwhile; a release in between sets 'none'.
+        void this.prepare(id, meshes, tile).catch(() => tile).then(prepared => {
+            if (meshes.roads === 'pending' && !meshes.disposed) {
+                this.finishBind(meshes, prepared);
+            }
+        });
+    }
+
+    private finishBind(meshes: TileMeshes, tile: PtrTile): void {
         const roads = buildRoadMeshes(
             tile, meshes.group.scale.x, this.materials, this.onBeforeRender,
         );

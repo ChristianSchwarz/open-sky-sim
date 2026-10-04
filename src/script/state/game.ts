@@ -619,6 +619,8 @@ export class Game {
     private fixedCameraUpdater: FixedCameraUpdater;
     /** The fixed camera asked for in the page URL, if any. */
     private cameraRoute: CameraRoute | undefined = cameraRouteFromLocation();
+    /** Set while the boot spawns on its way to the URL's fixed camera; see boot. */
+    private urlCameraPending = false;
     /** Arrow / page keys held while looking from the fixed camera. */
     private heldFixedCameraKeys: Set<string> = new Set();
     /** Eased fixed-camera rates: forward/right/up in m/s, yaw/pitch in deg/s. */
@@ -852,8 +854,13 @@ export class Game {
         // captured before that call to still know whether to boot into it.
         const urlCameraRoute = this.cameraRoute;
         const pending = this.pendingDestination;
+        // The boot's spawn must not write its own pose over a URL camera it
+        // is about to hand over to: the address bar showed the base airfield
+        // for the rest of the session.
+        this.urlCameraPending = urlCameraRoute !== undefined;
         await this.beginFlight(settings.spawnMode,
             pending !== undefined && pending.kind !== 'airfield' ? pending : undefined);
+        this.urlCameraPending = false;
         if (urlCameraRoute) {
             this.enterFixedCamera(urlCameraRoute);
         }
@@ -3096,6 +3103,9 @@ export class Game {
      * of the runway/carrier/approach they actually spawned into.
      */
     private syncSpawnCameraUrl(headingRad: number): void {
+        if (this.urlCameraPending) {
+            return;
+        }
         const p = this.player.position;
         const g = worldToGeodetic(this.planetTerrain.basis, p.x, p.y, p.z);
         // Player heading is a scene rotation (0 = +z); the URL/camera
@@ -3117,6 +3127,9 @@ export class Game {
      */
     private enterFixedCamera(route: CameraRoute) {
         this.cameraRoute = route;
+        writeCameraRouteToLocation(route);
+        // The boot spawn just wrote its own pose to the URL; put ours back.
+        writeCameraRouteToLocation(route);
         this.state = GameState.FIXED_CAMERA;
         this.player.setSimulationPaused(true);
         this.spawnMenu.enabled = false;

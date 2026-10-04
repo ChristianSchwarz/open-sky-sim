@@ -33,6 +33,14 @@ import type { RoadMeshes } from './roadStrokes';
 import { TileKey, tileBounds } from './tiling';
 import { LAND_TONE_BASE, TerrainTone } from './tones';
 
+/** What laying a tile's railway beds gave it (see TerrainEntity.railBedJob). */
+export interface TileRailBed {
+    /** The track strokes' positions on their graded profiles. */
+    strokePositions: Int16Array;
+    /** Whether a point of the tile (its own frame, metres) is on a bed or its batters. */
+    onBed?: (x: number, y: number, z: number) => boolean;
+}
+
 export interface TileMeshes {
     group: THREE.Group;
     /**
@@ -72,6 +80,12 @@ export interface TileMeshes {
      * three states as `cover`, then the bound meshes. Released with the tile.
      */
     roads?: RoadMeshes | 'pending' | 'none';
+    /**
+     * The tile's railway beds, once asked for by its roads or its trees,
+     * whichever comes first: resolves after the land has been swapped for
+     * the graded one; undefined for a tile with no track to grade.
+     */
+    railBed?: Promise<TileRailBed | undefined>;
     /** The tile's bridge geometry, once attached (see BridgeMeshes); same states as `roads`. */
     bridges?: BridgeMeshSet | 'pending' | 'none';
     /**
@@ -268,6 +282,17 @@ function leanEdgeNormals(positions: Int16Array, normals: Int8Array): void {
 }
 
 function landGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
+    return landGeometryFromArrays(tile.landPositions, tile.landNormals, tile.landAttrs, tile.quantScale);
+}
+
+/**
+ * The faceted land geometry over a soup's own arrays: what a tile is built
+ * with, and what a runtime change to its land (railBed.ts) is rebuilt with.
+ */
+export function landGeometryFromArrays(
+    landPositions: Int16Array, landNormals: Int8Array, landAttrs: Uint8Array, quantScale: number,
+): THREE.BufferGeometry | undefined {
+    const tile = { landPositions, landNormals, landAttrs, quantScale };
     const vertexCount = tile.landPositions.length / 3;
     if (vertexCount === 0) {
         return undefined;

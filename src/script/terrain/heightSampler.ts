@@ -8,6 +8,7 @@
  * paths that happen to agree.
  */
 
+import { RailBedField } from './railBedField';
 import { DemTile, sampleBilinear } from './demTile';
 import {
     Ecef, Enu, EnuBasis, Geodetic, ecefToEnu, enuToGeodeticApprox, geodeticOnSurfaceAtEnu,
@@ -39,6 +40,8 @@ export interface HeightSamplerOptions {
     pads: FlattenPad[];
     fine: TileLookup;
     coarse: TileLookup;
+    /** Railway beds laid into the drawn land; see railBedField.ts. */
+    railBeds?: RailBedField;
 }
 
 export class HeightSampler {
@@ -49,6 +52,7 @@ export class HeightSampler {
     readonly coarseZoom: number;
 
     private readonly pads: FlattenPad[];
+    private readonly railBeds: RailBedField | undefined;
     private readonly fine: TileLookup;
     private readonly coarse: TileLookup;
 
@@ -58,6 +62,7 @@ export class HeightSampler {
         this.queryZoom = opts.queryZoom;
         this.coarseZoom = opts.coarseZoom;
         this.pads = opts.pads;
+        this.railBeds = opts.railBeds;
         this.fine = opts.fine;
         this.coarse = opts.coarse;
     }
@@ -144,7 +149,7 @@ export class HeightSampler {
         for (const pad of this.pads) {
             h = applyFlattenPad(h, e, n, pad);
         }
-        return h;
+        return this.railBeds ? this.railBeds.clamp(lon, lat, h) : h;
     }
 
     /** True over a platform's flat core — the paved part, not its feather. */
