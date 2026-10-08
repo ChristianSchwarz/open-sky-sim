@@ -79,7 +79,8 @@ export async function openSettingsDialog(initialTab?: SettingsTab): Promise<void
         }
         const ref = appRef.injector.get(MatDialog).open(SettingsDialog, {
             data: { ...data, initialTab, terrainImport, spawnMenu: menu },
-            width: '760px',
+            // Wide enough for the eight tab links (see NARROW_QUERY).
+            width: '820px',
             maxWidth: '94vw',
             // Focus the dialog itself so the keyboard belongs to it, not the
             // game, from the moment it opens (see isOverlayKeyEvent).

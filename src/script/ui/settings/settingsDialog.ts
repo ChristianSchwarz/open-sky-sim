@@ -43,18 +43,18 @@ import { DEFAULT_TERRAIN_URL, loadTerrainManifest } from '../../terrain/manifest
 import { homeArea, terrainAreas } from '../../terrain/playArea';
 import { TerrainImporter } from './terrain/terrainImporter';
 
-export type SettingsTab = 'Flight' | 'Graphics' | 'Colours' | 'World' | 'Simulation' | 'General' | 'Help';
+export type SettingsTab = 'Flight' | 'Graphics' | 'Colours' | 'World' | 'Simulation' | 'General' | 'Help' | 'About';
 
 /** In display order. */
-const TABS: SettingsTab[] = ['Flight', 'Graphics', 'Colours', 'World', 'Simulation', 'General', 'Help'];
+const TABS: SettingsTab[] = ['Flight', 'Graphics', 'Colours', 'World', 'Simulation', 'General', 'Help', 'About'];
 
 /**
- * Below this viewport width the seven tab links do not fit the dialog, and the
+ * Below this viewport width the eight tab links do not fit the dialog, and the
  * tab bar is swapped for a select rather than scrolled or wrapped. The links
- * take about 650px; the dialog is 94vw less its 48px of padding, which only
- * clears that from about 750px up.
+ * take 756px (each at least Material's 90px); the dialog is 820px or 94vw,
+ * less its 48px of padding, which only clears that from about 855px up.
  */
-const NARROW_QUERY = '(max-width: 767.98px)';
+const NARROW_QUERY = '(max-width: 879.98px)';
 
 export interface SettingsDialogData {
     config: ConfigService;
@@ -123,6 +123,146 @@ const VIEWS_HELP: HelpEntry[] = [
     { keys: ['Num 4', 'Num 6', 'Num 8', 'Num 2'], action: 'Move camera around aircraft' },
     { keys: ['Num 5'], action: 'Recenter camera' },
     { keys: ['Num *', 'Num /'], action: 'Zoom in / out (F1: padlock target, F2: lock/unlock on enemy)' },
+];
+
+/** A dataset the world is built from, as the About tab credits it. */
+interface DataSource {
+    /** The dataset, as its publisher names it. */
+    name: string;
+    /** Where or what it covers, when that is narrower than its group. */
+    scope?: string;
+    /** The attribution its licence asks for. */
+    credit: string;
+    /** Where the credit links to, when the publisher asks for a link. */
+    creditUrl?: string;
+    /** A key of LICENCE_URLS where the licence has a canonical text. */
+    licence: string;
+}
+
+interface DataSourceGroup {
+    title: string;
+    /** What in the game the group's data ends up as. */
+    feeds: string;
+    sources: DataSource[];
+}
+
+const LICENCE_URLS: Record<string, string> = {
+    'ODbL 1.0': 'https://opendatacommons.org/licenses/odbl/1-0/',
+    'CC BY 4.0': 'https://creativecommons.org/licenses/by/4.0/',
+    'CC BY-NC-SA 4.0': 'https://creativecommons.org/licenses/by-nc-sa/4.0/',
+    'dl-de/by-2-0': 'https://www.govdata.de/dl-de/by-2-0',
+    'dl-de/zero-2-0': 'https://www.govdata.de/dl-de/zero-2-0',
+};
+
+const BAVARIA_CREDIT = 'Datenquelle: Bayerische Vermessungsverwaltung – www.geodaten.bayern.de';
+
+/**
+ * Every dataset the terrain bake reads, grouped by what it feeds. The sources
+ * and licences are the ones the bake tools name: tools/fetch_planet_dem.py,
+ * prep_global_dem.py, prep_global_imagery.py, fetch_cover_sources.py, the
+ * Source classes of measure_lidar.py and measure_buildings.py, and the
+ * OpenStreetMap bakes. A new source there belongs here too.
+ */
+const DATA_SOURCES: DataSourceGroup[] = [
+    {
+        title: 'Terrain heights',
+        feeds: 'The shape of the ground, from the whole planet down to the detailed areas.',
+        sources: [
+            {
+                name: 'FABDEM (Forest And Buildings removed Copernicus DEM)', scope: 'Detailed areas, 30 m',
+                credit: 'University of Bristol', licence: 'CC BY-NC-SA 4.0',
+            },
+            {
+                name: 'Copernicus DEM GLO-30', scope: 'Detailed areas, 30 m; the model FABDEM corrects',
+                credit: '© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved',
+                licence: 'Copernicus DEM licence',
+            },
+            {
+                name: 'ETOPO 2022, 60 arc-second', scope: 'The whole planet, 1.85 km',
+                credit: 'NOAA National Centers for Environmental Information', licence: 'Public domain',
+            },
+        ],
+    },
+    {
+        title: 'Road and railway earthworks',
+        feeds: 'Embankments, cuttings and bridge ends, measured along each road and railway in lidar terrain models.',
+        sources: [
+            { name: 'DGM1', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
+            {
+                name: 'ALS DTM 1 m (2025)', scope: 'Austria',
+                credit: 'BEV – Bundesamt für Eich- und Vermessungswesen', licence: 'CC BY 4.0',
+            },
+            { name: 'swissALTI3D', scope: 'Switzerland', credit: '© Data: swisstopo', licence: 'swisstopo OGD' },
+            {
+                name: 'DGM1', scope: 'Niedersachsen',
+                credit: 'LGLN – Landesamt für Geoinformation und Landesvermessung Niedersachsen', licence: 'CC BY 4.0',
+            },
+            {
+                name: 'DGM1', scope: 'Baden-Württemberg',
+                credit: 'LGL – Landesamt für Geoinformation und Landentwicklung Baden-Württemberg', licence: 'dl-de/by-2-0',
+            },
+            {
+                name: 'DGM1', scope: 'Brandenburg and Berlin',
+                credit: 'LGB – Landesvermessung und Geobasisinformation Brandenburg; Berlin: Geoportal Berlin',
+                licence: 'dl-de/by-2-0',
+            },
+            {
+                name: 'DGM1', scope: 'Hessen',
+                credit: 'HVBG – Hessische Verwaltung für Bodenmanagement und Geoinformation', licence: 'dl-de/zero-2-0',
+            },
+            { name: 'DGM1', scope: 'Nordrhein-Westfalen', credit: 'Geobasis NRW', licence: 'dl-de/zero-2-0' },
+            {
+                name: 'DGM1', scope: 'Rheinland-Pfalz',
+                credit: 'LVermGeo RLP – Landesamt für Vermessung und Geobasisinformation Rheinland-Pfalz',
+                licence: 'dl-de/by-2-0',
+            },
+            {
+                name: 'DGM1', scope: 'Mecklenburg-Vorpommern',
+                credit: 'LAiV MV – Landesamt für innere Verwaltung Mecklenburg-Vorpommern', licence: 'CC BY 4.0',
+            },
+            {
+                name: 'DGM1 2020–2025', scope: 'Thüringen',
+                credit: 'TLBG – Thüringer Landesamt für Bodenmanagement und Geoinformation', licence: 'dl-de/by-2-0',
+            },
+            { name: 'MDT 5 m', scope: 'Canary Islands', credit: 'IGN – Instituto Geográfico Nacional', licence: 'CC BY 4.0' },
+        ],
+    },
+    {
+        title: 'Land cover',
+        feeds: 'The colour of the ground: land-cover classes, true-colour imagery, and the planet seen from far off.',
+        sources: [
+            {
+                name: 'ESA WorldCover 2021 v200', scope: 'Land-cover classes, 10 m',
+                credit: '© ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium',
+                licence: 'CC BY 4.0',
+            },
+            {
+                name: 'Sentinel-2 L2A true colour', scope: 'Imagery and Hybrid terrain colours',
+                credit: 'Contains modified Copernicus Sentinel data', licence: 'Copernicus Sentinel data terms',
+            },
+            {
+                name: 'Blue Marble Next Generation', scope: 'The whole planet, 500 m',
+                credit: 'NASA Earth Observatory', licence: 'Public domain',
+            },
+        ],
+    },
+    {
+        title: 'Roads, buildings and map features',
+        feeds: 'Coastlines, lakes and rivers, land use, roads, railways, bridges, airfields and buildings, and the place search on the Flight tab.',
+        sources: [
+            {
+                name: 'OpenStreetMap', credit: '© OpenStreetMap contributors',
+                creditUrl: 'https://www.openstreetmap.org/copyright', licence: 'ODbL 1.0',
+            },
+        ],
+    },
+    {
+        title: 'Roof colours',
+        feeds: 'Building roofs, measured in aerial photos, with the Imagery and Hybrid terrain colours.',
+        sources: [
+            { name: 'DOP40 digital orthophotos, 40 cm', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
+        ],
+    },
 ];
 
 function formatControlKey(key: string): string {
@@ -775,6 +915,51 @@ function sliderValue(event: Event): number {
                         </section>
                     </div>
                 }
+
+                @case ('About') {
+                    <div class="flex flex-col gap-6">
+                        <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Data sources</h3>
+                            <p class="m-0 text-sm opacity-70">
+                                The world is built from open data. Each source is clipped, resampled,
+                                measured and combined with the others when the terrain is baked, so
+                                none of it appears as published, and no publisher endorses this game.
+                            </p>
+                        </section>
+
+                        @for (group of dataSources; track group.title) {
+                            <section>
+                                <h3 class="m-0 mb-1 text-base font-medium">{{ group.title }}</h3>
+                                <p class="m-0 mb-2 text-sm opacity-70">{{ group.feeds }}</p>
+                                <ul class="m-0 flex list-none flex-col gap-2 p-0 text-sm">
+                                    @for (source of group.sources; track $index) {
+                                        <li>
+                                            <div>
+                                                <span class="font-medium">{{ source.name }}</span>
+                                                @if (source.scope) {
+                                                    <span class="opacity-70"> · {{ source.scope }}</span>
+                                                }
+                                            </div>
+                                            <div class="text-xs opacity-80">
+                                                @if (source.creditUrl) {
+                                                    <a [href]="source.creditUrl" target="_blank" rel="noopener">{{ source.credit }}</a>
+                                                } @else {
+                                                    {{ source.credit }}
+                                                }
+                                                ·
+                                                @if (licenceUrls[source.licence]; as url) {
+                                                    <a [href]="url" target="_blank" rel="noopener">{{ source.licence }}</a>
+                                                } @else {
+                                                    {{ source.licence }}
+                                                }
+                                            </div>
+                                        </li>
+                                    }
+                                </ul>
+                            </section>
+                        }
+                    </div>
+                }
             }
         </div>
     </mat-tab-nav-panel>
@@ -904,6 +1089,8 @@ export class SettingsDialog {
     readonly systemsHelp = SYSTEMS_HELP;
     readonly spawnHelp = SPAWN_HELP;
     readonly viewsHelp = VIEWS_HELP;
+    readonly dataSources = DATA_SOURCES;
+    readonly licenceUrls = LICENCE_URLS;
 
     /** Flight control keys, relabelled whenever the keyboard layout changes. */
     readonly flightHelp = computed<HelpEntry[]>(() => {
