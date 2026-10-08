@@ -20,9 +20,11 @@
  */
 
 import * as THREE from 'three';
+import { RAIL_DETAIL_FADE_M } from '../scene/materials/shaders/depthFP';
 import { RoadsMode } from '../state/gameDefs';
 import { TerrainManifest, roadTileUrl } from './manifest';
 import { PtrTile, ROAD_CLASS_MASK, ROAD_MAJOR_MAX_CLASS, decodePtr, isRailClass } from './ptr';
+import { RoadLevels } from './roadLod';
 import { TileIndex } from './tileIndex';
 import { TileMeshes } from './tileMesh';
 import { TileStore } from './tileStore';
@@ -48,8 +50,25 @@ export interface RoadMeshes {
     railDetail?: THREE.Mesh;
     /** The rail stroke's rail pass, over every sleeper: shares `rail`'s geometry. */
     railTop?: THREE.Mesh;
+    /** Set by RoadStrokes.showTrackDetail; the two passes above hide when false. */
+    trackDetailInReach?: boolean;
+    /** Coarser index lists for the road kinds, drawn far off (see roadLod.ts). */
+    lod?: RoadLod;
+    /** Triangles bound at full detail, for the resident count. */
+    triangles?: number;
     /** GPU bytes bound, for the cache budget. */
     bytes: number;
+}
+
+/** A tile's road levels: which one it wants and what is built of them. */
+interface RoadLod {
+    want: number;
+    kinds: Array<{
+        mesh: THREE.Mesh;
+        levels: RoadLevels;
+        /** A geometry per distinct index list, sharing the full one's vertex buffers. */
+        geometries: Map<Uint16Array, THREE.BufferGeometry>;
+    }>;
 }
 
 export interface RoadStrokesOptions {
@@ -74,6 +93,11 @@ export interface RoadStrokesOptions {
     /** Rails, the third pass (uRailPass 2, transparent), drawn after every sleeper. */
     railTopMaterial?: THREE.Material;
     onBeforeRender?: THREE.Mesh['onBeforeRender'];
+    /**
+     * The local vertical in a tile's own axes, unit length: what the far
+     * levels keep strokes above (see roadLod.ts). Without it there are none.
+     */
+    localUp?: (meshes: TileMeshes) => readonly [number, number, number];
 }
 
 export interface RoadStrokesStats {
@@ -120,6 +144,27 @@ export function addTrackPasses(
         sleepers: sleepers ? make(sleepers, ROAD_RENDER_ORDER) : undefined,
         rails: rails ? make(rails, RAIL_TOP_RENDER_ORDER) : undefined,
     };
+}
+
+/**
+ * Farthest, in metres, a track's sleeper and rail passes can put a fragment
+ * on screen, for a camera of vertical `fovDeg` and `aspect` drawing `heightPx`
+ * real pixels tall.
+ *
+ * The passes fade out completely once a pixel spans RAIL_DETAIL_FADE_M[1] of
+ * ground (see RAIL_FRAGMENT): past this range every fragment is discarded,
+ * so the draw is pure cost. Bounded low on purpose: a pixel's angle shrinks
+ * by cos^2 towards a screen corner, and the footprint the shader takes, the
+ * larger of fwidth across and along, is at least half their sum, which is at
+ * least one screen step's length on the ground. A slanting view only ever
+ * lengthens that step.
+ */
+export function trackDetailReachM(fovDeg: number, aspect: number, heightPx: number): number {
+    const tanV = Math.tan(THREE.MathUtils.degToRad(fovDeg) / 2);
+    const tanH = tanV * aspect;
+    const centrePixel = (2 * tanV) / Math.max(1, heightPx);
+    const cornerCos2 = 1 / (1 + tanV * tanV + tanH * tanH);
+    return RAIL_DETAIL_FADE_M[1] / (centrePixel * cornerCos2);
 }
 
 function kindOf(byte: number): StrokeKind {
@@ -244,6 +289,9 @@ export class RoadStrokes {
     private readonly materials: StrokeMaterials;
     private readonly prepare?: (id: TileKey, meshes: TileMeshes, tile: PtrTile) => Promise<PtrTile>;
     private readonly onBeforeRender: THREE.Mesh['onBeforeRender'] | undefined;
+    private readonly localUp: RoadStrokesOptions['localUp'];
+    /** Tiles that want a road level not built yet; see buildPendingLevel. */
+    private readonly lodPending = new Set<RoadMeshes>();
     private index: TileIndex | undefined;
     private mode: RoadsMode = RoadsMode.ALL;
     private readonly attached = new Set<RoadMeshes>();
@@ -260,6 +308,7 @@ export class RoadStrokes {
         };
         this.prepare = opts.prepare;
         this.onBeforeRender = opts.onBeforeRender;
+        this.localUp = opts.localUp;
         this.store = spec === undefined ? undefined : new TileStore<PtrTile>({
             baseUrl: opts.baseUrl,
             url: (id) => roadTileUrl(opts.manifest, id.z, id.x, id.y, opts.baseUrl),
@@ -298,11 +347,30 @@ export class RoadStrokes {
         if (roads.rail) {
             roads.rail.visible = this.mode !== RoadsMode.OFF;
         }
+        this.applyTrackDetail(roads);
+    }
+
+    private applyTrackDetail(roads: RoadMeshes): void {
         for (const mesh of [roads.railDetail, roads.railTop]) {
             if (mesh) {
-                mesh.visible = this.mode !== RoadsMode.OFF;
+                mesh.visible = this.mode !== RoadsMode.OFF && roads.trackDetailInReach !== false;
             }
         }
+    }
+
+    /**
+     * Whether a drawn tile's sleeper and rail passes can show anything from
+     * where the camera is (see trackDetailReachM). Out of reach they are
+     * hidden rather than drawn to be discarded: two draws a railway tile.
+     */
+    showTrackDetail(meshes: TileMeshes, inReach: boolean): void {
+        const roads = meshes.roads;
+        if (roads === undefined || roads === 'pending' || roads === 'none'
+            || roads.trackDetailInReach === inReach) {
+            return;
+        }
+        roads.trackDetailInReach = inReach;
+        this.applyTrackDetail(roads);
     }
 
     setIndex(index: TileIndex | undefined): void {
@@ -374,11 +442,89 @@ export class RoadStrokes {
             tile, meshes.group.scale.x, this.materials, this.onBeforeRender,
         );
         this.applyMode(roads);
+        if (this.localUp) {
+            const up = this.localUp(meshes);
+            const kinds: RoadLod['kinds'] = [];
+            // A rail bed too: its sleeper and rail passes keep the full
+            // geometry they were given, and only they read the spacing.
+            for (const mesh of [roads.major, roads.minor, roads.rail]) {
+                const index = mesh?.geometry.getIndex()?.array;
+                if (mesh && index instanceof Uint16Array) {
+                    kinds.push({
+                        mesh, levels: new RoadLevels(tile, index, up),
+                        geometries: new Map([[index, mesh.geometry]]),
+                    });
+                }
+            }
+            if (kinds.length > 0) {
+                roads.lod = { want: 0, kinds };
+            }
+        }
+        roads.triangles = roadTriangles(roads);
         meshes.group.add(roads.group);
         meshes.roads = roads;
         meshes.bytes += roads.bytes;
         this.attached.add(roads);
-        this.triangles += roadTriangles(roads);
+        this.triangles += roads.triangles;
+    }
+
+    /**
+     * Draw a tile's roads at `level` (0 full; see roadLevelFor), or at the
+     * finest level built below it until buildPendingLevel gets to it.
+     */
+    showLevel(meshes: TileMeshes, level: number): void {
+        const roads = meshes.roads;
+        if (roads === undefined || roads === 'pending' || roads === 'none' || !roads.lod) {
+            return;
+        }
+        if (roads.lod.want === level) {
+            return;
+        }
+        roads.lod.want = level;
+        this.applyLevel(roads, roads.lod);
+        if (roads.lod.kinds.some(k => !k.levels.has(level))) {
+            this.lodPending.add(roads);
+        }
+    }
+
+    /**
+     * Build the road levels tiles are waiting for, for up to `budgetMs`. A
+     * dense tile takes a few milliseconds a level, so a backlog drains over
+     * frames instead of stalling one.
+     */
+    buildPendingLevels(budgetMs: number): void {
+        const start = performance.now();
+        for (const roads of this.lodPending) {
+            const lod = roads.lod;
+            if (lod) {
+                for (const kind of lod.kinds) {
+                    if (performance.now() - start >= budgetMs) {
+                        return;
+                    }
+                    kind.levels.build(lod.want);
+                }
+                this.applyLevel(roads, lod);
+            }
+            this.lodPending.delete(roads);
+        }
+    }
+
+    private applyLevel(roads: RoadMeshes, lod: RoadLod): void {
+        for (const kind of lod.kinds) {
+            const index = kind.levels.get(lod.want);
+            let geometry = kind.geometries.get(index);
+            if (!geometry) {
+                const full = kind.geometries.values().next().value as THREE.BufferGeometry;
+                geometry = new THREE.BufferGeometry();
+                for (const [name, attribute] of Object.entries(full.attributes)) {
+                    geometry.setAttribute(name, attribute);
+                }
+                geometry.setIndex(new THREE.BufferAttribute(index, 1));
+                kind.geometries.set(index, geometry);
+                roads.bytes += index.byteLength;
+            }
+            kind.mesh.geometry = geometry;
+        }
     }
 
     /** A tile is being released; drop its roads. */
@@ -386,10 +532,16 @@ export class RoadStrokes {
         const roads = meshes.roads;
         if (roads !== undefined && roads !== 'pending' && roads !== 'none') {
             this.attached.delete(roads);
-            this.triangles -= roadTriangles(roads);
+            this.lodPending.delete(roads);
+            this.triangles -= roads.triangles ?? roadTriangles(roads);
             roads.major?.geometry.dispose();
             roads.minor?.geometry.dispose();
             roads.rail?.geometry.dispose();
+            for (const kind of roads.lod?.kinds ?? []) {
+                for (const geometry of kind.geometries.values()) {
+                    geometry.dispose();
+                }
+            }
             roads.group.clear();
         }
         // A sidecar still in flight must not bind to a released tile.
@@ -397,18 +549,34 @@ export class RoadStrokes {
     }
 
     /** Triangles the roads of a drawn tile add, for the frame's count. */
-    trianglesOf(meshes: TileMeshes): number {
+    trianglesOf(meshes: TileMeshes, atFullDetail = false): number {
         const roads = meshes.roads;
         if (roads === undefined || roads === 'pending' || roads === 'none') {
             return 0;
         }
         let n = 0;
         for (const mesh of [roads.major, roads.minor, roads.rail, roads.railDetail, roads.railTop]) {
-            if (mesh?.visible) {
-                n += (mesh.geometry.getIndex()?.count ?? 0) / 3;
+            // At full detail for the budget, and by the roads setting rather
+            // than by what is visible: a far level makes a tile lighter, and
+            // the track passes are shown and hidden per pass (the target MFD
+            // shows them all), and neither may move the cut. A budget read
+            // between an MFD pass and the main view's swung by the track
+            // triangles every fourth frame, and folded tiles in and out.
+            const shown = atFullDetail ? mesh !== undefined && this.modeShows(roads, mesh) : mesh?.visible;
+            if (mesh && shown) {
+                const full = atFullDetail ? roads.lod?.kinds.find(k => k.mesh === mesh)?.levels.get(0) : undefined;
+                n += (full?.length ?? mesh.geometry.getIndex()?.count ?? 0) / 3;
             }
         }
         return n;
+    }
+
+    /** Whether the roads setting draws this mesh at all, whatever the pass hides. */
+    private modeShows(roads: RoadMeshes, mesh: THREE.Mesh): boolean {
+        if (this.mode === RoadsMode.OFF) {
+            return false;
+        }
+        return mesh !== roads.minor || this.mode === RoadsMode.ALL;
     }
 
     /** Sidecars nobody drew this generation may be evicted from the byte budget. */

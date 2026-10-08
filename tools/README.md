@@ -232,6 +232,9 @@ npm run bake:road-strokes
 npm run bake:lidar -- --bbox w,s,e,n
 npm run bake:bridges
 npm run bake:grade
+
+# 8. far land: lighter levels of each leaf's land, drawn from far off (optional)
+npm run bake:farland
 ```
 
 Stage 7's grading (`tools/bake_planet_grade.ts`) is where every road and
@@ -243,6 +246,17 @@ only loads them. A graded tile is flagged, and every stage that reads a tile as
 the ground its lines were drawn on (the road strokes, the bridges, the grading
 itself) refuses it: to grade a box again, re-bake its meshes and road strokes
 first. See [docs/terrain-roads.md](../docs/terrain-roads.md).
+
+Stage 8 (`tools/bake_planet_farland.ts`) writes a `.pfl` beside each leaf:
+its land simplified at 1 m and 4 m (`--levels`), which the runtime draws
+instead once the level's tolerance is under half a pixel. A graded leaf is
+60-70 thousand triangles, half of them under 25 m^2, and none of that shows
+from a few kilometres; Gran Canaria's leaves come down to 28 % and 19 % of
+their triangles. Borders, shores, steep faces and the order between fills and
+ground are kept, and the land never rises over a road or river
+(`tools/bake/farLand.ts`). It has to run after anything that rewrites a leaf's
+land: a sidecar records a fingerprint of the land it was made from, and one
+that no longer matches is ignored rather than drawn.
 
 `bake:lidar` (`tools/measure_lidar.py`) is what gives the beds real
 embankments, cuttings and bridge approaches: the 30 m land has none. It reads

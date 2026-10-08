@@ -49,10 +49,13 @@ import {
     textureIndexUrl,
     bedIndexUrl, bridgeIndexUrl,
     roadIndexUrl,
+    farLandIndexUrl,
 } from './manifest';
 import { CoverBinding, CoverTextures } from './coverTextures';
 import { BridgeMeshes } from './bridgeMeshes';
-import { RoadStrokes } from './roadStrokes';
+import { roadLevelFor } from './roadLod';
+import { FarLandTiles } from './farLandTiles';
+import { RoadStrokes, trackDetailReachM } from './roadStrokes';
 import { buildRoadExclusion } from './roadExclusion';
 import { buildAirfieldExclusion, AirfieldExclusion } from './airfieldExclusion';
 import { coverInPtmTile } from './finestCover';
@@ -285,6 +288,7 @@ export class TerrainEntity implements Entity {
     private readonly streamer: TileStreamer<PtmTile, TileMeshes>;
     private readonly cover: CoverTextures;
     private readonly roads: RoadStrokes;
+    private readonly farLand: FarLandTiles;
     private airfieldExclusion: AirfieldExclusion | undefined;
     private surfaceExclusion: ((x: number, z: number) => boolean) | undefined;
     private readonly bridges: BridgeMeshes;
@@ -644,6 +648,8 @@ export class TerrainEntity implements Entity {
     private triangleBudget = TERRAIN_TRIANGLE_BUDGET;
     private drawList: QuadNode[] = [];
     private drawnTriangles = 0;
+    /** As drawnTriangles but at what each tile draws, far land included. */
+    private shownTriangleCount = 0;
     /** Set for a frame where TERRAIN_TRIANGLE_BUDGET cut the draw list short. */
     private triangleBudgetHit = false;
     /** Sibling groups folded into their parent to fit the budget this reconcile; see coarsenToBudget. */
@@ -901,9 +907,13 @@ export class TerrainEntity implements Entity {
                 this.cover.release(m);
                 this.roads.release(m);
                 this.bridges.release(m);
+                this.farLand.release(m);
                 disposeTileMeshes(m);
             },
         });
+
+        // A leaf's lighter land for far off, swapped in by limitTrackDetail.
+        this.farLand = new FarLandTiles({ manifest: opts.manifest, baseUrl: base });
 
         // Road strokes ride beside the meshes like the textures do, bound
         // into the tile's own group when their sidecar lands.
@@ -916,6 +926,13 @@ export class TerrainEntity implements Entity {
             railDetailMaterial,
             railTopMaterial,
             onBeforeRender: tileBeforeRender,
+            // Up at the tile, turned into its own axes: what a far road level
+            // keeps its strokes above. Rebases move both alike.
+            localUp: meshes => {
+                const up = new THREE.Vector3().subVectors(meshes.group.position, this.earthCenter).normalize()
+                    .applyQuaternion(meshes.group.quaternion.clone().invert());
+                return [up.x, up.y, up.z];
+            },
         });
 
         // Bridges are lit solids on the leaf, in the two road greys: the
@@ -1006,13 +1023,15 @@ export class TerrainEntity implements Entity {
         const roadsIndexUrl = roadIndexUrl(this.manifest, base);
         const bridgesIndexUrl = bridgeIndexUrl(this.manifest, base);
         const bedsIndexUrl = bedIndexUrl(this.manifest, base);
-        const [meshIdx, heightIdx, texIdx, roadIdx, bridgeIdx, bedIdx] = await Promise.all([
+        const farIndexUrl = farLandIndexUrl(this.manifest, base);
+        const [meshIdx, heightIdx, texIdx, roadIdx, bridgeIdx, bedIdx, farIdx] = await Promise.all([
             fetchIndex(meshIndexUrl(this.manifest, base)),
             fetchIndex(heightIndexUrl(this.manifest, base)),
             texIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(texIndexUrl),
             roadsIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(roadsIndexUrl),
             bridgesIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(bridgesIndexUrl),
             bedsIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(bedsIndexUrl),
+            farIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(farIndexUrl),
         ]);
         this.meshIndex = meshIdx;
         this.heightIndex = heightIdx;
@@ -1020,6 +1039,7 @@ export class TerrainEntity implements Entity {
         this.roads.setIndex(roadIdx);
         this.bridges.setIndex(bridgeIdx);
         this.beds.setIndex(bedIdx);
+        this.farLand.setIndex(farIdx);
         await this.heights.loadCoarse(heightIdx);
     }
 
@@ -1449,7 +1469,11 @@ export class TerrainEntity implements Entity {
         if (meshes?.land === undefined) {
             return undefined;   // ocean stand-in, or water-only tile
         }
-        const index = new TileHeightIndex(meshes.land, meshes.group, node.id.z);
+        // The near land, whatever the mesh is drawing: a far level is up to
+        // its tolerance off, and the near land is what the stitcher moves.
+        const index = new TileHeightIndex(
+            meshes.landGeometryFaceted ? { geometry: meshes.landGeometryFaceted } as THREE.Mesh : meshes.land,
+            meshes.group, node.id.z);
         this.drawnHeightIndices.set(node.key, index);
         return index.heightAtWorld(x, z) === undefined ? undefined : index;
     }
@@ -1491,15 +1515,73 @@ export class TerrainEntity implements Entity {
             this.viewportHeightPx = targetHeight;
             this.reconcile(camera);
         }
-        this.cullSharedGroupFor(camera, isLodPass);
         const list = lists.get(SceneLayers.Terrain);
         if (list) {
+            // Only for a pass that draws terrain: the sky passes run this
+            // entity too, and their culling (and the track-detail flips in it)
+            // was paid every frame for nothing.
+            this.cullSharedGroupFor(camera, isLodPass);
             // Must go through attachToRenderList, not list.add: the renderer
             // stamps a generation on each build pass and pruneRenderList drops
             // every child that is not stamped for the current one. A plain add
             // is silently pruned again before anything is drawn.
             attachToRenderList(list, this.group);
         }
+    }
+
+    /**
+     * Per drawn tile, from how far off it is: hide the sleeper and rail passes
+     * where they cannot put a fragment on screen (trackDetailReachM), and pick
+     * the road level whose simplification stays under half a pixel there
+     * (roadLevelFor). Without a camera, everything at full detail. Measured to
+     * the tile's near edge, like the budget's ordering.
+     */
+    private limitTrackDetail(camera: THREE.PerspectiveCamera | undefined): void {
+        const heightPx = this.viewportHeightPx * this.renderScale;
+        const reach = camera
+            ? trackDetailReachM(camera.getEffectiveFOV(), camera.aspect, heightPx)
+            : Infinity;
+        // Ground metres per pixel per metre of range, at the screen centre.
+        const pixelAngle = camera
+            ? 2 * Math.tan(THREE.MathUtils.degToRad(camera.getEffectiveFOV()) / 2) / Math.max(1, heightPx)
+            : 0;
+        for (const node of this.drawList) {
+            const meshes = this.streamer.get(node.id);
+            if (!meshes) {
+                continue;
+            }
+            if (!camera) {
+                // A passive pass (the target MFD) only shows the track
+                // detail. Levels stay what the main view chose: switching
+                // them every MFD refresh and back churned every far tile
+                // twice a refresh for a small, half-resolution display.
+                this.roads.showTrackDetail(meshes, true);
+                continue;
+            }
+            const nearM = Math.max(0, node.center.distanceTo(camera.position) - node.radius);
+            this.roads.showTrackDetail(meshes, nearM <= reach);
+            this.roads.showLevel(meshes, roadLevelFor(nearM * pixelAngle));
+            // Far land only in faceted shading: the smooth geometry is
+            // the near land's, welded.
+            const smooth = this.landShading === TerrainShading.SMOOTH;
+            const near = smooth ? meshes.landGeometrySmooth ?? meshes.landGeometryFaceted : meshes.landGeometryFaceted;
+            this.farLand.show(node.id, meshes, smooth ? 0 : FAR_LAND_MAX_PIXELS * nearM * pixelAngle,
+                PRIORITY_IN_FRUSTUM - nearM, near);
+        }
+        if (camera) {
+            this.roads.buildPendingLevels(ROAD_LEVEL_BUILD_MS);
+        }
+    }
+
+    /**
+     * Real pixels per viewport pixel the main view is drawn at: the
+     * supersample, or a render scale below 1. Starts at the largest
+     * supersample, so detail is never cut short before the game says.
+     */
+    private renderScale = 2;
+
+    setRenderScale(scale: number): void {
+        this.renderScale = scale;
     }
 
     private readonly cullFrustum = new THREE.Frustum();
@@ -1526,8 +1608,12 @@ export class TerrainEntity implements Entity {
             for (const child of this.group.children) {
                 child.visible = true;
             }
+            this.limitTrackDetail(isLodPass ? camera as THREE.PerspectiveCamera : undefined);
             return;
         }
+        // A passive camera (the target MFD) is usually zoomed far in, where
+        // track detail shows much farther out: draw it all.
+        this.limitTrackDetail(undefined);
         camera.updateMatrixWorld();
         this.cullProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
         this.cullFrustum.setFromProjectionMatrix(this.cullProjScreenMatrix);
@@ -1808,6 +1894,7 @@ export class TerrainEntity implements Entity {
     private syncGroup(camPos: THREE.Vector3): void {
         this.group.clear();
         this.drawnTriangles = 0;
+        this.shownTriangleCount = 0;
         this.treeRescattersThisFrame = 0;
         this.treeInitialAttachesThisFrame = 0;
         this.triangleBudgetHit = false;
@@ -1889,6 +1976,7 @@ export class TerrainEntity implements Entity {
                     }
                 }
                 this.drawnTriangles += this.tileTriangles(meshes);
+                this.shownTriangleCount += this.shownTriangles(meshes);
                 // Nearest first, like the meshes; a leaf never has one and
                 // returns from this at once.
                 const priority = PRIORITY_IN_FRUSTUM - Math.sqrt(node.center.distanceToSquared(camPos));
@@ -1917,7 +2005,12 @@ export class TerrainEntity implements Entity {
 
     /** What a drawn tile costs the triangle budget: land, water, roads and bridges. */
     private tileTriangles(meshes: TileMeshes): number {
-        return countTriangles(meshes) + this.roads.trianglesOf(meshes) + this.bridges.trianglesOf(meshes);
+        return countTriangles(meshes, true) + this.roads.trianglesOf(meshes, true) + this.bridges.trianglesOf(meshes);
+    }
+
+    /** What a tile actually draws this frame, far land included; for the stats only. */
+    private shownTriangles(meshes: TileMeshes): number {
+        return countTriangles(meshes, false) + this.roads.trianglesOf(meshes) + this.bridges.trianglesOf(meshes);
     }
 
     /**
@@ -1951,7 +2044,7 @@ export class TerrainEntity implements Entity {
         const s = this.meshStore.stats;
         return {
             drawn: this.drawList.length,
-            triangles: this.drawnTriangles,
+            triangles: this.shownTriangleCount,
             detailScale: this.detailScale,
             frameEmaMs: this.frameEmaMs,
             heightTier: this.heights.heightResolutionAtWorld(0, 0),
@@ -1975,13 +2068,25 @@ export class TerrainEntity implements Entity {
     }
 }
 
+/** A leaf draws a far level of its land once that level's tolerance is under this many pixels. */
+const FAR_LAND_MAX_PIXELS = 0.5;
+
+/** Main-thread time a frame may spend simplifying far road levels; see RoadStrokes.buildPendingLevels. */
+const ROAD_LEVEL_BUILD_MS = 2;
+
 /** What a sea stand-in costs the budget; see buildOceanPatch. */
 const OCEAN_PATCH_TRIANGLES = 10;
 
-function countTriangles(m: TileMeshes): number {
+/**
+ * A tile's land and water triangles. `asNear` counts the land at its near
+ * cost even while a far level is drawn: the budget decides the cut, and a
+ * far level only makes a tile lighter, never a reason to draw more tiles.
+ */
+function countTriangles(m: TileMeshes, asNear: boolean): number {
     let n = 0;
     if (m.land) {
-        n += (m.land.geometry.getAttribute('position')?.count ?? 0) / 3;
+        const land = asNear ? m.landGeometryFaceted ?? m.land.geometry : m.land.geometry;
+        n += (land.getAttribute('position')?.count ?? 0) / 3;
     }
     if (m.water) {
         n += (m.water.geometry.getIndex()?.count ?? 0) / 3;

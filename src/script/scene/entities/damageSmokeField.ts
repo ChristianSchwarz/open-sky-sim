@@ -6,7 +6,7 @@ import { PointEmitter } from '../../physics/particles/emitters/pointEmitter';
 import { ParticleSystem } from '../../physics/particles/particleSystem';
 import { SimHitEvent } from '../../physics/sim/simTypes';
 import { CanvasPainter } from '../../render/screen/canvasPainter';
-import { SceneMaterialManager, SceneMaterialPrimitiveType, SceneMaterialUniforms } from '../materials/materials';
+import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../materials/materials';
 import { updateUniforms } from '../utils';
 import { Entity } from '../entity';
 import { Scene, SceneLayers } from '../scene';
@@ -78,7 +78,17 @@ export class DamageSmokeField implements Entity {
     enabled = true;
 
     private readonly system: ParticleSystem;
-    private readonly puffs: THREE.Mesh[] = [];
+    /**
+     * Every puff in one draw: a wreck plume keeps hundreds alive, and a mesh
+     * each was hundreds of draw calls. Live puffs are packed to the front in
+     * particle order, the order the separate meshes were drawn in (by
+     * material id), so overlaps resolve as before.
+     */
+    private readonly puffs: THREE.InstancedMesh;
+    private readonly puffLevel: THREE.InstancedBufferAttribute;
+    private readonly puffToneA: THREE.InstancedBufferAttribute;
+    private readonly puffToneB: THREE.InstancedBufferAttribute;
+    private readonly puffPose = new THREE.Object3D();
     private readonly root = new THREE.Object3D();
     private readonly leaks: Leak[] = [];
     private poseProvider: ((targetId: string) => DamageSmokePose | undefined) | undefined;
@@ -123,23 +133,33 @@ export class DamageSmokeField implements Entity {
         );
 
         const geo = new THREE.CircleGeometry(1, 6);
-        for (let i = 0; i < DAMAGE_SMOKE_PARTICLE_COUNT; i++) {
-            const mat = materials.build({
-                type: SceneMaterialPrimitiveType.MESH,
-                category: PaletteCategory.FX_SMOKE,
-                depthWrite: false,
-                shaded: false,
-                alphaDither: FLAME_DITHER,
-                colorDither: true,
-            });
-            mat.side = THREE.DoubleSide;
-            const mesh = new THREE.Mesh(geo, mat);
-            mesh.frustumCulled = false;
-            mesh.visible = false;
-            mesh.onBeforeRender = updateUniforms;
-            this.puffs.push(mesh);
-            this.root.add(mesh);
+        const n = DAMAGE_SMOKE_PARTICLE_COUNT;
+        this.puffLevel = new THREE.InstancedBufferAttribute(new Float32Array(n).fill(FLAME_DITHER), 1);
+        this.puffToneA = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
+        this.puffToneB = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
+        for (const attr of [this.puffLevel, this.puffToneA, this.puffToneB]) {
+            attr.setUsage(THREE.DynamicDrawUsage);
         }
+        geo.setAttribute('ditherLevel', this.puffLevel);
+        geo.setAttribute('toneA', this.puffToneA);
+        geo.setAttribute('toneB', this.puffToneB);
+        const mat = materials.build({
+            type: SceneMaterialPrimitiveType.MESH,
+            category: PaletteCategory.FX_SMOKE,
+            depthWrite: false,
+            shaded: false,
+            vertexAlphaDither: true,
+            instanceTones: true,
+            colorDither: true,
+        });
+        mat.side = THREE.DoubleSide;
+        this.puffs = new THREE.InstancedMesh(geo, mat, n);
+        this.puffs.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        this.puffs.frustumCulled = false;
+        this.puffs.count = 0;
+        this.puffs.visible = false;
+        this.puffs.onBeforeRender = updateUniforms;
+        this.root.add(this.puffs);
 
         for (let i = 0; i < MAX_LEAKS; i++) {
             this.leaks.push({
@@ -310,9 +330,8 @@ export class DamageSmokeField implements Entity {
             this.leaks[i].permanent = false;
             this.leaks[i].crashed = false;
         }
-        for (let i = 0; i < this.puffs.length; i++) {
-            this.puffs[i].visible = false;
-        }
+        this.puffs.count = 0;
+        this.puffs.visible = false;
     }
 
     init(_scene: Scene): void {
@@ -461,11 +480,11 @@ export class DamageSmokeField implements Entity {
 
     private syncPuffs(camera: THREE.Camera, palette: Palette): void {
         this.cachePaletteColors(palette);
-        for (let i = 0; i < this.puffs.length; i++) {
+        const mesh = this.puffPose;
+        let live = 0;
+        for (let i = 0; i < this.system.particles.length && i < DAMAGE_SMOKE_PARTICLE_COUNT; i++) {
             const p = this.system.particles[i];
-            const mesh = this.puffs[i];
             if (!p.isActive) {
-                mesh.visible = false;
                 continue;
             }
             const progress = p.life / p.lifespan;
@@ -476,22 +495,31 @@ export class DamageSmokeField implements Entity {
                     + (1 - FIRE_SIZE_GROWTH)
                     * ((progress - FIRE_PHASE_END) / (1 - FIRE_PHASE_END));
             const size = p.sizeStart + (p.sizeEnd - p.sizeStart) * sizeT;
-            mesh.visible = true;
             mesh.position.copy(p.position);
             mesh.scale.setScalar(size);
 
             // Yellow → red over the fire phase, then gray smoke for the rest.
             const heat = progress >= FIRE_PHASE_END ? 1 : progress / FIRE_PHASE_END;
             this.applyHeatColors(heat);
-            const u = (mesh.material as THREE.ShaderMaterial).uniforms as SceneMaterialUniforms;
-            u.color.value.copy(this.tmpColor);
-            u.colorSecondary.value.copy(this.tmpColorB);
+            this.tmpColor.toArray(this.puffToneA.array, live * 3);
+            this.tmpColorB.toArray(this.puffToneB.array, live * 3);
             // Ease-out dissolve: dense early, then a long thin tail to near-zero.
             const fadeT = 1 - (1 - progress) * (1 - progress);
-            u.alphaDither.value = lerp(fadeT, SMOKE_DITHER_START, SMOKE_DITHER_END);
+            this.puffLevel.array[live] = lerp(fadeT, SMOKE_DITHER_START, SMOKE_DITHER_END);
 
             mesh.lookAt(camera.position);
             mesh.rotateZ(p.rotationStart + (p.rotationEnd - p.rotationStart) * progress);
+            mesh.updateMatrix();
+            this.puffs.setMatrixAt(live, mesh.matrix);
+            live++;
+        }
+        this.puffs.count = live;
+        this.puffs.visible = live > 0;
+        if (live > 0) {
+            this.puffs.instanceMatrix.needsUpdate = true;
+            this.puffLevel.needsUpdate = true;
+            this.puffToneA.needsUpdate = true;
+            this.puffToneB.needsUpdate = true;
         }
     }
 

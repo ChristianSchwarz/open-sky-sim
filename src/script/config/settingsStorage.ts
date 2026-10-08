@@ -108,7 +108,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     farTileTextures: true,
     roads: RoadsMode.ALL,
     renderScale: 1,
-    supersampling: true,
+    supersampling: false,
     volume: 0.7,
 };
 

@@ -14,7 +14,7 @@ import {
     Ecef, Enu, EnuBasis, Geodetic, ecefToEnu, enuToGeodeticApprox, geodeticOnSurfaceAtEnu,
     geodeticToEcef,
 } from './geodesy';
-import { FlattenPad, applyFlattenPad, padBlendWeight } from './flattenPad';
+import { FlattenPad, PadGrid, applyFlattenPad, padBlendWeight } from './flattenPad';
 import { TileKey, tileAtLonLat, tileBounds, tileKeyString } from './tiling';
 
 /** Heights at or below seaLevel + this are open water. */
@@ -51,7 +51,7 @@ export class HeightSampler {
     readonly queryZoom: number;
     readonly coarseZoom: number;
 
-    private readonly pads: FlattenPad[];
+    private pads: PadGrid;
     private readonly railBeds: RailBedField | undefined;
     private readonly fine: TileLookup;
     private readonly coarse: TileLookup;
@@ -61,10 +61,15 @@ export class HeightSampler {
         this.seaLevel = opts.seaLevel;
         this.queryZoom = opts.queryZoom;
         this.coarseZoom = opts.coarseZoom;
-        this.pads = opts.pads;
+        this.pads = new PadGrid(opts.pads);
         this.railBeds = opts.railBeds;
         this.fine = opts.fine;
         this.coarse = opts.coarse;
+    }
+
+    /** Replace the flatten pads; the sampler indexes its own copy. */
+    setPads(pads: readonly FlattenPad[]): void {
+        this.pads = new PadGrid(pads);
     }
 
     /**
@@ -146,15 +151,18 @@ export class HeightSampler {
             return raw;
         }
         let h = raw;
-        for (const pad of this.pads) {
-            h = applyFlattenPad(h, e, n, pad);
+        const pads = this.pads.at(e, n);
+        if (pads) {
+            for (const pad of pads) {
+                h = applyFlattenPad(h, e, n, pad);
+            }
         }
         return this.railBeds ? this.railBeds.clamp(lon, lat, h) : h;
     }
 
     /** True over a platform's flat core — the paved part, not its feather. */
     private inPadCore(e: number, n: number): boolean {
-        for (const pad of this.pads) {
+        for (const pad of this.pads.at(e, n) ?? []) {
             if (padBlendWeight(e, n, pad) >= 1) {
                 return true;
             }

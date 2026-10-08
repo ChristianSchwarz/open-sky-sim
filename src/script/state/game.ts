@@ -20,6 +20,11 @@ import {
 
 /** How far out along the sun's bearing terrain is searched for a skyline. */
 const SUN_SKYLINE_RANGE_M = 100_000;
+/**
+ * Frames between skyline searches. It is ~200 ground reads and only sets the
+ * clouds' light, which a few frames' lag cannot show.
+ */
+const SUN_SKYLINE_EVERY_FRAMES = 4;
 import { paintSkyDome, SkyDome, skyDomeOf } from '../scene/models/lib/skyDomeModelBuilder';
 import { paintSunBloom } from '../scene/models/lib/sunModelBuilder';
 import { ATMOSPHERE_SHELL_UNIFORMS } from '../scene/models/lib/atmosphereShellModelBuilder';
@@ -193,6 +198,12 @@ const EXCLUDED_PACK_IDS = new Set(['a4e', 'f16']);
 const MAIN_RENDER_TARGET_HD = 'MAIN_RENDER_TARGET_HD';
 const CANVAS_RENDER_TARGET_HD = 'CANVAS_RENDER_TARGET_HD';
 const WEAPONSTARGET_RENDER_TARGET_HD = 'WEAPONSTARGET_RENDER_TARGET_HD';
+/**
+ * The target MFD is drawn at this fraction of the main view's pixel density
+ * per axis and stretched onto its square. It is a full second scene pass, and
+ * a small, low-detail display that reads fine at half resolution.
+ */
+const MFD_RENDER_SCALE = 0.5;
 
 /**
  * Supersampling factor for the HD profile's 3D render targets, resolved for
@@ -605,12 +616,15 @@ export class Game {
     private showcaseRenderLayersHd: RenderLayer[];
     /** Weapons-target MFD is refreshed every Nth frame to cut dual-scene cost. */
     private targetMfdFrame = 0;
+    private sunSkylineFrame = 0;
 
     private hdResolutionWidth = 0;
     private hdResolutionHeight = 0;
     /** Render scale the HD targets were last sized with (see updateHdResolution). */
     private hdRenderScale = 0;
-    private hdSupersampling = true;
+    private hdSupersampling = false;
+    /** Real pixels per viewport pixel of the main view, as last sized. */
+    private hdMainScale = 1;
 
     private view: PlayerViewState = PlayerViewState.COCKPIT_FRONT;
     private viewBeforeShowcase: PlayerViewState | null = null;
@@ -1935,18 +1949,21 @@ export class Game {
         // the HUD canvas and the weapons display keep their full size and
         // composite on top of it.
         const mainScale = renderScale < 1 ? renderScale : supersampleScale;
+        this.hdMainScale = mainScale;
+        // Optional: the first sizing can come before the terrain is built.
+        this.planetTerrain?.setRenderScale(mainScale);
 
         if (!this.renderer.hasRenderTarget(MAIN_RENDER_TARGET_HD)) {
             const textColors = this.getTextColors();
             this.renderer.createRenderTarget(MAIN_RENDER_TARGET_HD, RenderTargetType.WEBGL, 0, 0, width, height, { textureScale: mainScale });
             this.renderer.createRenderTarget(CANVAS_RENDER_TARGET_HD, RenderTargetType.CANVAS, 0, 0, width, height, { textColors });
             const mfdSize = CockpitMFDSize(height, width);
-            this.renderer.createRenderTarget(WEAPONSTARGET_RENDER_TARGET_HD, RenderTargetType.WEBGL, CockpitMFD2X(width, height, mfdSize), CockpitMFD2Y(width, height, mfdSize), mfdSize, mfdSize, { textureScale: supersampleScale });
+            this.renderer.createRenderTarget(WEAPONSTARGET_RENDER_TARGET_HD, RenderTargetType.WEBGL, CockpitMFD2X(width, height, mfdSize), CockpitMFD2Y(width, height, mfdSize), mfdSize, mfdSize, { textureScale: supersampleScale * MFD_RENDER_SCALE });
         } else {
             this.renderer.resizeRenderTarget(MAIN_RENDER_TARGET_HD, 0, 0, width, height, mainScale);
             this.renderer.resizeRenderTarget(CANVAS_RENDER_TARGET_HD, 0, 0, width, height);
             const mfdSize = CockpitMFDSize(height, width);
-            this.renderer.resizeRenderTarget(WEAPONSTARGET_RENDER_TARGET_HD, CockpitMFD2X(width, height, mfdSize), CockpitMFD2Y(width, height, mfdSize), mfdSize, mfdSize, supersampleScale);
+            this.renderer.resizeRenderTarget(WEAPONSTARGET_RENDER_TARGET_HD, CockpitMFD2X(width, height, mfdSize), CockpitMFD2Y(width, height, mfdSize), mfdSize, mfdSize, supersampleScale * MFD_RENDER_SCALE);
         }
 
         this.renderer.setComposeSize(width, height);
@@ -2309,6 +2326,9 @@ export class Game {
      * needs far less resolution to be found.
      */
     private updateSunVisibility(): void {
+        if (this.sunSkylineFrame++ % SUN_SKYLINE_EVERY_FRAMES !== 0) {
+            return;
+        }
         const cam = this.playerCamera.main.position;
         const horizontal = Math.hypot(SUN_DIRECTION.x, SUN_DIRECTION.z);
         let skylineDeg = -90;
@@ -3763,6 +3783,7 @@ export class Game {
             roads: this.configService.roads,
             treeDensity: this.configService.treeDensity,
         });
+        this.planetTerrain.setRenderScale(this.hdMainScale);
         await this.planetTerrain.load(DEFAULT_TERRAIN_URL);
         this.planetTerrain.setLodCamera(this.playerCamera.main);
         this.scene.add(this.planetTerrain);

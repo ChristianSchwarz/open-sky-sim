@@ -285,3 +285,55 @@ export function padFromRecord(
 export function padReachM(pad: FlattenPad): number {
     return Math.hypot(pad.halfD + pad.featherM, pad.halfW + pad.featherM);
 }
+
+/** Side of a {@link PadGrid} cell (m): a long runway's pad spans a handful. */
+const PAD_GRID_CELL_M = 2000;
+
+/**
+ * Pads bucketed by the cells their reach overlaps, so a height read tests the
+ * few pads near it instead of every pad in range.
+ *
+ * A play area now carries well over a thousand pads, and a ground height is
+ * read several times per query (the surface solve), a couple of hundred times
+ * a frame for the sun's skyline alone: walking the whole list made the height
+ * read 150 times dearer than the DEM sample under it. A pad outside its cells
+ * has weight 0 there, so skipping it changes nothing, and each cell keeps the
+ * pads in list order, which is the order overlapping pads are applied in.
+ */
+export class PadGrid {
+    private readonly cells = new Map<number, FlattenPad[]>();
+
+    constructor(pads: readonly FlattenPad[]) {
+        for (const pad of pads) {
+            const reach = padReachM(pad);
+            if (!Number.isFinite(reach) || !Number.isFinite(pad.centerX) || !Number.isFinite(pad.centerZ)) {
+                continue;
+            }
+            const x0 = Math.floor((pad.centerX - reach) / PAD_GRID_CELL_M);
+            const x1 = Math.floor((pad.centerX + reach) / PAD_GRID_CELL_M);
+            const z0 = Math.floor((pad.centerZ - reach) / PAD_GRID_CELL_M);
+            const z1 = Math.floor((pad.centerZ + reach) / PAD_GRID_CELL_M);
+            for (let cx = x0; cx <= x1; cx++) {
+                for (let cz = z0; cz <= z1; cz++) {
+                    const key = cellKey(cx, cz);
+                    const cell = this.cells.get(key);
+                    if (cell) {
+                        cell.push(pad);
+                    } else {
+                        this.cells.set(key, [pad]);
+                    }
+                }
+            }
+        }
+    }
+
+    /** The pads that may cover ENU (e, n), in list order; undefined when none. */
+    at(e: number, n: number): readonly FlattenPad[] | undefined {
+        return this.cells.get(cellKey(Math.floor(e / PAD_GRID_CELL_M), Math.floor(n / PAD_GRID_CELL_M)));
+    }
+}
+
+/** One number per cell; exact for the ±2^20 cells (±2,000 km) a frame can reach. */
+function cellKey(cx: number, cz: number): number {
+    return (cx + 1048576) * 2097152 + (cz + 1048576);
+}

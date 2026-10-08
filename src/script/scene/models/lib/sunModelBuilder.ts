@@ -277,7 +277,10 @@ function buildGlare(): THREE.Mesh {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = 'sunGlare';
     mesh.renderOrder = GLARE_RENDER_ORDER;
-    mesh.frustumCulled = false;
+    // Culled like any mesh: it is a 16 degree disc with true bounds, and the
+    // renderer skips its pass's full-screen depth resolve when it is out of
+    // view (Renderer.hasAnythingInView).
+    mesh.frustumCulled = true;
     return mesh;
 }
 

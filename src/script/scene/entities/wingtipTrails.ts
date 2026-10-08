@@ -46,7 +46,13 @@ class WingTrailSide {
     );
     private head = 0;
     private count = 0;
-    private readonly meshes: THREE.Mesh[];
+    /**
+     * All segments in one draw, oldest first - the order the separate
+     * segment meshes drew in (by material id) - each with its own dither.
+     */
+    private readonly mesh: THREE.InstancedMesh;
+    private readonly levels: THREE.InstancedBufferAttribute;
+    private readonly segment = new THREE.Object3D();
     private readonly root = new THREE.Object3D();
     private readonly lastSample = new THREE.Vector3();
     private hasLastSample = false;
@@ -59,29 +65,25 @@ class WingTrailSide {
     private readonly _right = new THREE.Vector3();
     private readonly _up = new THREE.Vector3();
 
-    private static sharedGeometry: THREE.PlaneGeometry | undefined;
-
-    constructor(materials: ShaderMaterial[]) {
-        if (!WingTrailSide.sharedGeometry) {
-            WingTrailSide.sharedGeometry = new THREE.PlaneGeometry(1, 1);
-        }
-        this.meshes = materials.map((material) => {
-            const mesh = new THREE.Mesh(WingTrailSide.sharedGeometry!, material);
-            mesh.onBeforeRender = updateUniforms;
-            mesh.frustumCulled = false;
-            mesh.visible = false;
-            this.root.add(mesh);
-            return mesh;
-        });
+    constructor(material: ShaderMaterial) {
+        // A geometry per side: the dither levels are instance attributes.
+        const geometry = new THREE.PlaneGeometry(1, 1);
+        this.levels = new THREE.InstancedBufferAttribute(new Float32Array(SEGMENT_COUNT), 1);
+        this.levels.setUsage(THREE.DynamicDrawUsage);
+        geometry.setAttribute('ditherLevel', this.levels);
+        this.mesh = new THREE.InstancedMesh(geometry, material, SEGMENT_COUNT);
+        this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        this.mesh.onBeforeRender = updateUniforms;
+        this.mesh.frustumCulled = false;
+        this.mesh.count = 0;
+        this.root.add(this.mesh);
     }
 
     reset(): void {
         this.head = 0;
         this.count = 0;
         this.hasLastSample = false;
-        for (let i = 0; i < this.meshes.length; i++) {
-            this.meshes[i].visible = false;
-        }
+        this.mesh.count = 0;
         this.root.visible = false;
     }
 
@@ -107,15 +109,14 @@ class WingTrailSide {
         }
 
         const segmentLimit = Math.min(SEGMENT_COUNT, this.count);
-        this.root.visible = segmentLimit > 0;
         camera.getWorldPosition(this._cameraPos);
+        const mesh = this.segment;
+        let drawn = 0;
 
         for (let i = 0; i < SEGMENT_COUNT; i++) {
-            const mesh = this.meshes[i];
             const age = SEGMENT_COUNT - 1 - i;
 
             if (age >= segmentLimit) {
-                mesh.visible = false;
                 continue;
             }
 
@@ -130,7 +131,6 @@ class WingTrailSide {
             this._dir.subVectors(this._to, this._from);
             const length = this._dir.length();
             if (length < 0.01) {
-                mesh.visible = false;
                 continue;
             }
 
@@ -155,7 +155,16 @@ class WingTrailSide {
             mesh.position.copy(this._mid);
             mesh.quaternion.setFromRotationMatrix(_basis);
             mesh.scale.set(SEGMENT_WIDTH * 2, length, 1);
-            mesh.visible = true;
+            mesh.updateMatrix();
+            this.mesh.setMatrixAt(drawn, mesh.matrix);
+            this.levels.array[drawn] = segmentDither(i);
+            drawn++;
+        }
+        this.mesh.count = drawn;
+        this.root.visible = drawn > 0;
+        if (drawn > 0) {
+            this.mesh.instanceMatrix.needsUpdate = true;
+            this.levels.needsUpdate = true;
         }
     }
 
@@ -180,7 +189,7 @@ class WingTrailSide {
 }
 
 export class WingtipTrails {
-    private readonly segmentMaterials: ShaderMaterial[];
+    private readonly material: ShaderMaterial;
     private readonly trailWhite = new THREE.Color(TRAIL_WHITE);
     private readonly left: WingTrailSide;
     private readonly right: WingTrailSide;
@@ -199,25 +208,25 @@ export class WingtipTrails {
             this.leftTipBody.copy(tips.left);
             this.rightTipBody.copy(tips.right);
         }
-        this.segmentMaterials = Array.from({ length: SEGMENT_COUNT }, (_, index) => {
-            const material = materials.build({
-                type: SceneMaterialPrimitiveType.MESH,
-                category: PaletteCategory.FX_SMOKE,
-                shaded: false,
-                depthWrite: false,
-                alphaDither: segmentDither(index),
-            }) as ShaderMaterial;
-            material.side = THREE.DoubleSide;
-            (material.userData as { wingtipTrailDriven?: boolean }).wingtipTrailDriven = true;
-            const uniforms = material.uniforms as SceneMaterialUniforms;
-            uniforms.color = { value: uniforms.color.value.clone() };
-            uniforms.colorSecondary = { value: uniforms.colorSecondary.value.clone() };
-            uniforms.color.value.copy(this.trailWhite);
-            uniforms.colorSecondary.value.copy(this.trailWhite);
-            return material;
-        });
-        this.left = new WingTrailSide(this.segmentMaterials);
-        this.right = new WingTrailSide(this.segmentMaterials);
+        // One material: each segment's dither rides its instance
+        // (vertexAlphaDither, see segmentDither).
+        const material = materials.build({
+            type: SceneMaterialPrimitiveType.MESH,
+            category: PaletteCategory.FX_SMOKE,
+            shaded: false,
+            depthWrite: false,
+            vertexAlphaDither: true,
+        }) as ShaderMaterial;
+        material.side = THREE.DoubleSide;
+        (material.userData as { wingtipTrailDriven?: boolean }).wingtipTrailDriven = true;
+        const uniforms = material.uniforms as SceneMaterialUniforms;
+        uniforms.color = { value: uniforms.color.value.clone() };
+        uniforms.colorSecondary = { value: uniforms.colorSecondary.value.clone() };
+        uniforms.color.value.copy(this.trailWhite);
+        uniforms.colorSecondary.value.copy(this.trailWhite);
+        this.material = material;
+        this.left = new WingTrailSide(material);
+        this.right = new WingTrailSide(material);
     }
 
     reset(): void {
@@ -231,11 +240,9 @@ export class WingtipTrails {
     }
 
     private applyWhiteColors(): void {
-        for (let i = 0; i < this.segmentMaterials.length; i++) {
-            const uniforms = this.segmentMaterials[i].uniforms as SceneMaterialUniforms;
-            uniforms.color.value.copy(this.trailWhite);
-            uniforms.colorSecondary.value.copy(this.trailWhite);
-        }
+        const uniforms = this.material.uniforms as SceneMaterialUniforms;
+        uniforms.color.value.copy(this.trailWhite);
+        uniforms.colorSecondary.value.copy(this.trailWhite);
     }
 
     update(

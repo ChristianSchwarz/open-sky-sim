@@ -41,7 +41,8 @@ function countObjectTriangles(root: THREE.Object3D): number {
         const mesh = child as THREE.Mesh;
         if (mesh.isMesh) {
             const geometry = mesh.geometry;
-            const vertexCount = geometry.index ? geometry.index.count : geometry.attributes.position.count;
+            const vertexCount = Math.min(geometry.drawRange.count,
+                geometry.index ? geometry.index.count : geometry.attributes.position.count);
             const instances = (mesh as THREE.InstancedMesh).isInstancedMesh ? (mesh as THREE.InstancedMesh).count : 1;
             total += (vertexCount / 3) * instances;
         }

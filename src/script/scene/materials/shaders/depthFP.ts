@@ -23,7 +23,7 @@ const RAIL_TRACK_PITCH_M = 5.0;
  * (sleeperCoverage), so where a pixel spans several they settle into an
  * even paler tint instead of shimmering, and the rails into a faint line.
  */
-const RAIL_DETAIL_FADE_M: readonly [number, number] = [0.8, 2.4];
+export const RAIL_DETAIL_FADE_M: readonly [number, number] = [0.8, 2.4];
 /**
  * Least strength a rail keeps once it is thinner than a pixel: exact
  * coverage of a 7.5 cm head fades to a few percent by the far end of the
@@ -171,6 +171,13 @@ const shader = (kind: 'stroke' | 'flat' | 'rail'): string => {
   varying vec3 vPosition;
   varying vec3 vNormalView;
   varying vec3 vViewDir;
+#ifdef VERTEX_ALPHA_DITHER
+  varying float vDitherLevel;
+#endif
+#ifdef INSTANCE_TONES
+  varying vec3 vToneA;
+  varying vec3 vToneB;
+#endif
 ` + (flat ? `
   uniform sampler2D uMap;
   uniform float uMarkings;
@@ -212,7 +219,11 @@ ${DITHER_PARS_FRAGMENT}
       float facing = abs(dot(grazeNormal, grazeView));
       rim = 1.0 - smoothstep(0.0, 0.65, facing);
     }
+#ifdef VERTEX_ALPHA_DITHER
+    float effectiveAlphaDither = vDitherLevel + rim * 0.55;
+#else
     float effectiveAlphaDither = alphaDither + rim * 0.55;
+#endif
 
     if (effectiveAlphaDither > 0.001) {
       float alpha = effectiveAlphaDither + bayerThreshold(screen);
@@ -238,13 +249,19 @@ ${DITHER_PARS_FRAGMENT}
       fogFactor = floor(fogFactor * fogSteps + 0.5) / fogSteps;
     }
 
+    vec3 primary = color;
+    vec3 secondary = colorSecondary;
+#ifdef INSTANCE_TONES
+    primary = vToneA;
+    secondary = vToneB;
+#endif
     vec3 diffuse;
     if (colorDither > 0.5 || (shadingType == 0 && colorDither > -0.5)) {
       // colorDither: 1 = force two-tone stipple, 0 = duotone-only, -1 = solid primary.
       bool dithering = mod(floor(screen.x + screen.y), 2.0) > 0.5;
-      diffuse = dithering ? color : colorSecondary;
+      diffuse = dithering ? primary : secondary;
     } else {
-      diffuse = color;
+      diffuse = primary;
     }
 ` + (flat ? `
     // A runway's paint, as mipmapped coverage: the first tone under the

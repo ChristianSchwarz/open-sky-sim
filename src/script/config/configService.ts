@@ -432,7 +432,7 @@ export class SupersamplingSetting {
     private active: boolean;
     private listeners: Set<SupersamplingChangeListener> = new Set();
 
-    constructor(initialActive: boolean = true) {
+    constructor(initialActive: boolean = false) {
         this.active = initialActive;
     }
 

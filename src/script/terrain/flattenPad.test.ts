@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-    FlattenPad, applyFlattenPad, padAxisFromHeading, padAxisTowards, padBlendWeight,
+    FlattenPad, PadGrid, applyFlattenPad, padAxisFromHeading, padAxisTowards, padBlendWeight,
     padGradientFromHeading, padLocal, padReachM, padSurfaceHeight,
 } from './flattenPad';
 
@@ -183,5 +183,41 @@ describe('flatten pad', () => {
                 assert.equal(padBlendWeight(0, reach + 1, pad), 0);
             }
         });
+    });
+});
+
+describe('pad grid', () => {
+    it('applies exactly what walking every pad does', () => {
+        // Turned, sloping, overlapping pads straddling cell edges and the origin.
+        let seed = 7;
+        const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+        const pads: FlattenPad[] = [];
+        for (let i = 0; i < 60; i++) {
+            const axis = padAxisFromHeading(rand() * 360);
+            pads.push({
+                centerX: (rand() - 0.5) * 20000, centerZ: (rand() - 0.5) * 20000,
+                halfW: 50 + rand() * 400, halfD: 300 + rand() * 2500, featherM: 20 + rand() * 150,
+                heightMsl: rand() * 500, axisE: axis.e, axisN: axis.n,
+                gradE: (rand() - 0.5) * 0.02, gradN: (rand() - 0.5) * 0.02,
+            });
+        }
+        const grid = new PadGrid(pads);
+        let covered = 0;
+        for (let i = 0; i < 20000; i++) {
+            const e = (rand() - 0.5) * 26000;
+            const n = (rand() - 0.5) * 26000;
+            const ground = rand() * 400;
+            let all = ground;
+            for (const pad of pads) {
+                all = applyFlattenPad(all, e, n, pad);
+            }
+            let near = ground;
+            for (const pad of grid.at(e, n) ?? []) {
+                near = applyFlattenPad(near, e, n, pad);
+            }
+            assert.equal(near, all);
+            covered += all !== ground ? 1 : 0;
+        }
+        assert.ok(covered > 500, `only ${covered} samples landed on a pad`);
     });
 });

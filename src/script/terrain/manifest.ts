@@ -102,6 +102,19 @@ interface BedStreamManifest {
     maxZoom: number;
 }
 
+/** A leaf's far land, PFL1 (see pfl.ts): lighter levels of its mesh for drawing it from far off. */
+interface FarLandStreamManifest {
+    /** Path template, e.g. `{z}/{x}/{y}.pfl`. */
+    path: string;
+    indexPath: string;
+    encoding: string;
+    transport?: string;
+    /** The leaf zoom; only leaves have one. */
+    zoom: number;
+    /** Each level's tolerance, metres, finest first. */
+    levelsM: number[];
+}
+
 interface HeightStreamManifest {
     path: string;
     indexPath: string;
@@ -176,6 +189,7 @@ export interface TerrainManifest {
     roads?: RoadStreamManifest;
     bridges?: BridgeStreamManifest;
     beds?: BedStreamManifest;
+    farLand?: FarLandStreamManifest;
     height: HeightStreamManifest;
     flattenPads: FlattenPadManifest[];
     /**
@@ -293,6 +307,12 @@ export function roadTileUrl(
     return `${base}/${expand(manifest.roads!.path, z, x, y)}`;
 }
 
+export function farLandTileUrl(
+    manifest: TerrainManifest, z: number, x: number, y: number, base: string,
+): string {
+    return `${base}/${expand(manifest.farLand!.path, z, x, y)}`;
+}
+
 export function roadIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
     return manifest.roads ? `${base}/${manifest.roads.indexPath}` : undefined;
 }
@@ -313,6 +333,10 @@ export function bedTileUrl(
     manifest: TerrainManifest, z: number, x: number, y: number, base: string,
 ): string {
     return `${base}/${expand(manifest.beds!.path, z, x, y)}`;
+}
+
+export function farLandIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
+    return manifest.farLand ? `${base}/${manifest.farLand.indexPath}` : undefined;
 }
 
 export function bedIndexUrl(manifest: TerrainManifest, base: string): string | undefined {

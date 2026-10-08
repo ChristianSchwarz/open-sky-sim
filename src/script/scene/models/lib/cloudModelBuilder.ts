@@ -351,12 +351,50 @@ function buildHazeTierGeometry(lobes: CloudPuffLobe[], tier: HazeTier, tierIndex
 }
 
 /**
- * Progressive haze-tier budgets, closest LOD first. Each level also keeps
- * the solid body mesh, so draw calls per instance run 1+N: 1+12, 1+8, 1+3, 1.
+ * Every haze tier in one buffer, densest first, with each puff's dither level
+ * in a `ditherLevel` attribute (see vertexAlphaDither). Answers a geometry per
+ * tier count that draws the first that many tiers: they share the buffers.
+ */
+function buildHazeLevels(lobes: CloudPuffLobe[], minY: number): (tierCount: number) => THREE.BufferGeometry {
+    const tiers = HAZE_TIERS.map((tier, i) => buildHazeTierGeometry(lobes, tier, i, minY));
+    const merged = mergeGeometries(tiers);
+    const levels = new Float32Array(merged.getAttribute('position').count);
+    const ends: number[] = [];
+    let end = 0;
+    tiers.forEach((g, i) => {
+        const count = g.getAttribute('position').count;
+        levels.fill(HAZE_TIERS[i].alphaDither, end, end + count);
+        end += count;
+        ends.push(end);
+        g.dispose();
+    });
+    merged.setAttribute('ditherLevel', new THREE.BufferAttribute(levels, 1));
+    return tierCount => {
+        const g = new THREE.BufferGeometry();
+        for (const name of ['position', 'normal', 'ditherLevel']) {
+            g.setAttribute(name, merged.getAttribute(name));
+        }
+        g.setDrawRange(0, ends[tierCount - 1]);
+        g.boundingSphere = merged.boundingSphere;
+        g.boundingBox = merged.boundingBox;
+        if (g.boundingSphere === null) {
+            merged.computeBoundingSphere();
+            g.boundingSphere = merged.boundingSphere;
+        }
+        return g;
+    };
+}
+
+/**
+ * Progressive haze-tier budgets, closest LOD first: 12, 8, 3 and no tiers.
  * HAZE_TIERS is ordered densest/closest-to-the-body first, so slicing from
  * the front keeps the puffs that matter most to the silhouette and drops the
  * sparse, faint outer and side tiers first — they're the least noticeable
  * at any distance where LOD would already be kicking in.
+ *
+ * Every level is one haze draw beside the solid body, not one per tier: the
+ * tiers sit in one buffer in this order, each puff carrying its own tier's
+ * dither level, and a level draws a prefix of it.
  */
 const LOD_HAZE_TIER_COUNTS = [HAZE_TIERS.length, 8, 3, 0];
 
@@ -406,15 +444,25 @@ export class CloudModelLibBuilder implements ModelLibBuilder {
         // stipples in the palette's SKY_CLOUD shadow tone alongside the lit
         // one in every display mode, so the haze reads as sitting partly in
         // the cloud's own shadow rather than a flat, uniformly lit fill.
-        const hazeMeshes = HAZE_TIERS.map((tier, i) => {
-            const m = new THREE.Mesh(buildHazeTierGeometry(this.lobes, tier, i, baseY), materials.build({
-                type: SceneMaterialPrimitiveType.MESH,
-                category: PaletteCategory.SKY_CLOUD,
-                depthWrite: false,
-                shaded: false,
-                alphaDither: tier.alphaDither,
-                colorDither: true,
-            }));
+        //
+        // One draw for all of them, though: the stipple is a plain discard with
+        // no blending, and every tier stipples the same two tones by screen
+        // parity, so which tier wins a pixel never changed its colour. The
+        // per-tier opacity rides each vertex instead (vertexAlphaDither).
+        const hazeMaterial = materials.build({
+            type: SceneMaterialPrimitiveType.MESH,
+            category: PaletteCategory.SKY_CLOUD,
+            depthWrite: false,
+            shaded: false,
+            vertexAlphaDither: true,
+            colorDither: true,
+        });
+        const hazeLevels = buildHazeLevels(this.lobes, baseY);
+        const hazeMeshes = LOD_HAZE_TIER_COUNTS.map(count => {
+            if (count === 0) {
+                return undefined;
+            }
+            const m = new THREE.Mesh(hazeLevels(count), hazeMaterial);
             m.onBeforeRender = sunVisibleColours();
             return m;
         });
@@ -429,16 +477,15 @@ export class CloudModelLibBuilder implements ModelLibBuilder {
             maxY = Math.max(maxY, l.y + l.r * HAZE_REACH);
         }
 
-        // Same mesh/hazeMeshes objects are referenced from multiple LOD
-        // levels below (e.g. the solid `mesh` is in every level) — safe
-        // because a given tier's content is identical wherever it appears,
-        // so it doesn't matter which level's group ends up parenting it (see
+        // The solid `mesh` is referenced from every LOD level below — safe
+        // because its content is identical wherever it appears, so it doesn't
+        // matter which level's group ends up parenting it (see
         // LODHelper.populateGroups); same sharing pattern as the other
         // multi-LOD builders (mountainModelBuilder, skiJumpModelBuilder).
         return {
-            lod: LOD_HAZE_TIER_COUNTS.map(count => ({
+            lod: hazeMeshes.map(haze => ({
                 flats: [],
-                volumes: [mesh, ...hazeMeshes.slice(0, count)]
+                volumes: haze ? [mesh, haze] : [mesh],
             })),
             animations: [],
             maxSize: 2 * maxRadius,

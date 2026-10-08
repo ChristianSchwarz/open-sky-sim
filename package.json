@@ -26,6 +26,7 @@
         "bake:bridges": "node --import tsx tools/bake_planet_bridges.ts",
         "bake:lidar": "node tools/run-python.mjs tools/measure_lidar.py",
         "bake:grade": "node --import tsx tools/bake_planet_grade.ts",
+        "bake:farland": "node --import tsx tools/bake_planet_farland.ts",
         "rebake:box": "node --import tsx tools/rebake_box.ts",
         "bake:tree-sprites": "node --import tsx tools/bake_tree_sprites.ts",
         "verify:planet": "node --import tsx tools/verify_planet.ts",

@@ -11,6 +11,16 @@ const shader = (highp: boolean): string => `
   varying vec3 vNormalView;
   varying vec3 vViewDir;
   varying vec2 vUv;
+#ifdef VERTEX_ALPHA_DITHER
+  attribute float ditherLevel;
+  varying float vDitherLevel;
+#endif
+#ifdef INSTANCE_TONES
+  attribute vec3 toneA;
+  attribute vec3 toneB;
+  varying vec3 vToneA;
+  varying vec3 vToneB;
+#endif
 ${LOG_DEPTH_PARS_VERTEX}
   void main() {
   #ifdef USE_INSTANCING
@@ -24,6 +34,13 @@ ${LOG_DEPTH_PARS_VERTEX}
     vNormalView = normalize(normalMatrix * normal);
     vViewDir = -viewPos.xyz;
     vUv = uv;
+#ifdef VERTEX_ALPHA_DITHER
+    vDitherLevel = ditherLevel;
+#endif
+#ifdef INSTANCE_TONES
+    vToneA = toneA;
+    vToneB = toneB;
+#endif
     vec4 pos = projectionMatrix * viewPos;`+ (highp ? '' : `
     if (shadingType != 3) {
       pos.x = floor(pos.x / pos.w * halfWidth + 0.5) / halfWidth * pos.w;

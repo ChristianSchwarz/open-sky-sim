@@ -854,12 +854,13 @@ async function main(): Promise<void> {
 
     const outManifestPath = path.join(args.out, 'manifest.json');
     const previousManifest = fs.existsSync(outManifestPath)
-        ? JSON.parse(fs.readFileSync(outManifestPath, 'utf8')) as { texture?: unknown; roads?: unknown; bridges?: unknown; beds?: unknown }
+        ? JSON.parse(fs.readFileSync(outManifestPath, 'utf8')) as { texture?: unknown; roads?: unknown; bridges?: unknown; beds?: unknown; farLand?: unknown }
         : {};
     const carriedTexture = previousManifest.texture;
     const carriedRoads = previousManifest.roads;
     const carriedBridges = previousManifest.bridges;
     const carriedBeds = previousManifest.beds;
+    const carriedFarLand = previousManifest.farLand;
     if (carriedTexture !== undefined) {
         console.log('texture stream carried from the previous manifest; run `npm run bake:tex` '
             + (args.bbox ? 'with the same --bbox ' : '') + 'to refresh it for the re-meshed tiles');
@@ -941,6 +942,10 @@ async function main(): Promise<void> {
         // and the graded beds and walls, bake_planet_grade.ts's.
         bridges: carriedBridges,
         beds: carriedBeds,
+        // And the far land, bake_planet_farland.ts's. A re-meshed leaf's
+        // sidecar no longer matches its land and the runtime ignores it
+        // (PflTile.nearFingerprint) until that stage runs again.
+        farLand: carriedFarLand,
     };
     fs.writeFileSync(
         path.join(args.out, 'manifest.json'),

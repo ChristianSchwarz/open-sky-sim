@@ -121,6 +121,18 @@ type SceneMaterialMeshProperties = {
             /** Screen-space ordered dither opacity (0 = opaque, 0.5 ≈ half transparent). */
             alphaDither?: number;
             /**
+             * Take the dither opacity per vertex, from a `ditherLevel` attribute,
+             * instead of `alphaDither`: meshes at several dither levels then
+             * share one material and one draw. Flat meshes only.
+             */
+            vertexAlphaDither?: boolean;
+            /**
+             * Take the two tones per instance, from `toneA` and `toneB`
+             * attributes, instead of the palette's: lets an InstancedMesh
+             * colour each copy on its own. Flat meshes only.
+             */
+            instanceTones?: boolean;
+            /**
              * Multiplier applied before the tone curve, for surfaces that are
              * brighter than a palette entry can say. Default 1.
              *
@@ -390,6 +402,12 @@ export class SceneMaterialManager implements KernelTask {
         if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && p.railDetail) {
             material.transparent = true;
         }
+        if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && !p.river && p.vertexAlphaDither) {
+            material.defines = { ...material.defines, VERTEX_ALPHA_DITHER: '' };
+        }
+        if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && !p.river && p.instanceTones) {
+            material.defines = { ...material.defines, INSTANCE_TONES: '' };
+        }
         if (!p.rawColor) {
             this.applyWaterTweak(p.category, material.uniforms as SceneMaterialUniforms);
         }
@@ -598,17 +616,22 @@ export class SceneMaterialManager implements KernelTask {
         // Uniform arrays are fixed-length in GLSL, so both tables are padded to
         // the size the shader declares rather than to what this bake happens to
         // use. uSwatchCount is what stops the shader reading the padding.
-        const toneColors: THREE.Color[] = [];
+        //
+        // Both are flat rgb triples rather than Color/Vector3 arrays: three.js
+        // uploads a numeric array as it is, but flattens an array of objects
+        // into a fresh buffer at every material switch, which the terrain's
+        // per-tile draws make hundreds of times a frame.
+        const toneColors = new Float32Array(TERRAIN_TONE_COUNT * 3);
         for (let i = 0; i < TERRAIN_TONE_COUNT; i++) {
             const category = spec.toneCategories[i] ?? PaletteCategory.TERRAIN_DEFAULT;
-            toneColors.push(this.colorCache.getColor(PaletteColor(this.palette, category)).clone());
+            this.colorCache.getColor(PaletteColor(this.palette, category)).toArray(toneColors, i * 3);
         }
-        // Vector3, not Color, and on purpose: THREE.Color decodes sRGB to the
-        // linear working space, and the shader wants these in the space the
-        // bake picked them in. See uSwatch in terrainVP.
-        const swatches: THREE.Vector3[] = [];
+        // Raw sRGB, not through Color, and on purpose: THREE.Color decodes sRGB
+        // to the linear working space, and the shader wants these in the space
+        // the bake picked them in. See uSwatch in terrainVP.
+        const swatches = new Float32Array(TERRAIN_SWATCH_COUNT * 3);
         for (let i = 0; i < TERRAIN_SWATCH_COUNT; i++) {
-            swatches.push(srgbVector(spec.swatches[i]));
+            srgbVector(spec.swatches[i]).toArray(swatches, i * 3);
         }
         const classTones = new Float32Array(TERRAIN_CLASS_COUNT);
         for (let i = 0; i < TERRAIN_CLASS_COUNT; i++) {
@@ -716,10 +739,10 @@ export class SceneMaterialManager implements KernelTask {
                 // Two halves, matching what the modes are made of: the tone
                 // table follows the blended palette like any authored colour,
                 // and the imagery light factor is the raw-colour one above.
-                const tones = u.uToneColor.value as THREE.Color[];
-                for (let t = 0; t < tones.length; t++) {
+                const tones = u.uToneColor.value as Float32Array;
+                for (let t = 0; t * 3 < tones.length; t++) {
                     const category = d.terrain.toneCategories[t] ?? PaletteCategory.TERRAIN_DEFAULT;
-                    tones[t].copy(this.colorCache.getColor(PaletteColor(palette, category)));
+                    this.colorCache.getColor(PaletteColor(palette, category)).toArray(tones, t * 3);
                 }
                 const light = palette.light ?? [1, 1, 1];
                 (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);

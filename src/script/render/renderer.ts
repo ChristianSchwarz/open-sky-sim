@@ -110,6 +110,8 @@ export class Renderer {
     private current2DRenderLists: Set<string> = new Set();
     /** Parent of layer list scenes for a single same-camera WebGL submit. */
     private readonly mergedListScene = new THREE.Scene();
+    /** Drawn into a target only to have three.js build its mip chain; see render. */
+    private readonly mipmapScene = new THREE.Scene();
     /** Camera-relative offset root: children drawn at world − camera.position. */
     private readonly relativeRoot = new THREE.Group();
     private readonly savedCamPos = new THREE.Vector3();
@@ -295,6 +297,24 @@ export class Renderer {
         // pass is a GPU-fill problem or a CPU-submission one.
         const cpuStats: Record<string, number> = {};
 
+        // three.js rebuilds a mipmapped target's whole chain at the end of
+        // every render() into it, and the supersampled main target takes four
+        // or five of those a frame (sky blit, each layer, the glare's): at
+        // 1.5x of an ultrawide that is a 10-megapixel chain built over and
+        // over for the one read the compose makes. Held off here and built
+        // once below, for the targets something was drawn into.
+        const deferredMips: Array<{ owner: RenderTarget; target: THREE.WebGLRenderTarget }> = [];
+        for (const renderTarget of this.renderTargets.values()) {
+            // By scale, not by the flag, so a frame that threw half way
+            // cannot leave a target unmipmapped for good. Same rule as
+            // createRenderTarget's: only a supersampled target has a chain.
+            if (renderTarget.type === RenderTargetType.WEBGL && renderTarget.textureScale > 1) {
+                renderTarget.target.texture.generateMipmaps = false;
+                deferredMips.push({ owner: renderTarget, target: renderTarget.target });
+            }
+        }
+        const drawnTargets = new Set<RenderTarget>();
+
         for (const layer of renderLayers) {
             const palette = layer.palette || this.palette;
             if (palette !== prevPalette) {
@@ -311,6 +331,7 @@ export class Renderer {
             const label = `${layer.target}:${layer.lists.join('+')}`;
             const cpuStart = performance.now();
             if (renderTarget.type === RenderTargetType.WEBGL) {
+                drawnTargets.add(renderTarget);
                 // 2D (CANVAS) passes submit nothing to the GL timeline, so
                 // timing them would just measure ~0 - only WEBGL passes are
                 // worth the query.
@@ -326,6 +347,19 @@ export class Renderer {
             }
             cpuStats[label] = performance.now() - cpuStart;
         }
+
+        this.gpuTimer.begin('mipmaps');
+        for (const { owner, target } of deferredMips) {
+            target.texture.generateMipmaps = true;
+            // A target skipped this frame kept last frame's pixels, and its
+            // chain still matches them.
+            if (drawnTargets.has(owner)) {
+                // An empty render is three.js's way to build a target's chain.
+                this.renderer.setRenderTarget(target);
+                this.renderer.render(this.mipmapScene, this.composeCamera);
+            }
+        }
+        this.gpuTimer.end();
 
         // Compose all
         this.renderer.setRenderTarget(null);
@@ -405,7 +439,7 @@ export class Renderer {
         // Skipped when the layer drew up empty, which for the glare is every
         // frame between sunset and sunrise - a full-screen resolve per view is
         // not worth paying for a pass with nothing in it.
-        if (layer.sceneDepthFrom !== undefined && this.hasAnythingToDraw(layer)) {
+        if (layer.sceneDepthFrom !== undefined && this.hasAnythingInView(layer)) {
             this.sceneDepthPass.resolve(this.renderer, renderTarget.target, layer.sceneDepthFrom.far);
         }
 
@@ -453,6 +487,58 @@ export class Renderer {
         }
         return small;
     }
+
+    /**
+     * Whether anything in this layer's lists can land in its camera's view.
+     *
+     * The glare is a ring round the sun, so its list is full all day, and the
+     * full-screen depth resolve it waits on was paid every frame the sun was
+     * behind the camera too: ~3 ms a frame on an integrated GPU at 2x
+     * supersample. Same test three.js culls with, a frame early: a mesh whose
+     * bounds miss the frustum is not drawn, so its pass needs no depth.
+     */
+    private hasAnythingInView(layer: RenderLayer): boolean {
+        if (!this.hasAnythingToDraw(layer)) {
+            return false;
+        }
+        const camera = layer.camera;
+        camera.updateMatrixWorld();
+        Renderer._viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        Renderer._frustum.setFromProjectionMatrix(Renderer._viewProjection);
+        let inView = false;
+        for (const listId of layer.lists) {
+            this.current3DRenderLists.get(listId)?.traverseVisible(object => {
+                if (inView) {
+                    return;
+                }
+                const mesh = object as THREE.Mesh;
+                if (!mesh.isMesh) {
+                    // Lines, points and sprites: not worth bounding, assume seen.
+                    inView = (object as THREE.Line).isLine || (object as THREE.Points).isPoints
+                        || (object as THREE.Sprite).isSprite;
+                    return;
+                }
+                // An instanced mesh's geometry bounds only one instance.
+                if (!mesh.frustumCulled || (mesh as THREE.InstancedMesh).isInstancedMesh) {
+                    inView = true;
+                    return;
+                }
+                if (mesh.geometry.boundingSphere === null) {
+                    mesh.geometry.computeBoundingSphere();
+                }
+                mesh.updateWorldMatrix(true, false);
+                Renderer._sphere.copy(mesh.geometry.boundingSphere!).applyMatrix4(mesh.matrixWorld);
+                inView = Renderer._frustum.intersectsSphere(Renderer._sphere);
+            });
+            if (inView) {
+                return true;
+            }
+        }
+        return false;
+    }
+    private static readonly _viewProjection = new THREE.Matrix4();
+    private static readonly _frustum = new THREE.Frustum();
+    private static readonly _sphere = new THREE.Sphere();
 
     /** Whether this layer's lists came out of the build with anything in them. */
     private hasAnythingToDraw(layer: RenderLayer): boolean {

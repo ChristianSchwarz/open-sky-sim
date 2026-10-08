@@ -87,11 +87,12 @@ export class HeightField {
 
     /**
      * Replace the flatten pads, as a re-base must: their centres are in the
-     * frame's east/north. In place, because the sampler holds the same array.
+     * frame's east/north. The sampler re-indexes its own copy.
      */
     setPads(pads: readonly FlattenPad[]): void {
         this.pads.length = 0;
         this.pads.push(...pads);
+        this.sampler.setPads(this.pads);
     }
 
     /** Airbase flatten pads, so a mirror can apply the same flattening. */

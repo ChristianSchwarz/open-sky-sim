@@ -30,6 +30,7 @@ import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmBorder, PtmTile } fr
 import type { SeamState } from './seamStitch';
 import type { BridgeMeshSet } from './bridgeMeshes';
 import type { RoadMeshes } from './roadStrokes';
+import type { FarLandMeshes } from './farLandTiles';
 import { TileKey, tileBounds } from './tiling';
 import { LAND_TONE_BASE, TerrainTone } from './tones';
 
@@ -78,6 +79,11 @@ export interface TileMeshes {
      * three states as `cover`, then the bound meshes. Released with the tile.
      */
     roads?: RoadMeshes | 'pending' | 'none';
+    /**
+     * A leaf's far land (farLandTiles.ts): lighter levels its land mesh is
+     * swapped to from far off. The same three states as `roads`.
+     */
+    far?: FarLandMeshes | 'pending' | 'none';
     /**
      * The tile's railway beds, once asked for by its roads or its trees,
      * whichever comes first: resolves after the land has been swapped for
@@ -254,7 +260,7 @@ function vertexCountOf(g: THREE.BufferGeometry): number {
  * toward it and the two meet in the middle. Edits `normals` in place; the
  * smooth geometry is built from the same arrays afterwards.
  */
-function leanEdgeNormals(positions: Int16Array, normals: Int8Array): void {
+export function leanEdgeNormals(positions: Int16Array, normals: Int8Array): void {
     const count = positions.length / 3;
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
     for (let v = 0; v < count; v++) {

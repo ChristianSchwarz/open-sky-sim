@@ -3,7 +3,8 @@ import { describe, it } from 'node:test';
 import * as THREE from 'three';
 import { RoadsMode } from '../state/gameDefs';
 import { ROAD_SIDE_BIT, RoadClass, decodePtr, encodePtr } from './ptr';
-import { RoadStrokes, buildRoadMeshes, roadTriangles } from './roadStrokes';
+import { RoadStrokes, buildRoadMeshes, roadTriangles, trackDetailReachM } from './roadStrokes';
+import { RAIL_DETAIL_FADE_M } from '../scene/materials/shaders/depthFP';
 import { TileMeshes } from './tileMesh';
 
 const ID = { z: 12, x: 4402, y: 856 };
@@ -152,5 +153,48 @@ describe('RoadStrokes', () => {
         strokes.release(meshes);
         assert.equal(meshes.roads, 'none');
         assert.equal(strokes.trianglesOf(meshes), 0);
+    });
+});
+
+describe('track detail reach', () => {
+    it('is never closer than where the shader has faded every fragment out', () => {
+        // Any pixel, any surface past the reach: the larger of the two
+        // footprints the rail shader takes (fwidth across and along, both
+        // in-surface directions) must be past the end of the fade.
+        let seed = 11;
+        const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+        const unit = () => new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
+        let worst = Infinity;
+        for (let i = 0; i < 20000; i++) {
+            const fov = 20 + rand() * 80;
+            const aspect = 1 + rand() * 1.5;
+            const height = 300 + Math.floor(rand() * 2000);
+            const width = height * aspect;
+            const reach = trackDetailReachM(fov, aspect, height);
+            const tanV = Math.tan(THREE.MathUtils.degToRad(fov) / 2);
+            const ray = (px: number, py: number) => new THREE.Vector3(
+                (2 * px / width - 1) * tanV * aspect, (1 - 2 * py / height) * tanV, -1);
+            const px = rand() * (width - 1);
+            const py = rand() * (height - 1);
+            const centre = ray(px, py);
+            const n = unit();
+            if (Math.abs(n.dot(centre.clone().normalize())) < 0.05) {
+                continue;
+            }
+            const p = centre.clone().normalize().multiplyScalar(reach * (1 + rand() * 0.01));
+            const hit = (d: THREE.Vector3) => d.clone().multiplyScalar(n.dot(p) / n.dot(d));
+            const dx = hit(ray(px + 1, py)).sub(p);
+            const dy = hit(ray(px, py + 1)).sub(p);
+            const a = new THREE.Vector3().crossVectors(n, unit()).normalize();
+            const l = new THREE.Vector3().crossVectors(n, a);
+            const fp = (u: THREE.Vector3) => Math.abs(dx.dot(u)) + Math.abs(dy.dot(u));
+            worst = Math.min(worst, Math.max(fp(a), fp(l)));
+        }
+        assert.ok(worst >= RAIL_DETAIL_FADE_M[1] * 0.999, `a pixel ${worst} m wide still shows detail`);
+    });
+
+    it('reaches kilometres, not tens of kilometres, at ordinary sizes', () => {
+        const reach = trackDetailReachM(60, 16 / 9, 1080);
+        assert.ok(reach > 3000 && reach < 12000, `${reach}`);
     });
 });
