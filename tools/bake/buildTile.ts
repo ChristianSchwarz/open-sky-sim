@@ -213,6 +213,13 @@ export interface BuildTileInput {
      * embankment is not merged away into the hillside beside it.
      */
     roadMask?: Uint8Array;
+    /**
+     * Border grid nodes the tile must have a vertex at (borderNodeKey), where
+     * roads and railways cross its edge: the runtime grading moves the border
+     * there, alike in both tiles, to carry a ramp across it, and needs
+     * vertices to move (see railBed.ts RailBedInput.borderRamps).
+     */
+    forcedBorderNodes?: ReadonlySet<string>;
     id: PtmTileId;
     /** Return the surface grid triangles too (diagnostics only). */
     keepGridTriangles?: boolean;
@@ -594,6 +601,9 @@ function gridKey(gx: number, gy: number): string {
     return `${gx.toFixed(4)},${gy.toFixed(4)}`;
 }
 
+/** BuildTileInput.forcedBorderNodes' key of the grid node (gx, gy). */
+export const borderNodeKey = gridKey;
+
 /** Every grid position some triangle tags as shore; see costWithSkirts. */
 function shorePositionsOf(tris: GridTriangle[]): Set<string> {
     const out = new Set<string>();
@@ -627,6 +637,7 @@ function shorePositionsOf(tris: GridTriangle[]): Set<string> {
 export function densifyBorder(
     tris: GridTriangle[], size: number, heightAt: (gx: number, gy: number) => number,
     tolM: number, isLand: (t: GridTriangle) => boolean,
+    forced?: ReadonlySet<string>,
 ): { triangles: GridTriangle[]; inserted: number } {
     const cells = size - 1;
     const out: GridTriangle[] = [];
@@ -648,8 +659,14 @@ export function densifyBorder(
         }
         let worst = tolM;
         let at: number | undefined;
+        // A node the tile must have (BuildTileInput.forcedBorderNodes) splits
+        // the edge whatever the error; the one nearest its middle first.
+        let must: number | undefined;
         for (let k = Math.floor(lo) + 1; k < hi; k++) {
             const x = alongX ? k : a.x, y = alongX ? a.y : k;
+            if (forced?.has(gridKey(x, y)) && (must === undefined || Math.abs(k - (lo + hi) / 2) < Math.abs(must - (lo + hi) / 2))) {
+                must = k;
+            }
             const h = heightAt(x, y);
             if (!Number.isFinite(h)) {
                 continue;
@@ -660,6 +677,7 @@ export function densifyBorder(
                 at = k;
             }
         }
+        at ??= must;
         if (at === undefined) {
             return undefined;
         }
@@ -1287,7 +1305,7 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     collapsedVertices = collapsed.collapsed;
     let borderSplits = 0;
     if (input.borderSplitErrorM !== undefined) {
-        const dense = densifyBorder(tris, size, sampleHeight, input.borderSplitErrorM, isLandTriangle);
+        const dense = densifyBorder(tris, size, sampleHeight, input.borderSplitErrorM, isLandTriangle, input.forcedBorderNodes);
         tris = dense.triangles;
         borderSplits = dense.inserted;
     }

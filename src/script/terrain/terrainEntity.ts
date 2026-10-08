@@ -47,7 +47,7 @@ import {
 import {
     TerrainManifest, baseUrlOf, heightIndexUrl, heightTileUrl, meshIndexUrl, meshTileUrl,
     textureIndexUrl,
-    bridgeIndexUrl,
+    bedIndexUrl, bridgeIndexUrl,
     roadIndexUrl,
 } from './manifest';
 import { CoverBinding, CoverTextures } from './coverTextures';
@@ -66,18 +66,9 @@ import {
     TileMeshes, TileRailBed, buildSmoothLandGeometryFromFaceted, buildTileMeshes, disposeTileMeshes,
     landGeometryFromArrays, tileOriginWorld,
 } from './tileMesh';
-import { RAIL_BED_SEGMENT_FLOATS, RailBedStats, RailWalls, buildRailBedExclusion, deckTrackEnds, railChains } from './railBed';
-import { RailBedClient } from './railBedClient';
-import { RAIL_FIELD_SEGMENT_FLOATS } from './railBedField';
-
-/**
- * Running totals in `window.__railBedStats`, per zoom, for the console:
- * workerMs is the beds' own cost, waitMs that plus the queue, applyMs the
- * render thread's share.
- */
-type RailBedTotals = Record<string, RailBedStats & { tiles: number; workerMs: number; waitMs: number; applyMs: number }>;
-import { borderEntryIndex } from './ptm';
-import { PtrTile } from './ptr';
+import { RailWalls, buildRailBedExclusion } from './railBed';
+import { TilePlacement, bedsToGeodetic } from './railBedField';
+import { BedStore } from './bedStore';
 import { tileBounds } from './tiling';
 import { TileStore } from './tileStore';
 import { PRIORITY_IN_FRUSTUM, TileStreamer, TileWant, predictViewTarget } from './tileStreamer';
@@ -297,6 +288,8 @@ export class TerrainEntity implements Entity {
     private airfieldExclusion: AirfieldExclusion | undefined;
     private surfaceExclusion: ((x: number, z: number) => boolean) | undefined;
     private readonly bridges: BridgeMeshes;
+    /** The bake's road and railway beds and retaining walls (pbd.ts). */
+    private readonly beds: BedStore;
     private readonly railWallMaterial: THREE.Material;
     private readonly quadtree: Quadtree;
     private readonly oceans = new Map<string, OceanPatch>();
@@ -473,9 +466,8 @@ export class TerrainEntity implements Entity {
         meshes.treesBusy = true;
         const ptr = await this.roads.load(tile.id, 0);
         const onRoad = ptr ? buildRoadExclusion(ptr) : undefined;
-        // Trees wait for the tile's railway beds: the ground on and beside
-        // them is no longer where this tile's facets put it.
-        const onBed = ptr && !meshes.disposed ? (await this.railBedJob(tile.id, meshes, ptr))?.onBed : undefined;
+        // Trees keep off the tile's road and railway beds, and their batters.
+        const onBed = !meshes.disposed ? (await this.railBedJob(tile.id, meshes))?.onBed : undefined;
         const onManMade = this.sceneExclusionFor(tile);
         const isExcluded = onRoad || onManMade || onBed
             ? (x: number, z: number, y: number) => (onRoad?.(x, z) ?? false) || (onBed?.(x, y, z) ?? false)
@@ -924,10 +916,6 @@ export class TerrainEntity implements Entity {
             railDetailMaterial,
             railTopMaterial,
             onBeforeRender: tileBeforeRender,
-            prepare: async (id, meshes, ptr) => {
-                const bed = await this.railBedJob(id, meshes, ptr);
-                return bed ? { ...ptr, positions: bed.strokePositions } : ptr;
-            },
         });
 
         // Bridges are lit solids on the leaf, in the two road greys: the
@@ -946,6 +934,7 @@ export class TerrainEntity implements Entity {
         };
         // Retaining walls beside railway beds: the bridges' concrete.
         this.railWallMaterial = bridgeMaterial(PaletteCategory.SCENERY_ROAD_SECONDARY);
+        this.beds = new BedStore({ manifest: opts.manifest, baseUrl: base });
         this.bridges = new BridgeMeshes({
             manifest: opts.manifest,
             baseUrl: base,
@@ -1016,18 +1005,21 @@ export class TerrainEntity implements Entity {
         const texIndexUrl = textureIndexUrl(this.manifest, base);
         const roadsIndexUrl = roadIndexUrl(this.manifest, base);
         const bridgesIndexUrl = bridgeIndexUrl(this.manifest, base);
-        const [meshIdx, heightIdx, texIdx, roadIdx, bridgeIdx] = await Promise.all([
+        const bedsIndexUrl = bedIndexUrl(this.manifest, base);
+        const [meshIdx, heightIdx, texIdx, roadIdx, bridgeIdx, bedIdx] = await Promise.all([
             fetchIndex(meshIndexUrl(this.manifest, base)),
             fetchIndex(heightIndexUrl(this.manifest, base)),
             texIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(texIndexUrl),
             roadsIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(roadsIndexUrl),
             bridgesIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(bridgesIndexUrl),
+            bedsIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(bedsIndexUrl),
         ]);
         this.meshIndex = meshIdx;
         this.heightIndex = heightIdx;
         this.cover.setIndex(texIdx);
         this.roads.setIndex(roadIdx);
         this.bridges.setIndex(bridgeIdx);
+        this.beds.setIndex(bedIdx);
         await this.heights.loadCoarse(heightIdx);
     }
 
@@ -1153,38 +1145,39 @@ export class TerrainEntity implements Entity {
     }
 
     /**
-     * A tile's railway beds (railBed.ts): no track steeper than 3 %, the
-     * ground cut and banked under it. Laid once per drawn tile, in a worker,
-     * for whichever of its roads and its trees asks first; both wait for it.
-     * Off with `window.__railBed = false` before the tile streams in; counts
-     * in `window.__railBedStats`.
+     * A tile's road and railway beds, as the bake laid them
+     * (tools/bake_planet_grade.ts): the land and the strokes arrive graded;
+     * the .pbd sidecar (pbd.ts) carries what is left - the beds, which the
+     * collision field clamps to (leaf only, the finest) and the trees and
+     * stones keep off, and the retaining walls. Loaded once per drawn tile.
      */
-    private railBedJob(id: TileKey, meshes: TileMeshes, ptr: PtrTile): Promise<TileRailBed | undefined> {
-        meshes.railBed ??= this.layRailBeds(id, meshes, ptr).catch(err => {
-            console.error(`[railBed] ${tileKeyString(id)}`, err);
+    private railBedJob(id: TileKey, meshes: TileMeshes): Promise<TileRailBed | undefined> {
+        meshes.railBed ??= this.loadBeds(id, meshes).catch(err => {
+            console.error(`[beds] ${tileKeyString(id)}`, err);
             return undefined;
         });
         return meshes.railBed;
     }
 
-    private async layRailBeds(id: TileKey, meshes: TileMeshes, ptr: PtrTile): Promise<TileRailBed | undefined> {
-        const w = window as unknown as { __railBed?: boolean; __railBedStats?: RailBedTotals };
-        if (w.__railBed === false || railChains(ptr).length === 0) {
+    private async loadBeds(id: TileKey, meshes: TileMeshes): Promise<TileRailBed | undefined> {
+        if (!this.beds.has(id)) {
             return undefined;
         }
-        // Bridges: the track on their decks, which the approaches climb to,
-        // and their structure, which the earthworks keep clear of.
-        const bridges = await this.railBridges(id, meshes);
-        const faceted = meshes.landGeometryFaceted;
-        if (meshes.disposed || !faceted || !meshes.land) {
+        const pbd = await this.beds.load(id, id.z);
+        if (!pbd || meshes.disposed) {
             return undefined;
         }
-        const pos = faceted.getAttribute('position') as THREE.BufferAttribute;
-        const nrm = faceted.getAttribute('normal') as THREE.InterleavedBufferAttribute;
-        const col = faceted.getAttribute('coverColor') as THREE.InterleavedBufferAttribute;
         const quantScale = meshes.group.scale.x;
-        if (!pos || !nrm || !col || Math.abs(ptr.quantScale - quantScale) > 1e-6 * quantScale) {
+        if (pbd.walls && !meshes.railWalls) {
+            meshes.railWalls = this.railWallMesh(pbd.walls, quantScale);
+            meshes.group.add(meshes.railWalls);
+        }
+        if (pbd.beds.length === 0) {
             return undefined;
+        }
+        const leaf = id.z === this.manifest.mesh.maxZoom;
+        if (leaf) {
+            this.heights.railBeds.set(tileKeyString(id), bedsToGeodetic(pbd.beds, this.tilePlacement(meshes)));
         }
         // The real vertical at the tile's centre, in the bake frame's axes
         // (x east, y up, z south), which is what the tile's offsets are in.
@@ -1193,221 +1186,8 @@ export class TerrainEntity implements Entity {
         const e0 = ecefToEnu(this.railBedBasis, geodeticToEcef(lat, lon, 0));
         const e1 = ecefToEnu(this.railBedBasis, geodeticToEcef(lat, lon, 1000));
         const up: [number, number, number] = [(e1.e - e0.e) / 1000, (e1.u - e0.u) / 1000, -(e1.n - e0.n) / 1000];
-        // Copies, handed to the worker; the border as baked, not as the seam
-        // stitcher has moved it: the stitcher moves it again on the new land.
-        const positions = (pos.array as Int16Array).slice();
-        const border = meshes.border?.vertices ?? [];
-        const pinned = new Uint32Array(border.length);
-        border.forEach((entry, i) => {
-            const v = borderEntryIndex(entry);
-            pinned[i] = v;
-            if (meshes.seam) {
-                positions.set(meshes.seam.orig.subarray(i * 3, i * 3 + 3), v * 3);
-            }
-        });
         const scale = 2 ** Math.max(0, this.manifest.mesh.maxZoom - id.z);
-        const t0 = performance.now();
-        const run = await this.railBedWorker.run({
-            land: {
-                positions,
-                normals: (nrm.data.array as Int8Array).slice(),
-                attrs: (col.data.array as Uint8Array).slice(),
-            },
-            quantScale, strokes: ptr, up,
-            liftM: 0.05 * approxTileEdgeMetres(id) / 256,
-            pinned,
-            scale,
-            // Only a leaf is close enough for a cutting to be worth triangles.
-            refine: id.z === this.manifest.mesh.maxZoom,
-            deckEnds: bridges.deckEnds,
-            keep: this.railKeep(meshes, bridges.tris),
-        }, id.z);
-        const result = run.result;
-        const waited = performance.now() - t0;
-        if (!result || meshes.disposed) {
-            return undefined;
-        }
-        const t1 = performance.now();
-        if (result.land && meshes.land && meshes.landGeometryFaceted === faceted) {
-            const g = landGeometryFromArrays(result.land.positions, result.land.normals, result.land.attrs, quantScale);
-            if (g) {
-                const smooth = meshes.landGeometrySmooth ? buildSmoothLandGeometryFromFaceted(g) : undefined;
-                faceted.dispose();
-                meshes.landGeometrySmooth?.dispose();
-                meshes.landGeometryFaceted = g;
-                meshes.landGeometrySmooth = smooth;
-                meshes.land.geometry = this.landShading === TerrainShading.SMOOTH && smooth ? smooth : g;
-                // The new land starts from the baked border: have the
-                // stitcher put it back on its neighbours, and forget the
-                // drawn-height index built over the old one.
-                if (meshes.seam) {
-                    meshes.seam.signature = '';
-                }
-                this.drawnHeightIndices.delete(tileKeyString(id));
-            }
-        }
-        if (result.walls && !meshes.railWalls) {
-            meshes.railWalls = this.railWallMesh(result.walls, quantScale);
-            meshes.group.add(meshes.railWalls);
-        }
-        // The collision surface takes the leaf's beds, the finest there are.
-        if (id.z === this.manifest.mesh.maxZoom && result.beds.length > 0) {
-            this.heights.railBeds.set(tileKeyString(id), this.railBedsToGeodetic(result.beds, meshes));
-        }
-        const totals = w.__railBedStats ??= {};
-        const s = totals[`z${id.z}`] ??= {
-            tiles: 0, workerMs: 0, waitMs: 0, applyMs: 0, chains: 0, trackM: 0, steepM: 0, overLimitM: 0,
-            trianglesAdded: 0, verticesMoved: 0, wallTriangles: 0,
-        };
-        s.tiles++;
-        s.workerMs += run.ms;
-        s.waitMs += waited;
-        s.applyMs += performance.now() - t1;
-        s.chains += result.stats.chains;
-        s.trackM += result.stats.trackM;
-        s.steepM += result.stats.steepM;
-        s.overLimitM += result.stats.overLimitM;
-        s.trianglesAdded += result.stats.trianglesAdded;
-        s.verticesMoved += result.stats.verticesMoved;
-        s.wallTriangles += result.stats.wallTriangles;
-        return {
-            strokePositions: result.strokePositions,
-            onBed: buildRailBedExclusion(result.beds, up, 32 * scale),
-        };
-    }
-
-    /**
-     * The bridges of a tile and its eight neighbours, in the tile's own frame
-     * (metres): the ends of the track on their decks, which the approaches
-     * climb to (railBed.ts RailBedInput.deckEnds), and every triangle of
-     * them, which the earthworks keep clear of (RailBedInput.keep). The
-     * neighbours' too: a deck can start a few metres across the border from
-     * the track that climbs to it. Every tile's frame has the bake's axes,
-     * so a neighbour's points only shift by the difference between the two
-     * tiles' origins.
-     */
-    private async railBridges(id: TileKey, meshes: TileMeshes): Promise<{ deckEnds?: Float64Array; tris?: Float64Array }> {
-        if (id.z !== this.manifest.mesh.maxZoom) {
-            return {};
-        }
-        const ends: number[] = [];
-        const tris: number[] = [];
-        let own: { e: number; u: number; n: number } | undefined;
-        for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-                const nb: TileKey = { z: id.z, x: id.x + dx, y: id.y + dy };
-                if (!this.bridges.has(nb)) {
-                    continue;
-                }
-                const pbr = await this.bridges.load(nb, id.z).catch(() => null);
-                if (!pbr || pbr.indices.length === 0) {
-                    continue;
-                }
-                let ox = 0, oy = 0, oz = 0;
-                if (dx !== 0 || dy !== 0) {
-                    own ??= await this.tileCentreEnu(id, meshes);
-                    const theirs = await this.tileCentreEnu(nb, this.streamer.get(nb));
-                    if (!own || !theirs) {
-                        continue;
-                    }
-                    // Tile frames: x east, y up, z south, from each tile's own centre.
-                    ox = theirs.e - own.e;
-                    oy = theirs.u - own.u;
-                    oz = own.n - theirs.n;
-                }
-                if (pbr.track && pbr.track.indices.length > 0) {
-                    const e = deckTrackEnds(pbr.track, pbr.quantScale);
-                    for (let i = 0; i < e.length; i += 3) {
-                        ends.push(e[i] + ox, e[i + 1] + oy, e[i + 2] + oz);
-                    }
-                }
-                const q = pbr.quantScale, P = pbr.positions;
-                for (const vi of pbr.indices) {
-                    tris.push(P[vi * 3] * q + ox, P[vi * 3 + 1] * q + oy, P[vi * 3 + 2] * q + oz);
-                }
-            }
-        }
-        return {
-            deckEnds: ends.length > 0 ? Float64Array.from(ends) : undefined,
-            tris: tris.length > 0 ? Float64Array.from(tris) : undefined,
-        };
-    }
-
-    /** Everything the tile's earthworks keep clear of besides its roads. */
-    private railKeep(meshes: TileMeshes, bridgeTris: Float64Array | undefined): { tris?: Float64Array; segs?: Float64Array } {
-        const water = this.railKeepWater(meshes);
-        const tris = new Float64Array(water.tris.length + (bridgeTris?.length ?? 0));
-        tris.set(water.tris, 0);
-        if (bridgeTris) {
-            tris.set(bridgeTris, water.tris.length);
-        }
-        return {
-            tris: tris.length > 0 ? tris : undefined,
-            segs: water.segs.length > 0 ? Float64Array.from(water.segs) : undefined,
-        };
-    }
-
-    /**
-     * The tile's water - lakes and sea as triangles, watercourses as
-     * segments with their half widths - in its own frame, metres, for the
-     * earthworks to keep clear of (railBed.ts RailBedInput.keep).
-     */
-    private railKeepWater(meshes: TileMeshes): { tris: number[]; segs: number[] } {
-        const q = meshes.group.scale.x;
-        const tris: number[] = [];
-        const segs: number[] = [];
-        const water = meshes.water?.geometry;
-        const wp = water?.getAttribute('position')?.array as Int16Array | undefined;
-        const wi = water?.getIndex()?.array;
-        if (wp && wi) {
-            for (let i = 0; i < wi.length; i++) {
-                const v = wi[i];
-                tris.push(wp[v * 3] * q, wp[v * 3 + 1] * q, wp[v * 3 + 2] * q);
-            }
-        }
-        const rivers = meshes.rivers?.geometry;
-        const rp = rivers?.getAttribute('position')?.array as Int16Array | undefined;
-        const rh = rivers?.getAttribute('riverHalf')?.array as Uint16Array | undefined;
-        const ri = rivers?.getIndex()?.array;
-        if (rp && rh && ri) {
-            // A ribbon is pairs of vertices on its centreline: its segments
-            // are the triangle edges between two different points.
-            const seen = new Set<number>();
-            for (let i = 0; i + 2 < ri.length; i += 3) {
-                for (let e = 0; e < 3; e++) {
-                    const a = ri[i + e], b = ri[i + (e + 1) % 3];
-                    const key = a < b ? a * 65536 + b : b * 65536 + a;
-                    if (seen.has(key) || (rp[a * 3] === rp[b * 3] && rp[a * 3 + 1] === rp[b * 3 + 1] && rp[a * 3 + 2] === rp[b * 3 + 2])) {
-                        continue;
-                    }
-                    seen.add(key);
-                    segs.push(rp[a * 3] * q, rp[a * 3 + 1] * q, rp[a * 3 + 2] * q,
-                        rp[b * 3] * q, rp[b * 3 + 1] * q, rp[b * 3 + 2] * q, Math.max(rh[a], rh[b]) / 10);
-                }
-            }
-        }
-        return { tris, segs };
-    }
-
-    /**
-     * A tile's origin in the bake's ENU frame: its centre at its baked
-     * centre height, which a drawn tile's placement gives back and the
-     * decoded mesh tile has in its header.
-     */
-    private async tileCentreEnu(id: TileKey, meshes: TileMeshes | undefined): Promise<{ e: number; u: number; n: number } | undefined> {
-        let height: number | undefined;
-        if (meshes && !meshes.disposed) {
-            const p = meshes.group.position;
-            height = worldToGeodetic(this.basis, p.x, p.y, p.z).height;
-        } else {
-            const tile = this.meshStore.peek(id) ?? await this.meshStore.request(id, id.z).catch(() => null);
-            height = tile?.centerHeightM;
-        }
-        if (height === undefined) {
-            return undefined;
-        }
-        const b = tileBounds(id);
-        return ecefToEnu(this.railBedBasis, geodeticToEcef((b.south + b.north) / 2, (b.west + b.east) / 2, height));
+        return { onBed: buildRailBedExclusion(pbd.beds, up, 32 * scale) };
     }
 
     /** A tile's retaining walls as a mesh in its group, whose units are quanta. */
@@ -1428,31 +1208,10 @@ export class TerrainEntity implements Entity {
         return mesh;
     }
 
-    /**
-     * Bed segments from a tile's frame (railBed.ts) to lat/lon and height
-     * above the ellipsoid, for the collision field: through the tile's own
-     * placement, so they land where the bed is drawn.
-     */
-    private railBedsToGeodetic(beds: Float64Array, meshes: TileMeshes): Float64Array {
-        const n = beds.length / RAIL_BED_SEGMENT_FLOATS;
-        const out = new Float64Array(n * RAIL_FIELD_SEGMENT_FLOATS);
-        const v = new THREE.Vector3();
-        const q = meshes.group.quaternion;
-        const origin = meshes.group.position;
-        for (let i = 0; i < n; i++) {
-            const o = i * RAIL_BED_SEGMENT_FLOATS;
-            const r = i * RAIL_FIELD_SEGMENT_FLOATS;
-            for (let k = 0; k < 2; k++) {
-                v.set(beds[o + k * 3], beds[o + k * 3 + 1], beds[o + k * 3 + 2]).applyQuaternion(q).add(origin);
-                const g = worldToGeodetic(this.basis, v.x, v.y, v.z);
-                out[r + k * 3] = g.lon;
-                out[r + k * 3 + 1] = g.lat;
-                out[r + k * 3 + 2] = g.height;
-            }
-            out[r + 6] = beds[o + 6];
-            out[r + 7] = beds[o + 8];
-        }
-        return out;
+    /** Where a tile is drawn, for converting its beds to the collision field's lat/lon. */
+    private tilePlacement(meshes: TileMeshes): TilePlacement {
+        const p = meshes.group.position, q = meshes.group.quaternion;
+        return { basis: cloneEnuBasis(this.basis), position: [p.x, p.y, p.z], quaternion: [q.x, q.y, q.z, q.w] };
     }
 
     /** The bake's ENU frame, which a tile's offsets are in. */
@@ -1461,7 +1220,6 @@ export class TerrainEntity implements Entity {
         return this.bakeBasisCache ??= makeEnuBasis(o.lat, o.lon, o.height ?? 0);
     }
     private bakeBasisCache?: ReturnType<typeof makeEnuBasis>;
-    private readonly railBedWorker = new RailBedClient();
 
     /** Deepest zoom the baked pyramid provides. */
     get maxZoom(): number {
@@ -1824,6 +1582,7 @@ export class TerrainEntity implements Entity {
         this.cover.nextGeneration();
         this.roads.nextGeneration();
         this.bridges.nextGeneration();
+        this.beds.nextGeneration();
 
         const r = this.quadtree.update(
             camera,
@@ -2136,6 +1895,8 @@ export class TerrainEntity implements Entity {
                 this.cover.attach(node.id, meshes, priority);
                 this.roads.attach(node.id, meshes, priority);
                 this.bridges.attach(node.id, meshes, priority);
+                // Walls, collision and the trees' mask: once per drawn tile.
+                void this.railBedJob(node.id, meshes);
                 continue;
             }
             const key = node.key;

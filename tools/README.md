@@ -224,6 +224,69 @@ npm run verify:planet -- --dir assets/terrain
 
 # 6. far-tile textures: leaf .ptm facets -> .ptx per coarse tile + index_tex.bin   (optional)
 npm run bake:tex
+
+# 7. roads, lidar, bridges, grading: strokes draped on the meshes, the lines
+#    and bridge ends measured in the lidar, bridges over them, then the road
+#    and railway beds laid into the land (the last write of a tile)
+npm run bake:road-strokes
+npm run bake:lidar -- --bbox w,s,e,n
+npm run bake:bridges
+npm run bake:grade
+```
+
+Stage 7's grading (`tools/bake_planet_grade.ts`) is where every road and
+railway gets its profile: no track steeper than 3 %, embankments and
+cuttings cut into the land, retaining walls where they are too steep to stand.
+It rewrites the `.ptm` land and the `.ptr` strokes and writes a `.pbd` per tile
+with the beds (collision, the trees' keep-off mask) and the walls; the runtime
+only loads them. A graded tile is flagged, and every stage that reads a tile as
+the ground its lines were drawn on (the road strokes, the bridges, the grading
+itself) refuses it: to grade a box again, re-bake its meshes and road strokes
+first. See [docs/terrain-roads.md](../docs/terrain-roads.md).
+
+`bake:lidar` (`tools/measure_lidar.py`) is what gives the beds real
+embankments, cuttings and bridge approaches: the 30 m land has none. It reads
+the open 1-2 m lidar terrain models along every graded line and beyond every
+bridge end of the planet pyramid's OSM vectors (`.rvr`, `.rbr`) and keeps only
+the answers, a few KB per leaf, in the lidar store
+(`data/imports/lidar/store/12/x/y.lms`, bake-only; `tools/bake/lidarStore.ts`).
+No raster is kept: source tiles are fetched into a bounded cache
+(`data/imports/lidar/.cache`, `--cache-gb`, default 2) or read in windows from
+cloud-optimised GeoTIFFs. `bake:bridges` and `bake:grade` read the store when it
+is there (`--no-lidar` to ignore it); a leaf whose `.rvr`/`.rbr` changed since
+it was measured is measured again on the next run and baked without its
+measurements until then. A re-run skips leaves already measured, so a large
+area can be measured ahead of time, in the background, and resumed.
+
+| Source | Where | Read |
+|---|---|---|
+| Bavaria DGM1 1 m (CC BY 4.0) | Bayern | 1 km GeoTIFFs, whole |
+| BEV ALS DTM 1 m, 2025 (CC BY 4.0) | Austria | 50 km COGs, 2 m overview in 512-pixel windows |
+| swissALTI3D 2 m (OGD, © swisstopo) | Switzerland | 1 km COGs via the STAC API |
+| LGLN DGM1 (CC BY 4.0) | Niedersachsen | 1 km COGs via the STAC API |
+| LGL DGM1 (dl-de/by-2-0) | Baden-Württemberg | WCS, 1 km blocks at 2 m |
+| LGB DGM1 (dl-de/by-2-0) | Brandenburg, Berlin | WCS, 1 km blocks at 2 m |
+| HVBG DGM1 (dl-de/zero-2-0) | Hessen | WCS, 1 km blocks at 2 m |
+| Geobasis NRW DGM1 (dl-de/zero-2-0) | Nordrhein-Westfalen | WCS, 1 km blocks at 2 m |
+| LVermGeo DGM1 (dl-de/by-2-0) | Rheinland-Pfalz | 1 km GeoTIFFs, whole (year from the folder listing) |
+| LAiV DGM1 (CC BY 4.0) | Mecklenburg-Vorpommern | 2 km GeoTIFFs, whole |
+| TLBG DGM1 (dl-de/by-2-0) | Thüringen | 1 km zipped XYZ, whole |
+| IGN MDT 5 m (CC BY 4.0) | Gran Canaria | WCS, 1 km blocks |
+
+Sources are tried in that order per station, one source per station. Not read
+yet - no open access a script can use was found (2026-10-06) - and so graded
+from the land alone: Sachsen-Anhalt (WCS answers 403), Sachsen and
+Schleswig-Holstein (portal downloads only), Hamburg and Bremen (whole-city
+archives), Saarland (fee-based), Krim.
+
+`npm run rebake:box` does that whole tail for a box - meshes, far-tile
+textures, road strokes, lidar, bridges, grading - and is how a change to the
+grading or the bridges reaches an area already baked:
+
+```
+npm run rebake:box -- --at 47.45043,12.38185          # the leaf under a point (a game URL's lat/lng)
+npm run rebake:box -- --at 47.45043,12.38185 --tiles 3 # the 3x3 leaves round it
+npm run rebake:box -- --bbox w,s,e,n
 ```
 
 Stage 6 rasterises every leaf's land facets top-down and folds the images up
@@ -423,14 +486,20 @@ npm run bake:mesh -- --bbox 7.6,45.9,7.8,46.0
 npm run bake:roads -- --bbox 7.6,45.9,7.8,46.0
 npm run bake:tex -- --bbox 7.6,45.9,7.8,46.0
 npm run bake:road-strokes -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:lidar -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:bridges -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:grade -- --bbox 7.6,45.9,7.8,46.0
 ```
 
 `bake:roads` fetches the OSM highways and writes per-tile road vectors
 (`.rvr`) into the planet pyramid; `bake:tex` paints the major ones into the
 far-tile rasters, and `bake:road-strokes` drapes them over the finished
 meshes into the `.ptr` stroke sidecars the runtime draws close up. Both road
-stages are optional and can be re-run on their own: nothing about a mesh
-changes. See [docs/terrain-roads.md](../docs/terrain-roads.md).
+stages are optional, and the strokes can be re-run on their own as long as
+the box is not graded yet: nothing about a mesh changes. `bake:bridges` and
+`bake:grade` come last; once a box is graded, re-baking its strokes or
+bridges means re-baking its meshes first. See
+[docs/terrain-roads.md](../docs/terrain-roads.md).
 
 `--osm-landuse` (the F9 import pipeline passes it too — see
 [`--osm-landuse`](#--osm-landuse-real-vector-edges-instead-of-raster-stairsteps)
@@ -499,6 +568,9 @@ npm run bake:cover -- --bbox 7.6,45.9,7.8,46.0 --osm-landuse --pbf data/switzerl
 npm run bake:mesh -- --bbox 7.6,45.9,7.8,46.0
 npm run bake:tex -- --bbox 7.6,45.9,7.8,46.0
 npm run bake:road-strokes -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:lidar -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:bridges -- --bbox 7.6,45.9,7.8,46.0
+npm run bake:grade -- --bbox 7.6,45.9,7.8,46.0
 ```
 
 The same extract file is reused for every future import inside its coverage —

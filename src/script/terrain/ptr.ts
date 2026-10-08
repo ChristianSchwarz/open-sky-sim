@@ -22,7 +22,7 @@
  *    0  u32  magic 'PTR1'        8  u32  x
  *    4  u8   version = 3        12  u32  y
  *    5  u8   z                  16  f32  quantScale
- *    6  u16  reserved           20  u16  vertCount   22  u16  indexCount / 3
+ *    6  u16  tile flags         20  u16  vertCount   22  u16  indexCount / 3
  *
  *   payload, each section padded to a 4-byte boundary
  *     pos    i16 x3 per vertex   centreline point, two vertices per point
@@ -183,6 +183,65 @@ export interface PtrTile {
     /** TRACK_FLAG_* bits; all zero before version 3. */
     flags: Uint8Array;
     indices: Uint16Array;
+    /** PTR_TILE_* bits of the header (what was a reserved word, so 0 on older files). */
+    tileFlags?: number;
+}
+
+/**
+ * The strokes are on their beds' profiles (tools/bake_planet_grade.ts):
+ * moved, and vertices inserted. Stages that drape or measure the strokes as
+ * drawn refuse such a tile.
+ */
+export const PTR_TILE_GRADED = 1;
+
+/**
+ * A decoded (or graded) tile written back as it is: the quantised sections
+ * verbatim, so nothing is rounded twice. `tileFlags` goes in the header.
+ */
+export function encodePtrRaw(t: PtrTile, tileFlags = t.tileFlags ?? 0): Uint8Array {
+    const vertCount = t.positions.length / 3;
+    const triCount = t.indices.length / 3;
+    if (vertCount > PTR_MAX_VERTS) {
+        throw new Error(`PTR1: ${vertCount} vertices exceed ${PTR_MAX_VERTS}`);
+    }
+    if (triCount > 0xffff) {
+        throw new Error(`PTR1: ${triCount} triangles exceed 65535`);
+    }
+    if (t.directions.length !== vertCount * 4 || t.halfWidths.length !== vertCount
+        || t.along.length !== vertCount || t.flags.length !== vertCount) {
+        throw new Error(`PTR1: section sizes disagree with ${vertCount} vertices`);
+    }
+    const posBytes = align4(vertCount * 6);
+    const dirBytes = align4(vertCount * 4);
+    const halfBytes = align4(vertCount * 2);
+    const alongBytes = align4(vertCount * 2);
+    const flagBytes = align4(vertCount);
+    const idxBytes = align4(triCount * 6);
+    const out = new Uint8Array(PTR_HEADER_BYTES + posBytes + dirBytes + halfBytes + alongBytes + flagBytes + idxBytes);
+    const view = new DataView(out.buffer);
+    view.setUint32(0, PTR_MAGIC, true);
+    view.setUint8(4, PTR_VERSION);
+    view.setUint8(5, t.id.z);
+    view.setUint16(6, tileFlags, true);
+    view.setUint32(8, t.id.x, true);
+    view.setUint32(12, t.id.y, true);
+    view.setFloat32(16, t.quantScale, true);
+    view.setUint16(20, vertCount, true);
+    view.setUint16(22, triCount, true);
+    const put = (a: ArrayBufferView, at: number) => out.set(new Uint8Array(a.buffer, a.byteOffset, a.byteLength), at);
+    let off = PTR_HEADER_BYTES;
+    put(t.positions, off);
+    off += posBytes;
+    put(t.directions, off);
+    off += dirBytes;
+    put(t.halfWidths, off);
+    off += halfBytes;
+    put(t.along, off);
+    off += alongBytes;
+    put(t.flags, off);
+    off += flagBytes;
+    put(t.indices, off);
+    return out;
 }
 
 function align4(n: number): number {
@@ -279,6 +338,7 @@ export function decodePtr(bytes: ArrayBuffer | Uint8Array): PtrTile {
         throw new Error(`PTR1 version ${version}, expected 1 to ${PTR_VERSION}`);
     }
     const z = view.getUint8(5);
+    const tileFlags = view.getUint16(6, true);
     const x = view.getUint32(8, true);
     const y = view.getUint32(12, true);
     const quantScale = view.getFloat32(16, true);
@@ -308,5 +368,5 @@ export function decodePtr(bytes: ArrayBuffer | Uint8Array): PtrTile {
     const flags = flagBytes > 0 ? new Uint8Array(raw.buffer, off, vertCount) : new Uint8Array(vertCount);
     off += flagBytes;
     const indices = new Uint16Array(raw.buffer, off, triCount * 3);
-    return { id: { z, x, y }, quantScale, positions, directions, halfWidths, along, flags, indices };
+    return { id: { z, x, y }, quantScale, positions, directions, halfWidths, along, flags, indices, tileFlags };
 }

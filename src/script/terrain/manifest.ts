@@ -87,6 +87,21 @@ interface BridgeStreamManifest {
     maxZoom: number;
 }
 
+/**
+ * Bed sidecars, written by tools/bake_planet_grade.ts: one PBD1 per graded
+ * tile with a road or railway bed (z8 up) - the beds for collision and the
+ * trees, and the retaining walls. Absent on a pyramid that was not graded.
+ */
+interface BedStreamManifest {
+    /** Path template, e.g. `{z}/{x}/{y}.pbd`. */
+    path: string;
+    indexPath: string;
+    encoding: string;
+    transport?: string;
+    minZoom: number;
+    maxZoom: number;
+}
+
 interface HeightStreamManifest {
     path: string;
     indexPath: string;
@@ -160,6 +175,7 @@ export interface TerrainManifest {
     texture?: TextureStreamManifest;
     roads?: RoadStreamManifest;
     bridges?: BridgeStreamManifest;
+    beds?: BedStreamManifest;
     height: HeightStreamManifest;
     flattenPads: FlattenPadManifest[];
     /**
@@ -290,6 +306,17 @@ export function bridgeTileUrl(
 
 export function bridgeIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
     return manifest.bridges ? `${base}/${manifest.bridges.indexPath}` : undefined;
+}
+
+/** Only meaningful when `manifest.beds` is present. */
+export function bedTileUrl(
+    manifest: TerrainManifest, z: number, x: number, y: number, base: string,
+): string {
+    return `${base}/${expand(manifest.beds!.path, z, x, y)}`;
+}
+
+export function bedIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
+    return manifest.beds ? `${base}/${manifest.beds.indexPath}` : undefined;
 }
 
 export function meshIndexUrl(manifest: TerrainManifest, base: string): string {

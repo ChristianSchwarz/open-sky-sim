@@ -187,20 +187,30 @@ describe('the bake plans end with meshes then textures over the same box', () =>
     /**
      * The mesh bake must be followed, immediately, by the texture bake with
      * the same --bbox. An import then drapes the road strokes over the
-     * finished meshes, and nothing runs after that.
+     * finished meshes, measures the lines in the lidar, bakes the bridges
+     * over them and grades the beds into the land, the last write of a tile;
+     * nothing runs after that.
      */
     function assertMeshThenTextures(steps: Step[], withRoads: boolean): void {
         const tools = steps.map(s => s.args.find(a => a.startsWith('tools/')));
         const mesh = tools.indexOf('tools/bake_planet_mesh.ts');
         assert.ok(mesh >= 0, 'no mesh bake in the plan');
         assert.equal(tools[mesh + 1], 'tools/bake_planet_tex.ts', 'texture bake does not follow the mesh bake');
-        const bboxOf = (s: Step) => s.args[s.args.indexOf('--bbox') + 1];
+        // `--bbox w,s,e,n`, or `--bbox=w,s,e,n` for a Python stage (argparse reads a
+        // negative west as an option of its own).
+        const bboxOf = (s: Step) => s.args.find(a => a.startsWith('--bbox='))?.slice('--bbox='.length)
+            ?? s.args[s.args.indexOf('--bbox') + 1];
         assert.equal(bboxOf(steps[mesh + 1]), bboxOf(steps[mesh]));
         assert.ok(bboxOf(steps[mesh]).split(',').length === 4, 'mesh bake has no box');
         if (withRoads) {
             assert.equal(tools[mesh + 2], 'tools/bake_planet_roads.ts', 'road strokes do not follow the textures');
             assert.equal(bboxOf(steps[mesh + 2]), bboxOf(steps[mesh]));
-            assert.equal(mesh + 3, steps.length, 'something runs after the road strokes');
+            assert.equal(tools[mesh + 3], 'tools/measure_lidar.py', 'the lidar is not measured after the road strokes');
+            assert.equal(bboxOf(steps[mesh + 3]), bboxOf(steps[mesh]));
+            assert.equal(tools[mesh + 4], 'tools/bake_planet_bridges.ts', 'bridges do not follow the lidar');
+            assert.equal(tools[mesh + 5], 'tools/bake_planet_grade.ts', 'grading does not follow the bridges');
+            assert.equal(bboxOf(steps[mesh + 5]), bboxOf(steps[mesh]));
+            assert.equal(mesh + 6, steps.length, 'something runs after the grading');
         } else {
             assert.equal(mesh + 2, steps.length, 'something runs after the texture bake');
         }

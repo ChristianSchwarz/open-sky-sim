@@ -85,6 +85,13 @@ export const PTM_GEOMETRIC_ERROR_OFFSET = 68;
 export const PTM_FLAG_HAS_LAND = 1 << 0;
 export const PTM_FLAG_HAS_WATER = 1 << 1;
 export const PTM_FLAG_HAS_RIVERS = 1 << 2;
+/**
+ * The land has had its road and railway beds laid (tools/bake_planet_grade.ts).
+ * Every stage that reads a tile as the ground the lines were drawn on - the
+ * road drape, the bridges, the measured line profiles, the grading itself -
+ * refuses such a tile: it is no longer that ground.
+ */
+export const PTM_FLAG_GRADED = 1 << 3;
 
 /** Water indices are u16, so a tile may not exceed this many water vertices. */
 const PTM_MAX_WATER_VERTS = 65536;
@@ -765,4 +772,75 @@ function borderViews(buffer: ArrayBufferLike, off: number, vertexCount: number, 
     at += edgeCount * 8;
     const edgeParams = new Float32Array(buffer, at, edgeCount * 2);
     return { vertices, vertexParams, edges, edgeParams };
+}
+
+/** The land sections a tile is spliced with: the same soup decodePtm hands out. */
+export interface PtmLandSoup {
+    positions: Int16Array;
+    normals: Int8Array;
+    attrs: Uint8Array;
+}
+
+/**
+ * A tile with its land replaced and PTM_FLAG_GRADED set: a byte splice, so
+ * water, rivers, the border table and every header word but the land count
+ * and the bounding radius are kept exactly. (encodePtm would not round-trip:
+ * it takes one normal per face and rebuilds the flags.) The new land is in
+ * the tile's own quantisation, and its first vertices must be the old ones'
+ * slots - the border table indexes them (railBed.ts keeps them).
+ */
+export function writePtmLand(bytes: Uint8Array, land: PtmLandSoup): Uint8Array {
+    const old = decodePtm(bytes);
+    const verts = land.positions.length / 3;
+    if (verts % 3 !== 0 || land.normals.length !== verts * 4 || land.attrs.length !== verts * 4) {
+        throw new Error(`PTM1: land soup sizes disagree (${land.positions.length}, ${land.normals.length}, ${land.attrs.length})`);
+    }
+    const oldVerts = old.landPositions.length / 3;
+    if (verts < oldVerts) {
+        throw new Error(`PTM1: new land has fewer vertices (${verts}) than the old (${oldVerts}); border indices would break`);
+    }
+    const head = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const oldLandBytes = align4(oldVerts * 6) + align4(oldVerts * 4) * 2;
+    const restStart = PTM_HEADER_BYTES + oldLandBytes;
+    const rest = bytes.subarray(restStart);
+    const posBytes = align4(verts * 6), nrmBytes = align4(verts * 4), attrBytes = align4(verts * 4);
+    const out = new Uint8Array(PTM_HEADER_BYTES + posBytes + nrmBytes + attrBytes + rest.byteLength);
+    out.set(bytes.subarray(0, PTM_HEADER_BYTES), 0);
+    let off = PTM_HEADER_BYTES;
+    out.set(new Uint8Array(land.positions.buffer, land.positions.byteOffset, land.positions.byteLength), off);
+    off += posBytes;
+    out.set(new Uint8Array(land.normals.buffer, land.normals.byteOffset, land.normals.byteLength), off);
+    off += nrmBytes;
+    out.set(new Uint8Array(land.attrs.buffer, land.attrs.byteOffset, land.attrs.byteLength), off);
+    off += attrBytes;
+    out.set(rest, off);
+    const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    view.setUint32(32, verts, true);
+    view.setUint16(6, head.getUint16(6, true) | PTM_FLAG_GRADED, true);
+    // The beds can lift land past the old bound (an embankment on a peak).
+    const q = old.quantScale;
+    let r2 = 0;
+    for (let i = 0; i < land.positions.length; i += 3) {
+        const x = land.positions[i] * q, y = land.positions[i + 1] * q, z = land.positions[i + 2] * q;
+        r2 = Math.max(r2, x * x + y * y + z * z);
+    }
+    view.setFloat32(28, Math.max(old.boundingRadiusM, Math.sqrt(r2)), true);
+    return out;
+}
+
+/** Whether a tile's land has had its beds laid (PTM_FLAG_GRADED). */
+export function isPtmGraded(tile: Pick<PtmTile, 'flags'>): boolean {
+    return (tile.flags & PTM_FLAG_GRADED) !== 0;
+}
+
+/**
+ * For the bake stages that read a tile as the ground its lines were drawn
+ * on: throws on a graded tile, whose land has the beds in it already.
+ */
+export function assertUngradedPtm(tile: Pick<PtmTile, 'id' | 'flags'>, stage: string): void {
+    if (isPtmGraded(tile)) {
+        const { z, x, y } = tile.id;
+        throw new Error(`${stage}: tile ${z}/${x}/${y} is graded (bake_planet_grade.ts); `
+            + 're-bake its mesh and roads (bake_planet_mesh, bake_planet_roads) for this box first');
+    }
 }

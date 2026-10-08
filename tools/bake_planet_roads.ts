@@ -27,7 +27,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { makeEnuBasis } from '../src/script/terrain/geodesy';
-import { decodePtm } from '../src/script/terrain/ptm';
+import { assertUngradedPtm, decodePtm } from '../src/script/terrain/ptm';
 import { PTR_MAX_VERTS, encodePtr } from '../src/script/terrain/ptr';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import { boundsOf } from './bake/coverTex';
@@ -150,6 +150,7 @@ function main(): void {
         if (fs.existsSync(rvrPath) && fs.existsSync(ptmPath)) {
             const roads = decodeRvr(fs.readFileSync(rvrPath));
             tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
+            assertUngradedPtm(tile, 'bake_planet_roads');
             level.roads += roads.length;
             draped = drapeRoads(tile, basis, roads, capFor(k.z), k.z >= leafZoom);
         }

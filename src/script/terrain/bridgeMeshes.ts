@@ -17,7 +17,7 @@
 import * as THREE from 'three';
 import { RoadsMode } from '../state/gameDefs';
 import { TerrainManifest, bridgeTileUrl } from './manifest';
-import { BridgeRole, PBR_BOX_FLOATS, PbrTile, decodePbr } from './pbr';
+import { BridgeRole, PBR_BOX_FLOATS, PbrTile, decodePbr, pbrRole } from './pbr';
 import { ROAD_RENDER_ORDER, addTrackPasses, strokeGeometry } from './roadStrokes';
 import { TileIndex } from './tileIndex';
 import { TileMeshes } from './tileMesh';
@@ -80,7 +80,7 @@ function roleIndices(tile: PbrTile, role: BridgeRole): Uint16Array | undefined {
     const all = tile.indices;
     let count = 0;
     for (let i = 0; i < all.length; i += 3) {
-        if (tile.normals[all[i] * 4 + 3] === role) {
+        if (pbrRole(tile.normals[all[i] * 4 + 3]) === role) {
             count += 3;
         }
     }
@@ -93,7 +93,7 @@ function roleIndices(tile: PbrTile, role: BridgeRole): Uint16Array | undefined {
     const out = new Uint16Array(count);
     let o = 0;
     for (let i = 0; i < all.length; i += 3) {
-        if (tile.normals[all[i] * 4 + 3] === role) {
+        if (pbrRole(tile.normals[all[i] * 4 + 3]) === role) {
             out[o++] = all[i];
             out[o++] = all[i + 1];
             out[o++] = all[i + 2];

@@ -33,10 +33,8 @@ import type { RoadMeshes } from './roadStrokes';
 import { TileKey, tileBounds } from './tiling';
 import { LAND_TONE_BASE, TerrainTone } from './tones';
 
-/** What laying a tile's railway beds gave it (see TerrainEntity.railBedJob). */
+/** What the bake's beds give a drawn tile (see TerrainEntity.railBedJob). */
 export interface TileRailBed {
-    /** The track strokes' positions on their graded profiles. */
-    strokePositions: Int16Array;
     /** Whether a point of the tile (its own frame, metres) is on a bed or its batters. */
     onBed?: (x: number, y: number, z: number) => boolean;
 }

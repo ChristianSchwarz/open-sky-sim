@@ -1,4 +1,11 @@
 /**
+ * SUPERSEDED: roads are graded at runtime now, with the railways, by
+ * priority (src/script/terrain/railBed.ts BED_TIERS: railway, Autobahn,
+ * highway, street). Do not run this on a pyramid the game grades at
+ * runtime - the roads would be graded twice, the second time against
+ * ground the first already moved. Kept for reference and for a pyramid
+ * shipped without the runtime pass.
+ *
  * Bake road grade sidecars (.rgr) into the planet pyramid.
  *
  * Reads the leaf-level road vectors (.rvr) bake_osm_roads.py wrote, joins the

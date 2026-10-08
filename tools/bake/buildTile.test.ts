@@ -10,7 +10,7 @@ import {
 import { TerrainClass, TerrainTone } from '../../src/script/terrain/tones';
 import { Watercourse } from './lvr';
 import { CoastPolygon, LonLatBounds } from './shoreline';
-import { BuildTileInput, COAST_BUDGET_CEILING, TileCover, buildTile, countOpenEdges, densifyBorder } from './buildTile';
+import { BuildTileInput, COAST_BUDGET_CEILING, TileCover, buildTile, countOpenEdges, densifyBorder, borderNodeKey } from './buildTile';
 import { RegionPolygon } from './regions';
 import { GridTriangle } from './decimate';
 
@@ -1681,6 +1681,17 @@ describe('densifyBorder', () => {
         const before = square().reduce((s, t) => s + area(t), 0);
         assert.equal(r.triangles.reduce((s, t) => s + area(t), 0), before);
         assert.ok(r.triangles.every(t => Math.sign(area(t)) === Math.sign(area(square()[0]))));
+        assert.equal(countOpenEdges(r.triangles, size), 0);
+    });
+
+    it('puts in the border nodes it is told to, within tolerance or not', () => {
+        // Where a road crosses the east border (x = 8) at y 5: nodes 4 to 6.
+        const forced = new Set([borderNodeKey(8, 4), borderNodeKey(8, 5), borderNodeKey(8, 6)]);
+        const r = densifyBorder(square(), size, () => 0, 150, () => true, forced);
+        for (const y of [4, 5, 6]) {
+            assert.ok(r.triangles.some(t => t.pts.some(p => p.x === 8 && p.y === y)), `node 8,${y} is a vertex`);
+        }
+        assert.equal(r.inserted, 3);
         assert.equal(countOpenEdges(r.triangles, size), 0);
     });
 

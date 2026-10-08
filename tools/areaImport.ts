@@ -735,7 +735,32 @@ export function dataSteps(
     ];
 }
 
-/** The mesh, far-texture and road-stroke bakes: once, over the whole import box. */
+/**
+ * The lidar measurements of the lines and bridge ends (tools/measure_lidar.py:
+ * the open lidar terrain models along the OSM vectors, kept in the lidar
+ * store; a leaf measured before on the same vectors is skipped), the bridges
+ * over the finished strokes, then the grading: the road and railway beds laid
+ * into the land (tools/bake_planet_grade.ts), the last write of a tile - every
+ * stage before it reads the land as it was drawn, and refuses a graded tile.
+ */
+function gradeSteps(bbox: string, rebaking = false): Step[] {
+    return [
+        {
+            label: 'measuring lines and bridge ends in the lidar', cmd: PYTHON,
+            args: ['tools/measure_lidar.py', `--bbox=${bbox}`],
+        },
+        {
+            label: rebaking ? 'rebaking bridges' : 'baking bridges', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_bridges.ts', '--bbox', bbox],
+        },
+        {
+            label: rebaking ? 'regrading road and railway beds' : 'grading road and railway beds', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_grade.ts', '--bbox', bbox],
+        },
+    ];
+}
+
+/** The mesh, far-texture and road-stroke bakes, then bridges and grading: once, over the whole import box. */
 export function meshSteps(box: readonly number[]): Step[] {
     const bbox = box.join(',');
     return [
@@ -754,6 +779,7 @@ export function meshSteps(box: readonly number[]): Step[] {
             label: 'baking road strokes', cmd: process.execPath,
             args: ['--import', 'tsx', 'tools/bake_planet_roads.ts', '--bbox', bbox],
         },
+        ...gradeSteps(bbox),
     ];
 }
 
@@ -915,6 +941,7 @@ export function deletePlan(name: string, bbox: readonly number[]): Step[] {
             label: 'rebaking road strokes', cmd: process.execPath,
             args: ['--import', 'tsx', 'tools/bake_planet_roads.ts', '--bbox', bbox.join(',')],
         },
+        ...gradeSteps(bbox.join(','), true),
     ];
 }
 

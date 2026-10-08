@@ -143,3 +143,25 @@ describe('buildRailBedExclusion', () => {
         assert.equal(buildRailBedExclusion(new Float64Array(0), [0, 1, 0]), undefined);
     });
 });
+
+describe('bedsToGeodetic', () => {
+    it('places bed ends exactly where three.js and worldToGeodetic would', async () => {
+        const THREE = await import('three');
+        const { cloneEnuBasis, worldToGeodetic } = await import('./geodesy');
+        const { bedsToGeodetic } = await import('./railBedField');
+        const basis = makeEnuBasis(47.5, 11.1, 0);
+        const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, -0.2, 0.45));
+        const position = new THREE.Vector3(1234.5, 678.9, -2345.6);
+        const beds = new Float64Array(RAIL_BED_SEGMENT_FLOATS);
+        beds.set([100, 20, -300, -50, 25, 400, 3, 1.5, 2, 1, 12]);
+        const out = bedsToGeodetic(beds, { basis: cloneEnuBasis(basis), position: [position.x, position.y, position.z], quaternion: [q.x, q.y, q.z, q.w] });
+        for (let k = 0; k < 2; k++) {
+            const v = new THREE.Vector3(beds[k * 3], beds[k * 3 + 1], beds[k * 3 + 2]).applyQuaternion(q).add(position);
+            const g = worldToGeodetic(basis, v.x, v.y, v.z);
+            assert.ok(Math.abs(out[k * 3] - g.lon) < 1e-9 && Math.abs(out[k * 3 + 1] - g.lat) < 1e-9);
+            assert.ok(Math.abs(out[k * 3 + 2] - g.height) < 1e-6);
+        }
+        // Half width, open ends, tier and reach carried over.
+        assert.deepEqual([...out.subarray(6, 10)], [3, 2, 1, 12]);
+    });
+});

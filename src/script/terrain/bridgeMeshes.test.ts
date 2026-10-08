@@ -107,5 +107,23 @@ describe('buildBridgeMeshes', () => {
         const set = buildBridgeMeshes(tile, 0.5, { ...mats, signRed: new THREE.MeshBasicMaterial() });
         assert.ok(set.signRed);
     });
-});
 
+    it('carries the border ramps after the boxes, and reads a version 3 file without them', () => {
+        const ramps = Float32Array.from([1200, 34.5, -80, 4.25, -1650, 12, 300, -5.5]);
+        const positions = new Float32Array(3), normals = Float32Array.from([0, 1, 0]);
+        const box = new Float32Array(PBR_BOX_FLOATS);
+        const bytes = encodePbr({
+            id: { z: 12, x: 5, y: 6 }, quantScale: 0.5, positions, normals,
+            roles: Uint8Array.from([0]), indices: new Uint32Array(0), boxes: box, ramps,
+        });
+        const tile = decodePbr(bytes.slice().buffer);
+        assert.deepEqual([...tile.ramps!], [...ramps]);
+        assert.equal(tile.boxes!.length, PBR_BOX_FLOATS);
+        // Without the section, as a version 3 file was written.
+        const v3 = bytes.slice(0, bytes.length - 4 - ramps.length * 4);
+        v3[4] = 3;
+        const old = decodePbr(v3.buffer);
+        assert.equal(old.ramps, undefined);
+        assert.equal(old.boxes!.length, PBR_BOX_FLOATS);
+    });
+});

@@ -172,6 +172,35 @@ export function keptStations(plan: BridgePlan, tolerance: number): number[] {
     return out;
 }
 
+/**
+ * Where a point `off` metres left of the centreline lies at station `i`, in
+ * plan: square across the deck, or at an end along its skewed line
+ * (BridgePlan.endSkew), which keeps the same width across the deck.
+ */
+function across(plan: BridgePlan, i: number, off: number): [number, number] {
+    const st = plan.stations[i];
+    const [tx, tz] = tangentAt(plan, i);
+    const px = -tz, pz = tx;
+    const skew = i === 0 ? plan.endSkew?.[0] : i === plan.stations.length - 1 ? plan.endSkew?.[1] : undefined;
+    if (!skew) {
+        return [st.x + px * off, st.z + pz * off];
+    }
+    const k = off / (skew[0] * px + skew[1] * pz);
+    return [st.x + skew[0] * k, st.z + skew[1] * k];
+}
+
+/** How far a skewed end's corners stand off its station along the deck, metres (0 square). */
+function skewShift(plan: BridgePlan, end: 0 | 1): number {
+    const skew = plan.endSkew?.[end];
+    if (!skew) {
+        return 0;
+    }
+    const i = end === 0 ? 0 : plan.stations.length - 1;
+    const [tx, tz] = tangentAt(plan, i);
+    const along = skew[0] * tx + skew[1] * tz, wide = skew[0] * -tz + skew[1] * tx;
+    return Math.abs((plan.deckWidthM / 2) * along / wide);
+}
+
 /** Horizontal unit tangent of the deck at station `i`, from its neighbours. */
 function tangentAt(plan: BridgePlan, i: number): [number, number] {
     const a = plan.stations[Math.max(0, i - 1)];
@@ -342,6 +371,21 @@ export function buildBridgeMesh(
     return finish(s);
 }
 
+/**
+ * Prisms (two four-corner sections each, as Soup.prism takes them) as one
+ * mesh in the tile's axes: the slab joining two bridges side by side
+ * (bridgeJoin.ts).
+ */
+export function buildPrismMesh(
+    prisms: ReadonlyArray<{ c0: P[]; c1: P[]; topRole: number; caps: boolean }>, frame: BridgeFrame,
+): BridgeMesh {
+    const s = new Soup(frame);
+    for (const p of prisms) {
+        s.prism(p.c0, p.c1, p.topRole, p.caps);
+    }
+    return finish(s);
+}
+
 /** Several plans into one mesh, for a tile. */
 export function buildTileBridgeMesh(
     plans: readonly BridgePlan[], frame: BridgeFrame, tolerance: number = DECK_SIMPLIFY_TOLERANCE_M,
@@ -358,46 +402,58 @@ function addDeck(s: Soup, plan: BridgePlan, tolerance: number): void {
     const T = plan.deckThicknessM;
     const section = (i: number, offL: number, offR: number, top: number, bottom: number): P[] => {
         const st = plan.stations[i];
-        const [tx, tz] = tangentAt(plan, i);
-        const px = -tz, pz = tx;
+        const [lx, lz] = across(plan, i, offL), [rx, rz] = across(plan, i, offR);
         return [
-            [st.x + px * offL, st.deckY + top, st.z + pz * offL],
-            [st.x + px * offR, st.deckY + top, st.z + pz * offR],
-            [st.x + px * offR, st.deckY + bottom, st.z + pz * offR],
-            [st.x + px * offL, st.deckY + bottom, st.z + pz * offL],
+            [lx, st.deckY + top, lz],
+            [rx, st.deckY + top, rz],
+            [rx, st.deckY + bottom, rz],
+            [lx, st.deckY + bottom, lz],
         ];
     };
     const last = plan.stations.length - 1;
-    const kept = keptStations(plan, tolerance);
+    // A skewed end's corners reach along the deck: no station in between may
+    // stand within that, or the slab would fold back on itself.
+    const shiftA = skewShift(plan, 0), shiftB = skewShift(plan, 1);
+    const total = plan.stations[last].s;
+    const kept = keptStations(plan, tolerance).filter((i, k, all) => k === 0 || k === all.length - 1
+        || (plan.stations[i].s > shiftA + 1 && plan.stations[i].s < total - shiftB - 1));
+    // A side joined to the bridge beside it (BridgePlan.openSides) has no
+    // parapet along the joined stretch.
+    const open = (side: 1 | -1, sa: number, sb: number) =>
+        (plan.openSides ?? []).some(o => o.side === side && (sa + sb) / 2 >= o.s0 - 1e-6 && (sa + sb) / 2 <= o.s1 + 1e-6);
     for (let k = 0; k + 1 < kept.length; k++) {
         const i = kept[k], j = kept[k + 1];
         s.prism(section(i, half, -half, 0, -T), section(j, half, -half, 0, -T), plan.deckRole ?? BridgeRole.Deck, false);
         // Parapets, both sides: outer edge at the deck's edge, inner a kerb in.
         // Their undersides sit on the deck, so they are not built.
         const inner = half - PARAPET_WIDTH_M;
-        s.prism(section(i, half, inner, PARAPET_HEIGHT_M, 0), section(j, half, inner, PARAPET_HEIGHT_M, 0),
-            BridgeRole.Concrete, false, true);
-        s.prism(section(i, -inner, -half, PARAPET_HEIGHT_M, 0), section(j, -inner, -half, PARAPET_HEIGHT_M, 0),
-            BridgeRole.Concrete, false, true);
+        const sa = plan.stations[i].s, sb = plan.stations[j].s;
+        if (!open(1, sa, sb)) {
+            s.prism(section(i, half, inner, PARAPET_HEIGHT_M, 0), section(j, half, inner, PARAPET_HEIGHT_M, 0),
+                BridgeRole.Concrete, false, true);
+        }
+        if (!open(-1, sa, sb)) {
+            s.prism(section(i, -inner, -half, PARAPET_HEIGHT_M, 0), section(j, -inner, -half, PARAPET_HEIGHT_M, 0),
+                BridgeRole.Concrete, false, true);
+        }
     }
     // Close the two ends of the slab and of each parapet so the deck is not open.
     for (const i of [0, last]) {
         const st = plan.stations[i];
         const [tx, tz] = tangentAt(plan, i);
-        const px = -tz, pz = tx;
         const endFace = (offL: number, offR: number, top: number, bottom: number) => {
-            const c: P[] = [
-                [st.x + px * offL, st.deckY + top, st.z + pz * offL],
-                [st.x + px * offR, st.deckY + top, st.z + pz * offR],
-                [st.x + px * offR, st.deckY + bottom, st.z + pz * offR],
-                [st.x + px * offL, st.deckY + bottom, st.z + pz * offL],
-            ];
+            const c = section(i, offL, offR, top, bottom);
             const inside: P = [st.x - tx * (i === 0 ? -1 : 1), st.deckY, st.z - tz * (i === 0 ? -1 : 1)];
             s.quad(c[0], c[1], c[2], c[3], BridgeRole.Concrete, inside);
         };
         endFace(half, -half, 0, -T);
-        endFace(half, half - PARAPET_WIDTH_M, PARAPET_HEIGHT_M, 0);
-        endFace(-(half - PARAPET_WIDTH_M), -half, PARAPET_HEIGHT_M, 0);
+        const s0 = plan.stations[i].s;
+        if (!open(1, s0, s0)) {
+            endFace(half, half - PARAPET_WIDTH_M, PARAPET_HEIGHT_M, 0);
+        }
+        if (!open(-1, s0, s0)) {
+            endFace(-(half - PARAPET_WIDTH_M), -half, PARAPET_HEIGHT_M, 0);
+        }
     }
 }
 
@@ -406,8 +462,9 @@ function addPiers(s: Soup, plan: BridgePlan): void {
         if (p.topY - p.baseY < 0.5) {
             continue;
         }
-        const tx = Math.sin(p.heading), tz = -Math.cos(p.heading);
-        const px = Math.cos(p.heading), pz = Math.sin(p.heading);
+        // Its width square across the deck, or along the road beside it.
+        const [px, pz] = p.across ?? [Math.cos(p.heading), Math.sin(p.heading)];
+        const tx = pz, tz = -px;
         const w = p.widthM / 2;
         const d = Math.min(p.widthM * 0.6, 3) / 2;
         const ring = (y: number): P[] => [
@@ -432,13 +489,15 @@ function addAbutments(s: Soup, plan: BridgePlan): void {
             continue;
         }
         const [tx, tz] = tangentAt(plan, i);
-        const px = -tz, pz = tx;
         const d = ABUTMENT_DEPTH_M / 2;
+        // Along the end's line: square across the deck, or parallel to the
+        // road under a skew bridge.
+        const [lx, lz] = across(plan, i, half), [rx, rz] = across(plan, i, -half);
         const ring = (y: number): P[] => [
-            [st.x + px * half + tx * d, y, st.z + pz * half + tz * d],
-            [st.x - px * half + tx * d, y, st.z - pz * half + tz * d],
-            [st.x - px * half - tx * d, y, st.z - pz * half - tz * d],
-            [st.x + px * half - tx * d, y, st.z + pz * half - tz * d],
+            [lx + tx * d, y, lz + tz * d],
+            [rx + tx * d, y, rz + tz * d],
+            [rx - tx * d, y, rz - tz * d],
+            [lx - tx * d, y, lz - tz * d],
         ];
         // Four sides: the top meets the deck's underside, the base is underground.
         s.prism(ring(top), ring(base), BridgeRole.Concrete, false);

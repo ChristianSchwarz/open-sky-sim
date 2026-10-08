@@ -17,7 +17,9 @@ import * as zlib from 'node:zlib';
 import { decodePdm } from '../../src/script/terrain/demTile';
 import { LanduseRegion, Watercourse, decodeLvr } from './lvr';
 import { PLC_FLAG_REAL_IMAGERY, decodePlc } from './plc';
-import { buildTile } from './buildTile';
+import { borderNodeKey, buildTile } from './buildTile';
+import { decodeRvr } from './rvr';
+import { isZoneClass } from '../../src/script/terrain/ptr';
 import { conformBorders, Side } from './borderConform';
 import { carveGrid, decodeRgr } from './roadGrade';
 import { GroundMeans, groundColorAt } from './groundColor';
@@ -301,6 +303,49 @@ function carvedNodes(before: Float32Array, after: Float32Array, size: number): U
     return any ? mask : undefined;
 }
 
+/** Border nodes are forced this far either side of where a line crosses the tile's edge, metres. */
+const CROSSING_NODE_REACH_M = 30;
+/** A line end this near the edge (in cells) is where it crosses it: the .rvr clips its lines to the tile. */
+const ON_EDGE_CELLS = 0.05;
+
+/**
+ * The border grid nodes within CROSSING_NODE_REACH_M of every point where a
+ * road or railway (.rvr, already clipped to the tile) crosses its edge. The
+ * runtime grading carries ramps across the border there and moves the border
+ * to do it, alike in both tiles; both pick the same nodes, the grid of two
+ * neighbours sharing its border nodes.
+ */
+function lineBorderNodes(rvrPath: string, b: { west: number; south: number; east: number; north: number }, size: number, edgeM: number): Set<string> | undefined {
+    if (!fs.existsSync(rvrPath)) {
+        return undefined;
+    }
+    const cells = size - 1;
+    const reach = Math.ceil(CROSSING_NODE_REACH_M / (edgeM / cells));
+    const out = new Set<string>();
+    for (const line of decodeRvr(fs.readFileSync(rvrPath))) {
+        if (isZoneClass(line.cls) || line.points.length < 2) {
+            continue;
+        }
+        for (const p of [line.points[0], line.points[line.points.length - 1]]) {
+            const gx = ((p.lon - b.west) / (b.east - b.west)) * cells;
+            const gy = ((b.north - p.lat) / (b.north - b.south)) * cells;
+            const onX = Math.abs(gx) < ON_EDGE_CELLS ? 0 : Math.abs(gx - cells) < ON_EDGE_CELLS ? cells : undefined;
+            const onY = Math.abs(gy) < ON_EDGE_CELLS ? 0 : Math.abs(gy - cells) < ON_EDGE_CELLS ? cells : undefined;
+            if (onX !== undefined) {
+                for (let k = Math.max(1, Math.ceil(gy - reach)); k <= Math.min(cells - 1, Math.floor(gy + reach)); k++) {
+                    out.add(borderNodeKey(onX, k));
+                }
+            }
+            if (onY !== undefined) {
+                for (let k = Math.max(1, Math.ceil(gx - reach)); k <= Math.min(cells - 1, Math.floor(gx + reach)); k++) {
+                    out.add(borderNodeKey(k, onY));
+                }
+            }
+        }
+    }
+    return out.size > 0 ? out : undefined;
+}
+
 /** Reads one tile's inputs, builds it and writes its `.ptm`. Returns undefined if there is no DEM tile. */
 export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessResult | undefined {
     const { z, x, y } = task;
@@ -373,6 +418,7 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
 
     const bounds = tileBounds(z, x, y);
     const edgeM = tileEdgeMetres(z, x, y);
+    const forcedBorderNodes = z === cfg.maxZoom ? lineBorderNodes(`${stem}.rvr`, bounds, dem.size, edgeM) : undefined;
     const baseSkirtM = skirtDepthForTile(parentErrorM(cfg.src, z, x, y, dem.geometricErrorM), edgeM);
     const skirtDepthM = skirtDepthAt(z, baseSkirtM);
     const cellM = edgeM / (dem.size - 1);
@@ -403,6 +449,7 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         triangleBudget: cfg.budget,
         pads: cfg.pads,
         roadMask,
+        forcedBorderNodes,
         cover,
         watercourses,
         regions,

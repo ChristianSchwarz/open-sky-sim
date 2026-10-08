@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { zlibSync } from 'fflate';
 import { BridgeRole, decodePbr, encodePbr } from '../../src/script/terrain/pbr';
-import { BridgeGround, BridgeSpan, planBridge } from './bridges';
+import { BridgeGround, BridgeSpan, MAX_SKEW_DEG, SpanCrossing, endSkews, planBridge } from './bridges';
 import {
     DECK_SIMPLIFY_TOLERANCE_M, IDENTITY_FRAME, TRACK_LIFT_M, buildBridgeMesh, buildTileBridgeMesh,
     buildTrackStroke, concatTracks, keptStations,
@@ -150,6 +150,19 @@ describe('PBR1', () => {
         assert.equal(tile.normals[3], mesh.roles[0]);
     });
 
+    it('round-trips the road deck ends after the ramps (version 5)', () => {
+        const plan = planBridge(span('beam'), valley(300, 40))!;
+        const mesh = buildBridgeMesh(plan, NO_SHEAR);
+        const ramps = Float32Array.of(1, 2, 3, 0.5);
+        const roadEnds = Float32Array.of(0, 101.5, 0, 2, 1, 101.5, 0, 300, 101.5, 0, 2, 299, 101.5, 0);
+        const tile = decodePbr(encodePbr({
+            id: { z: 12, x: 1, y: 2 }, quantScale: 0.05,
+            positions: mesh.positions, normals: mesh.normals, roles: mesh.roles, indices: mesh.indices, ramps, roadEnds,
+        }));
+        assert.deepEqual([...tile.ramps!], [...ramps]);
+        assert.deepEqual([...tile.roadEnds!], [...roadEnds]);
+    });
+
     it('refuses a bad magic', () => {
         assert.throws(() => decodePbr(new Uint8Array(32)), /magic/);
     });
@@ -233,5 +246,96 @@ describe('buildTrackStroke', () => {
         const back = decodePbr(v1.buffer);
         assert.equal(back.track, undefined);
         assert.equal(back.indices.length, mesh.indices.length);
+    });
+});
+
+describe('skew bridge ends', () => {
+    // A 60 m beam over a road crossing at 45 degrees, mid-span.
+    // 5 m wide: at 45 degrees its corners stand 2.5 m off the end, within the cap.
+    const flatPlan = (width = 5) => planBridge({ ...span('beam', 60), deckWidthM: width }, {
+        groundY: () => 100, obstacleY: (x) => (Math.abs(x - 30) < 8 ? 100 : undefined),
+    })!;
+    const crossing = (deg: number): SpanCrossing => {
+        const r = (deg * Math.PI) / 180;
+        return { along: 30, x: 30, z: 0, reach: 10, dir: [Math.cos(r), Math.sin(r)] };
+    };
+
+    it('turns both ends parallel to the road the span crosses', () => {
+        const plan = flatPlan();
+        const skew = endSkews(plan, [crossing(45)])!;
+        for (const e of skew) {
+            assert.ok(e);
+            // Parallel to (1, 1)/sqrt2, either way round.
+            close(Math.abs(e[0] * Math.SQRT1_2 + e[1] * Math.SQRT1_2), 1, 1e-9);
+        }
+    });
+
+    it('leaves an end square where the road crosses square, and turns a sharp skew no further than the limit', () => {
+        const plan = flatPlan();
+        assert.equal(endSkews(plan, [crossing(90)]), undefined);
+        assert.equal(endSkews(plan, []), undefined);
+        const sharp = endSkews(plan, [crossing(10)])!;
+        // 80 degrees off square, held at MAX_SKEW_DEG: its angle to the deck's
+        // cross direction (0, 1).
+        const off = (Math.acos(Math.abs(sharp[0]![1])) * 180) / Math.PI;
+        close(off, MAX_SKEW_DEG, 1e-6);
+    });
+
+    it('builds the deck end and the abutment along the skewed line, the deck as wide as ever', () => {
+        const plan = flatPlan();
+        plan.endSkew = endSkews(plan, [crossing(45)]);
+        const mesh = buildBridgeMesh(plan, NO_SHEAR);
+        // Every vertex near the first end lies on the 45-degree line through it
+        // (deck end, parapet ends, abutment face) or 1.5 m either side of it
+        // along the deck (the abutment block's depth).
+        const P = mesh.positions;
+        let onLine = 0;
+        for (let v = 0; v < mesh.vertexCount; v++) {
+            const x = P[v * 3], z = P[v * 3 + 2];
+            if (x > 15) {
+                continue;
+            }
+            const d = (x - z); // offset along the deck from the line x = z through (0, 0)
+            assert.ok(Math.abs(d) < 1e-3 || Math.abs(Math.abs(d) - 1.5) < 1e-3, `vertex at ${x.toFixed(2)},${z.toFixed(2)} off the skewed end`);
+            if (Math.abs(d) < 1e-3) {
+                onLine++;
+            }
+        }
+        assert.ok(onLine >= 8, `${onLine} vertices on the end line`);
+        // Still 5 m across the deck: the corners at z = +-2.5.
+        const zs = Array.from({ length: mesh.vertexCount }, (_, v) => P[v * 3 + 2]);
+        close(Math.max(...zs), 2.5, 1e-3);
+        close(Math.min(...zs), -2.5, 1e-3);
+    });
+
+    it('turns a wide deck no further than keeps its corners within 3 m of its end', () => {
+        const plan = flatPlan(12);
+        const [e] = endSkews(plan, [crossing(45)])!;
+        // Corner shift = half width x tan(angle off square).
+        const off = Math.acos(Math.abs(e![1]));
+        close(6 * Math.tan(off), 3, 1e-6);
+    });
+
+    it('builds a pier turned along the road beside it', () => {
+        const plan = planBridge(span('beam', 150), { ...valley(150, 30), roadDirAt: () => [Math.SQRT1_2, Math.SQRT1_2] })!;
+        assert.ok(plan.piers.length > 0 && plan.piers.every(p => p.across));
+        const mesh = buildBridgeMesh(plan, NO_SHEAR);
+        const P = mesh.positions;
+        // Every vertex of the first pier (around x = 50, under the deck) is on
+        // one of two 45-degree lines either side of its centre: its faces run
+        // along the road.
+        const pier = plan.piers[0];
+        let n = 0;
+        for (let v = 0; v < mesh.vertexCount; v++) {
+            const x = P[v * 3], y = P[v * 3 + 1], z = P[v * 3 + 2];
+            if (Math.abs(x - pier.x) > 4 || y > pier.topY + 1e-6 || Math.abs(z) > 4) {
+                continue;
+            }
+            const d = Math.abs((x - pier.x) - (z - pier.z)) * Math.SQRT1_2; // off the line through the centre along (1, 1)
+            const depth = Math.min(pier.widthM * 0.6, 3) / 2;
+            close(d, depth, 1e-3);
+            n++;
+        }
+        assert.ok(n >= 8, `${n} pier vertices`);
     });
 });

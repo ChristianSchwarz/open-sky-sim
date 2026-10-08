@@ -36,6 +36,23 @@
  *     box    f32 x16 per box     centre xyz (tile-local metres), three unit
  *                                axes xyz, half sizes along them, BridgeRole
  *
+ *   version 4 appends the ramps across the tile's border: where a road or
+ *   railway crosses its edge, how far off its drawn height the line is held
+ *   there to climb onto a deck or dip under one on the far side (the bake
+ *   walks the lines of both tiles, so both read the same; see railBed.ts).
+ *     u32 rampCount
+ *     ramp   f32 x4 per ramp     crossing point xyz (tile-local metres), dh
+ *
+ *   version 5 appends the road decks' ends: where each road span's deck ends,
+ *   its top on the centreline there, so the grading holds the road arriving
+ *   there to it (railBed.ts RailBedInput.roadDeckEnds) - as the rail decks'
+ *   track ends hold a railway - rather than guessing its deck from what the
+ *   triangles cover.
+ *     u32 endCount
+ *     end    f32 x7 per end      deck top at the end xyz (tile-local metres),
+ *                                the span's tier, and the deck top 1 m in
+ *                                from the end xyz (the way the span runs)
+ *
  * Decode is typed-array views over the received buffer, no per-vertex pass.
  */
 
@@ -43,13 +60,34 @@ import { ALONG_STEP_M, ALONG_WRAP_M } from './ptr';
 import { TileKey } from './tiling';
 
 const PBR_MAGIC = 0x31524250; // 'PBR1' little-endian
-const PBR_VERSION = 3;
+const PBR_VERSION = 5;
+/** Floats per border ramp: crossing point 3, height change 1. */
+export const PBR_RAMP_FLOATS = 4;
+/** Floats per road deck end: the end 3, the tier 1, a point 1 m in along the span 3. */
+export const PBR_ROAD_END_FLOATS = 7;
 /** Floats per furniture box: centre 3, axes 9, half sizes 3, role 1. */
 export const PBR_BOX_FLOATS = 16;
 const PBR_HEADER_BYTES = 24;
 export const PBR_MAX_VERTS = 65535;
 
-/** The fourth byte of `nrm`: which material a face takes. */
+/**
+ * The fourth byte of `nrm`: which material a face takes in its low four
+ * bits (BridgeRole), and above them the bridge's line tier plus one
+ * (railBed.ts BED_TIERS; 0 when unknown, as in files baked before it).
+ */
+export const PBR_ROLE_MASK = 0x0f;
+export const PBR_TIER_SHIFT = 4;
+
+/** A face's material, from the fourth byte of its first vertex's `nrm`. */
+export function pbrRole(byte: number): BridgeRole {
+    return (byte & PBR_ROLE_MASK) as BridgeRole;
+}
+
+/** The tier of the line a bridge carries (BED_TIERS index), or -1 when the file does not say. */
+export function pbrTier(byte: number): number {
+    return ((byte & 0xff) >> PBR_TIER_SHIFT) - 1;
+}
+
 export const enum BridgeRole {
     /** Road surface on top of a deck. */
     Deck = 0,
@@ -80,6 +118,10 @@ export interface PbrEncodeInput {
     track?: PbrTrackInput;
     /** Furniture boxes, PBR_BOX_FLOATS each, or absent. */
     boxes?: Float32Array;
+    /** Border ramps, PBR_RAMP_FLOATS each, or absent. */
+    ramps?: Float32Array;
+    /** Road deck ends, PBR_ROAD_END_FLOATS each, or absent. */
+    roadEnds?: Float32Array;
 }
 
 /** A track stroke, as ptr.ts's PtrEncodeInput has it. */
@@ -113,6 +155,10 @@ export interface PbrTile {
     track?: PbrTrack;
     /** Version 3: furniture boxes, PBR_BOX_FLOATS each, tile-local metres. */
     boxes?: Float32Array;
+    /** Version 4: border ramps, PBR_RAMP_FLOATS each (crossing point in tile-local metres, height change). */
+    ramps?: Float32Array;
+    /** Version 5: road deck ends, PBR_ROAD_END_FLOATS each (tile-local metres). */
+    roadEnds?: Float32Array;
 }
 
 const align4 = (n: number) => (n + 3) & ~3;
@@ -148,7 +194,11 @@ export function encodePbr(input: PbrEncodeInput): Uint8Array {
     const trackBytes = 4 + align4(tVerts * 6) + align4(tVerts * 4) + align4(tVerts * 2) * 2 + align4(tTris * 6);
     const boxFloats = input.boxes ? input.boxes.length : 0;
     const boxBytes = 4 + boxFloats * 4;
-    const out = new Uint8Array(PBR_HEADER_BYTES + posBytes + nrmBytes + idxBytes + trackBytes + boxBytes);
+    const rampFloats = input.ramps ? input.ramps.length : 0;
+    const rampBytes = 4 + rampFloats * 4;
+    const endFloats = input.roadEnds ? input.roadEnds.length : 0;
+    const endBytes = 4 + endFloats * 4;
+    const out = new Uint8Array(PBR_HEADER_BYTES + posBytes + nrmBytes + idxBytes + trackBytes + boxBytes + rampBytes + endBytes);
     const view = new DataView(out.buffer);
     view.setUint32(0, PBR_MAGIC, true);
     view.setUint8(4, PBR_VERSION);
@@ -209,6 +259,16 @@ export function encodePbr(input: PbrEncodeInput): Uint8Array {
     if (input.boxes) {
         new Float32Array(out.buffer, boxAt + 4, boxFloats).set(input.boxes);
     }
+    const rampAt = boxAt + boxBytes;
+    view.setUint32(rampAt, rampFloats / PBR_RAMP_FLOATS, true);
+    if (input.ramps) {
+        new Float32Array(out.buffer, rampAt + 4, rampFloats).set(input.ramps);
+    }
+    const endAt = rampAt + rampBytes;
+    view.setUint32(endAt, endFloats / PBR_ROAD_END_FLOATS, true);
+    if (input.roadEnds) {
+        new Float32Array(out.buffer, endAt + 4, endFloats).set(input.roadEnds);
+    }
     return out;
 }
 
@@ -223,8 +283,8 @@ export function decodePbr(bytes: ArrayBuffer | Uint8Array): PbrTile {
         throw new Error(`Bad PBR1 magic: 0x${magic.toString(16)}`);
     }
     const version = view.getUint8(4);
-    if (version !== 1 && version !== PBR_VERSION) {
-        throw new Error(`PBR1 version ${version}, expected 1 or ${PBR_VERSION}`);
+    if (version < 1 || version > PBR_VERSION) {
+        throw new Error(`PBR1 version ${version}, expected 1 to ${PBR_VERSION}`);
     }
     const z = view.getUint8(5);
     const x = view.getUint32(8, true);
@@ -280,6 +340,30 @@ export function decodePbr(bytes: ArrayBuffer | Uint8Array): PbrTile {
         if (count > 0) {
             boxes = new Float32Array(raw.buffer, off, count * PBR_BOX_FLOATS);
         }
+        off += count * PBR_BOX_FLOATS * 4;
     }
-    return { id: { z, x, y }, quantScale, positions, normals, indices, track, boxes };
+    let ramps: Float32Array | undefined;
+    if (version >= 4 && off + 4 <= raw.byteOffset + raw.byteLength) {
+        const count = view.getUint32(off - raw.byteOffset, true);
+        off += 4;
+        if (off + count * PBR_RAMP_FLOATS * 4 > raw.byteOffset + raw.byteLength) {
+            throw new Error(`PBR1 ${z}/${x}/${y}: ramps truncated`);
+        }
+        if (count > 0) {
+            ramps = new Float32Array(raw.buffer, off, count * PBR_RAMP_FLOATS);
+        }
+        off += count * PBR_RAMP_FLOATS * 4;
+    }
+    let roadEnds: Float32Array | undefined;
+    if (version >= 5 && off + 4 <= raw.byteOffset + raw.byteLength) {
+        const count = view.getUint32(off - raw.byteOffset, true);
+        off += 4;
+        if (off + count * PBR_ROAD_END_FLOATS * 4 > raw.byteOffset + raw.byteLength) {
+            throw new Error(`PBR1 ${z}/${x}/${y}: road deck ends truncated`);
+        }
+        if (count > 0) {
+            roadEnds = new Float32Array(raw.buffer, off, count * PBR_ROAD_END_FLOATS);
+        }
+    }
+    return { id: { z, x, y }, quantScale, positions, normals, indices, track, boxes, ramps, roadEnds };
 }
