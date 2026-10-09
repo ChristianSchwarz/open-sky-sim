@@ -25,7 +25,7 @@ export { TERRAIN_CLASS_COUNT, TERRAIN_SWATCH_COUNT, TERRAIN_TONE_COUNT } from '.
  * still shows.
  *
  * The lighting below is ShadedVertProgram's, unchanged. Land is always the
- * STATIC path (normals are baked in world ENU and tiles are never rotated), so
+ * STATIC path (normals are baked in ENU and ride the tile's rotation), so
  * the shadingType branch that program needs is not repeated here.
  */
 export const TerrainVertProgram: string = `
@@ -139,9 +139,14 @@ ${LOG_DEPTH_PARS_VERTEX}
   }
 
   void main() {
-    // Land normals are baked in world ENU and tiles are placed by translation
-    // only, so the attribute is already the world normal.
-    vec3 worldNormal = normalize(normal);
+    // Land normals are baked in the bake's ENU frame. A session drawn in
+    // another frame (any flight away from the bake's origin, and every
+    // re-base) turns the tile's vertices with the group's rotation
+    // (frameFix), so the normal has to turn with them: unrotated, it leans by
+    // the angle between the two frames' ups (4 deg or more out in the
+    // hinterland), which skews the light and flips vCameraAbove on far
+    // facets. The scale is uniform, so normalize undoes it.
+    vec3 worldNormal = normalize(mat3(modelMatrix) * normal);
 
     float ndl = pow(max(dot(worldNormal, uSunDir), 0.0), SHADOW_CONTRAST_POWER);
     float skyView = mix(AMBIENT_SKY_FLOOR, 1.0, 0.5 + 0.5 * worldNormal.y);
