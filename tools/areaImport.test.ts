@@ -189,7 +189,7 @@ describe('the bake plans end with meshes then textures over the same box', () =>
      * the same --bbox. An import then drapes the road strokes over the
      * finished meshes, measures the lines in the lidar, bakes the bridges
      * over them and grades the beds into the land, the last write of a tile;
-     * nothing runs after that.
+     * then the far land is made from the graded land, then the buildings stood on it, and nothing runs after.
      */
     function assertMeshThenTextures(steps: Step[], withRoads: boolean): void {
         const tools = steps.map(s => s.args.find(a => a.startsWith('tools/')));
@@ -210,7 +210,11 @@ describe('the bake plans end with meshes then textures over the same box', () =>
             assert.equal(tools[mesh + 4], 'tools/bake_planet_bridges.ts', 'bridges do not follow the lidar');
             assert.equal(tools[mesh + 5], 'tools/bake_planet_grade.ts', 'grading does not follow the bridges');
             assert.equal(bboxOf(steps[mesh + 5]), bboxOf(steps[mesh]));
-            assert.equal(mesh + 6, steps.length, 'something runs after the grading');
+            assert.equal(tools[mesh + 6], 'tools/bake_planet_farland.ts', 'far land does not follow the grading');
+            assert.equal(bboxOf(steps[mesh + 6]), bboxOf(steps[mesh]));
+            assert.equal(tools[mesh + 7], 'tools/bake_planet_buildings.ts', 'buildings do not follow the far land');
+            assert.equal(bboxOf(steps[mesh + 7]), bboxOf(steps[mesh]));
+            assert.equal(mesh + 8, steps.length, 'something runs after the buildings');
         } else {
             assert.equal(mesh + 2, steps.length, 'something runs after the texture bake');
         }
@@ -233,7 +237,7 @@ describe('plan', () => {
         assert.equal(steps[0].args[0], 'tools/osm_extract.py');
         assert.ok(steps[0].args.includes(`--bbox=${job.bbox.join(',')}`));
         const pbf = extractPathFor(job.bbox);
-        for (const tool of ['tools/bake_osm_coast.py', 'tools/bake_osm_roads.py',
+        for (const tool of ['tools/bake_osm_coast.py', 'tools/bake_osm_roads.py', 'tools/bake_osm_buildings.py',
             'tools/bake_osm_airports.py', 'tools/bake_planet_cover.py']) {
             const step = steps.find(s => s.args[0] === tool);
             assert.ok(step, `${tool} missing from the plan`);

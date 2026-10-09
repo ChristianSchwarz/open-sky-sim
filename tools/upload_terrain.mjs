@@ -33,6 +33,7 @@ const groups = [
     ['*.ptx', 'application/octet-stream', 'gzip'],
     ['*.ptr', 'application/octet-stream', 'gzip'],
     ['*.pbr', 'application/octet-stream', 'gzip'],
+    ['*.pbh', 'application/octet-stream', 'gzip'],
     ['*.pdm', 'application/octet-stream', null], // zlib, inflated in JS
     ['*.bin', 'application/octet-stream', null],
     ['*.json', 'application/json', null],

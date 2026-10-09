@@ -29,6 +29,7 @@ import { EnuBasis, ecefToEnu, geodeticToEcef, sceneFromEnu } from './geodesy';
 import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmBorder, PtmTile } from './ptm';
 import type { SeamState } from './seamStitch';
 import type { BridgeMeshSet } from './bridgeMeshes';
+import type { BuildingMeshSet } from './buildingMeshes';
 import type { RoadMeshes } from './roadStrokes';
 import type { FarLandMeshes } from './farLandTiles';
 import { TileKey, tileBounds } from './tiling';
@@ -94,6 +95,12 @@ export interface TileMeshes {
     railWalls?: THREE.Mesh;
     /** The tile's bridge geometry, once attached (see BridgeMeshes); same states as `roads`. */
     bridges?: BridgeMeshSet | 'pending' | 'none';
+    /**
+     * The leaf's buildings, extruded from its PBH1 sidecar: undefined until
+     * first drawn, 'pending' while fetched or queued for extrusion, 'none'
+     * when it has none or was released.
+     */
+    buildings?: BuildingMeshSet | 'pending' | 'none';
     /**
      * Tree billboards, once attached (see treeBillboards.ts and
      * terrainEntity.ts's upload callback). One InstancedMesh per species

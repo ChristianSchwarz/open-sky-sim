@@ -23,6 +23,7 @@ import {
 import { COLOUR_ADJUST_UNIFORMS, ColourTweak, adjustColourInPlace, defaultColourTweak } from './shaders/colourAdjust';
 import { SUN_UNIFORMS } from './shaders/sun';
 import { LANDUSE_BLEND_DEFAULT } from '../../terrain/tones';
+import { VERTEX_TONE_COUNT } from './shaders/shadedVP';
 import { makeNoCoverTexture } from '../../terrain/coverTextures';
 
 export enum SceneMaterialPrimitiveType {
@@ -96,6 +97,14 @@ type SceneMaterialMeshProperties = {
              * ship hull below the waterline. Omit / undefined = no clip.
              */
             clipBelowY?: number;
+            /**
+             * Colour each vertex from this table by its `tone` attribute
+             * instead of from `category`: meshes in many palette colours share
+             * one material and one draw, and still follow the palette (time of
+             * day, night vision). At most VERTEX_TONE_COUNT entries; `category`
+             * still picks the fog.
+             */
+            vertexTones?: readonly PaletteCategory[];
         }
         |
         {
@@ -269,6 +278,7 @@ interface SceneShadedMaterialData {
     /** Absolute ENU Y waterline clip (metres); adjusted by RENDER_ORIGIN each draw. */
     clipBelowYAbs: number;
     terrain?: TerrainMaterialSpec;
+    vertexTones?: readonly PaletteCategory[];
 }
 
 export class SceneMaterialManager implements KernelTask {
@@ -408,6 +418,9 @@ export class SceneMaterialManager implements KernelTask {
         if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && !p.river && p.instanceTones) {
             material.defines = { ...material.defines, INSTANCE_TONES: '' };
         }
+        if (p.type === SceneMaterialPrimitiveType.MESH && p.shaded && !p.terrain && p.vertexTones) {
+            material.defines = { ...material.defines, VERTEX_TONES: '' };
+        }
         if (!p.rawColor) {
             this.applyWaterTweak(p.category, material.uniforms as SceneMaterialUniforms);
         }
@@ -468,6 +481,7 @@ export class SceneMaterialManager implements KernelTask {
             ...(shaded ? {
                 clipBelowYAbs: typeof properties.clipBelowY === 'number' ? properties.clipBelowY : -1e30,
                 terrain: properties.terrain,
+                vertexTones: properties.vertexTones,
             } : {
                 markCategories: this.markingsOf(properties)?.categories,
             }),
@@ -591,6 +605,7 @@ export class SceneMaterialManager implements KernelTask {
                         : -1e30,
                 },
                 ...(properties.terrain ? this.buildTerrainUniforms(properties.terrain) : {}),
+                ...(properties.vertexTones ? this.buildVertexToneUniforms(properties.vertexTones) : {}),
             } : {
                 vCameraPos: { value: new THREE.Vector3() },
                 vCameraNormal: { value: new THREE.Vector3() },
@@ -672,6 +687,29 @@ export class SceneMaterialManager implements KernelTask {
         };
     }
 
+    private buildVertexToneUniforms(tones: readonly PaletteCategory[]): Record<string, THREE.IUniform> {
+        // Flat rgb triples for the same reason as uToneColor above.
+        const u = {
+            uVertexTone: { value: new Float32Array(VERTEX_TONE_COUNT * 3) },
+            uVertexToneShade: { value: new Float32Array(VERTEX_TONE_COUNT * 3) },
+            // Vertices with a colour of their own draw it while this is 1.
+            uVertexRaw: { value: 1 },
+            uRawLight: { value: new THREE.Vector3(1, 1, 1) },
+        };
+        this.fillVertexTones(tones, this.palette, u.uVertexTone.value, u.uVertexToneShade.value);
+        return u;
+    }
+
+    private fillVertexTones(
+        tones: readonly PaletteCategory[], palette: Palette, colors: Float32Array, shades: Float32Array,
+    ) {
+        for (let i = 0; i < VERTEX_TONE_COUNT; i++) {
+            const category = tones[i] ?? tones[0];
+            this.colorCache.getColor(PaletteColor(palette, category)).toArray(colors, i * 3);
+            this.colorCache.getColor(PaletteColorShade(palette, category)).toArray(shades, i * 3);
+        }
+    }
+
     private isPoint(properties: SceneMaterialProperties): boolean {
         return properties.type === SceneMaterialPrimitiveType.POINT ||
             properties.category === PaletteCategory.SCENERY_SPECKLE ||
@@ -744,6 +782,12 @@ export class SceneMaterialManager implements KernelTask {
                     const category = d.terrain.toneCategories[t] ?? PaletteCategory.TERRAIN_DEFAULT;
                     this.colorCache.getColor(PaletteColor(palette, category)).toArray(tones, t * 3);
                 }
+                const light = palette.light ?? [1, 1, 1];
+                (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);
+            }
+            if (d.shaded && d.vertexTones) {
+                this.fillVertexTones(d.vertexTones, palette, u.uVertexTone.value, u.uVertexToneShade.value);
+                // Own colours opted out of the palette: the imagery light, as for terrain.
                 const light = palette.light ?? [1, 1, 1];
                 (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);
             }

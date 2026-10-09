@@ -257,10 +257,28 @@ const DATA_SOURCES: DataSourceGroup[] = [
         ],
     },
     {
-        title: 'Roof colours',
-        feeds: 'Building roofs, measured in aerial photos, with the Imagery and Hybrid terrain colours.',
+        title: 'Buildings',
+        feeds: 'Roof colours measured in aerial photos (with the Imagery and Hybrid terrain colours), building '
+            + 'heights and ridges fitted to a surface model, and official roof shapes and heights - plus the '
+            + 'buildings only the official models have.',
         sources: [
             { name: 'DOP40 digital orthophotos, 40 cm', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
+            {
+                name: 'DOP20 digital orthophotos, 20 cm', scope: 'Brandenburg, Berlin',
+                credit: '© GeoBasis-DE/LGB; © Geoportal Berlin (data changed)', licence: 'dl-de/by-2-0',
+            },
+            { name: 'DOM20 digital surface model, 20 cm', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
+            { name: 'DGM1 digital terrain model, 1 m (ground under the buildings)', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
+            { name: 'LoD2 3D building models', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
+            {
+                name: 'bDOM digital surface model, 20 cm, over DGM1, 1 m', scope: 'Brandenburg',
+                credit: '© GeoBasis-DE/LGB (data changed)', licence: 'dl-de/by-2-0',
+            },
+            {
+                name: 'LoD2 3D building models', scope: 'Brandenburg',
+                credit: '© GeoBasis-DE/LGB (data changed)', licence: 'dl-de/by-2-0',
+            },
+            { name: 'LoD2 3D building models', scope: 'Berlin', credit: 'Geoportal Berlin', licence: 'dl-de/zero-2-0' },
         ],
     },
 ];
@@ -642,6 +660,21 @@ function sliderValue(event: Event): number {
                             </p>
                             <mat-slide-toggle [checked]="farTileTextures()" (change)="setFarTileTextures($event)">
                                 Paint far tiles from the detailed ground
+                            </mat-slide-toggle>
+                        </section>
+
+                        <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Buildings</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">
+                                Houses and other buildings from OpenStreetMap, with their roofs, where
+                                the terrain was baked with them. Far off only the larger ones are
+                                drawn, and a busy view thins them out to hold the frame rate. Where
+                                roofs were measured in aerial photos they show their real colour with
+                                the Imagery and Hybrid terrain colours.
+                            </p>
+                            <p class="m-0 mb-2 text-xs opacity-60">Data sources and licences: see the About tab.</p>
+                            <mat-slide-toggle [checked]="buildings()" (change)="setBuildings($event)">
+                                Draw buildings
                             </mat-slide-toggle>
                         </section>
 
@@ -1066,6 +1099,7 @@ export class SettingsDialog {
     readonly triangleBudget = signal(this.config.triangleBudget.getActive());
 
     readonly farTileTextures = signal(this.config.farTileTextures.getActive());
+    readonly buildings = signal(this.config.buildings.getActive());
     readonly roadsOptions = ROADS_OPTIONS;
     readonly roads = signal(this.config.roads.getActive());
     readonly renderScales: Option<number>[] = RENDER_SCALES.map(scale => ({
@@ -1170,6 +1204,12 @@ export class SettingsDialog {
         this.config.farTileTextures.setActive(event.checked);
         updateSettings({ farTileTextures: event.checked });
         this.farTileTextures.set(event.checked);
+    }
+
+    setBuildings(event: MatSlideToggleChange) {
+        this.config.buildings.setActive(event.checked);
+        updateSettings({ buildings: event.checked });
+        this.buildings.set(event.checked);
     }
 
     setRoads(mode: RoadsMode) {

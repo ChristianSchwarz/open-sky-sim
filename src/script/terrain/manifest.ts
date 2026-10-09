@@ -88,6 +88,13 @@ interface BridgeStreamManifest {
 }
 
 /**
+ * Building sidecars, written by tools/bake_planet_buildings.ts. One PBH1 per
+ * leaf tile with buildings: footprints, heights and roofs as parameters the
+ * runtime extrudes (buildingMeshes.ts). Absent on a pyramid baked without.
+ */
+type BuildingStreamManifest = BridgeStreamManifest;
+
+/**
  * Bed sidecars, written by tools/bake_planet_grade.ts: one PBD1 per graded
  * tile with a road or railway bed (z8 up) - the beds for collision and the
  * trees, and the retaining walls. Absent on a pyramid that was not graded.
@@ -190,6 +197,7 @@ export interface TerrainManifest {
     bridges?: BridgeStreamManifest;
     beds?: BedStreamManifest;
     farLand?: FarLandStreamManifest;
+    buildings?: BuildingStreamManifest;
     height: HeightStreamManifest;
     flattenPads: FlattenPadManifest[];
     /**
@@ -326,6 +334,17 @@ export function bridgeTileUrl(
 
 export function bridgeIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
     return manifest.bridges ? `${base}/${manifest.bridges.indexPath}` : undefined;
+}
+
+/** Only meaningful when `manifest.buildings` is present. */
+export function buildingTileUrl(
+    manifest: TerrainManifest, z: number, x: number, y: number, base: string,
+): string {
+    return `${base}/${expand(manifest.buildings!.path, z, x, y)}`;
+}
+
+export function buildingIndexUrl(manifest: TerrainManifest, base: string): string | undefined {
+    return manifest.buildings ? `${base}/${manifest.buildings.indexPath}` : undefined;
 }
 
 /** Only meaningful when `manifest.beds` is present. */

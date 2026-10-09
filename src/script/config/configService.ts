@@ -28,6 +28,7 @@ export type VisibleZoomChangeListener = (zoom: number) => void;
 export type LanduseRevealChangeListener = (px: number) => void;
 export type TriangleBudgetChangeListener = (triangles: number) => void;
 export type FarTileTexturesChangeListener = (enabled: boolean) => void;
+export type BuildingsChangeListener = (enabled: boolean) => void;
 export type RoadsChangeListener = (mode: RoadsMode) => void;
 export type RenderScaleChangeListener = (scale: number) => void;
 export type SupersamplingChangeListener = (enabled: boolean) => void;
@@ -57,6 +58,7 @@ export class ConfigService {
     readonly landuseReveal: LanduseRevealSetting;
     readonly triangleBudget: TriangleBudgetSetting;
     readonly farTileTextures: FarTileTexturesSetting;
+    readonly buildings: BuildingsSetting;
     readonly roads: RoadsSetting;
     readonly renderScale: RenderScaleSetting;
     readonly supersampling: SupersamplingSetting;
@@ -84,6 +86,7 @@ export class ConfigService {
         initialTreeDensity?: number,
         initialVisibleZoom?: number,
         initialColourAdjust?: ColourAdjust,
+        initialBuildings?: boolean,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -98,6 +101,7 @@ export class ConfigService {
         this.landuseReveal = new LanduseRevealSetting(initialLanduseRevealPx);
         this.triangleBudget = new TriangleBudgetSetting(initialTriangleBudget);
         this.farTileTextures = new FarTileTexturesSetting(initialFarTileTextures);
+        this.buildings = new BuildingsSetting(initialBuildings);
         this.roads = new RoadsSetting(initialRoads);
         this.renderScale = new RenderScaleSetting(initialRenderScale);
         this.supersampling = new SupersamplingSetting(initialSupersampling);
@@ -305,6 +309,39 @@ export class LanduseRevealSetting {
     }
 
     removeChangeListener(listener: LanduseRevealChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * Whether the OSM buildings the bake shipped are extruded and drawn on the
+ * leaf tiles (see BuildingMeshes). Off stops new fetches and hides the rest.
+ */
+export class BuildingsSetting {
+    private active: boolean;
+    private listeners: Set<BuildingsChangeListener> = new Set();
+
+    constructor(initialActive: boolean = true) {
+        this.active = initialActive;
+    }
+
+    getActive(): boolean {
+        return this.active;
+    }
+
+    setActive(enabled: boolean) {
+        if (enabled === this.active) return;
+        this.active = enabled;
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: BuildingsChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: BuildingsChangeListener) {
         this.listeners.delete(listener);
     }
 }

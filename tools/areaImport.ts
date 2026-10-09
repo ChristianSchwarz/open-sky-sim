@@ -560,7 +560,7 @@ export interface Step {
  * file they share, the manifest, is written under a lock
  * (osm_common.update_manifest).
  */
-export type Lane = 'dem' | 'prefetch' | 'coast' | 'roads' | 'airfields' | 'cover-fetch' | 'cover';
+export type Lane = 'dem' | 'prefetch' | 'coast' | 'roads' | 'buildings' | 'airfields' | 'cover-fetch' | 'cover';
 
 /** The lanes that take the progress bar, one step at a time. The OSM read and the coast bake are also the two that need most memory (10 GB for one Erz chunk's coast bake), so never two at once. */
 const FOREGROUND_LANES: ReadonlySet<Lane> = new Set<Lane>(['dem', 'prefetch', 'coast']);
@@ -705,6 +705,12 @@ export function dataSteps(
             label: 'baking road vectors', cmd: PYTHON, lane: 'roads',
             args: ['tools/bake_osm_roads.py', `--bbox=${bbox}`, pbfArg],
         },
+        // The building footprints likewise: their own files (.bvr), read only
+        // by the building bake at the very end of the mesh tail.
+        {
+            label: 'baking building footprints', cmd: PYTHON, lane: 'buildings',
+            args: ['tools/bake_osm_buildings.py', `--bbox=${bbox}`, pbfArg],
+        },
         // After the coast, because an airfield's platform is checked against
         // the land mask the coast bake just wrote — a runway the mask calls
         // water is one the terrain will refuse to flatten. Before the cover,
@@ -742,6 +748,10 @@ export function dataSteps(
  * over the finished strokes, then the grading: the road and railway beds laid
  * into the land (tools/bake_planet_grade.ts), the last write of a tile - every
  * stage before it reads the land as it was drawn, and refuses a graded tile.
+ * Last, each leaf's far land from the graded land (tools/bake_planet_farland.ts):
+ * a sidecar made before the grading would no longer match its leaf, and the
+ * game would draw the leaf at full detail at any range. Then the buildings
+ * (tools/bake_planet_buildings.ts), stood on the graded land.
  */
 function gradeSteps(bbox: string, rebaking = false): Step[] {
     return [
@@ -757,10 +767,18 @@ function gradeSteps(bbox: string, rebaking = false): Step[] {
             label: rebaking ? 'regrading road and railway beds' : 'grading road and railway beds', cmd: process.execPath,
             args: ['--import', 'tsx', 'tools/bake_planet_grade.ts', '--bbox', bbox],
         },
+        {
+            label: rebaking ? 'rebaking far land' : 'baking far land', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_farland.ts', '--bbox', bbox],
+        },
+        {
+            label: rebaking ? 'rebaking buildings' : 'baking buildings', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/bake_planet_buildings.ts', '--bbox', bbox],
+        },
     ];
 }
 
-/** The mesh, far-texture and road-stroke bakes, then bridges and grading: once, over the whole import box. */
+/** The mesh, far-texture and road-stroke bakes, then bridges, grading and far land: once, over the whole import box. */
 export function meshSteps(box: readonly number[]): Step[] {
     const bbox = box.join(',');
     return [
@@ -893,6 +911,7 @@ async function runImport(job: Job): Promise<void> {
                 await runForeground(s);
             }
             lanes.run('roads', [], laneRun(steps, 'roads'));
+            lanes.run('buildings', [], laneRun(steps, 'buildings'));
             for (const s of inLane(steps, 'coast')) {
                 await runForeground(s);
             }

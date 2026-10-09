@@ -1,6 +1,6 @@
 /**
- * Re-bake a graded box: meshes, far-tile textures, road strokes, bridges and
- * the grading, in that order (areaImport.ts meshSteps) - what it takes to
+ * Re-bake a graded box: meshes, far-tile textures, road strokes, bridges, the
+ * grading and the far land, in that order (areaImport.ts meshSteps) - what it takes to
  * apply a change to the grading or the bridges to an area, since a graded
  * tile is never graded again in place (bake_planet_grade.ts).
  *

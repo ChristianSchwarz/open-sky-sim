@@ -19,6 +19,7 @@ import time
 from typing import Sequence
 
 from bake_osm_airports import PBF_GROUPS as AIRFIELD_GROUPS
+from bake_osm_buildings import building_tag_predicate
 from bake_osm_coast import coast_tag_predicate
 from bake_osm_roads import rail_service_tag_predicate, rail_tag_predicate, road_tag_predicate
 from osm_common import glue_negative_bbox, parse_bbox
@@ -32,6 +33,7 @@ SPECS = (
     ('roads', road_tag_predicate, False),
     ('rails', rail_tag_predicate, False),
     ('rail_service', rail_service_tag_predicate, False),
+    ('buildings', building_tag_predicate, True),
 ) + tuple((key, predicate, True) for key, predicate in AIRFIELD_GROUPS)
 
 

@@ -3780,6 +3780,7 @@ export class Game {
             landuseReveal: this.configService.landuseReveal,
             triangleBudget: this.configService.triangleBudget,
             farTileTextures: this.configService.farTileTextures,
+            buildings: this.configService.buildings,
             roads: this.configService.roads,
             treeDensity: this.configService.treeDensity,
         });

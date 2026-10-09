@@ -54,10 +54,10 @@ from bake_planet_dem import (
 QUADRANTS = ((0, 0), (1, 0), (0, 1), (1, 1))
 
 # Everything a planet tile can carry: heights, coast/water vectors, cover.
-PLANET_EXTS = ('.pdm', '.lvr', '.plc', '.rvr')
+PLANET_EXTS = ('.pdm', '.lvr', '.plc', '.rvr', '.bvr', '.bvl')
 # The draw-ready tree: the mesh, the height tile copied there for physics, and
 # the far-tile cover texture beside the mesh.
-TERRAIN_EXTS = ('.ptm', '.pdm', '.ptx', '.ptr')
+TERRAIN_EXTS = ('.ptm', '.pdm', '.ptx', '.ptr', '.pbh')
 
 TileSet = Set[Tuple[int, int]]
 
@@ -286,7 +286,8 @@ def delete(args: argparse.Namespace) -> int:
         for index_rel in {tman.get('mesh', {}).get('indexPath', 'index_mesh.bin'),
                           tman.get('height', {}).get('indexPath', 'index.bin'),
                           tman.get('texture', {}).get('indexPath', 'index_tex.bin'),
-                          (tman.get('roads') or {}).get('indexPath', 'index_roads.bin')}:
+                          (tman.get('roads') or {}).get('indexPath', 'index_roads.bin'),
+                          (tman.get('buildings') or {}).get('indexPath', 'index_buildings.bin')}:
             t_index_path = os.path.join(args.terrain, index_rel)
             if not os.path.exists(t_index_path):
                 continue

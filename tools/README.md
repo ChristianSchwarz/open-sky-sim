@@ -235,7 +235,44 @@ npm run bake:grade
 
 # 8. far land: lighter levels of each leaf's land, drawn from far off (optional)
 npm run bake:farland
+
+# 9. buildings: OSM footprints -> .bvr per leaf (planet), then heights, roofs
+#    and colours stood on the graded land -> .pbh per leaf + index_buildings.bin
+npm run bake:buildings -- --bbox w,s,e,n
+npm run bake:lod2 -- --bbox w,s,e,n           # optional: official LoD2 roofs and heights (Bavaria, Brandenburg, Berlin)
+npm run bake:roof-colours -- --bbox w,s,e,n   # optional: roofs measured in orthophotos (Bavaria, Brandenburg, Berlin)
+npm run bake:roof-shapes -- --bbox w,s,e,n    # optional: heights and ridges from surface models (Bavaria, Brandenburg)
+npm run bake:buildings-pbh -- --bbox w,s,e,n
 ```
+
+Stage 9 (`tools/bake_osm_buildings.py`, `tools/bake_planet_buildings.ts`)
+reads every `building=*` outline, files it whole under the leaf holding its
+centroid and decides its height and roof from its tags or, mostly, from rules
+by kind, size and region (`tools/bake/buildingPlan.ts`). The runtime extrudes
+them (`src/script/terrain/buildingMeshes.ts`, Graphics tab *Buildings*). The
+`.pbh` stands on the drawn land, so re-run `bake:buildings-pbh` after any
+re-mesh or re-grade of the box. Overpass cells are z11 (`--cell-zoom`): a city
+cell at the road bakes' z8 would be millions of ways. `bake:roof-colours`
+(`tools/measure_buildings.py`) reads each roof's colour off Bavaria's open
+DOP40 orthophotos (CC BY 4.0, "Datenquelle: Bayerische Vermessungsverwaltung –
+www.geodaten.bayern.de") into data/imports/buildings/store; the `.pbh` bake
+picks it up. It is not part of an area import - run it by box. `bake:roof-shapes`
+(`tools/measure_roof_shapes.py`) fits each building's height and ridge to
+Bavaria's DOM20 surface over its DGM1 terrain (CC BY 4.0, same attribution);
+the roof *form* it fits is used only with `bake:buildings-pbh --
+--surface-forms` (see the doc for why). `bake:lod2` (`tools/import_lod2.py`)
+matches Bavaria's LoD2 city models to the OSM footprints; where it matches,
+its roof form, heights and ridge win over everything else. `npm run
+eval:buildings -- --bbox w,s,e,n` scores the other sources against it.
+
+Brandenburg and Berlin are wired too: DOP20 orthophotos for both (dl-de/by-2-0,
+"(c) GeoBasis-DE/LGB; (c) Geoportal Berlin"), Brandenburg's 20 cm bDOM over its
+DGM1 (dl-de/by-2-0, "(c) GeoBasis-DE/LGB"; Berlin's surface models are 1 m only
+and not used), and both states' LoD2 (Brandenburg dl-de/by-2-0, Berlin
+dl-de/zero-2-0). Run `bake:lod2` before `bake:roof-colours`: the buildings only
+LoD2 has (.bvl) are coloured too. data.geobasis-bb.de serves at about
+0.65 MB/s in all, and a bDOM tile is ~29 MB whole, so `bake:roof-shapes` over
+a town takes hours; it resumes where it stopped. Design: docs/terrain-buildings.md.
 
 Stage 7's grading (`tools/bake_planet_grade.ts`) is where every road and
 railway gets its profile: no track steeper than 3 %, embankments and
@@ -256,7 +293,9 @@ their triangles. Borders, shores, steep faces and the order between fills and
 ground are kept, and the land never rises over a road or river
 (`tools/bake/farLand.ts`). It has to run after anything that rewrites a leaf's
 land: a sidecar records a fingerprint of the land it was made from, and one
-that no longer matches is ignored rather than drawn.
+that no longer matches is ignored rather than drawn. The area import, an area
+delete and `rebake:box` run it last on their own; after a stage run by hand,
+run it again over the same box.
 
 `bake:lidar` (`tools/measure_lidar.py`) is what gives the beds real
 embankments, cuttings and bridge approaches: the 30 m land has none. It reads

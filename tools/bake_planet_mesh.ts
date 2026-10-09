@@ -854,13 +854,14 @@ async function main(): Promise<void> {
 
     const outManifestPath = path.join(args.out, 'manifest.json');
     const previousManifest = fs.existsSync(outManifestPath)
-        ? JSON.parse(fs.readFileSync(outManifestPath, 'utf8')) as { texture?: unknown; roads?: unknown; bridges?: unknown; beds?: unknown; farLand?: unknown }
+        ? JSON.parse(fs.readFileSync(outManifestPath, 'utf8')) as { texture?: unknown; roads?: unknown; bridges?: unknown; beds?: unknown; farLand?: unknown; buildings?: unknown }
         : {};
     const carriedTexture = previousManifest.texture;
     const carriedRoads = previousManifest.roads;
     const carriedBridges = previousManifest.bridges;
     const carriedBeds = previousManifest.beds;
     const carriedFarLand = previousManifest.farLand;
+    const carriedBuildings = previousManifest.buildings;
     if (carriedTexture !== undefined) {
         console.log('texture stream carried from the previous manifest; run `npm run bake:tex` '
             + (args.bbox ? 'with the same --bbox ' : '') + 'to refresh it for the re-meshed tiles');
@@ -946,6 +947,9 @@ async function main(): Promise<void> {
         // sidecar no longer matches its land and the runtime ignores it
         // (PflTile.nearFingerprint) until that stage runs again.
         farLand: carriedFarLand,
+        // And the buildings, bake_planet_buildings.ts's: their bases were
+        // read off the old land, so re-run bake:buildings after a re-mesh.
+        buildings: carriedBuildings,
     };
     fs.writeFileSync(
         path.join(args.out, 'manifest.json'),

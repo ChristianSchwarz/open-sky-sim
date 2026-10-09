@@ -47,12 +47,15 @@ import {
 import {
     TerrainManifest, baseUrlOf, heightIndexUrl, heightTileUrl, meshIndexUrl, meshTileUrl,
     textureIndexUrl,
-    bedIndexUrl, bridgeIndexUrl,
+    bedIndexUrl, bridgeIndexUrl, buildingIndexUrl,
     roadIndexUrl,
     farLandIndexUrl,
 } from './manifest';
 import { CoverBinding, CoverTextures } from './coverTextures';
 import { BridgeMeshes } from './bridgeMeshes';
+import { BUILDING_BUILD_MS, BuildingMeshes } from './buildingMeshes';
+import { buildBuildingExclusion } from './buildingExclusion';
+import { BUILDING_TONES } from './buildingTones';
 import { roadLevelFor } from './roadLod';
 import { FarLandTiles } from './farLandTiles';
 import { RoadStrokes, trackDetailReachM } from './roadStrokes';
@@ -83,7 +86,7 @@ import {
 } from './tones';
 import { RoadsMode, TERRAIN_COLOUR_MODE_INDEX, TerrainColours, TerrainShading } from '../state/gameDefs';
 import {
-    FarTileTexturesSetting, LanduseBlendSetting, LanduseReachSetting, LanduseRevealSetting, RoadsSetting, TerrainColourSetting,
+    BuildingsSetting, FarTileTexturesSetting, LanduseBlendSetting, LanduseReachSetting, LanduseRevealSetting, RoadsSetting, TerrainColourSetting,
     TerrainDetailSetting, TerrainShadingSetting, TreeDensitySetting, TriangleBudgetSetting, VisibleZoomSetting,
 } from '../config/configService';
 import { publishTerrainStats, trackTerrainMaterial } from './debug';
@@ -227,6 +230,7 @@ export interface TerrainEntityOptions {
     triangleBudget?: TriangleBudgetSetting;
     /** Live far-tile texture switch. Omit and textures are drawn where the bake shipped them. */
     farTileTextures?: FarTileTexturesSetting;
+    buildings?: BuildingsSetting;
     /** Live road switch. Omit and every road the bake shipped is drawn. */
     roads?: RoadsSetting;
     /**
@@ -264,6 +268,10 @@ export interface TerrainStats {
     /** Resident tiles with bridge geometry bound, and the triangles they hold. */
     bridgeTiles: number;
     bridgeTriangles: number;
+    /** Resident tiles with buildings extruded, the triangles bound, and those drawn last frame. */
+    buildingTiles: number;
+    buildingTriangles: number;
+    buildingShownTriangles: number;
 }
 
 export class TerrainEntity implements Entity {
@@ -292,6 +300,8 @@ export class TerrainEntity implements Entity {
     private airfieldExclusion: AirfieldExclusion | undefined;
     private surfaceExclusion: ((x: number, z: number) => boolean) | undefined;
     private readonly bridges: BridgeMeshes;
+    readonly buildings: BuildingMeshes;
+    private buildingMaterial: THREE.Material | undefined;
     /** The bake's road and railway beds and retaining walls (pbd.ts). */
     private readonly beds: BedStore;
     private readonly railWallMaterial: THREE.Material;
@@ -313,6 +323,22 @@ export class TerrainEntity implements Entity {
      */
     setTerrainColour(mode: TerrainColours): void {
         this.landMaterial.uniforms.uTerrainMode.value = TERRAIN_COLOUR_MODE_INDEX[mode];
+        this.terrainColour = mode;
+        this.applyBuildingColours();
+    }
+
+    private terrainColour: TerrainColours = TerrainColours.HYBRID;
+
+    /**
+     * Measured roof colours in the modes that show the ground's own colours
+     * (Imagery, Hybrid); their nearest palette tone in the palette modes.
+     */
+    private applyBuildingColours(): void {
+        const m = this.buildingMaterial as THREE.ShaderMaterial | undefined;
+        if (m?.uniforms.uVertexRaw) {
+            m.uniforms.uVertexRaw.value =
+                this.terrainColour === TerrainColours.IMAGERY || this.terrainColour === TerrainColours.HYBRID ? 1 : 0;
+        }
     }
 
     /**
@@ -470,12 +496,15 @@ export class TerrainEntity implements Entity {
         meshes.treesBusy = true;
         const ptr = await this.roads.load(tile.id, 0);
         const onRoad = ptr ? buildRoadExclusion(ptr) : undefined;
+        // Nor through a roof.
+        const pbh = await this.buildings.load(tile.id, 0);
+        const onBuilding = pbh ? buildBuildingExclusion(pbh) : undefined;
         // Trees keep off the tile's road and railway beds, and their batters.
         const onBed = !meshes.disposed ? (await this.railBedJob(tile.id, meshes))?.onBed : undefined;
         const onManMade = this.sceneExclusionFor(tile);
-        const isExcluded = onRoad || onManMade || onBed
+        const isExcluded = onRoad || onManMade || onBed || onBuilding
             ? (x: number, z: number, y: number) => (onRoad?.(x, z) ?? false) || (onBed?.(x, y, z) ?? false)
-                || (onManMade?.(x, z, y) ?? false)
+                || (onManMade?.(x, z, y) ?? false) || (onBuilding?.(x, y, z) ?? false)
             : undefined;
         const groups = scatterTreeSpecies(tile, densityScale, isExcluded);
         // Ground clutter (rocks + extra shrubs on open, non-forested ground -
@@ -907,6 +936,7 @@ export class TerrainEntity implements Entity {
                 this.cover.release(m);
                 this.roads.release(m);
                 this.bridges.release(m);
+                this.buildings.release(m);
                 this.farLand.release(m);
                 disposeTileMeshes(m);
             },
@@ -966,6 +996,28 @@ export class TerrainEntity implements Entity {
             trackTopMaterial: railTopMaterial,
             onBeforeRender: tileBeforeRender,
         });
+        // Buildings: one lit mesh per leaf, its colours a tone per face.
+        // FrontSide: walls wind outward and roofs up (buildingRoofs.ts).
+        const buildingMaterial = opts.materials.build({
+            type: SceneMaterialPrimitiveType.MESH,
+            category: PaletteCategory.SCENERY_WALL_PLASTER,
+            depthWrite: true,
+            shaded: true as const,
+            vertexTones: BUILDING_TONES,
+        }) as THREE.ShaderMaterial;
+        trackTerrainMaterial(buildingMaterial);
+        this.buildingMaterial = buildingMaterial;
+        this.applyBuildingColours();
+        this.buildings = new BuildingMeshes({
+            manifest: opts.manifest,
+            baseUrl: base,
+            material: buildingMaterial,
+            onBeforeRender: tileBeforeRender,
+        });
+        if (opts.buildings) {
+            this.buildings.setEnabled(opts.buildings.getActive());
+            opts.buildings.addChangeListener(on => this.buildings.setEnabled(on));
+        }
         if (opts.roads) {
             this.setRoads(opts.roads.getActive());
             opts.roads.addChangeListener(mode => this.setRoads(mode));
@@ -1024,7 +1076,8 @@ export class TerrainEntity implements Entity {
         const bridgesIndexUrl = bridgeIndexUrl(this.manifest, base);
         const bedsIndexUrl = bedIndexUrl(this.manifest, base);
         const farIndexUrl = farLandIndexUrl(this.manifest, base);
-        const [meshIdx, heightIdx, texIdx, roadIdx, bridgeIdx, bedIdx, farIdx] = await Promise.all([
+        const buildingsIndexUrl = buildingIndexUrl(this.manifest, base);
+        const [meshIdx, heightIdx, texIdx, roadIdx, bridgeIdx, bedIdx, farIdx, buildingIdx] = await Promise.all([
             fetchIndex(meshIndexUrl(this.manifest, base)),
             fetchIndex(heightIndexUrl(this.manifest, base)),
             texIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(texIndexUrl),
@@ -1032,6 +1085,7 @@ export class TerrainEntity implements Entity {
             bridgesIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(bridgesIndexUrl),
             bedsIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(bedsIndexUrl),
             farIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(farIndexUrl),
+            buildingsIndexUrl === undefined ? Promise.resolve(undefined) : fetchIndex(buildingsIndexUrl),
         ]);
         this.meshIndex = meshIdx;
         this.heightIndex = heightIdx;
@@ -1040,6 +1094,7 @@ export class TerrainEntity implements Entity {
         this.bridges.setIndex(bridgeIdx);
         this.beds.setIndex(bedIdx);
         this.farLand.setIndex(farIdx);
+        this.buildings.setIndex(buildingIdx);
         await this.heights.loadCoarse(heightIdx);
     }
 
@@ -1293,8 +1348,9 @@ export class TerrainEntity implements Entity {
         const c = this.cover.stats;
         const r = this.roads.stats;
         const b = this.bridges.stats;
+        const h = this.buildings.stats;
         return m.queued + m.inflight + this.streamer.pendingUploads
-            + c.queued + c.inflight + r.queued + r.inflight + b.queued + b.inflight;
+            + c.queued + c.inflight + r.queued + r.inflight + b.queued + b.inflight + h.queued + h.inflight;
     }
 
     /** Resolve once every pinned tile is uploaded, reporting progress. */
@@ -1545,6 +1601,9 @@ export class TerrainEntity implements Entity {
         const pixelAngle = camera
             ? 2 * Math.tan(THREE.MathUtils.degToRad(camera.getEffectiveFOV()) / 2) / Math.max(1, heightPx)
             : 0;
+        if (camera) {
+            this.buildings.beginFrame();
+        }
         for (const node of this.drawList) {
             const meshes = this.streamer.get(node.id);
             if (!meshes) {
@@ -1559,6 +1618,9 @@ export class TerrainEntity implements Entity {
                 continue;
             }
             const nearM = Math.max(0, node.center.distanceTo(camera.position) - node.radius);
+            if (!node.under) {
+                this.buildings.want(meshes, nearM);
+            }
             this.roads.showTrackDetail(meshes, nearM <= reach);
             this.roads.showLevel(meshes, roadLevelFor(nearM * pixelAngle));
             // Far land only in faceted shading: the smooth geometry is
@@ -1570,6 +1632,8 @@ export class TerrainEntity implements Entity {
         }
         if (camera) {
             this.roads.buildPendingLevels(ROAD_LEVEL_BUILD_MS);
+            this.buildings.buildPending(BUILDING_BUILD_MS);
+            this.buildings.endFrame(pixelAngle);
         }
     }
 
@@ -1668,6 +1732,7 @@ export class TerrainEntity implements Entity {
         this.cover.nextGeneration();
         this.roads.nextGeneration();
         this.bridges.nextGeneration();
+        this.buildings.nextGeneration();
         this.beds.nextGeneration();
 
         const r = this.quadtree.update(
@@ -1983,6 +2048,9 @@ export class TerrainEntity implements Entity {
                 this.cover.attach(node.id, meshes, priority);
                 this.roads.attach(node.id, meshes, priority);
                 this.bridges.attach(node.id, meshes, priority);
+                if (!node.under) {
+                    this.buildings.attach(node.id, meshes, priority);
+                }
                 // Walls, collision and the trees' mask: once per drawn tile.
                 void this.railBedJob(node.id, meshes);
                 continue;
@@ -2064,6 +2132,9 @@ export class TerrainEntity implements Entity {
             roadTriangles: this.roads.stats.triangles,
             bridgeTiles: this.bridges.stats.attached,
             bridgeTriangles: this.bridges.stats.triangles,
+            buildingTiles: this.buildings.stats.attached,
+            buildingTriangles: this.buildings.stats.triangles,
+            buildingShownTriangles: this.buildings.stats.shownTriangles,
         };
     }
 }

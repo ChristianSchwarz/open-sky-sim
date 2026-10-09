@@ -1,5 +1,8 @@
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 
+/** Size of the VERTEX_TONES colour table (see `vertexTones` in materials.ts). */
+export const VERTEX_TONE_COUNT = 16;
+
 export const ShadedVertProgram: string = `
   precision highp float;
 
@@ -39,8 +42,37 @@ export const ShadedVertProgram: string = `
   varying float vWorldY;
   /** Camera distance at this vertex, so haze varies across a mesh, not per draw. */
   varying float vDist;
+#ifdef VERTEX_TONES
+  // Looked up here, not in the fragment shader: a vertex shader may index a
+  // uniform array by any expression. Every vertex of a face carries the same
+  // tone, so the varyings arrive uninterpolated in effect.
+  attribute float tone;
+  uniform vec3 uVertexTone[${VERTEX_TONE_COUNT}];
+  uniform vec3 uVertexToneShade[${VERTEX_TONE_COUNT}];
+  varying vec3 vToneColor;
+  varying vec3 vToneShade;
+  // A colour of its own (sRGB bytes, alpha 1 when there is one), drawn in
+  // place of the tone while uVertexRaw is on: a measured roof. Every mesh with
+  // this material must bind it - an unbound attribute reads (0, 0, 0, 1),
+  // which is black. In linear light under uRawLight, like terrain imagery.
+  attribute vec4 rawColor;
+  uniform float uVertexRaw;
+  uniform vec3 uRawLight;
+  vec3 rawToLinear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+  }
+#endif
 ${LOG_DEPTH_PARS_VERTEX}
   void main() {
+#ifdef VERTEX_TONES
+    int toneIndex = int(tone + 0.5);
+    vToneColor = uVertexTone[toneIndex];
+    vToneShade = uVertexToneShade[toneIndex];
+    if (uVertexRaw > 0.5 && rawColor.a > 0.5) {
+      vToneColor = rawToLinear(rawColor.rgb) * uRawLight;
+      vToneShade = vToneColor * 0.7;
+    }
+#endif
     vec3 worldNormal;
 
     if (shadingType == 2 || shadingType == 3) {
