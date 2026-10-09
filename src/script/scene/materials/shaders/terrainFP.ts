@@ -47,6 +47,7 @@ export const TerrainFragProgram: string = `
   varying vec2 vCoverUv;
   varying float vDist;
   varying float vCameraAbove;
+  varying float vHeightOverCamera;
 ${LOG_DEPTH_PARS_FRAGMENT}
 ${DITHER_PARS_FRAGMENT}
 ${TERRAIN_COVER_PARS}
@@ -57,7 +58,10 @@ ${TERRAIN_COVER_PARS}
       discard;
     }
     // An under-parent seen from below: only its top may fill in for the leaves.
-    if (vCameraAbove < 0.0) {
+    // Only what hangs over the camera counts: a facet turned away from a
+    // camera well above it is no ceiling, and dropping it leaves a hole
+    // wherever the leaves have not arrived.
+    if (vCameraAbove < 0.0 && vHeightOverCamera > 0.0) {
       discard;
     }
 

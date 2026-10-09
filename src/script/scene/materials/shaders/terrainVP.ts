@@ -104,6 +104,8 @@ ${TERRAIN_COVER_PARS}
   varying float vDist;
   /** Under-parent only: the camera's height over this facet's plane; see uLodUnder. */
   varying float vCameraAbove;
+  /** Height of this fragment over the camera (scene y, camera at the origin). */
+  varying float vHeightOverCamera;
 ${LOG_DEPTH_PARS_VERTEX}
 
   /**
@@ -159,6 +161,7 @@ ${LOG_DEPTH_PARS_VERTEX}
     // The camera sits at the origin, and a faceted vertex carries its facet's
     // normal, so this is linear across the facet and interpolates exactly.
     vCameraAbove = uLodUnder > 0.5 ? dot(worldNormal, -worldPos.xyz) : 1.0;
+    vHeightOverCamera = worldPos.y;
     float bySize = sizeReveal(d);
     bool fills = uLodFills > 0.5;
     vBase = facetColor(coverColor, coverClass, fills ? 1.0 : bySize);
