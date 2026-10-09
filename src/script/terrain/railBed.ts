@@ -1865,6 +1865,7 @@ export function cutLandAtWalls(
             normals[no + 3] = 0;
             attrs[no + 3] = vs[src].attr[3];
         });
+        unifyCorners(attrs, slot * 12);
     };
     for (const [t, vs] of slots) {
         put(t, vs);
@@ -5941,6 +5942,7 @@ class SoupMesh {
                 }
                 attrs.set(this.land.attrs.subarray(src, src + 4), vo * 4);
             }
+            unifyCorners(attrs, slot * 12);
         };
         // Original slots: untouched bytes, the triangle now holding the slot,
         // or degenerate when it went to pieces.
@@ -6027,4 +6029,25 @@ export function buildRailBedExclusion(
         }
         return false;
     };
+}
+
+/**
+ * Gives a triangle one class and one colour set. A triangle's corners are
+ * copied from the slots they came from, and after an edge flip or a split
+ * those are different triangles' corners: a forest sliver beside a field then
+ * had one corner of the field's yellow, which the shader blends across it as a
+ * smear into the field. A triangle is one cover, so the odd corner takes the
+ * colour and class of the other two (the first corner when all three differ).
+ */
+export function unifyCorners(attrs: Uint8Array, at: number): void {
+    const cls = [attrs[at + 3], attrs[at + 7], attrs[at + 11]];
+    if (cls[0] === cls[1] && cls[1] === cls[2]) {
+        return;
+    }
+    const keep = cls[1] === cls[2] ? 1 : 0;
+    for (let k = 0; k < 3; k++) {
+        if (cls[k] !== cls[keep]) {
+            attrs.copyWithin(at + k * 4, at + keep * 4, at + keep * 4 + 4);
+        }
+    }
 }

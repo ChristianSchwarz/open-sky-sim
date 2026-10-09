@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { PtrTile, RoadClass, ROAD_SIDE_BIT } from './ptr';
 import {
-    BED_TIERS, BandResolver, RAIL_MAX_GRADE, gradeProfileWeighted, layRailBeds, railChains, retainingWalls, smoothVerticalCurves, underpinConcrete, cutLandAtWalls, DeckCeiling,
+    BED_TIERS, BandResolver, RAIL_MAX_GRADE, gradeProfileWeighted, layRailBeds, railChains, retainingWalls, smoothVerticalCurves, underpinConcrete, cutLandAtWalls, DeckCeiling, unifyCorners,
 } from './railBed';
 
 const Q = 0.05;
@@ -576,5 +576,30 @@ describe('DeckCeiling', () => {
     });
     it('says nothing far from any deck', () => {
         assert.equal(c.at(10, 40), undefined);
+    });
+});
+
+describe('unifyCorners', () => {
+    const tri = (...corners: number[][]) => new Uint8Array(corners.flat());
+
+    it('leaves a triangle of one class alone', () => {
+        const a = tri([10, 20, 30, 2], [11, 21, 31, 2], [12, 22, 32, 2]);
+        const before = a.slice();
+        unifyCorners(a, 0);
+        assert.deepEqual(a, before);
+    });
+
+    it('gives the odd corner the colour and class of a corner of the majority class', () => {
+        const a = tri([48, 58, 39, 2], [154, 142, 108, 6], [48, 59, 40, 2]);
+        unifyCorners(a, 0);
+        assert.deepEqual([...a.slice(4, 8)], [48, 58, 39, 2]);
+        assert.deepEqual([...a.slice(8, 12)], [48, 59, 40, 2]);
+    });
+
+    it('takes the first corner when all three differ, and works at an offset', () => {
+        const a = new Uint8Array(24);
+        a.set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 12);
+        unifyCorners(a, 12);
+        assert.deepEqual([...a.slice(12, 24)], [1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4]);
     });
 });
