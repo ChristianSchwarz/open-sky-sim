@@ -22,6 +22,7 @@
  *     --near-size N    texels across a near tile         (default 512)
  *     --near-zoom N    first level counted as near       (default 10)
  *     --min-zoom N     coarsest level that gets one      (default 4)
+ *     --no-buildings   leave the .pbh building footprints out of the leaf rasters
  *     --bbox w,s,e,n   re-rasterise only the leaves in this box, refold their
  *                      ancestors, and merge the index with what is there
  */
@@ -31,6 +32,7 @@ import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { makeEnuBasis } from '../src/script/terrain/geodesy';
 import { decodePtm } from '../src/script/terrain/ptm';
+import { decodePbh } from '../src/script/terrain/pbh';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import {
     PTX_HEADER_BYTES, boundsOf, decodePtx, emptyRaster, encodePtx, isEmptyRaster,
@@ -70,6 +72,7 @@ interface Args {
     nearSize: number;
     nearZoom: number;
     minZoom: number;
+    buildings: boolean;
     bbox?: LonLatBounds;
 }
 
@@ -98,6 +101,7 @@ function parseArgs(argv: string[]): Args {
         nearSize: DEFAULT_NEAR_SIZE,
         nearZoom: DEFAULT_NEAR_ZOOM,
         minZoom: DEFAULT_MIN_ZOOM,
+        buildings: true,
     };
     for (let i = 0; i < argv.length; i++) {
         const k = argv[i];
@@ -109,6 +113,7 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--near-size') a.nearSize = Number(next());
         else if (k === '--near-zoom') a.nearZoom = Number(next());
         else if (k === '--min-zoom') a.minZoom = Number(next());
+        else if (k === '--no-buildings') a.buildings = false;
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else throw new Error(`unknown argument ${k}`);
     }
@@ -137,6 +142,8 @@ interface CachedLeaf {
     texSize: number;
     /** The road vectors painted in, `size:mtime`, or absent when there were none. */
     roads?: string;
+    /** The .pbh footprints painted in, `size:mtime`, or absent when there were none. */
+    buildings?: string;
 }
 
 interface CacheMeta {
@@ -239,17 +246,22 @@ function main(): void {
         // averaged a one-texel road into its neighbours until z10 kept 53
         // road texels of Berlin. A cache entry from that bake carries a
         // `roads` key and is re-rasterised clean.
+        const pbhPath = tilePath(args.dir, k, '.pbh');
+        const pbhStat = args.buildings && fs.existsSync(pbhPath) ? fs.statSync(pbhPath) : undefined;
+        const pbhSig = pbhStat ? `${pbhStat.size}:${pbhStat.mtimeMs}` : undefined;
         if (known && known.size === st.size && known.mtimeMs === st.mtimeMs
-            && known.texSize === leafSize && known.roads === undefined && fs.existsSync(cachePath)) {
+            && known.texSize === leafSize && known.roads === undefined
+            && known.buildings === pbhSig && fs.existsSync(cachePath)) {
             fromCache++;
         } else {
             const tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
-            const raster = rasterizeLeaf(tile, basis, leafSize);
+            const pbh = pbhStat ? decodePbh(zlib.gunzipSync(fs.readFileSync(pbhPath))) : undefined;
+            const raster = rasterizeLeaf(tile, basis, leafSize, pbh);
             fs.mkdirSync(path.dirname(cachePath), { recursive: true });
             // Lightly compressed: a megabyte of mostly flat colour per leaf
             // shrinks twentyfold, and the cache holds thousands of them.
             fs.writeFileSync(cachePath, zlib.gzipSync(encodePtx(k, leafSize, raster), { level: 1 }));
-            cacheMeta[key] = { size: st.size, mtimeMs: st.mtimeMs, texSize: leafSize };
+            cacheMeta[key] = { size: st.size, mtimeMs: st.mtimeMs, texSize: leafSize, buildings: pbhSig };
             rasterised++;
         }
         if (Date.now() - lastLine > 500 || i === leaves.length - 1) {
@@ -356,6 +368,27 @@ function main(): void {
         previous = current;
     }
 
+    // --- sparse leaf textures -----------------------------------------------
+    // Leaves that carry buildings also ship their raster: their own facets and
+    // 3D houses cover the near field, this the far field where the houses are
+    // cut. Every other leaf has none, and drops a stale one.
+    const leafShipped: TileKey[] = [];
+    const leafDropped: TileKey[] = [];
+    let leafGz = 0;
+    for (const k of leaves) {
+        const leafOut = tilePath(args.dir, k, '.ptx');
+        const pbhPath = tilePath(args.dir, k, '.pbh');
+        const r = args.buildings && fs.existsSync(pbhPath) ? leafRaster(k) : undefined;
+        if (r !== undefined && !isEmptyRaster(r.texels)) {
+            leafGz += writePtx(leafOut, k, r.size, paintLevelRoads(k, r.texels, r.size));
+            leafShipped.push(k);
+        } else if (fs.existsSync(leafOut)) {
+            fs.unlinkSync(leafOut);
+            leafDropped.push(k);
+        }
+    }
+    console.log(`  leaf textures: ${leafShipped.length} shipped (${(leafGz / 1048576).toFixed(1)} MB gz), ${leafDropped.length} dropped`);
+
     // --- index and manifest -------------------------------------------------
     const indexPath = path.join(args.dir, 'index_tex.bin');
     const present = new Map<string, TileKey>();
@@ -371,9 +404,16 @@ function main(): void {
     for (const k of written) {
         present.set(keyOf(k), k);
     }
+    for (const k of leafDropped) {
+        present.delete(keyOf(k));
+    }
+    for (const k of leafShipped) {
+        present.set(keyOf(k), k);
+    }
     const all = [...present.values()];
     const maxZoom = leafZoom - 1;
-    fs.writeFileSync(indexPath, encodeTileIndex(all, args.minZoom, maxZoom));
+    const hasLeaves = all.some(k => k.z === leafZoom);
+    fs.writeFileSync(indexPath, encodeTileIndex(all, args.minZoom, hasLeaves ? leafZoom : maxZoom));
 
     manifest.texture = {
         path: '{z}/{x}/{y}.ptx',
@@ -385,6 +425,7 @@ function main(): void {
         nearZoom: args.nearZoom,
         minZoom: args.minZoom,
         maxZoom,
+        ...(hasLeaves ? { leafZoom } : {}),
     };
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 

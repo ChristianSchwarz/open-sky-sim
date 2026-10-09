@@ -137,6 +137,15 @@ export class Renderer {
      * dither structure to smear into blocks.
      */
     private static readonly BACKGROUND_SKY_SCALE = 0.25;
+    /**
+     * The upscaled sky waiting for the next pass into each target that draws
+     * anything, by target: drawn there behind the opaque geometry instead of
+     * blitted over the whole target first. The blit filled every pixel of
+     * the frame (2.6 ms of an ultrawide on an integrated GPU) for the terrain
+     * to cover most of them; at the far plane, depth-tested, it shades only
+     * what is left of the sky.
+     */
+    private readonly pendingSky = new Map<string, { texture: THREE.Texture; target: THREE.WebGLRenderTarget }>();
     private renderListGeneration = 0;
     /**
      * Mipmap-based supersample downsampling needs generateMipmap() on a
@@ -166,6 +175,11 @@ export class Renderer {
         );
         this.renderer.autoClear = false;
         this.renderer.sortObjects = false;
+        // Only for the pass that carries a deferred sky (render3D): the
+        // traversal order everything relies on, but the sky quad after the
+        // geometry that writes depth. Array.prototype.sort is stable.
+        this.renderer.setOpaqueSort((a, b) => Renderer.deferredBlitRank(a.material) - Renderer.deferredBlitRank(b.material));
+        this.renderer.setTransparentSort(() => 0);
         this.relativeRoot.name = 'CameraRelativeRoot';
         this.updateViewportSize();
         this.container.appendChild(this.renderer.domElement);
@@ -347,6 +361,11 @@ export class Renderer {
             }
             cpuStats[label] = performance.now() - cpuStart;
         }
+        // A sky no pass drew behind: the whole of it still shows.
+        for (const { texture, target } of this.pendingSky.values()) {
+            this.blitPass.drawDeferred(this.renderer, texture, target);
+        }
+        this.pendingSky.clear();
 
         this.gpuTimer.begin('mipmaps');
         for (const { owner, target } of deferredMips) {
@@ -443,14 +462,44 @@ export class Renderer {
             this.sceneDepthPass.resolve(this.renderer, renderTarget.target, layer.sceneDepthFrom.far);
         }
 
-        this.submitCameraRelative(layer, palette);
+        const sky = this.pendingSky.get(layer.target);
+        if (sky === undefined || !this.hasAnythingToDraw(layer)) {
+            this.submitCameraRelative(layer, palette);
+            return;
+        }
+        this.pendingSky.delete(layer.target);
+        const list = this.current3DRenderLists.get(layer.lists[0]);
+        assertIsDefined(list);
+        const quad = this.blitPass.deferredMesh(sky.texture);
+        list.add(quad);
+        this.renderer.sortObjects = true;
+        try {
+            this.submitCameraRelative(layer, palette);
+        } finally {
+            this.renderer.sortObjects = false;
+            list.remove(quad);
+        }
+    }
+
+    /**
+     * Opaque draw order for a pass with a deferred sky: what writes depth,
+     * then the sky on whatever none of it covered, then what does not write
+     * depth (road and river strokes, shadows, stippled cloud haze), which
+     * would otherwise be painted over where it lies against the sky.
+     */
+    private static deferredBlitRank(material: THREE.Material): number {
+        if (material.userData.deferredBlit) {
+            return 1;
+        }
+        return material.depthWrite && material.depthTest ? 0 : 2;
     }
 
     /**
      * Renders a BackgroundSky-only layer (the sky dome) at a fraction of
-     * `renderTarget`'s resolution and upscales it in, instead of shading the
-     * dome at full resolution only to have the terrain pass draw over most
-     * of it a moment later. Reuses render3D unchanged: THREE sizes the actual
+     * `renderTarget`'s resolution, upscaled in later behind the next pass's
+     * opaque geometry (pendingSky), instead of shading the dome at full
+     * resolution only to have the terrain pass draw over most of it a moment
+     * later. Reuses render3D unchanged: THREE sizes the actual
      * GL viewport from whichever target is bound via setRenderTarget, not
      * from the `renderTarget` wrapper passed in, so pointing that binding at
      * a smaller buffer first is enough - the wrapper's width/height still
@@ -467,7 +516,7 @@ export class Renderer {
         this.render3D(renderTarget, scene, layer, palette);
 
         this.renderer.setRenderTarget(renderTarget.target);
-        this.blitPass.blit(this.renderer, small.texture, renderTarget.target);
+        this.pendingSky.set(layer.target, { texture: small.texture, target: renderTarget.target });
     }
 
     private backgroundSkyTargetFor(key: string, renderTarget: WebGLRenderTarget): THREE.WebGLRenderTarget {

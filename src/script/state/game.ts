@@ -410,7 +410,7 @@ const FIXED_CAMERA_MOVE_KEYS = new Set([
 enum GameState {
     SPAWN_MENU,
     PLAYER,
-    /** Looking from the URL's fixed camera; sim paused, Escape for the menu. */
+    /** Looking from the URL's fixed camera; sim paused, Escape opens the menu over it. */
     FIXED_CAMERA,
 }
 
@@ -2623,10 +2623,16 @@ export class Game {
             }
             if (this.state === GameState.FIXED_CAMERA) {
                 if (event.code === 'Escape') {
+                    // Opens the menu over the free camera, which stays put:
+                    // closing the dialog lands back here, and only a spawn
+                    // from it (via enterSpawnMenu) leaves this state.
                     event.preventDefault();
+                    // As for a flight below: the dialog's own Esc handler
+                    // would otherwise close it within this same key press.
+                    event.stopPropagation();
                     this.heldFixedCameraKeys.clear();
                     this.fixedCameraRates = zeroFixedCameraRates();
-                    this.enterSpawnMenu();
+                    this.spawnPanel.show();
                 } else if (event.key === 'F8') {
                     event.preventDefault();
                     this.toggleWireframeDebug();

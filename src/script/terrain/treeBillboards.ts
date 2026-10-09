@@ -18,6 +18,7 @@
 import * as THREE from 'three';
 import { PaletteCategory } from '../config/palettes/palette';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../scene/materials/materials';
+import { TREE_MIN_SPACING_PX } from '../scene/materials/shaders/treeBillboardVP';
 import { TREE_SPECIES_COUNT, Species } from '../scene/vegetation/treeSprites';
 import { PtmTile } from './ptm';
 
@@ -241,27 +242,111 @@ export function scatterTreeSpecies(
 function buildQuadGeometry(): THREE.BufferGeometry {
     const hw = TREE_HALF_WIDTH_M;
     const h = TREE_HEIGHT_M;
+    // Four corners and an index, not six vertices: every instance runs the
+    // whole vertex program per corner, and the shared two are run once.
     const positions = new Float32Array([
-        -hw, 0, 0, hw, 0, 0, hw, h, 0,
-        -hw, 0, 0, hw, h, 0, -hw, h, 0,
+        -hw, 0, 0, hw, 0, 0, hw, h, 0, -hw, h, 0,
     ]);
     // v=1 at the ground vertices, v=0 at the treetop — matches the sprite
     // atlas, whose cells are drawn canopy-up (see treeAtlas.ts / treeSprites.ts).
     const uvs = new Float32Array([
-        0, 1, 1, 1, 1, 0,
-        0, 1, 1, 0, 0, 0,
+        0, 1, 1, 1, 1, 0, 0, 0,
     ]);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geometry.setIndex([0, 1, 2, 0, 2, 3]);
     return geometry;
 }
 
-/** Builds every species' already-scattered points into one InstancedMesh (one draw call per tile) bound to the shared atlas. */
+/** Average metres between a tile's trees at `densityScale` (see TREE_SPACING_M2). */
+export function treeSpacingM(densityScale: number): number {
+    return Math.sqrt(TREE_SPACING_M2 / Math.max(densityScale, 1e-3));
+}
+
+/** Cells a side a tile's trees are split into, see buildTreeMeshes. */
+const TREE_CELLS = 4;
+
+const nearSphere = new THREE.Sphere();
+
+/**
+ * How many of a tree mesh's instances the screen-space thinning can keep
+ * anywhere in it, seen from `eye` (world, like the mesh's matrixWorld) with
+ * `pixelAngle` ground metres per pixel per metre of range: the shader's keep
+ * fraction at the mesh's near edge, as a prefix of the shuffled instances.
+ * The rest are never submitted - a far forest's own vertex work otherwise,
+ * even for the trees the shader drops. Without an eye, all of them.
+ */
+export function treeInstancesToDraw(mesh: THREE.InstancedMesh, eye: THREE.Vector3 | undefined, pixelAngle: number): number {
+    const total: number = mesh.userData.treeTotal ?? mesh.count;
+    const spacingM: number = mesh.userData.treeSpacingM ?? 0;
+    if (spacingM <= 0 || eye === undefined || !mesh.boundingSphere) {
+        return total;
+    }
+    nearSphere.copy(mesh.boundingSphere).applyMatrix4(mesh.matrixWorld);
+    const pixelM = Math.max(0, nearSphere.distanceToPoint(eye)) * pixelAngle;
+    if (pixelM <= 0) {
+        return total;
+    }
+    const spacingPx = spacingM / pixelM;
+    const keep = Math.min(1, (spacingPx * spacingPx) / (TREE_MIN_SPACING_PX * TREE_MIN_SPACING_PX));
+    return Math.min(total, Math.ceil(keep * total));
+}
+
+/**
+ * A tile's trees as TREE_CELLS x TREE_CELLS meshes (buildTreeMesh), one per
+ * patch of ground that has any. A tile is 6-7 km across: as one mesh, every
+ * tree in it was drawn whenever any part of it was in view, and at the count
+ * its nearest corner needs. A patch is culled by its own bounds and thinned
+ * by its own range, which leaves a fifth of a whole tile's trees to submit.
+ */
+export function buildTreeMeshes(
+    groups: SpeciesGroup[],
+    materials: SceneMaterialManager,
+    atlas: THREE.Texture,
+    spacingM = 0,
+): THREE.InstancedMesh[] {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const g of groups) {
+        for (const p of g.points) {
+            minX = Math.min(minX, p.x);
+            maxX = Math.max(maxX, p.x);
+            minZ = Math.min(minZ, p.z);
+            maxZ = Math.max(maxZ, p.z);
+        }
+    }
+    const n = TREE_CELLS;
+    const cells: SpeciesGroup[][] = Array.from({ length: n * n }, () => []);
+    const sx = n / Math.max(maxX - minX, 1e-6), sz = n / Math.max(maxZ - minZ, 1e-6);
+    for (const g of groups) {
+        const split: SpeciesGroup[] = [];
+        for (let k = 0; k < g.points.length; k++) {
+            const p = g.points[k];
+            const c = Math.min(n - 1, Math.floor((p.x - minX) * sx)) + n * Math.min(n - 1, Math.floor((p.z - minZ) * sz));
+            let s = split[c];
+            if (!s) {
+                s = split[c] = { species: g.species, points: [], tints: [], normals: [] };
+                cells[c].push(s);
+            }
+            s.points.push(p);
+            s.tints.push(g.tints[k * 3], g.tints[k * 3 + 1], g.tints[k * 3 + 2]);
+            s.normals.push(g.normals[k * 3], g.normals[k * 3 + 1], g.normals[k * 3 + 2]);
+        }
+    }
+    return cells.filter(c => c.length > 0).map(c => buildTreeMesh(c, materials, atlas, spacingM));
+}
+
+/**
+ * Builds every species' already-scattered points into one InstancedMesh (one
+ * draw call per tile) bound to the shared atlas. `spacingM` (treeSpacingM)
+ * lets the shader thin trees that pack tighter on screen than
+ * TREE_MIN_SPACING_PX; without it every instance is drawn.
+ */
 export function buildTreeMesh(
     groups: SpeciesGroup[],
     materials: SceneMaterialManager,
     atlas: THREE.Texture,
+    spacingM = 0,
 ): THREE.InstancedMesh {
     let count = 0;
     for (const group of groups) {
@@ -278,7 +363,28 @@ export function buildTreeMesh(
         category: PaletteCategory.TERRAIN_FOREST,
         depthWrite: true,
         map: atlas,
-    });
+    }) as THREE.ShaderMaterial;
+    material.uniforms.uTreeSpacingM = { value: spacingM };
+    material.uniforms.uTreeInvCount = { value: 1 / Math.max(1, count) };
+
+    // A seeded shuffle of the slots: an instance's index is its thinning
+    // hash, so the trees any thinning keeps are a prefix, spread evenly over
+    // the tile and the same every build.
+    const slot = new Uint32Array(count);
+    for (let j = 0; j < count; j++) {
+        slot[j] = j;
+    }
+    let seed = (count * 2654435761) >>> 0 || 1;
+    for (let j = count - 1; j > 0; j--) {
+        seed ^= seed << 13;
+        seed ^= seed >>> 17;
+        seed ^= seed << 5;
+        seed >>>= 0;
+        const r = seed % (j + 1);
+        const t = slot[j];
+        slot[j] = slot[r];
+        slot[r] = t;
+    }
 
     const mesh = new THREE.InstancedMesh(geometry, material, count);
     const shade = new Float32Array(count * 4);
@@ -295,17 +401,18 @@ export function buildTreeMesh(
                 * (group.species === Species.SHRUB ? SHRUB_SCALE : group.species === Species.BUSH ? BUSH_SCALE : 1);
             m.makeScale(scale, scale, scale);
             m.setPosition(p.x, p.y, p.z);
-            mesh.setMatrixAt(i, m);
-            speciesAttr[i] = group.species;
-            normalAttr[i * 3] = group.normals[k * 3];
-            normalAttr[i * 3 + 1] = group.normals[k * 3 + 1];
-            normalAttr[i * 3 + 2] = group.normals[k * 3 + 2];
+            const s = slot[i];
+            mesh.setMatrixAt(s, m);
+            speciesAttr[s] = group.species;
+            normalAttr[s * 3] = group.normals[k * 3];
+            normalAttr[s * 3 + 1] = group.normals[k * 3 + 1];
+            normalAttr[s * 3 + 2] = group.normals[k * 3 + 2];
             // rgb = the sampled ground colour, a = lighter/darker variation; the
             // fragment shader mixes the ground colour 50:50 with the palette green.
-            shade[i * 4] = group.tints[k * 3];
-            shade[i * 4 + 1] = group.tints[k * 3 + 1];
-            shade[i * 4 + 2] = group.tints[k * 3 + 2];
-            shade[i * 4 + 3] = (0.3 + hash01(i * 6.451 + group.species * 17.3 + 2) * 0.3) * 0.72;
+            shade[s * 4] = group.tints[k * 3];
+            shade[s * 4 + 1] = group.tints[k * 3 + 1];
+            shade[s * 4 + 2] = group.tints[k * 3 + 2];
+            shade[s * 4 + 3] = (0.3 + hash01(i * 6.451 + group.species * 17.3 + 2) * 0.3) * 0.72;
         }
     }
     mesh.instanceMatrix.needsUpdate = true;
@@ -318,5 +425,7 @@ export function buildTreeMesh(
     mesh.computeBoundingSphere();
     mesh.frustumCulled = true;
     mesh.matrixAutoUpdate = false;
+    mesh.userData.treeTotal = count;
+    mesh.userData.treeSpacingM = spacingM;
     return mesh;
 }

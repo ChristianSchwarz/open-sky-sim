@@ -53,7 +53,8 @@ export const WALL_TONES: readonly BuildingTone[] = [
     BuildingTone.WallMetal, BuildingTone.RoofWhite,
 ];
 
-function noonRgb(tone: BuildingTone): [number, number, number] {
+/** A tone's noon-palette colour as 0-255 sRGB. */
+export function noonRgb(tone: BuildingTone): [number, number, number] {
     const value = HDNoonPalette.colors[BUILDING_TONES[tone]];
     const hex = (Array.isArray(value) ? value[0] : value) as string;
     const n = parseInt(hex.slice(1), 16);

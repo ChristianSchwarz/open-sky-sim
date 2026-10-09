@@ -48,7 +48,12 @@ export interface CoverBinding {
     north: THREE.Vector3;
     /** The lon span's shrink toward the pole, per lat fraction; see coverFrame. */
     k: number;
+    /** The texture is read only past this distance (m); 0 = everywhere. A leaf's is its far-field stand-in for houses. */
+    fromM: number;
 }
+
+/** How far from the camera a leaf's own cover texture replaces its facet colour. */
+export const LEAF_COVER_FROM_M = 3000;
 
 export interface CoverFrame {
     east: THREE.Vector3;
@@ -199,6 +204,7 @@ export class CoverTextures {
     private readonly bakeBasis: EnuBasis;
     private readonly minZoom: number;
     private readonly maxZoom: number;
+    private readonly leafZoom: number;
     private readonly spec: TextureStreamManifest | undefined;
     private index: TileIndex | undefined;
     private attached = 0;
@@ -210,6 +216,7 @@ export class CoverTextures {
         this.spec = spec;
         this.minZoom = spec?.minZoom ?? 0;
         this.maxZoom = spec?.maxZoom ?? -1;
+        this.leafZoom = spec?.leafZoom ?? -1;
         this.store = spec === undefined ? undefined : new TileStore<PtxTile>({
             baseUrl: opts.baseUrl,
             url: (id) => textureTileUrl(opts.manifest, id.z, id.x, id.y, opts.baseUrl),
@@ -240,6 +247,10 @@ export class CoverTextures {
 
     /** Whether the bake wrote a texture for this tile. */
     has(id: TileKey): boolean {
+        if (id.z === this.leafZoom) {
+            // Sparse: only what the index lists.
+            return this.index ? this.index.has(id) : false;
+        }
         if (id.z < this.minZoom || id.z > this.maxZoom) {
             return false;
         }
@@ -286,7 +297,10 @@ export class CoverTextures {
         }
         const frame = coverFrame(id, this.bakeBasis, meshes.group.scale.x);
         const texture = buildCoverTexture(tile);
-        const binding: CoverBinding = { texture, east: frame.east, north: frame.north, k: frame.k };
+        const binding: CoverBinding = {
+            texture, east: frame.east, north: frame.north, k: frame.k,
+            fromM: id.z === this.leafZoom ? LEAF_COVER_FROM_M : 0,
+        };
         land.userData.cover = binding;
         meshes.cover = texture;
         meshes.bytes += coverTextureBytes(tile.size);

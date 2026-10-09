@@ -55,6 +55,13 @@ export interface TextureStreamManifest {
     minZoom: number;
     /** The leaf zoom less one: a leaf draws its own facets. */
     maxZoom: number;
+    /**
+     * The leaf zoom, when the bake also wrote textures for the leaves that carry
+     * buildings (sparse: the index says which). A leaf draws its own facets and
+     * its 3D houses up close; its texture takes over from `LEAF_COVER_FROM_M` out,
+     * where the houses are cut. Not part of the moving map's zoom range.
+     */
+    leafZoom?: number;
 }
 
 /**

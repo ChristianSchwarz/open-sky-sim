@@ -17,6 +17,15 @@ export const ConstantFragProgram: string = `
   varying vec3 vLight;
   varying float vWorldY;
   varying float vDist;
+#ifdef VERTEX_TONES
+  varying vec3 vToneColor;
+  varying vec3 vToneShade;
+  #define TONE_PRIMARY vToneColor
+  #define TONE_SECONDARY vToneShade
+#else
+  #define TONE_PRIMARY color
+  #define TONE_SECONDARY colorSecondary
+#endif
 ${LOG_DEPTH_PARS_FRAGMENT}
 ${DITHER_PARS_FRAGMENT}
   void main() {
@@ -40,19 +49,19 @@ ${DITHER_PARS_FRAGMENT}
     vec3 diffuse;
     if (shadingType == 0) {
       if (shade > 0.9) {
-        diffuse = color;
+        diffuse = TONE_PRIMARY;
       } else if (shade > 0.8) {
         vec2 screen = gl_FragCoord.xy;
         bool dithering = mod(floor(screen.x + screen.y), 2.0) > 0.5;
-        diffuse = dithering ? color : colorSecondary;
+        diffuse = dithering ? TONE_PRIMARY : TONE_SECONDARY;
       } else {
-        diffuse = colorSecondary;
+        diffuse = TONE_SECONDARY;
       }
     } else {
       // Coloured light, not a grey multiply: see vLight in shadedVP. The
       // duotone branch above stays on the scalar shade on purpose: its two
       // authored tones are the whole look, and warming them would break it.
-      diffuse = color * vLight;
+      diffuse = TONE_PRIMARY * vLight;
     }
     gl_FragColor = mix(vec4(diffuse, 1.0), vec4(fogColor, 1.0), fogFactor * 0.92);
 ${LOG_DEPTH_FRAGMENT}

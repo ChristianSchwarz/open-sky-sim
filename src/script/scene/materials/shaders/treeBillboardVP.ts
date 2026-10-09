@@ -2,6 +2,28 @@ import { COLOUR_ADJUST_PARS } from './colourAdjust';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 
 /**
+ * Trees closer together on screen than this many pixels are thinned out.
+ *
+ * A dense forest a few kilometres off packs several trees into every pixel:
+ * hundreds of thousands of alpha-tested quads, each a pixel or two wide,
+ * drawn over one another for a canopy the eye reads as one texture. Past the
+ * distance where a tile's spacing projects to this, each tree is kept with
+ * the probability that holds the on-screen spacing there, by its own
+ * distance rather than its tile's (a tile is 6-7 km across).
+ */
+export const TREE_MIN_SPACING_PX = 3;
+/**
+ * How much a kept tree may grow to cover for the ones dropped round it: by
+ * the square root of what was dropped, so the canopy covers about as much
+ * ground, up to this factor.
+ */
+export const TREE_MAX_GROW = 1.6;
+/** A tree near its cut-off shrinks to nothing over this share of the keep fraction, rather than popping. */
+const TREE_THIN_FADE = 0.25;
+
+const f = (v: number) => (Number.isInteger(v) ? v.toFixed(1) : String(v));
+
+/**
  * Billboarded tree with a discrete 4-angle atlas instead of a single
  * always-facing quad: the quadrant sampled is picked here, per frame, from
  * the camera's elevation angle above the tree - how far down it is looking,
@@ -29,6 +51,10 @@ export const TreeBillboardVertProgram: string = `
   uniform vec3 uSunDirect;
   /** The player's tree saturation, brightness and hue; see colourAdjust.ts. */
   uniform vec3 uAdjTrees;
+  /** Metres between this tile's trees, for the screen-space thinning; 0 keeps them all. */
+  uniform float uTreeSpacingM;
+  /** 1 / the tile's instance count. The instances are stored shuffled, so an index is a tree's hash. */
+  uniform float uTreeInvCount;
 ${COLOUR_ADJUST_PARS}
   attribute vec4 instanceShade;
   attribute float instanceSpecies;
@@ -42,6 +68,27 @@ ${LOG_DEPTH_PARS_VERTEX}
   void main() {
     vec4 worldBase = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
     float s = length(instanceMatrix[0].xyz);
+
+    // Screen-space thinning, see TREE_MIN_SPACING_PX. The hash is the
+    // instance's shuffled index, so the same trees stay as the camera moves,
+    // and the ones dropped at a tile's near edge are a tail the draw leaves
+    // off (treeInstancesToDraw). A dropped tree leaves here, before the
+    // lighting and the billboard below: the trees cost vertex work, not fill.
+#if __VERSION__ >= 300
+    if (uTreeSpacingM > 0.0) {
+      float pixelM = length(cameraPosition - worldBase.xyz) / (projectionMatrix[1][1] * max(halfHeight, 1.0));
+      float spacingPx = uTreeSpacingM / max(pixelM, 1.0e-6);
+      float keep = min(1.0, (spacingPx * spacingPx) / ${f(TREE_MIN_SPACING_PX * TREE_MIN_SPACING_PX)});
+      float h = (float(gl_InstanceID) + 0.5) * uTreeInvCount;
+      float fade = clamp((keep - h) / (${f(TREE_THIN_FADE)} * keep), 0.0, 1.0);
+      if (fade <= 0.0) {
+        // Outside the clip volume on every corner: the quad is never rasterised.
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+      }
+      s *= fade * min(${f(TREE_MAX_GROW)}, inversesqrt(max(keep, 1.0e-4)));
+    }
+#endif
 
     // Billboard about world up, not camera up: using the camera's view-space
     // x/y directly would roll the quad with the aircraft's bank, tilting

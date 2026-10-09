@@ -25,6 +25,9 @@ import { EnuBasis, ecefToEnu, ecefToGeodetic, enuToEcef, geodeticToEcef } from '
 import { PtmTile } from '../../src/script/terrain/ptm';
 import { PTX_NO_DATA } from '../../src/script/terrain/ptx';
 import { RoadClass } from '../../src/script/terrain/ptr';
+import { PBH_FLAG_ROOF_RGB, PbhTile, pbhRings } from '../../src/script/terrain/pbh';
+import { noonRgb } from '../../src/script/terrain/buildingTones';
+import { TerrainClass } from '../../src/script/terrain/tones';
 import { TileKey } from './index';
 import { LonLatBounds } from './shoreline';
 import { tileBounds } from './meshTile';
@@ -70,7 +73,9 @@ const MIN_TRIANGLE_AREA_TEXELS = 1e-4;
  * conversion, and it orders overlapping facets: a land-use fill is lifted a
  * hair above the ground it covers and has to win the texel.
  */
-export function rasterizeLeaf(tile: PtmTile, basis: EnuBasis, size: number): Uint8Array {
+export function rasterizeLeaf(
+    tile: PtmTile, basis: EnuBasis, size: number, buildings?: PbhTile,
+): Uint8Array {
     const out = emptyRaster(size);
     const height = new Float32Array(size * size).fill(-Infinity);
     const bounds = tileBounds(tile.id.z, tile.id.x, tile.id.y);
@@ -110,7 +115,100 @@ export function rasterizeLeaf(tile: PtmTile, basis: EnuBasis, size: number): Uin
             attrs[v * 4], attrs[v * 4 + 1], attrs[v * 4 + 2], attrs[v * 4 + 3],
         );
     }
+    if (buildings !== undefined) {
+        paintBuildings(out, size, bounds, centre, basis, buildings);
+    }
     return out;
+}
+
+/**
+ * Paint a leaf's building footprints over its ground, by area: each texel
+ * takes the share of it a roof covers (a 2x2 grid of samples) as the mix of
+ * roof and ground colour, and turns Built once roofs hold half of it. The
+ * 2x2 fold up the pyramid then averages the houses with the gardens between
+ * them, so a town reads as a town in every coarse tile instead of the flat
+ * residential-fill colour. Roofs take their measured colour, else their tone.
+ *
+ * The footprints are (u, v) metres in the .pbh's true local frame; a point is
+ * `u*a + v*b + base*up` from the tile centre in the tile's own axes, which
+ * go back to lon/lat exactly as the mesh vertices do.
+ */
+function paintBuildings(
+    out: Uint8Array, size: number, bounds: LonLatBounds,
+    centre: { e: number; n: number; u: number }, basis: EnuBasis, pbh: PbhTile,
+): number {
+    const lonSpan = bounds.east - bounds.west;
+    const latSpan = bounds.north - bounds.south;
+    const { a, b, up } = pbh.frame;
+    const enu = { e: 0, n: 0, u: 0 };
+    const ecef = { x: 0, y: 0, z: 0 };
+    let painted = 0;
+    for (const bld of pbh.buildings) {
+        let rgb: [number, number, number];
+        if ((bld.flags & PBH_FLAG_ROOF_RGB) !== 0) {
+            rgb = [(bld.roofRgb >> 16) & 255, (bld.roofRgb >> 8) & 255, bld.roofRgb & 255];
+        } else {
+            rgb = noonRgb(bld.roofTone);
+        }
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const rings = pbhRings(pbh, bld).map(ring => ring.map(([u, v]) => {
+            enu.e = centre.e + u * a[0] + v * b[0] + bld.baseM * up[0];
+            enu.u = centre.u + u * a[1] + v * b[1] + bld.baseM * up[1];
+            enu.n = centre.n - (u * a[2] + v * b[2] + bld.baseM * up[2]);
+            enuToEcef(basis, enu, ecef);
+            const g = ecefToGeodetic(ecef.x, ecef.y, ecef.z);
+            const x = ((g.lon - bounds.west) / lonSpan) * size;
+            const y = ((bounds.north - g.lat) / latSpan) * size;
+            minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+            minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+            return [x, y] as [number, number];
+        }));
+        const x0 = Math.max(0, Math.floor(minX)), x1 = Math.min(size - 1, Math.floor(maxX));
+        const y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(size - 1, Math.floor(maxY));
+        for (let py = y0; py <= y1; py++) {
+            for (let px = x0; px <= x1; px++) {
+                let hits = 0;
+                for (let s = 0; s < 4; s++) {
+                    if (insideRings(rings, px + 0.25 + (s & 1) * 0.5, py + 0.25 + (s >> 1) * 0.5)) {
+                        hits++;
+                    }
+                }
+                if (hits === 0) {
+                    continue;
+                }
+                const o = (py * size + px) * 4;
+                const w = hits / 4;
+                if (out[o + 3] === PTX_NO_DATA) {
+                    // Nothing under it (a leaf edge texel): the roof alone.
+                    out[o] = rgb[0]; out[o + 1] = rgb[1]; out[o + 2] = rgb[2];
+                    out[o + 3] = TerrainClass.Built;
+                } else {
+                    out[o] = Math.round(out[o] + (rgb[0] - out[o]) * w);
+                    out[o + 1] = Math.round(out[o + 1] + (rgb[1] - out[o + 1]) * w);
+                    out[o + 2] = Math.round(out[o + 2] + (rgb[2] - out[o + 2]) * w);
+                    if (w >= 0.5) {
+                        out[o + 3] = TerrainClass.Built;
+                    }
+                }
+                painted++;
+            }
+        }
+    }
+    return painted;
+}
+
+/** Even-odd point test over a building's rings, so courtyards are holes. */
+function insideRings(rings: ReadonlyArray<ReadonlyArray<[number, number]>>, x: number, y: number): boolean {
+    let inside = false;
+    for (const ring of rings) {
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const [xi, yi] = ring[i], [xj, yj] = ring[j];
+            if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+                inside = !inside;
+            }
+        }
+    }
+    return inside;
 }
 
 /**

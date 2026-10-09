@@ -36,6 +36,14 @@ export const BUILDING_TRIANGLE_BUDGET = 300_000;
 export const BUILDING_MIN_PIXELS = 2.5;
 /** Main-thread time a frame may spend extruding buildings. */
 export const BUILDING_BUILD_MS = 3;
+/**
+ * Houses of one size cross the pixel floor together, so a hard cut brings a
+ * whole town in at one frame. A tile adds its buildings at a steady rate
+ * instead, biggest first: its whole count over this many seconds, and never
+ * slower than `BUILDING_GROW_MIN_PER_S` so a small tile is not left waiting.
+ */
+export const BUILDING_GROW_SECONDS = 8;
+const BUILDING_GROW_MIN_PER_S = 25;
 
 export interface BuildingMeshSet {
     group: THREE.Group;
@@ -46,6 +54,8 @@ export interface BuildingMeshSet {
     prominence: Float32Array;
     /** Triangles drawn now (the draw range). */
     shown: number;
+    /** Buildings drawn now: the prefix `shown` is the triangles of. */
+    count: number;
     /** GPU bytes bound, for the cache budget. */
     bytes: number;
 }
@@ -212,6 +222,9 @@ export class BuildingMeshes {
     private tris = 0;
     private shownTris = 0;
     private minPixels = BUILDING_MIN_PIXELS;
+    private lastFrameMs = 0;
+    /** Fractions of a building owed to each tile between frames. */
+    private readonly owed = new WeakMap<BuildingMeshSet, number>();
     /** This frame's drawn leaves and their near-edge distance, for the budget. */
     private readonly frame: Array<{ set: BuildingMeshSet; nearM: number }> = [];
     budget = BUILDING_TRIANGLE_BUDGET;
@@ -364,7 +377,7 @@ export class BuildingMeshes {
         // Hidden until the next frame's budget pass gives it a draw range.
         mesh.visible = false;
         const set: BuildingMeshSet = {
-            group, mesh, prefix: job.prefix, prominence: job.prominence, shown: soup.tris,
+            group, mesh, prefix: job.prefix, prominence: job.prominence, shown: soup.tris, count: 0,
             bytes: soup.tris * 3 * (12 + 3 + 1 + 4),
         };
         meshes.group.add(group);
@@ -439,8 +452,23 @@ export class BuildingMeshes {
             this.shownTris = 0;
             return;
         }
+        const now = performance.now();
+        const dt = this.lastFrameMs === 0 ? 0 : Math.min(0.25, (now - this.lastFrameMs) / 1000);
+        this.lastFrameMs = now;
         for (const { set, nearM } of this.frame) {
-            const tris = trianglesFor(set, px * nearM * pixelAngle);
+            const want = countAtLeast(set.prominence, px * nearM * pixelAngle);
+            // Shrinking is at once, so the budget holds; growing is one by one.
+            if (want <= set.count) {
+                set.count = want;
+                this.owed.delete(set);
+            } else {
+                const rate = Math.max(BUILDING_GROW_MIN_PER_S, want / BUILDING_GROW_SECONDS);
+                const owe = (this.owed.get(set) ?? 0) + rate * dt;
+                const add = Math.floor(owe);
+                this.owed.set(set, owe - add);
+                set.count = Math.min(want, set.count + add);
+            }
+            const tris = set.count > 0 ? set.prefix[set.count - 1] : 0;
             if (tris !== set.shown) {
                 set.shown = tris;
                 set.mesh.geometry.setDrawRange(0, tris * 3);

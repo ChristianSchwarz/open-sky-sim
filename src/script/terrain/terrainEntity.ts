@@ -26,7 +26,7 @@ import { attachToRenderList } from '../render/renderList';
 import { getTreeAtlas } from '../scene/textures/treeAtlas';
 import { getStoneAtlas } from '../scene/textures/stoneAtlas';
 import {
-    TREE_DENSITY_MULTIPLIER_DEFAULT, buildTreeMesh, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
+    TREE_DENSITY_MULTIPLIER_DEFAULT, buildTreeMeshes, treeInstancesToDraw, treeSpacingM, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
 } from './treeBillboards';
 import { CLUTTER_ELIGIBLE_CLASSES, buildStoneMesh, scatterGroundClutter } from './stones';
 import { sphereInFrustum } from './culling';
@@ -193,6 +193,7 @@ const tileBeforeRender: THREE.Mesh['onBeforeRender'] = function (
         (u.uCoverEast.value as THREE.Vector3).copy(cover.east);
         (u.uCoverNorth.value as THREE.Vector3).copy(cover.north);
         u.uCoverK.value = cover.k;
+        u.uCoverFromM.value = cover.fromM;
     } else if (u.uHasCoverTex.value !== 0) {
         u.uHasCoverTex.value = 0;
         u.uCoverTex.value = noCoverTexture;
@@ -517,7 +518,7 @@ export class TerrainEntity implements Entity {
         const allTreeGroups = [...groups, ...clutter.vegetation];
         const treeMeshes = allTreeGroups.length > 0
             ? await getTreeAtlas()
-                .then(atlas => [buildTreeMesh(allTreeGroups, materials, atlas)])
+                .then(atlas => buildTreeMeshes(allTreeGroups, materials, atlas, treeSpacingM(densityScale)))
                 .catch(() => {
                     // No atlas (e.g. a canvas-less test environment) - the tile
                     // still draws, it just grows no trees.
@@ -756,6 +757,9 @@ export class TerrainEntity implements Entity {
             shaded: false as const,
             river: true,
         }) as THREE.ShaderMaterial;
+        // True width only: no pixel floor, so distant rivers and canals thin out
+        // instead of being held at a minimum on-screen width.
+        this.riverMaterial.uniforms.uMinHalfPixels.value = 0;
         trackTerrainMaterial(this.riverMaterial);
 
         // Roads are the same kind of stroke as a river, in the two road
@@ -1591,7 +1595,8 @@ export class TerrainEntity implements Entity {
      * where they cannot put a fragment on screen (trackDetailReachM), and pick
      * the road level whose simplification stays under half a pixel there
      * (roadLevelFor). Without a camera, everything at full detail. Measured to
-     * the tile's near edge, like the budget's ordering.
+     * the tile's near edge, like the budget's ordering. The trees the
+     * screen-space thinning drops all over the tile are not submitted.
      */
     private limitTrackDetail(camera: THREE.PerspectiveCamera | undefined): void {
         const heightPx = this.viewportHeightPx * this.renderScale;
@@ -1616,6 +1621,9 @@ export class TerrainEntity implements Entity {
                 // them every MFD refresh and back churned every far tile
                 // twice a refresh for a small, half-resolution display.
                 this.roads.showTrackDetail(meshes, true);
+                for (const trees of meshes.trees ?? []) {
+                    trees.count = treeInstancesToDraw(trees, undefined, 0);
+                }
                 continue;
             }
             const nearM = Math.max(0, node.center.distanceTo(camera.position) - node.radius);
@@ -1624,6 +1632,9 @@ export class TerrainEntity implements Entity {
             }
             this.roads.showTrackDetail(meshes, nearM <= reach);
             this.roads.showLevel(meshes, roadLevelFor(nearM * pixelAngle));
+            for (const trees of meshes.trees ?? []) {
+                trees.count = treeInstancesToDraw(trees, camera.position, pixelAngle);
+            }
             // Far land only in faceted shading: the smooth geometry is
             // the near land's, welded.
             const smooth = this.landShading === TerrainShading.SMOOTH;

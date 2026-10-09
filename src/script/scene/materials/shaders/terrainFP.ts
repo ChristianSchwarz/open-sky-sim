@@ -40,6 +40,8 @@ export const TerrainFragProgram: string = `
   uniform float uHasCoverTex;
   /** The player's far-texture switch, one uniform for every draw. */
   uniform float uCoverEnabled;
+  /** The texture is read past this distance only; a leaf keeps its facets close up. */
+  uniform float uCoverFromM;
 
   varying vec3 vLight;
   varying vec3 vBase;
@@ -77,7 +79,7 @@ ${TERRAIN_COVER_PARS}
     }
 
     vec3 base = vBase;
-    if (uHasCoverTex > 0.5 && uCoverEnabled > 0.5) {
+    if (uHasCoverTex > 0.5 && uCoverEnabled > 0.5 && vDist > uCoverFromM) {
       vec4 texel = texture2D(uCoverTex, vCoverUv);
       // Alpha is the class byte; 255 is no data (PTX_NO_DATA).
       float coverClass = floor(texel.a * 255.0 + 0.5);

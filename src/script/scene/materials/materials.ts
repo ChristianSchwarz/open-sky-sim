@@ -685,6 +685,7 @@ export class SceneMaterialManager implements KernelTask {
             uCoverEast: { value: new THREE.Vector3() },
             uCoverNorth: { value: new THREE.Vector3() },
             uCoverK: { value: 0 },
+            uCoverFromM: { value: 0 },
         };
     }
 

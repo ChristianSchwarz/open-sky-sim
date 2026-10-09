@@ -225,4 +225,78 @@ describe('buildSmoothLandGeometry', () => {
         const h = buildSmoothLandGeometry(u.positions, normalsOf(u.positions), u.attrs)!;
         assert.equal(verticesAt(h, 100, 0).length, 2, 'a class edge is a hard edge');
     });
+
+    /** The weld as it was first written, on Maps keyed by string: the reference for the typed-array one. */
+    function referenceWeld(positions: Int16Array, normals: Int8Array, attrs: Uint8Array, sizes: Uint16Array) {
+        const landuse = Array.from({ length: attrs.length / 4 }, (_, v) => attrs[v * 4 + 3]).includes(GROUND);
+        const regionOf = (v: number) => {
+            const cls = attrs[v * 4 + 3];
+            return !landuse || cls === GROUND ? cls : attrs[v * 4] | (attrs[v * 4 + 1] << 8) | (attrs[v * 4 + 2] << 16) | (cls << 24);
+        };
+        const byKey = new Map<string, number>(), byPos = new Map<string, number>();
+        const pos: number[] = [], normalOf: number[] = [], nSum: number[] = [], cSum: number[] = [], cls: number[] = [], size: number[] = [];
+        const index: number[] = [];
+        for (let i = 0; i < positions.length / 3; i++) {
+            const p = `${positions[i * 3]},${positions[i * 3 + 1]},${positions[i * 3 + 2]}`;
+            let n = byPos.get(p);
+            if (n === undefined) {
+                byPos.set(p, n = nSum.length / 3);
+                nSum.push(0, 0, 0);
+            }
+            let idx = byKey.get(`${p},${regionOf(i)}`);
+            if (idx === undefined) {
+                byKey.set(`${p},${regionOf(i)}`, idx = pos.length / 3);
+                pos.push(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+                normalOf.push(n);
+                cSum.push(0, 0, 0, 0);
+                cls.push(attrs[i * 4 + 3]);
+                size.push(0);
+            }
+            index.push(idx);
+            size[idx] = Math.max(size[idx], sizes[i]);
+            for (let k = 0; k < 3; k++) {
+                nSum[n * 3 + k] += normals[i * 4 + k];
+                cSum[idx * 4 + k] += attrs[i * 4 + k];
+            }
+            cSum[idx * 4 + 3]++;
+        }
+        const normal: number[] = [], colour: number[] = [];
+        for (let v = 0; v < pos.length / 3; v++) {
+            const n = normalOf[v];
+            const len = Math.hypot(nSum[n * 3], nSum[n * 3 + 1], nSum[n * 3 + 2]) || 1;
+            normal.push(...[0, 1, 2].map(k => Math.round((nSum[n * 3 + k] / len) * 127)), 0);
+            colour.push(...[0, 1, 2].map(k => Math.round(cSum[v * 4 + k] / cSum[v * 4 + 3])), cls[v]);
+        }
+        return { pos, normal, colour, size, index };
+    }
+
+    it('welds exactly as the string-keyed reference does', () => {
+        // A jittered grid with negative coordinates, several regions and a
+        // few colours of each, so corners are shared by up to six facets
+        // across up to as many regions.
+        let seed = 7;
+        const rand = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 2 ** 32);
+        const N = 40;
+        const height = (x: number, z: number) => Math.round(Math.sin(x * 0.3) * 50 + Math.cos(z * 0.2) * 40);
+        const tris: { pts: number[]; cls: number; rgb: number[] }[] = [];
+        for (let x = 0; x < N; x++) {
+            for (let z = 0; z < N; z++) {
+                const corner = (i: number, k: number) => [(x + i) * 64 - 1200, height(x + i, z + k), (z + k) * 64 - 900];
+                const cls = [GROUND, CROP, FOREST][Math.floor(rand() * 3)];
+                const rgb = [Math.floor(rand() * 3) * 40, 90, cls === GROUND ? Math.floor(rand() * 255) : 20];
+                tris.push({ pts: [...corner(0, 0), ...corner(1, 0), ...corner(0, 1)], cls, rgb });
+                tris.push({ pts: [...corner(1, 0), ...corner(1, 1), ...corner(0, 1)], cls, rgb });
+            }
+        }
+        const t = tile(tris);
+        const normals = normalsOf(t.positions);
+        const sizes = new Uint16Array(t.positions.length / 3).map(() => Math.floor(rand() * 5000));
+        const g = buildSmoothLandGeometry(t.positions, normals, t.attrs, sizes)!;
+        const ref = referenceWeld(t.positions, normals, t.attrs, sizes);
+        assert.deepEqual([...g.getAttribute('position').array], ref.pos);
+        assert.deepEqual([...(g.getAttribute('normal') as { data: { array: Int8Array } }).data.array], ref.normal);
+        assert.deepEqual([...(g.getAttribute('coverColor') as { data: { array: Uint8Array } }).data.array], ref.colour);
+        assert.deepEqual([...g.getAttribute('regionSize').array], ref.size);
+        assert.deepEqual([...g.getIndex()!.array], ref.index);
+    });
 });

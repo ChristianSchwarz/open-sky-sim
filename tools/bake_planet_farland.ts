@@ -167,10 +167,22 @@ async function main(): Promise<void> {
     process.stdout.write('\n');
 
     // The index: every leaf with a sidecar, merged with the rest when scoped.
+    // A leaf in the box that is no longer in the mesh index went with a
+    // deleted area: its sidecar goes too, or the index would keep asking for it.
     const indexPath = path.join(args.dir, INDEX_FILE);
     const present = new Map<string, TileKey>();
+    let dropped = 0;
     if (args.bbox !== undefined && fs.existsSync(indexPath)) {
+        const leaves = new Set(tiles.map(keyOf));
         for (const k of decodeTileIndex(fs.readFileSync(indexPath))) {
+            if (overlaps(boundsOf(k), args.bbox) && !leaves.has(keyOf(k))) {
+                const stale = tileFile(args.dir, k, FAR_LAND_EXT);
+                if (fs.existsSync(stale)) {
+                    fs.unlinkSync(stale);
+                }
+                dropped++;
+                continue;
+            }
             present.set(keyOf(k), k);
         }
     }
@@ -206,6 +218,9 @@ async function main(): Promise<void> {
         coarseTris += r.levelTris[r.levelTris.length - 1];
         bytes += r.bytes ?? 0;
         firstLevel[0] += r.levelTris[0];
+    }
+    if (dropped > 0) {
+        console.log(`${dropped} sidecars of leaves no longer in the pyramid removed`);
     }
     console.log(`${written} sidecars, ${(bytes / 1e6).toFixed(1)} MB; ${noSaving} leaves not worth one; `
         + `land triangles ${nearTris} -> finest level ${firstLevel[0]} (${((100 * firstLevel[0]) / Math.max(1, nearTris)).toFixed(0)}%), `

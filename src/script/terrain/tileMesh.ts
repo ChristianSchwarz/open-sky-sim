@@ -383,9 +383,9 @@ const EDGE_NORMAL_LEAN = 0;
  * Takes raw arrays rather than a `PtmTile` so it can also run lazily, long
  * after the tile's decoded value is gone — see `buildSmoothLandGeometryFromFaceted`,
  * which pulls the same arrays back out of the already-built FACETED geometry.
- * Expensive (a `Map` keyed on a per-vertex string) and only ever worth paying
- * for tiles actually shown in SMOOTH mode, which is why callers gate it
- * instead of it being run unconditionally per tile upload.
+ * A few milliseconds a leaf, but only ever worth paying for tiles actually
+ * shown in SMOOTH mode, which is why callers gate it instead of it being run
+ * unconditionally per tile upload.
  */
 export function buildSmoothLandGeometry(
     positions: Int16Array, normals: Int8Array, attrs: Uint8Array,
@@ -398,16 +398,30 @@ export function buildSmoothLandGeometry(
     }
 
     // Two welds over one pass: colour (and class, size) by position+region,
-    // normal by position alone. `normalOf` maps each output vertex to its
-    // position's normal slot.
-    const keyToIndex = new Map<string, number>();
-    const posKeyToNormal = new Map<string, number>();
-    const uniquePositions: number[] = [];
-    const normalOf: number[] = [];
-    const normalSum: number[] = [];
-    const colorSum: number[] = [];
-    const vertexClass: number[] = [];
-    const sizeMax: number[] = [];
+    // normal by position alone. A position's slot is its normal; the output
+    // vertices at one position (one per region there, rarely more than
+    // three) hang off it in a list. Both in first-seen order. Typed arrays
+    // and an open-addressed table rather than Maps keyed on strings: a leaf
+    // has up to 100K vertices, and this runs on the main thread for every
+    // leaf streamed in under SMOOTH (30-50 ms a leaf with the strings).
+    let capacity = 16;
+    while (capacity < vertexCount * 2) {
+        capacity *= 2;
+    }
+    const mask = capacity - 1;
+    const table = new Int32Array(capacity).fill(-1);
+    const slotPositions = new Int16Array(vertexCount * 3);
+    const firstOut = new Int32Array(vertexCount);
+    const normalSum = new Float64Array(vertexCount * 3);
+    let slots = 0;
+    const nextOut = new Int32Array(vertexCount);
+    const outRegion = new Int32Array(vertexCount);
+    const normalOf = new Int32Array(vertexCount);
+    const uniquePositions = new Int16Array(vertexCount * 3);
+    const colorSum = new Float64Array(vertexCount * 4);
+    const vertexClass = new Uint8Array(vertexCount);
+    const sizeMax = new Uint16Array(vertexCount);
+    let uniqueCount = 0;
     const remap = new Uint32Array(vertexCount);
     const landuse = hasLanduseGround(attrs);
 
@@ -415,23 +429,35 @@ export function buildSmoothLandGeometry(
         const px = positions[i * 3];
         const py = positions[i * 3 + 1];
         const pz = positions[i * 3 + 2];
-        const posKey = `${px},${py},${pz}`;
-        let n = posKeyToNormal.get(posKey);
-        if (n === undefined) {
-            n = normalSum.length / 3;
-            posKeyToNormal.set(posKey, n);
-            normalSum.push(0, 0, 0);
+        let h = (Math.imul(px, 73856093) ^ Math.imul(py, 19349663) ^ Math.imul(pz, 83492791)) & mask;
+        let n = table[h];
+        while (n !== -1 && (slotPositions[n * 3] !== px || slotPositions[n * 3 + 1] !== py || slotPositions[n * 3 + 2] !== pz)) {
+            h = (h + 1) & mask;
+            n = table[h];
         }
-        const key = `${posKey},${regionKeyOf(attrs, i, landuse)}`;
-        let idx = keyToIndex.get(key);
-        if (idx === undefined) {
-            idx = uniquePositions.length / 3;
-            keyToIndex.set(key, idx);
-            uniquePositions.push(px, py, pz);
-            normalOf.push(n);
-            colorSum.push(0, 0, 0, 0);
-            vertexClass.push(attrs[i * 4 + 3]);
-            sizeMax.push(0);
+        if (n === -1) {
+            n = slots++;
+            table[h] = n;
+            slotPositions[n * 3] = px;
+            slotPositions[n * 3 + 1] = py;
+            slotPositions[n * 3 + 2] = pz;
+            firstOut[n] = -1;
+        }
+        const region = regionKeyOf(attrs, i, landuse);
+        let idx = firstOut[n];
+        while (idx !== -1 && outRegion[idx] !== region) {
+            idx = nextOut[idx];
+        }
+        if (idx === -1) {
+            idx = uniqueCount++;
+            outRegion[idx] = region;
+            nextOut[idx] = firstOut[n];
+            firstOut[n] = idx;
+            uniquePositions[idx * 3] = px;
+            uniquePositions[idx * 3 + 1] = py;
+            uniquePositions[idx * 3 + 2] = pz;
+            normalOf[idx] = n;
+            vertexClass[idx] = attrs[i * 4 + 3];
         }
         remap[i] = idx;
         if (sizes && sizes[i] > sizeMax[idx]) {
@@ -450,12 +476,10 @@ export function buildSmoothLandGeometry(
         colorSum[idx * 4 + 3] += 1;
     }
 
-    const uniqueCount = uniquePositions.length / 3;
-
-    const outPositions = new Int16Array(uniquePositions);
+    const outPositions = uniquePositions.slice(0, uniqueCount * 3);
     const outNormals = new Int8Array(uniqueCount * 4);
     const outAttrs = new Uint8Array(uniqueCount * 4);
-    const outSizes = new Uint16Array(sizeMax);
+    const outSizes = sizeMax.slice(0, uniqueCount);
     for (let v = 0; v < uniqueCount; v++) {
         const n = normalOf[v];
         const nx = normalSum[n * 3];
