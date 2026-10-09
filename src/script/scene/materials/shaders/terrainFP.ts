@@ -46,6 +46,7 @@ export const TerrainFragProgram: string = `
   varying float vReveal;
   varying vec2 vCoverUv;
   varying float vDist;
+  varying float vCameraAbove;
 ${LOG_DEPTH_PARS_FRAGMENT}
 ${DITHER_PARS_FRAGMENT}
 ${TERRAIN_COVER_PARS}
@@ -53,6 +54,10 @@ ${TERRAIN_COVER_PARS}
     // <= so that 0 drops every fragment: the threshold bottoms out at 0 for
     // one cell in sixteen, which a plain < would keep.
     if (vReveal < 1.0 && vReveal <= bayerThreshold(gl_FragCoord.xy) + 0.5) {
+      discard;
+    }
+    // An under-parent seen from below: only its top may fill in for the leaves.
+    if (vCameraAbove < 0.0) {
       discard;
     }
 

@@ -179,6 +179,7 @@ const tileBeforeRender: THREE.Mesh['onBeforeRender'] = function (
     }
     const lod = this.parent?.userData.lod as TileLodState | undefined;
     u.uDepthPush.value = lod?.pushM ?? 0;
+    u.uLodUnder.value = lod && lod.pushM > 0 ? 1 : 0;
     u.uLodFadeM.value = lod?.fadeM ?? 0;
     u.uLodFadeCap.value = lod && lod.fadeM > 0
         ? Math.min(1, (performance.now() - lod.fadeFromMs) / LOD_FADE_MS)
@@ -2048,6 +2049,8 @@ export class TerrainEntity implements Entity {
                 this.cover.attach(node.id, meshes, priority);
                 this.roads.attach(node.id, meshes, priority);
                 this.bridges.attach(node.id, meshes, priority);
+                this.roads.setUnder(meshes, node.under);
+                this.bridges.setUnder(meshes, node.under);
                 if (!node.under) {
                     this.buildings.attach(node.id, meshes, priority);
                 }

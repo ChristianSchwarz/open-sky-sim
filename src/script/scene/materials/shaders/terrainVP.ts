@@ -59,6 +59,13 @@ ${TERRAIN_COVER_PARS}
   uniform float uLodFadeM;
   uniform float uLodFadeCap;
   /**
+   * 1 for a parent drawn under its dissolving leaves, else 0. Its coarse
+   * surface can lie metres over the leaves' real one, so a camera low over
+   * the ground can be beneath it: the land is double-sided, and its
+   * underside showed as a second layer of terrain overhead.
+   */
+  uniform float uLodUnder;
+  /**
    * Land-use regions by size, see LANDUSE_REVEAL_MIN_PX: a region shows once
    * the camera is within regionSize * uSizeRevealScale metres (0 turns it
    * off). uLodFills says whether this tile's regions are fills lifted over
@@ -95,6 +102,8 @@ ${TERRAIN_COVER_PARS}
   varying vec2 vCoverUv;
   /** Camera distance at this vertex, so haze varies across a tile, not per draw. */
   varying float vDist;
+  /** Under-parent only: the camera's height over this facet's plane; see uLodUnder. */
+  varying float vCameraAbove;
 ${LOG_DEPTH_PARS_VERTEX}
 
   /**
@@ -142,6 +151,9 @@ ${LOG_DEPTH_PARS_VERTEX}
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     float d = length(worldPos.xyz);
     vDist = d;
+    // The camera sits at the origin, and a faceted vertex carries its facet's
+    // normal, so this is linear across the facet and interpolates exactly.
+    vCameraAbove = uLodUnder > 0.5 ? dot(worldNormal, -worldPos.xyz) : 1.0;
     float bySize = sizeReveal(d);
     bool fills = uLodFills > 0.5;
     vBase = facetColor(coverColor, coverClass, fills ? 1.0 : bySize);

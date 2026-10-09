@@ -45,6 +45,8 @@ export interface BridgeMeshSet {
     trackTop?: THREE.Mesh;
     /** GPU bytes bound, for the cache budget. */
     bytes: number;
+    /** Drawn under its dissolving leaves this pass: hidden, see setUnder. */
+    under?: boolean;
 }
 
 export interface BridgeMeshesOptions {
@@ -328,7 +330,20 @@ export class BridgeMeshes {
     }
 
     private applyMode(set: BridgeMeshSet): void {
-        set.group.visible = this.mode !== RoadsMode.OFF;
+        set.group.visible = this.mode !== RoadsMode.OFF && set.under !== true;
+    }
+
+    /**
+     * A parent drawn under its dissolving leaves shows no bridges: the
+     * leaves draw their own, so the parent's were a second copy at its
+     * coarser land's heights (see RoadStrokes.setUnder).
+     */
+    setUnder(meshes: TileMeshes, under: boolean): void {
+        const set = meshes.bridges;
+        if (set !== undefined && set !== 'pending' && set !== 'none' && (set.under === true) !== under) {
+            set.under = under;
+            this.applyMode(set);
+        }
     }
 
     setIndex(index: TileIndex | undefined): void {

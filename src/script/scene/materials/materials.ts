@@ -671,6 +671,7 @@ export class SceneMaterialManager implements KernelTask {
             uLodFadeM: { value: 0 },
             uLodFadeCap: { value: 1 },
             uLodFills: { value: 0 },
+            uLodUnder: { value: 0 },
             uDepthPush: { value: 0 },
             // Land-use regions by size; the entity sets the scale per
             // reconcile from the viewport. See LANDUSE_REVEAL_MIN_PX.

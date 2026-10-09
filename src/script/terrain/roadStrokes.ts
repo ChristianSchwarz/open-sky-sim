@@ -548,10 +548,25 @@ export class RoadStrokes {
         meshes.roads = 'none';
     }
 
+    /**
+     * A parent drawn under its dissolving leaves shows no roads. The leaves
+     * draw their own, opaque - only their land dithers - so the parent's
+     * were a second copy, draped on its coarser land and so floating metres
+     * off the leaves' (graded) surface. Still attached, ready for when the
+     * parent is the draw again.
+     */
+    setUnder(meshes: TileMeshes, under: boolean): void {
+        const roads = meshes.roads;
+        if (roads !== undefined && roads !== 'pending' && roads !== 'none') {
+            roads.group.visible = !under;
+        }
+    }
+
     /** Triangles the roads of a drawn tile add, for the frame's count. */
     trianglesOf(meshes: TileMeshes, atFullDetail = false): number {
         const roads = meshes.roads;
-        if (roads === undefined || roads === 'pending' || roads === 'none') {
+        if (roads === undefined || roads === 'pending' || roads === 'none'
+            || (!atFullDetail && !roads.group.visible)) {
             return 0;
         }
         let n = 0;
