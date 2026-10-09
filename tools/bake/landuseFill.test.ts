@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { FillPiece, GridPoint, GridTri, clipToTriangle, landuseFill, mergePieces, snapToShore } from './landuseFill';
+import { FillPiece, GridPoint, GridTri, clipToTriangle, isThinStrip, landuseFill, mergePieces, snapToShore } from './landuseFill';
 
 describe('mergePieces', () => {
     const tri = (a: [number, number], b: [number, number], c: [number, number]): [GridPoint, GridPoint, GridPoint] =>
@@ -200,5 +200,28 @@ describe('snapToShore', () => {
         const before = landuseFill(facets, [rect(0, 0, 4, 2.6), rect(0, 2.8, 4, 3)], 4);
         const after = snap(before, 1);
         assert.ok(Math.abs(area(after) - (4 * 2.6 + 4 * 0.2)) < 1e-9);
+    });
+});
+
+describe('isThinStrip', () => {
+    const rect = (w: number, h: number): GridPoint[] => [
+        { x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h },
+    ];
+    // 10 m cells.
+    it('takes a long narrow region for a strip', () => {
+        assert.equal(isThinStrip(rect(100, 2), [], 10), true); // 1000 m x 20 m
+    });
+    it('keeps a wide region', () => {
+        assert.equal(isThinStrip(rect(100, 10), [], 10), false); // 1000 m x 100 m
+    });
+    it('keeps a short narrow region: a copse, not a tree line', () => {
+        assert.equal(isThinStrip(rect(10, 1), [], 10), false); // 100 m x 10 m
+    });
+    it('does not mistake a ring round a clearing for a strip', () => {
+        const hole = rect(90, 90).map(p => ({ x: p.x + 5, y: p.y + 5 }));
+        assert.equal(isThinStrip(rect(100, 100), [hole], 10), false); // a 50 m wide ring, 3.8 km round
+    });
+    it('keeps a degenerate ring', () => {
+        assert.equal(isThinStrip([{ x: 0, y: 0 }, { x: 1, y: 1 }], [], 10), false);
     });
 });

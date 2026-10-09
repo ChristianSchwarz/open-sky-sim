@@ -40,6 +40,48 @@ export interface FillPiece {
 /** Below this, in square cells, a clipped sliver is dropped. */
 const MIN_PIECE_AREA = 1e-7;
 
+/**
+ * A region this narrow and this long is a strip: a tree line, a windbreak, a
+ * verge mapped as its own polygon. Triangulated, it becomes a few long thin
+ * triangles that read from the air as wedges cut into the field beside it, and
+ * where the map and the imagery disagree about the strip they are plainly
+ * wrong. Narrower than 22 m is under two z12 cells: the ground colour sampled
+ * from the imagery draws such a strip better than its polygon does. Widths are
+ * 2 A / P (area over half the perimeter), which is a strip's own width.
+ */
+export const THIN_STRIP_MAX_WIDTH_M = 22;
+/** A strip is at least this long, in metres: half its perimeter, nearly. */
+export const THIN_STRIP_MIN_LENGTH_M = 150;
+
+/**
+ * Whether a region is a strip (see THIN_STRIP_MAX_WIDTH_M). `exterior` and
+ * `holes` are grid points; `metresPerCell` converts them. Holes count against
+ * the area and add to the perimeter, so a ring of trees round a clearing is
+ * not mistaken for a strip.
+ */
+export function isThinStrip(
+    exterior: readonly GridPoint[], holes: ReadonlyArray<readonly GridPoint[]>, metresPerCell: number,
+): boolean {
+    const perimeter = (ring: readonly GridPoint[]) => {
+        let p = 0;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            p += Math.hypot(ring[i].x - ring[j].x, ring[i].y - ring[j].y);
+        }
+        return p;
+    };
+    let area = Math.abs(signedArea(exterior));
+    let length = perimeter(exterior);
+    for (const hole of holes) {
+        area -= Math.abs(signedArea(hole));
+        length += perimeter(hole);
+    }
+    if (area <= 0 || length <= 0) {
+        return false;
+    }
+    const widthM = (2 * area / length) * metresPerCell;
+    return widthM < THIN_STRIP_MAX_WIDTH_M && (length / 2) * metresPerCell >= THIN_STRIP_MIN_LENGTH_M;
+}
+
 function signedArea(pts: readonly GridPoint[]): number {
     let a = 0;
     for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {

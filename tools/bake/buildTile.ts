@@ -40,7 +40,7 @@ import {
 } from './shoreline';
 import { Watercourse } from './lvr';
 import { RegionPolygon, buildRegionField, regionFieldFromShoreline } from './regions';
-import { GridPoint, landuseFill, snapToShore } from './landuseFill';
+import { GridPoint, isThinStrip, landuseFill, snapToShore } from './landuseFill';
 
 /** Heights at or below seaLevel + this are open water. Matches the old bake. */
 export const WATER_HEIGHT_EPS_M = 0.5;
@@ -1917,9 +1917,15 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         // appended after the facets it covers, so it also wins any depth tie.
         const FILL_LIFT_CELLS = 0.02;
         const liftM = metresPerCell * FILL_LIFT_CELLS;
+        // Strips are left to the ground colour under them (isThinStrip).
         const tagged = input.regions!
             .map((region, index) => ({ region, index }))
-            .filter(({ region }) => region.isLand && region.landuseClass !== undefined);
+            .filter(({ region }) => region.isLand && region.landuseClass !== undefined)
+            .filter(({ region }) => !isThinStrip(
+                landuseRing(region.exterior) ?? [],
+                region.holes.map(landuseRing).filter((h): h is GridPoint[] => h !== undefined),
+                metresPerCell,
+            ));
         const landTris = tris.filter(isLandTriangle);
         // The drawn shoreline, as the shore chords the walls hang from,
         // bucketed per cell for the snap's distance test.
