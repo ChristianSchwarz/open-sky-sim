@@ -15,9 +15,9 @@ runtime, rendering, sim/AI, UI/input). Nothing in the repo was changed to produc
 | D-E terrain rendering, roads, buildings, trees | Blocked: needs a Unity install | |
 | F FM2 + FM3 | Done, all 26 traces match | `unity/Packages/com.retro.sim/Runtime/Physics` |
 | G height queries + airfield pads | Done, golden-verified | `.../terrain-data/Runtime/Height` |
-| G combat sim, colliders, arrestor, collision | Goldens written (12 scenarios); port next | `tests/golden/combat_sim.json` |
+| G combat sim, colliders, arrestor, collision | Goldens written (12 scenarios); port in progress | `tests/golden/combat_sim.json` |
 | H dogfight geometry | Done | `.../sim/Runtime/Ai/DogfightGeometry.cs` |
-| H AI pilots (4 models) | Goldens written (34 traces); port in progress | `tests/golden/ai_pilots.json` |
+| H AI pilots (4 models) | Done, all 34 closed-loop traces bit-identical (V8-exact trig in `JsTrig`) | `.../sim/Runtime/Ai` |
 | I-P (mods, sky, HUD, UI, input, wreck, integration) | Not started; most need Unity | |
 
 `cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity.
