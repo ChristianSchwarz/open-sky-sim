@@ -1,0 +1,631 @@
+{
+  "suite": "flight_configs",
+  "version": 1,
+  "source": "src/script/physics/fm2/fm2AircraftConfig.ts, src/script/physics/fm3/f16Airframe.ts",
+  "configs": {
+    "defaultFm2Config": {
+      "geometry": {
+        "massKg": 13608,
+        "wingAreaM2": 27.87,
+        "wingSpanM": 9.45,
+        "meanChordM": 3.45
+      },
+      "inertia": {
+        "pitch": 75673.73748,
+        "yaw": 85552.242,
+        "roll": 12874.86672
+      },
+      "surfaces": {
+        "fuselage": {
+          "name": "fuselage",
+          "position": [0, 0, 0],
+          "up": [0, 1, 0],
+          "forward": [0, 0, 1],
+          "areaM2": 13,
+          "liftSlopePerRad": 2.4,
+          "zeroLiftAoaRad": -0.03316125578789226,
+          "clMax": 1.5,
+          "stallAoaRad": 0.6981317007977318,
+          "cd0": 0,
+          "inducedK": 0.25,
+          "flatPlateCd": 1.3,
+          "controlEffectiveness": 0
+        },
+        "wingLeft": {
+          "name": "wingLeft",
+          "position": [-2.4, 0, -0.15],
+          "up": [0, 1, 0],
+          "forward": [0, 0, 1],
+          "areaM2": 7.1,
+          "liftSlopePerRad": 5.2,
+          "zeroLiftAoaRad": -0.022689280275926284,
+          "clMax": 1.5,
+          "stallAoaRad": 0.4188790204786391,
+          "cd0": 0.0085,
+          "inducedK": 0.118,
+          "flatPlateCd": 1.9,
+          "controlEffectiveness": 0,
+          "unsteadyTauS": 0.18
+        },
+        "wingRight": {
+          "name": "wingRight",
+          "position": [2.4, 0, -0.15],
+          "up": [0, 1, 0],
+          "forward": [0, 0, 1],
+          "areaM2": 7.1,
+          "liftSlopePerRad": 5.2,
+          "zeroLiftAoaRad": -0.022689280275926284,
+          "clMax": 1.5,
+          "stallAoaRad": 0.4188790204786391,
+          "cd0": 0.0085,
+          "inducedK": 0.118,
+          "flatPlateCd": 1.9,
+          "controlEffectiveness": 0,
+          "unsteadyTauS": 0.18
+        },
+        "htailLeft": {
+          "name": "htailLeft",
+          "position": [-1.5, 0, -4.6],
+          "up": [0, 1, 0],
+          "forward": [0, 0, 1],
+          "areaM2": 2.95,
+          "liftSlopePerRad": 3.4,
+          "stallAoaRad": 0.4537856055185257,
+          "cd0": 0.006,
+          "inducedK": 0.15,
+          "flatPlateCd": 2,
+          "controlEffectiveness": 0.9,
+          "highAoaDampingScale": 0.7
+        },
+        "htailRight": {
+          "name": "htailRight",
+          "position": [1.5, 0, -4.6],
+          "up": [0, 1, 0],
+          "forward": [0, 0, 1],
+          "areaM2": 2.95,
+          "liftSlopePerRad": 3.4,
+          "stallAoaRad": 0.4537856055185257,
+          "cd0": 0.006,
+          "inducedK": 0.15,
+          "flatPlateCd": 2,
+          "controlEffectiveness": 0.9,
+          "highAoaDampingScale": 0.7
+        },
+        "vtail": {
+          "name": "vtail",
+          "position": [0, 1.1, -4.3],
+          "up": [1, 0, 0],
+          "forward": [0, 0, 1],
+          "areaM2": 5.1,
+          "liftSlopePerRad": 2.9,
+          "stallAoaRad": 0.5235987755982988,
+          "cd0": 0.007,
+          "inducedK": 0.16,
+          "flatPlateCd": 2,
+          "controlEffectiveness": 0.55
+        },
+        "aileronLeft": {
+          "name": "aileronLeft",
+          "position": [-3.4, 0, -0.6],
+          "up": [0, 1, 0],
+          "forward": [0, 0, 1],
+          "areaM2": 1.5,
+          "liftSlopePerRad": 4.5,
+          "clMax": 1.5,
+          "stallAoaRad": 0.4886921905584123,
+          "cd0": 0.009,
+          "inducedK": 0.15,
+          "flatPlateCd": 1.9,
+          "controlEffectiveness": 1
+        },
+        "aileronRight": {
+          "name": "aileronRight",
+          "position": [3.4, 0, -0.6],
+          "up": [0, 1, 0],
+          "forward": [0, 0, 1],
+          "areaM2": 1.5,
+          "liftSlopePerRad": 4.5,
+          "clMax": 1.5,
+          "stallAoaRad": 0.4886921905584123,
+          "cd0": 0.009,
+          "inducedK": 0.15,
+          "flatPlateCd": 1.9,
+          "controlEffectiveness": 1
+        },
+        "foreStrake": {
+          "name": "foreStrake",
+          "position": [0, 0, 3.2],
+          "up": [0, 1, 0],
+          "forward": [0, 0, 1],
+          "areaM2": 5,
+          "liftSlopePerRad": 0.4,
+          "clMax": 1.2,
+          "stallAoaRad": 0.3141592653589793,
+          "cd0": 0.006,
+          "inducedK": 0.2,
+          "flatPlateCd": 1.3,
+          "controlEffectiveness": 0,
+          "vortexLiftScale": 2.5,
+          "unsteadyTauS": 0.3
+        }
+      },
+      "aileronMaxDeflectionRad": 0.04363323129985824,
+      "flaps": {
+        "aoaBiasRad": 0.13962634015954636,
+        "stallReductionRad": 0.017453292519943295,
+        "extraCd": 0.02
+      },
+      "gearCd": 0.022,
+      "airbrakeCd": 0.028,
+      "bodyCd0": 0.01,
+      "waveDrag": {
+        "machOnset": 0.95,
+        "scale": 0.55
+      },
+      "gear": {
+        "points": [
+          [0, -2, 2.6],
+          [-1.2, -2, -0.6],
+          [1.2, -2, -0.6]
+        ],
+        "stiffness": 4000000,
+        "damping": 160000,
+        "rollFriction": 0.04,
+        "brakeFriction": 0.55,
+        "sideFriction": 0.8,
+        "maxStrokeM": 0.35
+      },
+      "engine": {
+        "afterburner": true,
+        "idleThrustKn": 0.5,
+        "milThrustKn": 76.3,
+        "abMinThrustKn": 104,
+        "abMaxThrustKn": 129.4,
+        "milLeverEnd": 0.98,
+        "abMinLeverEnd": 0.99
+      },
+      "fcs": {
+        "maxStabilatorRad": 0.4363323129985824,
+        "maxRudderRad": 0.3839724354387525,
+        "taileronRollFraction": 0.6,
+        "actuatorTauS": 0.05,
+        "pitch": {
+          "gCommand": true,
+          "rateDampGain": 1.1,
+          "maxCommandG": 9.5,
+          "minCommandG": -3,
+          "gGain": 0.14,
+          "iGain": 0.6,
+          "aoaRateDampGain": 4.5,
+          "aoaRateFilterTauS": 0.05,
+          "aoaRateDampQFadeStartNorm": 1.3,
+          "aoaRateDampQFadeEndNorm": 1.9,
+          "aoaRateDampQFadeFloor": 0.55,
+          "aoaRateDampQFadeTauS": 0.5,
+          "stickExpo": 0.92,
+          "integralLeakTauS": 0.35,
+          "aoaLimitDeg": 28,
+          "aoaSoftDeg": 24,
+          "aoaLimiterGain": 0.35,
+          "aoaLimiterLeadS": 0.08,
+          "gLimiterGain": 0.9,
+          "gLimiterLeadS": 0.05,
+          "gLimiterNegLeadS": 0.02,
+          "gLimiterSoftMarginG": 1,
+          "envelopeAuthorityTauS": 0.15,
+          "envelopeAuthorityLeadS": 0.2,
+          "capBackCalcGain": 0.75,
+          "capRateTauS": 0.06,
+          "aoaCapQFadeStart": 0.3,
+          "aoaCapQFadeEnd": 0.7
+        },
+        "highAoa": {
+          "directDampScale": 0.19
+        },
+        "roll": {
+          "rateCommand": true,
+          "rateGain": 0.8,
+          "rateDamp": 0,
+          "maxRollRateDegS": 300,
+          "qGainMin": 0.12,
+          "qGainMax": 1,
+          "machLimiterOnset": 0.85,
+          "machLimiterSlope": 0.55,
+          "machLimiterFloor": 0.35,
+          "altLimiterOnsetM": 12000,
+          "altLimiterSlopeM": 20000,
+          "altLimiterFloor": 0.45,
+          "aoaLimiterOnsetDeg": 15,
+          "aoaLimiterSlopeDeg": 22,
+          "aoaLimiterFloor": 0.15,
+          "flapsFactor": 0.65
+        },
+        "yaw": {
+          "maxRudderCmd": 1,
+          "damperGain": 1.6,
+          "damperWashoutTauS": 1,
+          "ariGain": 0.1
+        }
+      },
+      "envelope": {
+        "stallAoaRad": 0.3839724354387525,
+        "minFlyingSpeedMps": 68,
+        "cruiseAltitudeM": 9144,
+        "cruiseSpeedMps": 257.86080000000004,
+        "maxLoadFactorG": 9.5,
+        "landingMaxSpeedMps": 90,
+        "landingMaxVerticalSpeedMps": 8,
+        "landingMinPitchRad": -0.20943951023931956,
+        "landingMaxRollRad": 0.20943951023931956
+      },
+      "forebodyAsymmetry": {
+        "armZ": 3.6,
+        "refAreaM2": 27.87,
+        "onsetAoaRad": 0.6108652381980153,
+        "fullAoaRad": 0.9599310885968813,
+        "maxSideForceCoeff": 0.42,
+        "lockInRateGain": 6,
+        "seedDrive": 0.06,
+        "driveScale": 0.5,
+        "pitchRateArmRatio": 1
+      },
+      "transonicPitchDamp": {
+        "qKnee": 2,
+        "gain": 0.5,
+        "maxRamp": 2
+      }
+    },
+    "f16Airframe": {
+      "name": "F-16 (NASA TP-1538)",
+      "reference": {
+        "areaM2": 27.87,
+        "spanM": 9.144,
+        "chordM": 3.45,
+        "momentRef": [0, 0, 0]
+      },
+      "mass": {
+        "massKg": 9298.588202903133,
+        "cg": [0, 0, 0],
+        "inertia": {
+          "ixx": 12875,
+          "iyy": 75674,
+          "izz": 85552,
+          "ixz": 1331
+        }
+      },
+      "surfaces": [
+        {
+          "name": "inner wing",
+          "role": "wing",
+          "rootLE": [2.723, 0, 0.05],
+          "rootChord": 4.968,
+          "tipLE": [1.1885999999999999, 1.8288000000000002, 0.05],
+          "tipChord": 3.432,
+          "mirror": true,
+          "strips": 4,
+          "spacing": "uniform",
+          "vortexFromStrakes": true,
+          "section": {
+            "cnAlpha": 6,
+            "alpha0": -0.022689280275926284,
+            "alphaSep": 0.4886921905584123,
+            "sepWidth": 0.05235987755982989,
+            "cd0": 0.006,
+            "suctionEta": 0.9,
+            "cd90": 1.25,
+            "cm0": -0.02,
+            "reverseSlopeFactor": 0.6,
+            "reverseAlphaSep": 0.10471975511965978,
+            "tau1": 3,
+            "tau2": 1.5,
+            "thickness": 0.04,
+            "plateShape": 0.297,
+            "vortexLift": 1.5,
+            "vortexCp": 0.461,
+            "vortexBurstStart": 1.4835298641951802,
+            "vortexBurstEnd": 1.5707963267948966
+          },
+          "controls": [
+            {
+              "kind": "flap",
+              "channel": "flapR",
+              "mirrorChannel": "flapL",
+              "spanFrom": 0.43744531933508307,
+              "spanTo": 1,
+              "chordFraction": 0.25
+            },
+            {
+              "kind": "leadingEdge",
+              "channel": "lef",
+              "spanFrom": 0.43744531933508307,
+              "spanTo": 1
+            }
+          ]
+        },
+        {
+          "name": "outer wing",
+          "role": "wing",
+          "rootLE": [1.1885999999999999, 1.8288000000000002, 0.05],
+          "rootChord": 3.432,
+          "tipLE": [-1.113, 4.572, 0.05],
+          "tipChord": 1.128,
+          "mirror": true,
+          "strips": 6,
+          "section": {
+            "cnAlpha": 6,
+            "alpha0": -0.022689280275926284,
+            "alphaSep": 0.4363323129985824,
+            "sepWidth": 0.05235987755982989,
+            "cd0": 0.006,
+            "suctionEta": 0.9,
+            "cd90": 1.25,
+            "cm0": -0.02,
+            "reverseSlopeFactor": 0.6,
+            "reverseAlphaSep": 0.10471975511965978,
+            "tau1": 3,
+            "tau2": 1.5,
+            "thickness": 0.04,
+            "plateShape": 0.297
+          },
+          "controls": [
+            {
+              "kind": "flap",
+              "channel": "flapR",
+              "mirrorChannel": "flapL",
+              "spanFrom": 0,
+              "spanTo": 0.499854184893555,
+              "chordFraction": 0.25
+            },
+            {
+              "kind": "leadingEdge",
+              "channel": "lef",
+              "spanFrom": 0,
+              "spanTo": 1
+            }
+          ]
+        },
+        {
+          "name": "stabilator",
+          "role": "tail",
+          "rootLE": [-3.93, 1, 0.25],
+          "rootChord": 2.25,
+          "tipLE": [-5.43, 2.79, 0.566],
+          "tipChord": 1.05,
+          "mirror": true,
+          "strips": 5,
+          "section": {
+            "cnAlpha": 5.8,
+            "alpha0": 0,
+            "alphaSep": 0.3141592653589793,
+            "sepWidth": 0.13962634015954636,
+            "cd0": 0.007,
+            "suctionEta": 0.85,
+            "cd90": 1.2,
+            "cm0": 0,
+            "reverseSlopeFactor": 0.6,
+            "reverseAlphaSep": 0.10471975511965978,
+            "tau1": 3,
+            "tau2": 1.5,
+            "thickness": 0.05,
+            "plateShape": 0.431,
+            "vortexLift": 0.023,
+            "vortexCp": 0.35,
+            "vortexBurstStart": 0.6579891280018623,
+            "vortexBurstEnd": 1.5707963267948966
+          },
+          "qFactor": 0.919,
+          "controls": [
+            {
+              "kind": "allMoving",
+              "channel": "stabR",
+              "mirrorChannel": "stabL",
+              "spanFrom": 0,
+              "spanTo": 1
+            }
+          ]
+        },
+        {
+          "name": "fin",
+          "role": "tail",
+          "rootLE": [-3.17, 0, -0.75],
+          "rootChord": 3.35,
+          "tipLE": [-5.57, 0, -2.95],
+          "tipChord": 1.22,
+          "mirror": false,
+          "strips": 6,
+          "section": {
+            "cnAlpha": 5.8,
+            "alpha0": 0,
+            "alphaSep": 0.4188790204786391,
+            "sepWidth": 0.06981317007977318,
+            "cd0": 0.007,
+            "suctionEta": 0.85,
+            "cd90": 1.2,
+            "cm0": 0,
+            "reverseSlopeFactor": 0.6,
+            "reverseAlphaSep": 0.10471975511965978,
+            "tau1": 3,
+            "tau2": 1.5,
+            "thickness": 0.05,
+            "plateShape": 0.45
+          },
+          "qFactor": 0.95,
+          "rootEndplate": true,
+          "controls": [
+            {
+              "kind": "flap",
+              "channel": "rudder",
+              "spanFrom": 0.05,
+              "spanTo": 0.85,
+              "chordFraction": 0.3
+            }
+          ]
+        },
+        {
+          "name": "ventral fins",
+          "role": "tail",
+          "rootLE": [-3, 0.55, 0.7],
+          "rootChord": 1.2,
+          "tipLE": [-3.35, 0.72, 1.35],
+          "tipChord": 0.7,
+          "mirror": true,
+          "strips": 2,
+          "section": {
+            "cnAlpha": 5.8,
+            "alpha0": 0,
+            "alphaSep": 0.4188790204786391,
+            "sepWidth": 0.06981317007977318,
+            "cd0": 0.007,
+            "suctionEta": 0.85,
+            "cd90": 1.2,
+            "cm0": 0,
+            "reverseSlopeFactor": 0.6,
+            "reverseAlphaSep": 0.10471975511965978,
+            "tau1": 3,
+            "tau2": 1.5,
+            "thickness": 0.05,
+            "plateShape": 0.45
+          },
+          "qFactor": 0.9,
+          "rootEndplate": true
+        }
+      ],
+      "strakes": [
+        {
+          "name": "strakes",
+          "apex": [5, 0.62, 0.05],
+          "rootChord": 2.9,
+          "span": 0.696,
+          "mirror": true,
+          "cd90": 1.2,
+          "burstTrailingEdge": 0.9250245035569946,
+          "burstApex": 1.53588974175501,
+          "burstSweepSensitivity": 0.5,
+          "burstTau1": 2,
+          "burstTau2": 0.5,
+          "cd0": 0.004,
+          "augmentedArea": 1.469,
+          "augmentedX": 1.318
+        }
+      ],
+      "bodies": [
+        {
+          "name": "fuselage",
+          "stations": [
+            [6.7, 0, 0, 0],
+            [6.2, 0, 0.45, 0.45],
+            [5.4, -0.05, 0.8, 0.85],
+            [4.6, -0.15, 0.95, 1.2],
+            [3.6, -0.2, 1.1, 1.4],
+            [2.6, -0.05, 1.45, 1.45],
+            [1.5, 0, 1.55, 1.4],
+            [0, 0, 1.55, 1.3],
+            [-1.5, -0.05, 1.5, 1.2],
+            [-3, -0.05, 1.4, 1.1],
+            [-4.5, -0.05, 1.25, 1.05],
+            [-6, 0, 1.05, 1],
+            [-7.2, 0, 0.95, 0.95]
+          ],
+          "crossflowCd": 1.13
+        }
+      ],
+      "bluffBodies": [
+        {
+          "name": "nose gear",
+          "position": [2.6, 0, 1.3],
+          "cdA": 0.17,
+          "deploy": "gear"
+        },
+        {
+          "name": "left main gear",
+          "position": [-0.6, -1.2, 1.3],
+          "cdA": 0.29,
+          "deploy": "gear"
+        },
+        {
+          "name": "right main gear",
+          "position": [-0.6, 1.2, 1.3],
+          "cdA": 0.29,
+          "deploy": "gear"
+        },
+        {
+          "name": "speedbrake",
+          "position": [-6.8, 0, 0],
+          "cdA": 1.6,
+          "deploy": "speedbrake"
+        }
+      ],
+      "engines": [
+        {
+          "nozzle": [-7.2, 0, 0],
+          "axis": [1, 0, 0],
+          "rotorMomentum": 216.9,
+          "idleThrustN": 500,
+          "milThrustN": 76300,
+          "abMinThrustN": 104000,
+          "maxThrustN": 129400
+        }
+      ],
+      "actuators": [
+        {
+          "channel": "stabL",
+          "min": -0.4363323129985824,
+          "max": 0.4363323129985824,
+          "rate": 1.0471975511965976,
+          "tau": 0.04950495049504951
+        },
+        {
+          "channel": "stabR",
+          "min": -0.4363323129985824,
+          "max": 0.4363323129985824,
+          "rate": 1.0471975511965976,
+          "tau": 0.04950495049504951
+        },
+        {
+          "channel": "flapL",
+          "min": -0.3752457891787809,
+          "max": 0.3752457891787809,
+          "rate": 1.3962634015954636,
+          "tau": 0.04950495049504951
+        },
+        {
+          "channel": "flapR",
+          "min": -0.3752457891787809,
+          "max": 0.3752457891787809,
+          "rate": 1.3962634015954636,
+          "tau": 0.04950495049504951
+        },
+        {
+          "channel": "rudder",
+          "min": -0.5235987755982988,
+          "max": 0.5235987755982988,
+          "rate": 2.0943951023931953,
+          "tau": 0.04950495049504951
+        },
+        {
+          "channel": "lef",
+          "min": 0,
+          "max": 0.4363323129985824,
+          "rate": 0.4363323129985824,
+          "tau": 0.13793103448275862
+        },
+        {
+          "channel": "speedbrake",
+          "min": 0,
+          "max": 1.0471975511965976,
+          "rate": 0.5235987755982988,
+          "tau": 0.1
+        }
+      ],
+      "miscCd0": 0.009,
+      "bodyWaveDrag": [
+        [0, 0],
+        [0.81, 0],
+        [1.1, 0.023],
+        [1.8, 0.015]
+      ],
+      "wakeTau": 1
+    },
+    "fm2GroundRestHeight": 2
+  }
+}
