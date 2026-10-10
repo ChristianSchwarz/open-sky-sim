@@ -1,0 +1,17 @@
+{
+    "name": "Retro.Game",
+    "rootNamespace": "Retro.Game",
+    "references": [
+        "Retro.Core",
+        "Retro.TerrainData"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": true
+}
