@@ -58,6 +58,10 @@ namespace Retro.Core
 
         public static double Distance(Vec3d a, Vec3d b) => (a - b).Length;
 
+        /// <summary>three.js lerpVectors(a, b, t).</summary>
+        public static Vec3d Lerp(Vec3d a, Vec3d b, double t) =>
+            new Vec3d(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, a.Z + (b.Z - a.Z) * t);
+
         /// <summary>three.js applyQuaternion (q assumed unit length).</summary>
         public Vec3d Rotate(Quatd q)
         {

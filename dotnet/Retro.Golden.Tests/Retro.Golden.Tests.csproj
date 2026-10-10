@@ -14,6 +14,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Retro.Core\Retro.Core.csproj" />
     <ProjectReference Include="..\Retro.TerrainData\Retro.TerrainData.csproj" />
+    <ProjectReference Include="..\Retro.Sim\Retro.Sim.csproj" />
   </ItemGroup>
   <ItemGroup>
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">

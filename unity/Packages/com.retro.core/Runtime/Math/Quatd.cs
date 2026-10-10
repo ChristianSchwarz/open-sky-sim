@@ -85,6 +85,28 @@ namespace Retro.Core
             }
         }
 
+        /// <summary>three.js slerpQuaternions(a, b, t): shortest arc, normalised lerp below ~1.8 degrees.</summary>
+        public static Quatd Slerp(Quatd a, Quatd b, double t)
+        {
+            double x = b.X, y = b.Y, z = b.Z, w = b.W;
+            double dot = Dot(a, b);
+            if (dot < 0)
+            {
+                x = -x; y = -y; z = -z; w = -w;
+                dot = -dot;
+            }
+            double s = 1 - t;
+            if (dot < 0.9995)
+            {
+                double theta = Math.Acos(dot);
+                double sin = Math.Sin(theta);
+                s = Math.Sin(s * theta) / sin;
+                t = Math.Sin(t * theta) / sin;
+                return new Quatd(a.X * s + x * t, a.Y * s + y * t, a.Z * s + z * t, a.W * s + w * t);
+            }
+            return new Quatd(a.X * s + x * t, a.Y * s + y * t, a.Z * s + z * t, a.W * s + w * t).Normalized();
+        }
+
         public bool Equals(Quatd other) => X == other.X && Y == other.Y && Z == other.Z && W == other.W;
         public override bool Equals(object obj) => obj is Quatd q && Equals(q);
         public override int GetHashCode() => HashCode.Combine(X, Y, Z, W);

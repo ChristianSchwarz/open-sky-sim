@@ -1,0 +1,10 @@
+{
+  "name": "com.retro.sim",
+  "displayName": "Retro Sim",
+  "version": "0.1.0",
+  "unity": "6000.0",
+  "description": "Flight models (FM2, FM3), combat sim, AI pilots and weapons, ported from the TypeScript game. Double precision, fixed 1/120 s step, original right-handed scene axes (x east, y up, z south). Engine-free.",
+  "dependencies": {
+    "com.retro.core": "0.1.0"
+  }
+}

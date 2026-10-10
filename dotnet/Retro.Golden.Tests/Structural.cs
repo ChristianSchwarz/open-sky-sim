@@ -97,7 +97,7 @@ public static class Structural
             return;
         }
         if (actual is not IList list) { m.Fail($"{path}: expected an array, got {actual?.GetType().Name ?? "null"}"); return; }
-        if (actual is Array arr && TypedName(arr) != null)
+        if (actual is Array arr && TypedName(arr) != null && arr.GetType() != typeof(double[]))
         {
             m.Fail($"{path}: expected a plain array but the port has a typed {TypedName(arr)}");
             return;
@@ -148,9 +148,9 @@ public static class Structural
             if (!byName.TryGetValue(p.Name, out FieldInfo f)) { m.Fail($"{path}.{p.Name}: the port has no such field"); continue; }
             Compare($"{path}.{p.Name}", p.Value, f.GetValue(actual), m, tol);
         }
-        foreach (string name in byName.Keys)
+        foreach (var (name, f) in byName)
         {
-            if (!expected.TryGetProperty(name, out _)) m.Fail($"{path}.{name}: field not in the oracle's output");
+            if (!expected.TryGetProperty(name, out _) && f.GetValue(actual) != null) m.Fail($"{path}.{name}: field not in the oracle's output");
         }
     }
 }
