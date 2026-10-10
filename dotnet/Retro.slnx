@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Retro.Core/Retro.Core.csproj" />
+  <Project Path="Retro.Golden.Tests/Retro.Golden.Tests.csproj" />
+  <Project Path="Retro.TerrainData/Retro.TerrainData.csproj" />
+</Solution>

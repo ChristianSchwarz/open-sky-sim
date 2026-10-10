@@ -1,0 +1,7 @@
+{
+  "name": "com.retro.core",
+  "displayName": "Retro Core",
+  "version": "0.1.0",
+  "unity": "6000.0",
+  "description": "Double-precision math, WGS84 geodesy, ENU frames, FrameShift and the Plate Carree tile scheme. Engine-free: no UnityEngine references, also built by dotnet/ for command-line tests."
+}

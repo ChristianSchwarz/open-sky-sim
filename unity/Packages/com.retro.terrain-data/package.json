@@ -1,0 +1,10 @@
+{
+  "name": "com.retro.terrain-data",
+  "displayName": "Retro Terrain Data",
+  "version": "0.1.0",
+  "unity": "6000.0",
+  "description": "Decoders for the baked terrain pyramid (PTM1, PDM1, PTX1, PTR1, PBR1, PBH1, PBD1, PFL1, PIX1) and DEM sampling. Engine-free.",
+  "dependencies": {
+    "com.retro.core": "0.1.0"
+  }
+}

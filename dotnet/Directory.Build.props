@@ -1,0 +1,15 @@
+<Project>
+  <!--
+    The libraries here compile the C# that lives in unity/Packages/com.retro.*,
+    so the same files build in Unity and on the command line. Keep the language
+    and API surface to what Unity 6 accepts: C# 9, netstandard2.1.
+  -->
+  <PropertyGroup>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PackagesRoot>$(MSBuildThisFileDirectory)..\unity\Packages\</PackagesRoot>
+    <GoldenRoot>$(MSBuildThisFileDirectory)..\tests\golden\</GoldenRoot>
+  </PropertyGroup>
+</Project>

@@ -1,6 +1,6 @@
 # Unity port: parity plan
 
-Status: draft, 2026-10-10. Written from five read-only code surveys (terrain formats, terrain
+Status: draft, 2026-10-10; rendering approach revised 2026-10-11 (section 4.6). Written from five read-only code surveys (terrain formats, terrain
 runtime, rendering, sim/AI, UI/input). Nothing in the repo was changed to produce it.
 
 ## 1. Decisions already made
@@ -127,12 +127,44 @@ web game with a screenshot diff in M3. This is easy to get subtly wrong.
 - `Math.hypot`, `Math.sign(0)`, `Math.round` on negative halves differ between JS and C#; use
   helpers in `core` (`Js.Sign`, `Js.RoundHalfUp`, `Js.Hypot`).
 
-### 4.6 Render pipeline and the retro look
+### 4.6 Render pipeline: Unity's graphics framework (decided 2026-10-11)
 
-Ship the HD profile only (FULL shading: vertex pixel-snapping and stepped fog are off). Keep:
-palette-by-category colour, Bayer-dither transparency, per-category exp2 fog, per-vertex lit
-unlit-style shading, SSAA with box downsample. The dither is screen-space, so SSAA is required
-for it to look like the web game. Details in workstream J.
+**Decision (user, 2026-10-11): build the rendering on Unity's own graphics framework, not a
+one-to-one port of the three.js renderer.** Concretely:
+
+- **URP** (Universal Render Pipeline) with its standard Forward+ renderer. No custom SRP, no
+  hand-rolled layer compositor, no log-depth shader chunk in every material.
+- **Lighting:** a real directional light driven by the sun model (time of day), URP ambient
+  (gradient or sky-based), URP shadows where they pay for themselves (aircraft, carrier, near
+  buildings). Planform silhouette shadows are replaced by real shadow maps.
+- **Materials:** URP Lit / Simple Lit / Unlit, or Shader Graph where a feature needs it
+  (terrain colour modes, cover textures, dissolve). Palette categories become material
+  properties or a palette texture, not per-draw uniform pokes.
+- **Sky and fog:** URP skybox / procedural sky material driven by the existing CPU atmosphere
+  model, URP distance fog (or a Volume-based height fog), URP post-processing (bloom for the sun,
+  tonemapping, colour adjustments replacing the per-group colour sliders).
+- **Anti-aliasing:** URP MSAA/SMAA/TAA and render scale instead of the mip-trick SSAA.
+- **Transparency:** real alpha blending where it reads better (smoke, haze, glass, glare), not
+  the Bayer-dither stipple that only works under SSAA.
+- **Drawing:** GameObjects with MeshRenderer for aircraft, ships, airfields; `Graphics.RenderMesh`
+  / `RenderMeshInstanced` (or BatchRendererGroup) for tiles, trees and particles; Unity
+  `LODGroup` where it fits; VFX Graph or the Particle System for smoke and fire is acceptable.
+- **HUD:** UI Toolkit / uGUI (Canvas). The bitmap fonts can stay as a sprite font to keep the
+  look, but the HUD is no longer a software rasteriser into a texture.
+
+Consequences:
+- The look will be close to, but not pixel-identical with, the web game. Visual parity is judged
+  by side-by-side screenshots, not per-pixel diffs; the golden tests stay for everything
+  numeric (geodesy, codecs, LOD selection, flight models, AI).
+- The retro-specific shader tricks (vertex pixel snapping, stepped fog, duotone, dither
+  transparency, log-depth `uDepthPush`) are dropped unless a later art decision asks for them
+  back as URP features.
+- Precision is still ours to handle: Unity transforms are float, so the double-precision
+  floating origin of 4.2 stays; the camera sits at the origin and objects are positioned
+  relative to it each frame (or rebased every few km).
+- Depth (4.3) becomes: URP reversed-Z with camera-relative positions, a near plane that grows
+  with altitude, and per-material depth offset for decals (runway paint, roads). The log-depth
+  fallback is only revisited if the M2 spike shows z-fighting URP can't solve.
 
 ## 5. Data delivery
 
@@ -200,9 +232,12 @@ oracle's, and the triangle total is within 1 percent.
 1. Vertex layout: position `SInt16x4` (pad), normal `SNorm8x4`, colour/class `UNorm8x4`; land is
    a non-indexed soup. Alternative: `StructuredBuffer` + `DrawProcedural` to keep the 6-byte
    stride. Decide in the M2 spike.
-2. One land shader, per-tile data via `MaterialPropertyBlock` or an indexed structured buffer
-   (no shared-material uniform pokes).
-3. Leaf dissolve (`vReveal`, Bayer discard) and under-parent push; landuse size reveal.
+2. One URP land material (Shader Graph or a URP-compatible HLSL shader using URP's lighting
+   library, so it receives the main light, shadows, fog and ambient), per-tile data via
+   `MaterialPropertyBlock` or an indexed structured buffer.
+3. LOD transitions: URP's LOD cross-fade (dithered, `LOD_FADE_CROSSFADE`) replaces the custom
+   leaf dissolve and the log-depth under-parent push; landuse size reveal stays as a material
+   property.
 4. Seam stitching: keep a CPU `NativeArray<short4>` copy, partial `SetVertexBufferData`.
    Alternative to evaluate: do the stitch in the vertex shader from a per-tile edge table,
    removing re-upload entirely.
@@ -210,8 +245,9 @@ oracle's, and the triangle total is within 1 percent.
 6. Cover textures: `Texture2D` point-filtered with hand-built mip chain (`SetPixelData` per
    level, `Apply(updateMipmaps:false)`).
 7. Colour modes: Imagery, Swatch (24), Hybrid, Palette.
-**Done when:** a fixed-camera screenshot over Gran Canaria matches the web render within a
-per-pixel tolerance outside dithered regions, and tile counts match.
+**Done when:** tile counts and the drawn cut match the oracle for scripted camera paths, and a
+side-by-side screenshot over Gran Canaria reads the same (same land colours and coastline, no
+holes or seams).
 
 ### E. Roads, rails, bridges, buildings, trees (8 w)
 - Roads/rails (`roadStrokes`, `roadLod`, `riverVP`, `depthFP` rail detail): two verts per
@@ -277,20 +313,24 @@ reads scene depth), atmosphere shell (full-screen analytic ray march for space),
 (~100 categories, noon/midnight/night-vision, daytime blend), CPU atmosphere model (pure math,
 ports 1:1), particles/smoke (4,800-puff instanced pool), wingtip trails, afterburner cones,
 ship wakes, impact marks, planform shadows.
-- Custom `ScriptableRendererFeature` passes (Render Graph): sky at far plane, foreground
-  glare/shell after opaques, final box-downsample blit, secondary camera for the target MFD
-  (half res, every 4th frame).
-- Use `RenderMeshInstanced` with dynamic `GraphicsBuffer` for the smoke pool; do not use Unity
-  `ParticleSystem` (would change the dither look).
-**Done when:** a day, dusk and night screenshot set matches the web game.
+- Built on URP: directional light + skybox material driven by the CPU atmosphere model
+  (ported 1:1), URP fog, post-processing Volume (bloom on the sun, tonemapping, colour
+  adjustments). The space-view atmosphere shell becomes a full-screen pass in a small
+  `ScriptableRendererFeature` (Render Graph) only if a skybox cannot do it.
+- Clouds: meshes with a URP lit material and real alpha (or Shader Graph), not dither stipple.
+- Smoke, fire, trails, wakes: VFX Graph or the Particle System; `RenderMeshInstanced` is the
+  fallback if particle counts (4,800 puffs) cost too much.
+- Target MFD view: a second URP camera rendering into a `RenderTexture` at half resolution.
+**Done when:** a day, dusk and night screenshot set reads like the web game side by side.
 
 ### K. HUD / OSD (4 w)
 Canvas2D today (`canvasPainter`, `text`, 320x200 logical grid, bitmap fonts 3x5/5x8/7x11).
-**Decision:** software rasteriser into a CPU `Texture2D`/`RenderTexture`, nearest-filtered. The
-line, triangle, circle and text algorithms port directly and preserve the pixel-art look. Dirty
-tile upload is probably unnecessary. Entities: HUD (1,066), cockpit MFDs (679), moving map,
-approach aids, perf HUD, exterior data, units.
-**Done when:** HUD screenshot matches at 1080p.
+**Decision (follows 4.6):** Unity UI (UI Toolkit or uGUI Canvas) with the three bitmap fonts as
+sprite fonts; ladder, tapes and symbology drawn with UI Toolkit `Painter2D` or uGUI meshes. The
+layout logic (320x200 grid, scales, focus modes) ports as plain C#. Entities: HUD (1,066),
+cockpit MFDs (679), moving map, approach aids, perf HUD, exterior data, units.
+**Done when:** every HUD element is present and reads the same values as the web game for the
+same flight state.
 
 ### L. Settings, boot and spawn UI (4 w)
 Angular Material dialog becomes UI Toolkit (UXML/USS): eight tabs (Flight, Graphics, Colours,
@@ -375,7 +415,7 @@ signed off.
 | Terrain geometry jobs (buildings, trees, road LOD) cost and GC | Medium | Struct-based Burst jobs; budgets measured per milestone |
 | Seam stitching with separate GPU copy | Medium | Vertex-shader stitch evaluated in M2 |
 | Wreck geometry slicing port | Medium-High | Scheduled last; ~110 tests as spec |
-| SSAA/dither look not matching | Medium | Keep SSAA from day one; mip-based box filter |
+| Look drifts from the web game under URP lighting | Medium | Side-by-side screenshot reviews per milestone; palette as material data so colours can be tuned without code |
 | Non-deterministic sim vs oracle | Medium | Fixed step; tolerance bands; FM3 numeric goldens |
 | Data volume (17.6 GB, ~302k files) | Medium | Direct reads first; repack decision after profiling |
 | Handedness mistakes | Medium | One conversion point; assertions in debug builds |
