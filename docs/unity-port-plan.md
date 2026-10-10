@@ -3,6 +3,25 @@
 Status: draft, 2026-10-10; rendering approach revised 2026-10-11 (section 4.6). Written from five read-only code surveys (terrain formats, terrain
 runtime, rendering, sim/AI, UI/input). Nothing in the repo was changed to produce it.
 
+## 0. Progress (branch `unity-fe`)
+
+| Milestone / stream | State | Where |
+|---|---|---|
+| M0 golden harness | Done: 10 suites, `npm run golden:check`, `tools/golden/golden.test.ts` | `tools/golden/`, `tests/golden/` |
+| A core math, geodesy, FrameShift, tiling | Done, golden-verified | `unity/Packages/com.retro.core` |
+| B terrain codecs (8 formats + PIX1) | Done, golden-verified on 32 real tiles | `unity/Packages/com.retro.terrain-data/Runtime/Codecs` |
+| C LOD policy + quadtree selection | Done, golden-verified on 6 camera paths | `.../terrain-data/Runtime/Lod` |
+| C streaming store, budget folding | Not started | |
+| D-E terrain rendering, roads, buildings, trees | Blocked: needs a Unity install | |
+| F FM2 + FM3 | Done, all 26 traces match | `unity/Packages/com.retro.sim/Runtime/Physics` |
+| G height queries + airfield pads | Done, golden-verified | `.../terrain-data/Runtime/Height` |
+| G combat sim, colliders, arrestor, collision | Goldens written (12 scenarios); port next | `tests/golden/combat_sim.json` |
+| H dogfight geometry | Done | `.../sim/Runtime/Ai/DogfightGeometry.cs` |
+| H AI pilots (4 models) | Goldens written (34 traces); port in progress | `tests/golden/ai_pilots.json` |
+| I-P (mods, sky, HUD, UI, input, wreck, integration) | Not started; most need Unity | |
+
+`cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity.
+
 ## 1. Decisions already made
 
 | Decision | Choice |
