@@ -629,7 +629,7 @@ namespace Retro.Sim
                 }
                 double un = Math.Sqrt(un2);
                 double cfx = fx[i], cfy = fy[i], cfz = fz[i];
-                double alpha = Math.Atan2(-(unx * nxi + uny * nyi + unz * nzi), unx * cfx + uny * cfy + unz * cfz);
+                double alpha = JsTrig.Atan2(-(unx * nxi + uny * nyi + unz * nzi), unx * cfx + uny * cfy + unz * cfz);
 
                 double cnx = nxi, cny = nyi, cnz = nzi, ccx = cfx, ccy = cfy, ccz = cfz;
                 int amc = allMovingCh[i];
@@ -640,7 +640,7 @@ namespace Retro.Sim
                     {
                         // Deflecting an all-moving surface rotates its chord nose-up by d.
                         alpha += d;
-                        double cd = Math.Cos(d), sd = Math.Sin(d);
+                        double cd = JsTrig.Cos(d), sd = JsTrig.Sin(d);
                         ccx = cfx * cd + nxi * sd; ccy = cfy * cd + nyi * sd; ccz = cfz * cd + nzi * sd;
                         cnx = nxi * cd - cfx * sd; cny = nyi * cd - cfy * sd; cnz = nzi * cd - cfz * sd;
                         if (alpha > Math.PI) alpha -= 2 * Math.PI;
@@ -658,7 +658,7 @@ namespace Retro.Sim
                         double shift = flapTau[i] * SectionAero.FlapDeflectionEfficiency(d) * d;
                         dA0 -= shift;
                         dSep += FlapSepGain * shift;
-                        double s = Math.Sin(d);
+                        double s = JsTrig.Sin(d);
                         dCd += FlapCdGain * flapCf[i] * s * s;
                     }
                 }
@@ -670,7 +670,7 @@ namespace Retro.Sim
                     {
                         dSep += LefSepGain * d;
                         dA0 -= LefAlpha0Gain * d;
-                        double s = Math.Sin(d);
+                        double s = JsTrig.Sin(d);
                         dCd += LefCdGain * s * s;
                     }
                 }
@@ -712,7 +712,7 @@ namespace Retro.Sim
                     lastMach[i] = mach;
                     lastDAlpha0[i] = dA0;
                     lastDAlphaSep[i] = dSep;
-                    double ca = Math.Cos(alpha), sa = Math.Sin(alpha);
+                    double ca = JsTrig.Cos(alpha), sa = JsTrig.Sin(alpha);
                     lastCl[i] = sf.Cn * ca + sf.Cc * sa;
                     lastCd[i] = sf.Cn * sa - sf.Cc * ca + sf.CdProfile;
                     RecordGroup(stripGroup[i], fxs, fys, fzs, ax, ay, az);
@@ -730,8 +730,8 @@ namespace Retro.Sim
                 if (v2s < 1e-4) continue;
                 double v = Math.Sqrt(v2s);
                 // Strake plane: normal +Y (up), chord +Z (forward), outboard +-X.
-                double alpha = Math.Atan2(-uy, uz);
-                double sa = Math.Sin(alpha), ca = Math.Cos(alpha);
+                double alpha = JsTrig.Atan2(-uy, uz);
+                double sa = JsTrig.Sin(alpha), ca = JsTrig.Cos(alpha);
                 double absSa = sa < 0 ? -sa : sa;
                 double cn;
                 if (ca >= 0)
@@ -768,7 +768,7 @@ namespace Retro.Sim
                     stAlpha[k] = alpha;
                     stSpeed[k] = v;
                     double sb = (ux * stOutX[k]) / v;
-                    stBeta[k] = Math.Asin(sb > 1 ? 1 : sb < -1 ? -1 : sb);
+                    stBeta[k] = JsTrig.Asin(sb > 1 ? 1 : sb < -1 ? -1 : sb);
                     RecordGroup(stGroup[k], fxs, fys, fzs, rx, ry, rz);
                     if (augF != 0) RecordGroup(stGroup[k], 0, augF, 0, stAugX[k], stAugY[k], stAugZ[k]);
                 }
@@ -787,8 +787,8 @@ namespace Retro.Sim
                 double ex = ux / uc, ey = uy / uc;
                 // Potential flow: rho u_axial u_cross dS (slender-body theory), with
                 // Jorgensen's cos(alpha/2) for high incidence; alpha here runs 0..pi.
-                double alphaB = Math.Atan2(uc, ua);
-                double nPot = rho * ua * uc * segDArea[k] * segPotential[k] * Math.Cos(0.5 * alphaB);
+                double alphaB = JsTrig.Atan2(uc, ua);
+                double nPot = rho * ua * uc * segDArea[k] * segPotential[k] * JsTrig.Cos(0.5 * alphaB);
                 // Viscous crossflow on the projected width of the elliptical section.
                 double halfW = 0.5 * segWidth[k], halfH = 0.5 * segHeight[k];
                 double proj = 2 * Math.Sqrt(halfW * halfW * ey * ey + halfH * halfH * ex * ex);
@@ -953,9 +953,9 @@ namespace Retro.Sim
             double alpha = 0, beta = 0;
             if (v > 1)
             {
-                alpha = Math.Atan2(-vy, vz);
+                alpha = JsTrig.Atan2(-vy, vz);
                 double sb = -vx / v;
-                beta = Math.Asin(sb > 1 ? 1 : sb < -1 ? -1 : sb);
+                beta = JsTrig.Asin(sb > 1 ? 1 : sb < -1 ? -1 : sb);
             }
             // The influences change slowly with the wake's direction; re-blending
             // the tables every step while it has hardly moved is most of the cost.
@@ -1115,7 +1115,7 @@ namespace Retro.Sim
                         if (across < halfWidth)
                         {
                             double centre = Math.Min(0.95, 2.42 * Math.Sqrt(cd) / (along / c + 0.3));
-                            double shape = Math.Cos(0.5 * Math.PI * across / halfWidth);
+                            double shape = JsTrig.Cos(0.5 * Math.PI * across / halfWidth);
                             q = 1 - centre * shape * shape;
                         }
                     }
@@ -1148,7 +1148,7 @@ namespace Retro.Sim
                 double lo = stBurstTE[k] + shift;
                 double hi = stBurstApex[k] + shift;
                 double target;
-                if (Math.Cos(alpha) < 0 || lagged >= hi) target = 0;
+                if (JsTrig.Cos(alpha) < 0 || lagged >= hi) target = 0;
                 else if (lagged <= lo) target = 1;
                 else
                 {
@@ -1271,9 +1271,9 @@ namespace Retro.Sim
             double beta = c.Beta ?? 0;
             SetControls(c);
             // NASA (u, v, w) to sim (-v, -w, u).
-            double u = speed * Math.Cos(c.Alpha) * Math.Cos(beta);
-            double vN = speed * Math.Sin(beta);
-            double w = speed * Math.Sin(c.Alpha) * Math.Cos(beta);
+            double u = speed * JsTrig.Cos(c.Alpha) * JsTrig.Cos(beta);
+            double vN = speed * JsTrig.Sin(beta);
+            double w = speed * JsTrig.Sin(c.Alpha) * JsTrig.Cos(beta);
             double vx = -vN, vy = -w, vz = u;
             double p = c.P ?? 0, q = c.Q ?? 0, r = c.R ?? 0;
             double wx = -q, wy = -r, wz = p;
@@ -1297,7 +1297,7 @@ namespace Retro.Sim
             Fm3Reference rf = Airframe.Reference;
             double qS = 0.5 * rho * speed * speed * rf.AreaM2;
             double CX = F[0] / qS, CY = F[1] / qS, CZ = F[2] / qS;
-            double ca = Math.Cos(c.Alpha), sa = Math.Sin(c.Alpha), cb = Math.Cos(beta), sb = Math.Sin(beta);
+            double ca = JsTrig.Cos(c.Alpha), sa = JsTrig.Sin(c.Alpha), cb = JsTrig.Cos(beta), sb = JsTrig.Sin(beta);
             return new NasaCoefficients
             {
                 CX = CX, CY = CY, CZ = CZ,
@@ -1335,9 +1335,9 @@ namespace Retro.Sim
             // NASA (u, v, w) to sim (-v, -w, u).
             void VelocityAt(double alpha)
             {
-                v[0] = -speed * Math.Sin(beta);
-                v[1] = -speed * Math.Sin(alpha) * Math.Cos(beta);
-                v[2] = speed * Math.Cos(alpha) * Math.Cos(beta);
+                v[0] = -speed * JsTrig.Sin(beta);
+                v[1] = -speed * JsTrig.Sin(alpha) * JsTrig.Cos(beta);
+                v[2] = speed * JsTrig.Cos(alpha) * JsTrig.Cos(beta);
             }
             VelocityAt(c.Alpha);
             Reset();
@@ -1351,13 +1351,13 @@ namespace Retro.Sim
             for (int i = 0; i < 2 * cycle; i++)
             {
                 double t = i * dt;
-                VelocityAt(c.Alpha + amplitude * Math.Sin(omega * t));
+                VelocityAt(c.Alpha + amplitude * JsTrig.Sin(omega * t));
                 // q = alpha-dot, and sim w about +X is -q.
-                double wx = -amplitude * omega * Math.Cos(omega * t);
+                double wx = -amplitude * omega * JsTrig.Cos(omega * t);
                 Advance(dt, v[0], v[1], v[2], wx, wy, wz, env);
                 Evaluate(v[0], v[1], v[2], wx, wy, wz, env, f, m, true);
                 // NASA pitching moment is -M about sim +X.
-                if (i >= cycle) inPhase -= m[0] * Math.Cos(omega * t);
+                if (i >= cycle) inPhase -= m[0] * JsTrig.Cos(omega * t);
             }
             Fm3Reference rf = Airframe.Reference;
             double qSc = 0.5 * rho * speed * speed * rf.AreaM2 * rf.ChordM;
@@ -1433,8 +1433,8 @@ namespace Retro.Sim
                     // A root, or a tip that joins another panel, is not a free edge:
                     // strips bunched there would only shed spurious vortices between them.
                     bool uniform = surface.Spacing == Fm3StripSpacing.Uniform;
-                    double t0 = uniform ? (double)k / nStrips : Math.Sin(0.5 * Math.PI * k / nStrips);
-                    double t1 = uniform ? (double)(k + 1) / nStrips : Math.Sin(0.5 * Math.PI * (k + 1) / nStrips);
+                    double t0 = uniform ? (double)k / nStrips : JsTrig.Sin(0.5 * Math.PI * k / nStrips);
+                    double t1 = uniform ? (double)(k + 1) / nStrips : JsTrig.Sin(0.5 * Math.PI * (k + 1) / nStrips);
                     double tm = 0.5 * (t0 + t1);
                     double ChordAt(double t) => surface.RootChord + t * (surface.TipChord - surface.RootChord);
                     double[] Quarter(double t) => V.Add(V.Lerp(surface.RootLE, surface.TipLE, t), new[] { -0.25 * ChordAt(t), 0, 0 });
@@ -1535,7 +1535,7 @@ namespace Retro.Sim
             /// <summary>Rodrigues rotation of v about unit axis k by angle theta.</summary>
             public static double[] RotateAbout(double[] v, double[] k, double theta)
             {
-                double c = Math.Cos(theta), s = Math.Sin(theta);
+                double c = JsTrig.Cos(theta), s = JsTrig.Sin(theta);
                 double[] kv = Cross(k, v);
                 double kdv = Dot(k, v);
                 return new[]

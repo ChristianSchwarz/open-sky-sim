@@ -147,7 +147,7 @@ namespace Retro.Game
         {
             double angle = (bearingDeg - airfield.Plane.HeadingDeg) * Math.PI / 180;
             return airfield.Plane.HeightMsl
-                + airfield.Plane.Gradient * distanceM * Math.Cos(angle);
+                + airfield.Plane.Gradient * distanceM * JsTrig.Cos(angle);
         }
 
         /// <summary>Longest runway of an airfield, which is the one worth flying to.</summary>

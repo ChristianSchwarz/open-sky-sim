@@ -1,6 +1,6 @@
 using System;
 
-namespace Retro.Sim
+namespace Retro.Core
 {
     /// <summary>
     /// Math.sin / cos / atan / atan2 / asin / acos exactly as V8 computes them:

@@ -1,3 +1,4 @@
+using Retro.Core;
 using System;
 
 namespace Retro.Game
@@ -40,8 +41,8 @@ namespace Retro.Game
         /// <summary>SampleSurfacePadY with the skirt `feather` metres wide; 0 is the footprint alone.</summary>
         private static double PadY(double worldX, double worldZ, SurfacePadCollider pad, double feather)
         {
-            double cos = Math.Cos(pad.Heading);
-            double sin = Math.Sin(pad.Heading);
+            double cos = JsTrig.Cos(pad.Heading);
+            double sin = JsTrig.Sin(pad.Heading);
             double dx = worldX - pad.CenterX;
             double dz = worldZ - pad.CenterZ;
             // World delta into pad local XZ: the inverse of the scene heading

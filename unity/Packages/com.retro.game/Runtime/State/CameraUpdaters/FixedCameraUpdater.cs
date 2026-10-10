@@ -34,9 +34,9 @@ namespace Retro.Game
             double h = _headingDeg * Math.PI / 180;
             double p = _pitchDeg * Math.PI / 180;
             _direction = new Vec3d(
-                Math.Sin(h) * Math.Cos(p),
-                Math.Sin(p),
-                -Math.Cos(h) * Math.Cos(p));
+                JsTrig.Sin(h) * JsTrig.Cos(p),
+                JsTrig.Sin(p),
+                -JsTrig.Cos(h) * JsTrig.Cos(p));
         }
 
         /// <summary>Carry the pose into a re-based frame: same place, same view of it.</summary>
@@ -45,8 +45,8 @@ namespace Retro.Game
             _position = shift.Point(_position);
             Vec3d d = shift.Vector(_direction);
             _direction = d;
-            _headingDeg = ((Math.Atan2(d.X, -d.Z) * 180 / Math.PI) + 360) % 360;
-            _pitchDeg = Math.Asin(Math.Max(-1, Math.Min(1, d.Y))) * 180 / Math.PI;
+            _headingDeg = ((JsTrig.Atan2(d.X, -d.Z) * 180 / Math.PI) + 360) % 360;
+            _pitchDeg = JsTrig.Asin(Math.Max(-1, Math.Min(1, d.Y))) * 180 / Math.PI;
         }
 
         /// <summary>Where the camera is, in scene metres.</summary>

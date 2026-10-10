@@ -271,7 +271,7 @@ namespace Retro.Sim
             // attack for sideslip. The lateral feedback gains are capped at low
             // dynamic pressure and fade at high AoA, where the surfaces lose
             // effectiveness and a high-gain damper only drives itself into a cycle.
-            double cosA = Math.Cos(alpha), sinA = Math.Sin(alpha);
+            double cosA = JsTrig.Cos(alpha), sinA = JsTrig.Sin(alpha);
             double pStab = input.P * cosA + input.R * sinA;
             double rStab = input.R * cosA - input.P * sinA;
             double gainFade = 1 - (1 - cr.GainFadeFloor) * Smoothstep(cr.GainFadeStart, cr.GainFadeEnd, Math.Abs(alpha));

@@ -15,12 +15,14 @@ runtime, rendering, sim/AI, UI/input). Nothing in the repo was changed to produc
 | D-E terrain rendering, roads, buildings, trees | Blocked: needs a Unity install | |
 | F FM2 + FM3 | Done, all 26 traces match | `unity/Packages/com.retro.sim/Runtime/Physics` |
 | G height queries + airfield pads | Done, golden-verified | `.../terrain-data/Runtime/Height` |
-| G combat sim, colliders, arrestor, collision | Goldens written (12 scenarios); port in progress | `tests/golden/combat_sim.json` |
+| G combat sim, colliders, arrestor, collision, player input, gun | Done, all 12 scenarios match (most to ~1e-13) | `tests/golden/combat_sim.json` |
 | H dogfight geometry | Done | `.../sim/Runtime/Ai/DogfightGeometry.cs` |
 | H AI pilots (4 models) | Done, all 34 closed-loop traces bit-identical (V8-exact trig in `JsTrig`) | `.../sim/Runtime/Ai` |
-| I-P (mods, sky, HUD, UI, input, wreck, integration) | Not started; most need Unity | |
+| O game state: spawn search, camera routes, runway pick, carrier site, recorder, re-base, all camera modes | Done, 74 tests ported from TS plus oracle checks | `unity/Packages/com.retro.game` |
+| M2 terrain spike | Engine-free streaming core done (integration-tested on Gran Canaria); Unity URP layer written, awaiting first compile | `unity/Packages/com.retro.unity` |
+| I-P (mods, sky, HUD, UI, wreck, Unity integration) | Not started; need Unity | |
 
-`cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity.
+`cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity (202 tests). All trig goes through `Retro.Core.JsTrig`, a port of V8's fdlibm, so closed-loop traces stay bit-identical to the browser.
 
 ## 1. Decisions already made
 

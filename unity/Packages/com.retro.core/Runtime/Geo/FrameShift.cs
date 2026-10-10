@@ -39,9 +39,9 @@ namespace Retro.Core
         /// <summary>A heading with a rise per metre along it, turned into the new frame.</summary>
         public (double Heading, double Slope) SlopedHeading(double h, double slope)
         {
-            Vec3d d = Vector(new Vec3d(Math.Sin(h), slope, Math.Cos(h)));
+            Vec3d d = Vector(new Vec3d(JsTrig.Sin(h), slope, JsTrig.Cos(h)));
             double run = JsMath.Hypot(d.X, d.Z);
-            return (Math.Atan2(d.X, d.Z), d.Y / run);
+            return (JsTrig.Atan2(d.X, d.Z), d.Y / run);
         }
     }
 }

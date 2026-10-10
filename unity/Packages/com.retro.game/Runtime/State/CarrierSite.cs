@@ -1,3 +1,4 @@
+using Retro.Core;
 using System;
 using System.Collections.Generic;
 
@@ -178,7 +179,7 @@ namespace Retro.Game
             (double X, double Z) At(double r, double k, double phase)
             {
                 double a = ((k + phase) / Bearings) * Math.PI * 2;
-                return (centreX + Math.Cos(a) * r, centreZ + Math.Sin(a) * r);
+                return (centreX + JsTrig.Cos(a) * r, centreZ + JsTrig.Sin(a) * r);
             }
 
             // Water: nearest ring first; on a ring start at the bearing that faces

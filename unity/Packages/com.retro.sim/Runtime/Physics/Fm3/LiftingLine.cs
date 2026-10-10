@@ -1,3 +1,4 @@
+using Retro.Core;
 using System;
 
 namespace Retro.Sim
@@ -140,8 +141,8 @@ namespace Retro.Sim
         /// </summary>
         private static double[] WakeDirection(double alpha, double beta, double[] o)
         {
-            double ca = Math.Cos(alpha), sa = Math.Sin(alpha);
-            double cb = Math.Cos(beta), sb = Math.Sin(beta);
+            double ca = JsTrig.Cos(alpha), sa = JsTrig.Sin(alpha);
+            double cb = JsTrig.Cos(beta), sb = JsTrig.Sin(beta);
             // NASA downstream (-cos a cos b, -sin b, -sin a cos b) to sim (-y_N, -z_N, x_N).
             o[0] = sb;
             o[1] = sa * cb;

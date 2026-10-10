@@ -1,3 +1,4 @@
+using Retro.Core;
 using System;
 
 namespace Retro.Sim
@@ -212,7 +213,7 @@ namespace Retro.Sim
         {
             double ff = f < 0 ? 0 : f > 1 ? 1 : f;
             double sq = Math.Sqrt(ff);
-            double sinA = Math.Sin(alpha);
+            double sinA = JsTrig.Sin(alpha);
             double absSinA = sinA < 0 ? -sinA : sinA;
             double shape = p.PlateShape ?? 0.56;
             double plate = p.Cd90 * sinA / (shape + (1 - shape) * absSinA);
@@ -223,7 +224,7 @@ namespace Retro.Sim
             {
                 double cnA = p.CnAlpha * SlopeMachFactor(mach, p.CnAlpha);
                 double alphaE = alpha - (p.Alpha0 + mod.DAlpha0);
-                double sinAe = Math.Sin(alphaE);
+                double sinAe = JsTrig.Sin(alphaE);
                 double attached = cnA * sinAe;
                 double cn = attached * kirchhoffFactor + w * (plate - 0.25 * attached);
                 double xcp = 0.25 + 0.25 * (1 - ff) * absSinA;
@@ -275,8 +276,8 @@ namespace Retro.Sim
         public static double FlapEffectiveness(double cf)
         {
             double c = cf < 0 ? 0 : cf > 1 ? 1 : cf;
-            double theta = Math.Acos(2 * c - 1);
-            return 1 - (theta - Math.Sin(theta)) / Math.PI;
+            double theta = JsTrig.Acos(2 * c - 1);
+            return 1 - (theta - JsTrig.Sin(theta)) / Math.PI;
         }
 
         /// <summary>

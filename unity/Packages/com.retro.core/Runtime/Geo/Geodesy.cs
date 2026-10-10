@@ -74,10 +74,10 @@ namespace Retro.Core
         {
             double lat = latDeg * Deg;
             double lon = lonDeg * Deg;
-            double sinLat = Math.Sin(lat);
-            double cosLat = Math.Cos(lat);
-            double sinLon = Math.Sin(lon);
-            double cosLon = Math.Cos(lon);
+            double sinLat = JsTrig.Sin(lat);
+            double cosLat = JsTrig.Cos(lat);
+            double sinLon = JsTrig.Sin(lon);
+            double cosLon = JsTrig.Cos(lon);
             double n = Wgs84A / Math.Sqrt(1 - Wgs84E2 * sinLat * sinLat);
             return new Vec3d(
                 (n + height) * cosLat * cosLon,
@@ -88,17 +88,17 @@ namespace Retro.Core
         /// <summary>ECEF metres to geodetic. Bowring closed form.</summary>
         public static Geodetic EcefToGeodetic(double x, double y, double z)
         {
-            double lon = Math.Atan2(y, x);
+            double lon = JsTrig.Atan2(y, x);
             double p = JsMath.Hypot(x, y);
-            double theta = Math.Atan2(z * Wgs84A, p * Wgs84B);
-            double sinT = Math.Sin(theta);
-            double cosT = Math.Cos(theta);
-            double lat = Math.Atan2(
+            double theta = JsTrig.Atan2(z * Wgs84A, p * Wgs84B);
+            double sinT = JsTrig.Sin(theta);
+            double cosT = JsTrig.Cos(theta);
+            double lat = JsTrig.Atan2(
                 z + Wgs84E2 * Wgs84B / (1 - Wgs84E2) * sinT * sinT * sinT,
                 p - Wgs84E2 * Wgs84A * cosT * cosT * cosT);
-            double sinLat = Math.Sin(lat);
+            double sinLat = JsTrig.Sin(lat);
             double n = Wgs84A / Math.Sqrt(1 - Wgs84E2 * sinLat * sinLat);
-            return new Geodetic(lat * Rad, lon * Rad, p / Math.Cos(lat) - n);
+            return new Geodetic(lat * Rad, lon * Rad, p / JsTrig.Cos(lat) - n);
         }
 
         public static Geodetic EcefToGeodetic(Vec3d ecef) => EcefToGeodetic(ecef.X, ecef.Y, ecef.Z);
@@ -108,10 +108,10 @@ namespace Retro.Core
             Vec3d origin = GeodeticToEcef(lat0, lon0, height0);
             double lat = lat0 * Deg;
             double lon = lon0 * Deg;
-            double sinLat = Math.Sin(lat);
-            double cosLat = Math.Cos(lat);
-            double sinLon = Math.Sin(lon);
-            double cosLon = Math.Cos(lon);
+            double sinLat = JsTrig.Sin(lat);
+            double cosLat = JsTrig.Cos(lat);
+            double sinLon = JsTrig.Sin(lon);
+            double cosLon = JsTrig.Cos(lon);
             double ex = -sinLon, ey = cosLon, ez = 0;
             double nx = -sinLat * cosLon, ny = -sinLat * sinLon, nz = cosLat;
             double ux = cosLat * cosLon, uy = cosLat * sinLon, uz = sinLat;

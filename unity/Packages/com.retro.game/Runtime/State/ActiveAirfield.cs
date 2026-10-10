@@ -53,8 +53,8 @@ namespace Retro.Game
         {
             double lat = latDeg * Math.PI / 180;
             return (
-                111132.92 - 559.82 * Math.Cos(2 * lat) + 1.175 * Math.Cos(4 * lat),
-                Math.Max(1, 111412.84 * Math.Cos(lat) - 93.5 * Math.Cos(3 * lat)));
+                111132.92 - 559.82 * JsTrig.Cos(2 * lat) + 1.175 * JsTrig.Cos(4 * lat),
+                Math.Max(1, 111412.84 * JsTrig.Cos(lat) - 93.5 * JsTrig.Cos(3 * lat)));
         }
 
         /// <summary>
@@ -70,8 +70,8 @@ namespace Retro.Game
             double r = runway.HeadingDeg * Math.PI / 180;
             Vec3d At(double along)
             {
-                double lat = runway.Lat + (along * Math.Cos(r)) / perDeg.Lat;
-                double lon = runway.Lon + (along * Math.Sin(r)) / perDeg.Lon;
+                double lat = runway.Lat + (along * JsTrig.Cos(r)) / perDeg.Lat;
+                double lon = runway.Lon + (along * JsTrig.Sin(r)) / perDeg.Lon;
                 double elevation = Airfields.PlaneElevationAt(airfield, runway.HeadingDeg, along) + surfaceEpsM;
                 return Geodesy.SceneFromEnu(Geodesy.EcefToEnu(basis, Geodesy.GeodeticToEcef(lat, lon, elevation)));
             }
@@ -83,7 +83,7 @@ namespace Retro.Game
             return new SceneRunway
             {
                 Center = centre,
-                Heading = Math.Atan2(ahead.X - behind.X, ahead.Z - behind.Z),
+                Heading = JsTrig.Atan2(ahead.X - behind.X, ahead.Z - behind.Z),
                 HalfLength = half,
                 HalfWidth = runway.WidthM / 2,
                 Slope = (ahead.Y - behind.Y) / runway.LengthM,
@@ -197,7 +197,7 @@ namespace Retro.Game
         }
 
         /// <summary>Unit forward vector along a scene heading.</summary>
-        public static Vec3d HeadingForward(double heading) => new Vec3d(Math.Sin(heading), 0, Math.Cos(heading));
+        public static Vec3d HeadingForward(double heading) => new Vec3d(JsTrig.Sin(heading), 0, JsTrig.Cos(heading));
 
         /// <summary>One airfield entry per `icao || name`, for a picker. Longest runway decides the order.</summary>
         public static List<AirfieldChoice> AirfieldChoices(IReadOnlyList<SceneRunway> runways)

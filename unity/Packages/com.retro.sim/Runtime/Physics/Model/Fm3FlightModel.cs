@@ -304,15 +304,15 @@ namespace Retro.Sim
             double alpha;
             if (speed > 1)
             {
-                alpha = Math.Atan2(-vb[1], vb[2]);
-                sideslipRad = Math.Asin(JsMath.Clamp(-vb[0] / speed, -1, 1));
+                alpha = JsTrig.Atan2(-vb[1], vb[2]);
+                sideslipRad = JsTrig.Asin(JsMath.Clamp(-vb[0] / speed, -1, 1));
             }
             else
             {
                 // Tail-slide apex: the velocity vector says nothing; fall back to attitude (as FM2).
                 double[] t = tmp;
                 RigidBody6.RotateBodyToWorld(rb.Quat, 0, 0, 1, t);
-                alpha = Math.Asin(JsMath.Clamp(t[1], -1, 1));
+                alpha = JsTrig.Asin(JsMath.Clamp(t[1], -1, 1));
                 sideslipRad = 0;
             }
             input.Alpha = alpha;
@@ -458,8 +458,8 @@ namespace Retro.Sim
             Vec3d fwd = SimConstants.Forward.Rotate(quaternion);
             Vec3d right = SimConstants.Right.Rotate(quaternion);
             double speed = velocity.Length;
-            double pitchAngle = Math.Asin(JsMath.Clamp(fwd.Y, -1, 1));
-            double rollAngle = Math.Asin(JsMath.Clamp(right.Y, -1, 1));
+            double pitchAngle = JsTrig.Asin(JsMath.Clamp(fwd.Y, -1, 1));
+            double rollAngle = JsTrig.Asin(JsMath.Clamp(right.Y, -1, 1));
             Fm2EnvelopeConfig envl = config.Envelope;
             bool badAttitude = Math.Abs(rollAngle) > envl.LandingMaxRollRad || pitchAngle < envl.LandingMinPitchRad;
             if (!landingGearDeployed)

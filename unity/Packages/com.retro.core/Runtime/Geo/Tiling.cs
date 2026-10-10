@@ -111,7 +111,7 @@ namespace Retro.Core
         {
             LonLatBounds b = Bounds(id);
             double midLat = 0.5 * (b.South + b.North);
-            double lonM = (b.East - b.West) * 111320 * Math.Cos(midLat * Math.PI / 180);
+            double lonM = (b.East - b.West) * 111320 * JsTrig.Cos(midLat * Math.PI / 180);
             double latM = (b.North - b.South) * 110540;
             return Math.Max(lonM, latM);
         }

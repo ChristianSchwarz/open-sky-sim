@@ -53,8 +53,8 @@ namespace Retro.Core
 
         public static Quatd FromAxisAngle(Vec3d axis, double angle)
         {
-            double half = angle / 2, s = Math.Sin(half);
-            return new Quatd(axis.X * s, axis.Y * s, axis.Z * s, Math.Cos(half));
+            double half = angle / 2, s = JsTrig.Sin(half);
+            return new Quatd(axis.X * s, axis.Y * s, axis.Z * s, JsTrig.Cos(half));
         }
 
         /// <summary>three.js setFromRotationMatrix on a pure rotation (same branch order).</summary>
@@ -98,10 +98,10 @@ namespace Retro.Core
             double s = 1 - t;
             if (dot < 0.9995)
             {
-                double theta = Math.Acos(dot);
-                double sin = Math.Sin(theta);
-                s = Math.Sin(s * theta) / sin;
-                t = Math.Sin(t * theta) / sin;
+                double theta = JsTrig.Acos(dot);
+                double sin = JsTrig.Sin(theta);
+                s = JsTrig.Sin(s * theta) / sin;
+                t = JsTrig.Sin(t * theta) / sin;
                 return new Quatd(a.X * s + x * t, a.Y * s + y * t, a.Z * s + z * t, a.W * s + w * t);
             }
             return new Quatd(a.X * s + x * t, a.Y * s + y * t, a.Z * s + z * t, a.W * s + w * t).Normalized();

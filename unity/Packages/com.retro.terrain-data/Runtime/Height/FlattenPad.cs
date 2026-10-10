@@ -45,7 +45,7 @@ namespace Retro.Terrain
         public static (double E, double N) AxisFromHeading(double headingDeg)
         {
             double r = headingDeg * Math.PI / 180;
-            return (Math.Sin(r), Math.Cos(r));
+            return (JsTrig.Sin(r), JsTrig.Cos(r));
         }
 
         public static (double E, double N) AxisTowards(double centerE, double centerN, double aheadE, double aheadN)
@@ -106,8 +106,8 @@ namespace Retro.Terrain
         private static (double Lat, double Lon) MetresPerDegree(double latDeg)
         {
             double lat = latDeg * Math.PI / 180;
-            return (111132.92 - 559.82 * Math.Cos(2 * lat) + 1.175 * Math.Cos(4 * lat),
-                111412.84 * Math.Cos(lat) - 93.5 * Math.Cos(3 * lat));
+            return (111132.92 - 559.82 * JsTrig.Cos(2 * lat) + 1.175 * JsTrig.Cos(4 * lat),
+                111412.84 * JsTrig.Cos(lat) - 93.5 * JsTrig.Cos(3 * lat));
         }
 
         /// <summary>A bearing turned into an ENU axis by probing 1 km ahead (meridian convergence).</summary>
@@ -118,8 +118,8 @@ namespace Retro.Terrain
             var perDeg = MetresPerDegree(lat);
             double r = bearingDeg * Math.PI / 180;
             var ahead = toEnu(
-                lat + (AxisProbeM * Math.Cos(r)) / perDeg.Lat,
-                lon + (AxisProbeM * Math.Sin(r)) / Math.Max(1, perDeg.Lon));
+                lat + (AxisProbeM * JsTrig.Cos(r)) / perDeg.Lat,
+                lon + (AxisProbeM * JsTrig.Sin(r)) / Math.Max(1, perDeg.Lon));
             return AxisTowards(centre.E, centre.N, ahead.E, ahead.N);
         }
 

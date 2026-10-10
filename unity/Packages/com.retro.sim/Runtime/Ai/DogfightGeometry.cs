@@ -32,7 +32,7 @@ namespace Retro.Sim
             if (los.LengthSquared < 1e-9 || shooterForward.LengthSquared < 1e-9) return 0;
             los = los.Normalized();
             Vec3d fwd = shooterForward.Normalized();
-            return Math.Acos(JsMath.Clamp(Vec3d.Dot(fwd, los), -1, 1));
+            return JsTrig.Acos(JsMath.Clamp(Vec3d.Dot(fwd, los), -1, 1));
         }
 
         /// <summary>Aspect angle (rad, [0, pi]) at the target, from its tail to the observer; 0 = dead astern.</summary>
@@ -48,7 +48,7 @@ namespace Retro.Sim
         {
             if (myVel.LengthSquared < 1e-9 || targetVel.LengthSquared < 1e-9) return 0;
             double dot = Vec3d.Dot(myVel, targetVel) / (myVel.Length * targetVel.Length);
-            return Math.Acos(JsMath.Clamp(dot, -1, 1));
+            return JsTrig.Acos(JsMath.Clamp(dot, -1, 1));
         }
 
         /// <summary>Bullet time of flight (s) to intercept, by three fixed-point iterations, clamped to [0, maxTof].</summary>
