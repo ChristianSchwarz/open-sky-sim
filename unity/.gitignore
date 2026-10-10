@@ -1,0 +1,15 @@
+# Unity project generated files (the project lives in unity/RetroFlight)
+/RetroFlight/[Ll]ibrary/
+/RetroFlight/[Tt]emp/
+/RetroFlight/[Oo]bj/
+/RetroFlight/[Bb]uild/
+/RetroFlight/[Bb]uilds/
+/RetroFlight/[Ll]ogs/
+/RetroFlight/[Uu]ser[Ss]ettings/
+/RetroFlight/[Mm]emoryCaptures/
+/RetroFlight/*.csproj
+/RetroFlight/*.sln
+/RetroFlight/*.slnx
+/RetroFlight/.vs/
+/RetroFlight/.vscode/
+/RetroFlight/.idea/

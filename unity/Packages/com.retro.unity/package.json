@@ -1,0 +1,7 @@
+{
+  "name": "com.retro.unity",
+  "displayName": "Retro Unity Frontend",
+  "version": "0.1.0",
+  "unity": "6000.0",
+  "description": "Unity frontend for the port: terrain streaming and drawing on URP, the floating origin, a fly camera and a bootstrap for the M2 terrain spike. Depends on the engine-free com.retro.* packages, which the project manifest references as file: packages."
+}

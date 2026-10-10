@@ -1,0 +1,24 @@
+{
+    "name": "Retro.Unity",
+    "rootNamespace": "Retro.Unity",
+    "references": [
+        "Retro.Core",
+        "Retro.TerrainData",
+        "Unity.InputSystem"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.inputsystem",
+            "expression": "1.0.0",
+            "define": "RETRO_INPUT_SYSTEM"
+        }
+    ],
+    "noEngineReferences": false
+}
