@@ -813,14 +813,14 @@ namespace Retro.Sim
         {
             if (speed > 1)
             {
-                return Math.Atan2(-velBody.Y, velBody.Z);
+                return JsTrig.Atan2(-velBody.Y, velBody.Z);
             }
             if (speed > 0.15)
             {
-                return Math.Atan2(-velBody.Y, velBody.Z);
+                return JsTrig.Atan2(-velBody.Y, velBody.Z);
             }
             Vec3d fwd = new Vec3d(0, 0, 1).Rotate(rb.Orientation);
-            return Math.Asin(JsMath.Clamp(fwd.Y, -1, 1));
+            return JsTrig.Asin(JsMath.Clamp(fwd.Y, -1, 1));
         }
 
         private void UpdateStallState(double speed, double aoa, double altitude)
@@ -866,8 +866,8 @@ namespace Retro.Sim
             Vec3d fwd = SimConstants.Forward.Rotate(rb.Orientation);
             Vec3d right = SimConstants.Right.Rotate(rb.Orientation);
             double speed = velocity.Length;
-            double pitchAngle = Math.Asin(JsMath.Clamp(fwd.Y, -1, 1));
-            double rollAngle = Math.Asin(JsMath.Clamp(right.Y, -1, 1));
+            double pitchAngle = JsTrig.Asin(JsMath.Clamp(fwd.Y, -1, 1));
+            double rollAngle = JsTrig.Asin(JsMath.Clamp(right.Y, -1, 1));
 
             Fm2EnvelopeConfig env = config.Envelope;
             // The sink rate the aircraft arrived with: the gear stops and clamps it, so by

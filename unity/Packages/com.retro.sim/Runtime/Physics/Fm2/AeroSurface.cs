@@ -116,7 +116,7 @@ namespace Retro.Sim
 
             double uf = Vec3d.Dot(u, forward);
             double uu = Vec3d.Dot(u, up);
-            double aoa = Math.Atan2(-uu, uf);
+            double aoa = JsTrig.Atan2(-uu, uf);
             LastAoaRad = aoa;
 
             double effectiveAoa = aoa + input.ControlDeltaAoaRad + input.CamberBiasRad;
@@ -198,7 +198,7 @@ namespace Retro.Sim
             double attached = linear / Math.Pow(1 + Math.Pow(norm, ClSoftclipExponent), 1 / ClSoftclipExponent);
 
             // Fully-separated flat-plate lift (odd in alpha, so lift reverses past +-90 degrees).
-            double flat = FlatPlateCl * Math.Sin(2 * aoaRad);
+            double flat = FlatPlateCl * JsTrig.Sin(2 * aoaRad);
 
             double magSep = Math.Abs(aoaSep);
             double sep = 1 / (1 + Math.Exp(-LiftSeparationSteepness * (magSep - stallRad)));
@@ -215,7 +215,7 @@ namespace Retro.Sim
                     double half = magSep <= vortexPeak
                         ? (magSep - stallRad) / (vortexPeak - stallRad)
                         : (vortexEnd - magSep) / (vortexEnd - vortexPeak);
-                    double window = 0.5 * (1 - Math.Cos(Math.PI * JsMath.Clamp(half, 0, 1)));
+                    double window = 0.5 * (1 - JsTrig.Cos(Math.PI * JsMath.Clamp(half, 0, 1)));
                     cl += sign * window * clMax * vortexScale;
                 }
             }
@@ -237,7 +237,7 @@ namespace Retro.Sim
         {
             double aoaSep = aoaSepRad ?? aoaRad;
             double attached = parasiticCd + inducedK * cl * cl;
-            double flatPlate = flatPlateCd * 0.5 * (1 - Math.Cos(2 * aoaRad));
+            double flatPlate = flatPlateCd * 0.5 * (1 - JsTrig.Cos(2 * aoaRad));
             double sep = 1 / (1 + Math.Exp(-DragSeparationSteepness * (Math.Abs(aoaSep) - stallRad)));
             return (1 - sep) * attached + sep * flatPlate;
         }

@@ -91,7 +91,10 @@ namespace Retro.Sim
             if (omega > 1e-9)
             {
                 Vec3d axis = w * (1 / omega);
-                Quatd dq = Quatd.FromAxisAngle(axis, omega * dt);
+                // three.js setFromAxisAngle, with V8's sin/cos (JsTrig): a ground roll
+                // amplifies one ulp of attitude into a visible roll within 20 steps.
+                double half = omega * dt / 2, s = JsTrig.Sin(half);
+                var dq = new Quatd(axis.X * s, axis.Y * s, axis.Z * s, JsTrig.Cos(half));
                 Orientation = (Orientation * dq).Normalized(); // body-frame delta applied on the right
             }
         }
