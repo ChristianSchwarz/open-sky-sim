@@ -18,6 +18,7 @@ import { codecsSuite, selectTiles } from './suites/codecs';
 import { flightModelsSuite } from './suites/flightModels';
 import { aiSuite } from './suites/ai';
 import { quadtreeSuite } from './suites/quadtree';
+import { heightsSuite } from './suites/heights';
 
 export const GOLDEN_ROOT = path.resolve(__dirname, '../../tests/golden');
 const TERRAIN_ROOT = path.resolve(__dirname, '../../assets/terrain');
@@ -40,6 +41,7 @@ const SUITES: SuiteDef[] = [
     { name: 'flightModels', run: () => flightModelsSuite() },
     { name: 'ai', run: () => aiSuite() },
     { name: 'quadtree', run: ctx => quadtreeSuite(ctx) },
+    { name: 'heights', run: ctx => heightsSuite(ctx) },
 ];
 
 export interface GenerateResult {

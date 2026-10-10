@@ -26,6 +26,7 @@ import { TileIndex } from '../../../src/script/terrain/tileIndex';
 import { tileAtLonLat, tileKeyString, TileKey } from '../../../src/script/terrain/tiling';
 import { describe, fnv1a32, hex32, Rng, sha256Hex, SuiteOutput } from '../lib';
 import type { SuiteContext } from '../generate';
+import { heightTileKeys } from './heights';
 
 /** Where we look for tiles worth keeping, in preference order. */
 const SITES: ReadonlyArray<readonly [string, number, number]> = [
@@ -109,6 +110,15 @@ export function selectTiles(ctx: SuiteContext): number {
                 }
             }
         }
+    }
+    // DEM block for the height suite (fine 3x3 at z11 around GCLP, plus the z7 coarse tile).
+    for (const k of heightTileKeys()) {
+        const src = tilePath(ctx.terrainRoot, 'pdm', k);
+        if (!fs.existsSync(src)) continue;
+        const dest = path.join(outDir, 'height', `${k.z}_${k.x}_${k.y}.pdm`);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(src, dest);
+        count++;
     }
     // The manifest drives level errors and the ENU origin for the LOD and height suites.
     fs.copyFileSync(path.join(ctx.terrainRoot, 'manifest.json'), path.join(outDir, 'manifest.json'));
