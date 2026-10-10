@@ -34,9 +34,13 @@ import { terrainMaxZoomForAltitudeM } from '../terrain/lod';
 import { Renderer, RenderLayer, RenderTargetType } from "../render/renderer";
 import { SceneCamera } from '../scene/cameras/camera';
 import { DebrisField } from '../scene/entities/debrisField';
+import { WreckField } from '../scene/entities/wreckField';
+import { ImpactMarks } from '../scene/entities/impactMarks';
+import { MovingSurface } from '../scene/entities/movingSurface';
 import { DamageSmokeField } from '../scene/entities/damageSmokeField';
 import { GroundTargetEntity } from '../scene/entities/groundTarget';
-import { ActivePlayArea, homeArea, resolvePlayArea, terrainAreas } from '../terrain/playArea';
+import { ActivePlayArea, areaContains, homeArea, resolvePlayArea, terrainAreas } from '../terrain/playArea';
+import { carrierSurfaceY, chooseCarrierSite } from './carrierSite';
 import { Airfield, AirfieldBuilding, airfieldsInArea } from '../terrain/airfields';
 import {
     SceneRunway, airfieldChoices, headingForward, pickStartRunway, sceneRunwaysOf,
@@ -45,7 +49,7 @@ import {
     AIRFIELD_SURFACE_EPS_M, GroundStrip, buildAirfieldModel, buildingHeightM, combineCover, repaintGroundStrip,
     sampleGroundStrip,
 } from '../scene/airfield/airfieldModel';
-import { WGS84_A, WGS84_B, cloneEnuBasis, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, worldToGeodetic } from '../terrain/geodesy';
+import { WGS84_A, WGS84_B, cloneEnuBasis, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, seaLevelSceneY, worldToGeodetic } from '../terrain/geodesy';
 import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
@@ -119,7 +123,8 @@ import { SimProxyFlightModel } from '../physics/model/simProxyFlightModel';
 import { SerializedWorld, serializeStaticColliders, serializeWorld, defaultArrestorCableField } from '../physics/sim/serializedWorld';
 import { HeightFieldSender, MirrorFocus, SerializedHeightField } from '../terrain/heightMirror';
 import { rebaseMeshCollider, rebaseRunway, rebaseSkiJump, rebaseSurfacePad } from './worldRebase';
-import { SimAircraftSpawn, SimFlightModelKind, SimGunConfig } from '../physics/sim/simTypes';
+import { FlightRecorder, ReplayPlayer, newReplayPose } from './flightRecorder';
+import { SimAircraftSpawn, SimFlightModelKind, SimGunConfig, SimHitEvent } from '../physics/sim/simTypes';
 import { PLAYER_SIM_ID, WINGMAN_SIM_ID, aiSimId } from '../physics/sim/simIds';
 import { AiPilotModels } from './gameDefs';
 import {
@@ -132,6 +137,21 @@ import {
 import {
     AIRBASE_LOCAL, TARGET_LOCAL, PLAY_ORIGIN, SCENERY_SURFACE_EPS_M,
 } from './worldLayout';
+
+/**
+ * The crash severity from which a ground impact that does not destroy the aircraft
+ * already bends its airframe and starts to tear parts off. (A touchdown, however
+ * firm, sits below it; the crash scale is speed into the ground plus a third of
+ * the speed along it, over 110 m/s.)
+ */
+const LIVE_DAMAGE_MIN_SEVERITY = 0.3;
+
+/** The fuselage fire burns this long, thinning to smoke and gaps, before it goes out. */
+const FUSELAGE_FIRE_LIFE_S = 200;
+/** ...and a faint smoke trickle carries on this long after the flames end. */
+const FUSELAGE_SMOULDER_S = 240;
+const WING_ROOT_FIRE_LIFE_S = 60;
+const WING_ROOT_SMOULDER_S = 80;
 
 /** How many AI opponents the combat sim spawns. */
 /** Loose cloud deck: base altitude and per-puff undulation, well under HIGH_ALTITUDE_M. */
@@ -176,6 +196,11 @@ const AI_HEADON_SPAWN_DISTANCE_M = 3000;
  * {@link AiFlightPhase.FORMATION}).
  */
 const WINGMAN_HOLD_ALTITUDE_AGL_M = 900;
+/** The wingtip start: height above the ground (m), throttle, and where the wingman sits (m) off the player. */
+const CLOSE_WING_ALTITUDE_AGL_M = 1500;
+const CLOSE_WING_SPAWN_THROTTLE = 0.75;
+const CLOSE_WING_SIDE_M = 4;
+const CLOSE_WING_ABOVE_M = 2;
 /** Airspeed (m/s) the wingman is spawned with when holding overhead. */
 const WINGMAN_HOLD_SPEED_MPS = 180;
 
@@ -273,6 +298,8 @@ const KUZ_POSITION = new THREE.Vector3(
     ARRESTOR_CARRIER_ORIGIN.z,
 );
 const KUZ_IDENTITY_QUAT = new THREE.Quaternion();
+/** How far the carrier model is lifted so its draft reads ~10 m, not the mesh's 15 m. */
+const KUZ_HULL_RAISE_M = 4;
 /**
  * Carrier hull AABB from `assets/kuz.glb` (approx).
  * Used for approach spawn alignment along the deck axis.
@@ -582,9 +609,28 @@ export class Game {
     /** World bow direction and velocity for the steaming carrier. */
     private readonly carrierBowDir = new THREE.Vector3(0, 0, -1);
     private readonly carrierVelocity = new THREE.Vector3();
+    /** Cruise speed of the ship: zero when it is moored on land. */
+    private carrierSpeedMps = CARRIER_SPEED_MPS;
+    /**
+     * The carrier's deck as ground that moves: wreckage, a lake of burning fuel
+     * and scorch marks that come to rest on it go along with the ship.
+     */
+    private readonly carrierSurface: MovingSurface = {
+        velocity: this.carrierVelocity,
+        contains: (x, y, z) => {
+            if (this.carrierMeshes.length === 0) {
+                return false;
+            }
+            const deckY = sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes);
+            // Over the ship, and on it rather than high above it or below it.
+            return Number.isFinite(deckY) && y - deckY < 5 && y - deckY > -3;
+        },
+    };
     private readonly obstacles: Obstacle[] = [];
     private weaponsField: WeaponsField | undefined;
     private debrisField: DebrisField | undefined;
+    private wreckField: WreckField | undefined;
+    private impactMarks: ImpactMarks | undefined;
     private damageSmoke: DamageSmokeField | undefined;
     /** Countdown before AI opponents leave STRAIGHT and enter ENGAGE. */
     private aiStraightTimer = 0;
@@ -661,6 +707,12 @@ export class Game {
     private heldOrbitKeys = new Set<string>();
     /** A flight held by the settings dialog: it is open over it and nothing moves until it closes. */
     private menuPaused = false;
+
+    /** Flight replay: the recorder runs for the whole flight, F4 plays it back. */
+    private readonly recorder = new FlightRecorder();
+    private readonly replayPlayer = new ReplayPlayer(this.recorder);
+    private readonly replayPose = newReplayPose();
+    private replaying = false;
     /** The whole game holds still under the blurred overlay while terrain streams in; see holdUntilStreamed. */
     private streamHeld = false;
     /** Bumped per hold, so a spawn during an older hold's wait takes it over. */
@@ -1377,17 +1429,15 @@ export class Game {
      * The spawn actually usable in this area.
      *
      * Every area has an airbase now — the bake flattens a pad at the centre of
-     * each — so runway and approach starts work anywhere. The carrier does not
-     * travel: it needs the open water east of Gran Canaria, so its two spawns
-     * fall back to the runway rather than dropping the player at a ship that
-     * is not there.
+     * each — and every area has a carrier: off the coast where there is one,
+     * moored on level ground where there is not (see `chooseCarrierSite`).
      */
     private spawnForArea(spawn: SpawnMode): SpawnMode {
-        if (this.playArea === undefined || this.playArea.isHome) {
-            return spawn;
+        // The close-wingman start is an airborne start over the base: it loads the terrain as an approach does.
+        if (spawn === 'closeWing') {
+            return 'approach';
         }
-        return spawn === 'carrier' || spawn === 'carrierBarricade' || spawn === 'carrierTakeoff'
-            ? 'runway' : spawn;
+        return spawn;
     }
 
     private spawnCenterEnu(spawn: SpawnMode): { x: number; z: number } {
@@ -1669,6 +1719,13 @@ export class Game {
             f.centerX, this.groundHeightAt(f.centerX, f.centerZ) + HIGH_ALTITUDE_M, f.centerZ);
     }
 
+    /** Overhead the airbase at a low cruising height, for the wingtip start. */
+    private closeWingSpawnPosition(): THREE.Vector3 {
+        const f = this.spawnFrame;
+        return new THREE.Vector3(
+            f.centerX, this.groundHeightAt(f.centerX, f.centerZ) + CLOSE_WING_ALTITUDE_AGL_M, f.centerZ);
+    }
+
     /** Overhead the airbase at LEO altitude. */
     private spaceSpawnPosition(): THREE.Vector3 {
         const f = this.spawnFrame;
@@ -1864,7 +1921,7 @@ export class Game {
         const pose = this.carrierPose();
         return new THREE.Vector3(
             pose.position.x + KUZ_DECK_MID_X,
-            CARRIER_APPROACH_ALTITUDE_M,
+            pose.position.y + CARRIER_APPROACH_ALTITUDE_M,
             pose.position.z + KUZ_HULL.maxZ + CARRIER_APPROACH_FINAL_DISTANCE_M,
         );
     }
@@ -1893,7 +1950,7 @@ export class Game {
      * deck that is itself moving away.
      */
     private carrierBarricadeSpawn(): PlayerSpawnState {
-        const speed = CARRIER_SPEED_MPS + CARRIER_GROOVE_SPEED_MPS;
+        const speed = this.carrierSpeedMps + CARRIER_GROOVE_SPEED_MPS;
         const velocity = FORWARD.clone()
             .applyAxisAngle(UP, PLAYER_CARRIER_HEADING)
             .multiplyScalar(speed);
@@ -1903,7 +1960,7 @@ export class Game {
 
     /** Approach airspeed in world frame (ship speed + relative groove speed). */
     private carrierApproachSpawn(): PlayerSpawnState {
-        const speed = CARRIER_SPEED_MPS + APPROACH_SPEED_MPS;
+        const speed = this.carrierSpeedMps + APPROACH_SPEED_MPS;
         return {
             velocity: FORWARD.clone().applyAxisAngle(UP, PLAYER_CARRIER_HEADING).multiplyScalar(speed),
             throttle: 0.38,
@@ -1914,7 +1971,7 @@ export class Game {
     /** On-deck takeoff: world velocity matches ship cruise along the bow. */
     private carrierTakeoffSpawn(): PlayerSpawnState {
         return {
-            velocity: FORWARD.clone().applyAxisAngle(UP, PLAYER_CARRIER_TAKEOFF_HEADING).multiplyScalar(CARRIER_SPEED_MPS),
+            velocity: FORWARD.clone().applyAxisAngle(UP, PLAYER_CARRIER_TAKEOFF_HEADING).multiplyScalar(this.carrierSpeedMps),
             throttle: 0,
             airborne: false,
         };
@@ -2053,9 +2110,23 @@ export class Game {
         if (this.menuPaused || this.streamHeld) {
             return;
         }
+        if (this.replaying) {
+            // The world holds still; only the recorded aircraft moves.
+            this.replayPlayer.advance(delta);
+            if (this.view === PlayerViewState.FIXED) {
+                this.moveFixedCamera(delta);
+            } else {
+                this.updateOrbitFromKeys(delta);
+            }
+            this.recorder.sample(this.replayPlayer.time, this.replayPose);
+            this.player.setReplayPose(this.replayPose);
+            this.updateReplayHud();
+            return;
+        }
         if (this.state === GameState.PLAYER) {
             this.maybeRebase();
             this.streamAirfields();
+            this.recordFlightFrame(delta);
         }
         if (this.state === GameState.PLAYER) {
             if ((this.view === PlayerViewState.TARGET_TO || this.view === PlayerViewState.TARGET_FROM) && !this.player.weaponsTarget) {
@@ -2075,6 +2146,8 @@ export class Game {
 
             if (this.player.isCrashed) {
                 this.transitionFromPlayerToCrashed();
+            } else {
+                this.crashTransitionDone = false;
             }
         } else if (this.state === GameState.SPAWN_MENU || this.state === GameState.FIXED_CAMERA) {
             if (this.state === GameState.FIXED_CAMERA) {
@@ -2088,12 +2161,262 @@ export class Game {
         }
     }
 
+    /** Seconds of wreckage still recorded after the crash, then the recording stops. */
+    private static readonly REPLAY_POST_CRASH_S = 6;
+    private postCrashRecorded = 0;
+
+    private recordFlightFrame(delta: number): void {
+        if (this.player.isCrashed) {
+            this.postCrashRecorded += delta;
+            if (this.postCrashRecorded > Game.REPLAY_POST_CRASH_S) {
+                return;
+            }
+        } else {
+            this.postCrashRecorded = 0;
+        }
+        const pose = this.replayPose;
+        pose.position.copy(this.player.position);
+        pose.quaternion.copy(this.player.quaternion);
+        pose.velocity.copy(this.player.velocityVector);
+        pose.devices.throttle = this.player.throttleUnit;
+        this.recorder.record(delta, pose);
+    }
+
+    /** F4: watch the flight so far (up to the last ten minutes) from the replay camera. */
+    private toggleReplay(): void {
+        if (this.replaying) {
+            this.stopReplay();
+            return;
+        }
+        if (this.state !== GameState.PLAYER || this.menuPaused || this.recorder.length < 2) {
+            return;
+        }
+        this.replaying = true;
+        this.replayWasPaused = !this.player.controlsEnabled;
+        this.player.setSimulationPaused(true);
+        this.leaveShowcaseIfActive();
+        this.resetOrbit();
+        this.replayPlayer.start();
+        if (this.view === PlayerViewState.COCKPIT_FRONT) {
+            this.setReplayView(PlayerViewState.EXTERIOR_BEHIND);
+        }
+    }
+
+    private replayWasPaused = false;
+
+    private stopReplay(): void {
+        if (!this.replaying) {
+            return;
+        }
+        this.replaying = false;
+        this.heldFixedCameraKeys.clear();
+        this.fixedCameraRates = zeroFixedCameraRates();
+        this.player.setReplayPose(undefined);
+        this.player.setSimulationPaused(this.replayWasPaused);
+        if (this.replayUi) {
+            this.replayUi.root.style.display = 'none';
+        }
+    }
+
+    /** Replay keys: space pauses, arrows seek/speed (move the camera in the free view), F4/Esc leave. True if used. */
+    private handleReplayKey(event: KeyboardEvent): boolean {
+        switch (event.code) {
+            case 'Space': this.replayPlayer.paused = !this.replayPlayer.paused; break;
+            case 'Comma': this.replayPlayer.seek(-5); break;
+            case 'Period': this.replayPlayer.seek(5); break;
+            case 'BracketRight': this.replayPlayer.changeSpeed(1); break;
+            case 'BracketLeft': this.replayPlayer.changeSpeed(-1); break;
+            case 'ArrowLeft': case 'ArrowRight': case 'ArrowUp': case 'ArrowDown':
+            case 'PageUp': case 'PageDown':
+            case 'Numpad4': case 'Numpad6': case 'Numpad8': case 'Numpad2':
+                // The arrows move the camera in the free view only; elsewhere
+                // they seek (left/right) and change speed (up/down).
+                if (this.view === PlayerViewState.FIXED) {
+                    this.heldFixedCameraKeys.add(event.code);
+                } else if (event.code === 'ArrowLeft') {
+                    this.replayPlayer.seek(-5);
+                } else if (event.code === 'ArrowRight') {
+                    this.replayPlayer.seek(5);
+                } else if (event.code === 'ArrowUp') {
+                    this.replayPlayer.changeSpeed(1);
+                } else if (event.code === 'ArrowDown') {
+                    this.replayPlayer.changeSpeed(-1);
+                } else {
+                    return false;
+                }
+                break;
+            case 'Home': this.replayPlayer.start(); break;
+            case 'Escape': this.stopReplay(); break;
+            default: return false;
+        }
+        return true;
+    }
+
+    private replayUi: {
+        root: HTMLDivElement; play: HTMLButtonElement; seek: HTMLInputElement;
+        time: HTMLSpanElement; speed: HTMLButtonElement; views: Map<PlayerViewState, HTMLButtonElement>;
+    } | undefined;
+    private replayScrubbing = false;
+
+    private buildReplayUi(): NonNullable<Game['replayUi']> {
+        const root = document.createElement('div');
+        root.style.cssText = 'position:fixed;left:0;right:0;bottom:0;display:flex;flex-direction:column;'
+            + 'gap:6px;padding:8px 16px 12px;background:linear-gradient(transparent,rgba(0,0,0,0.8));'
+            + 'color:#fff;font:13px sans-serif;z-index:50;user-select:none';
+        const btnCss = 'background:rgba(255,255,255,0.12);color:#fff;border:1px solid rgba(255,255,255,0.3);'
+            + 'border-radius:4px;padding:4px 10px;cursor:pointer;font:inherit';
+        const button = (label: string, title: string, onClick: () => void): HTMLButtonElement => {
+            const b = document.createElement('button');
+            b.textContent = label;
+            b.title = title;
+            b.style.cssText = btnCss;
+            // Keep keyboard focus off the button so Space still pauses.
+            b.addEventListener('mousedown', e => e.preventDefault());
+            b.addEventListener('click', onClick);
+            return b;
+        };
+        const seek = document.createElement('input');
+        seek.type = 'range';
+        seek.min = '0';
+        seek.max = '1000';
+        seek.style.cssText = 'width:100%;cursor:pointer';
+        const scrub = () => {
+            this.replayPlayer.time = this.recorder.startTime + (Number(seek.value) / 1000) * this.recorder.duration;
+        };
+        seek.addEventListener('pointerdown', () => { this.replayScrubbing = true; });
+        seek.addEventListener('input', scrub);
+        seek.addEventListener('pointerup', () => { this.replayScrubbing = false; });
+        seek.addEventListener('change', () => { this.replayScrubbing = false; });
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+        const play = button('Pause', 'Play / pause (Space)', () => {
+            this.replayPlayer.paused = !this.replayPlayer.paused;
+        });
+        const time = document.createElement('span');
+        time.style.cssText = 'font-family:monospace;min-width:90px';
+        const speed = button('1x', 'Playback speed (click: faster, Shift-click: slower)', () => {});
+        speed.addEventListener('click', e => {
+            if (e.shiftKey) this.replayPlayer.changeSpeed(-1); else this.replayPlayer.cycleSpeed();
+        });
+        const spacer = document.createElement('span');
+        spacer.style.flex = '1';
+        row.append(
+            button('|<', 'Restart (Home)', () => this.replayPlayer.start()),
+            button('-5s', 'Back 5 s (Left or ,)', () => this.replayPlayer.seek(-5)),
+            play,
+            button('+5s', 'Forward 5 s (Right or .)', () => this.replayPlayer.seek(5)),
+            time, speed, spacer);
+        const views = new Map<PlayerViewState, HTMLButtonElement>();
+        const addView = (label: string, v: PlayerViewState, title: string) => {
+            const b = button(label, title, () => this.setReplayView(v));
+            views.set(v, b);
+            row.append(b);
+        };
+        addView('Cockpit', PlayerViewState.COCKPIT_FRONT, 'Cockpit (F1)');
+        addView('Behind', PlayerViewState.EXTERIOR_BEHIND, 'Chase from behind (F2)');
+        addView('Front', PlayerViewState.EXTERIOR_FRONT, 'From the front');
+        addView('Left', PlayerViewState.EXTERIOR_LEFT, 'Left side');
+        addView('Right', PlayerViewState.EXTERIOR_RIGHT, 'Right side');
+        addView('Free', PlayerViewState.FIXED, 'Free camera: arrows move it, Page Up/Down raise and lower, numpad 4/6/8/2 turn');
+        addView('Tower', PlayerViewState.CARRIER_OVER_STERN, 'Over-the-stern view (F3)');
+        row.append(button('Exit', 'Leave replay (F4 / Esc)', () => this.stopReplay()));
+        root.append(seek, row);
+        document.body.appendChild(root);
+        return { root, play, seek, time, speed, views };
+    }
+
+    private setReplayView(v: PlayerViewState): void {
+        this.resetOrbit();
+        this.heldFixedCameraKeys.clear();
+        this.fixedCameraRates = zeroFixedCameraRates();
+        if (v === PlayerViewState.FIXED) {
+            // Free camera: starts where the current one is, then flies on its own.
+            const cam = this.playerCamera.main;
+            const d = cam.getWorldDirection(new THREE.Vector3());
+            this.fixedCameraUpdater.setPose(
+                cam.position.clone(),
+                (Math.atan2(d.x, -d.z) * 180 / Math.PI + 360) % 360,
+                Math.asin(Math.max(-1, Math.min(1, d.y))) * 180 / Math.PI);
+            restoreMainCameraParameters(cam);
+            this.setExteriorView(v);
+            return;
+        }
+        if (v === PlayerViewState.COCKPIT_FRONT) {
+            this.setCockpitFrontView();
+            return;
+        }
+        restoreMainCameraParameters(this.playerCamera.main);
+        this.setExteriorView(v);
+    }
+
+    private updateReplayHud(): void {
+        const ui = this.replayUi ??= this.buildReplayUi();
+        const r = this.replayPlayer;
+        const rec = this.recorder;
+        const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+        ui.root.style.display = 'flex';
+        ui.play.textContent = r.paused ? 'Play' : 'Pause';
+        ui.time.textContent = `${fmt(r.time - rec.startTime)} / ${fmt(rec.duration)}`;
+        ui.speed.textContent = `${r.speed}x`;
+        if (!this.replayScrubbing) {
+            ui.seek.value = String(Math.round(r.fraction * 1000));
+        }
+        for (const [v, b] of ui.views) {
+            b.style.background = v === this.view ? 'rgba(80,160,255,0.6)' : 'rgba(255,255,255,0.12)';
+        }
+    }
+
+    private readonly carrierAheadProbe = new THREE.Vector3();
+    /** The hull materials' waterline clips, moved with the sea under the ship. */
+    private carrierClipData: { clipBelowYAbs?: number }[] = [];
+    /** Afloat rather than moored on land: the ship rides the sea surface as it steams. */
+    private carrierAtSea = false;
+
+    /**
+     * Keep the hull on the sea it is over. Scene Y is measured from the play
+     * origin's tangent plane, and the sea curves away from that plane, so a
+     * ship steaming toward the origin's latitude would otherwise sink under
+     * a surface rising 15 m in four kilometres.
+     */
+    private seatCarrierOnSea(): void {
+        const kuz = this.kuz;
+        if (!kuz || !this.carrierAtSea) return;
+        const { x, z } = kuz.position;
+        // The DEM near a coast reads as land; the sea itself is the sphere.
+        const seaY = Math.min(this.planetTerrain.heightAtWorld(x, z), seaLevelSceneY(x, z) + 2);
+        kuz.position.y = ARRESTOR_CARRIER_ORIGIN.y + seaY + KUZ_HULL_RAISE_M;
+        for (const d of this.carrierClipData) {
+            d.clipBelowYAbs = seaY + 0.05;
+        }
+    }
+
+    /** True when ground lies within a few hundred metres ahead of the bow. */
+    private landAheadOfCarrier(): boolean {
+        const kuz = this.kuz;
+        if (!kuz) return false;
+        for (const dx of [KUZ_HULL.minX - 30, KUZ_DECK_MID_X, KUZ_HULL.maxX + 30]) {
+            for (const dz of [KUZ_HULL.minZ - 150, KUZ_HULL.minZ - 600]) {
+                this.carrierAheadProbe.set(dx, 0, dz).applyQuaternion(kuz.quaternion).add(kuz.position);
+                if (this.planetTerrain.isLandAtWorld(this.carrierAheadProbe.x, this.carrierAheadProbe.z)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /** Steam the Kuznetsov at {@link CARRIER_SPEED_MPS} along its bow (−Z at identity). */
     private advanceCarrier(delta: number): void {
         if (!this.kuz) return;
+        if (this.carrierSpeedMps > 0 && this.landAheadOfCarrier()) {
+            // Land across the bow: drop anchor rather than steam into it.
+            this.carrierSpeedMps = 0;
+        }
         this.carrierBowDir.set(0, 0, -1).applyQuaternion(this.kuz.quaternion);
-        this.carrierVelocity.copy(this.carrierBowDir).multiplyScalar(CARRIER_SPEED_MPS);
+        this.carrierVelocity.copy(this.carrierBowDir).multiplyScalar(this.carrierSpeedMps);
         this.kuz.position.addScaledVector(this.carrierVelocity, delta);
+        this.seatCarrierOnSea();
     }
 
     /**
@@ -2611,6 +2934,18 @@ export class Game {
                 this.triggerModImport();
                 return;
             }
+            if (event.code === 'F4') {
+                event.preventDefault();
+                if (!event.repeat) {
+                    this.toggleReplay();
+                }
+                return;
+            }
+            if (this.replaying && this.handleReplayKey(event)) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
             if (this.state === GameState.SPAWN_MENU) {
                 if (event.code === 'Escape') {
                     // The menu lives in the settings dialog; Esc closes that
@@ -2813,6 +3148,10 @@ export class Game {
                         void this.beginFlight('carrierBarricade');
                         break;
                     }
+                    case '9': {
+                        void this.beginFlight('closeWing');
+                        break;
+                    }
                 }
             }
 
@@ -3000,19 +3339,108 @@ export class Game {
         return updater;
     }
 
-    transitionFromPlayerToCrashed() {
-        if (this.view === PlayerViewState.CRASHED) {
+    /** Views that keep running after a crash rather than cutting to the crash camera. */
+    private keepsViewThroughCrash(view: PlayerViewState): boolean {
+        switch (view) {
+            case PlayerViewState.COCKPIT_FRONT:
+            case PlayerViewState.EXTERIOR_BEHIND:
+            case PlayerViewState.EXTERIOR_FRONT:
+            case PlayerViewState.EXTERIOR_LEFT:
+            case PlayerViewState.EXTERIOR_RIGHT:
+            case PlayerViewState.AI_CHASE:
+            case PlayerViewState.TARGET_TO:
+            case PlayerViewState.TARGET_FROM:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * A hard ground impact that did not destroy the aircraft: it bends and
+     * tears from this on (see WreckField.applyDamage), not only when it finally
+     * crashes. The same crash scale as the break-up, from the speed into the ground
+     * and the speed along it.
+     */
+    private noteSurvivableImpact(hit: SimHitEvent): void {
+        // The fatal impact is the break-up's business; this is for ones it survives.
+        if (hit.impactSpeed === undefined || hit.damage >= 50) {
             return;
         }
+        const along = Math.hypot(hit.velocity[0], hit.velocity[2]);
+        // The sim says how hard it was when it has worked that out (a belly landing's damage grows
+        // linearly from nothing); otherwise it is the speed into the ground and along it.
+        const severity = hit.severity ?? (hit.impactSpeed + 0.35 * along) / 110;
+        if (severity < (hit.severity !== undefined ? 0.2 : LIVE_DAMAGE_MIN_SEVERITY)) {
+            return;
+        }
+        const at = this._survivableHit.set(hit.position[0], hit.position[1], hit.position[2]);
+        if (hit.targetId === PLAYER_SIM_ID) {
+            this.player.noteGroundImpact(severity, at);
+            return;
+        }
+        const ai = this.aiOpponents.find(a => a.simId === hit.targetId)
+            ?? (this.wingman?.simId === hit.targetId ? this.wingman : undefined);
+        ai?.noteGroundImpact(severity, at);
+    }
+
+    private readonly _survivableHit = new THREE.Vector3();
+
+    /** What a point on the ground is, for the colour of the dust thrown up from it. */
+    private surfaceKindAt(x: number, z: number): 'dirt' | 'water' | 'concrete' {
+        if (!Number.isFinite(sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes))) {
+            if (!this.planetTerrain.isLandAtWorld(x, z) && this.surfacePads.sampleYMax(x, z) === -Infinity) {
+                return 'water';
+            }
+        } else {
+            return 'concrete'; // the carrier's deck
+        }
+        if (this.surfacePads.sampleYMax(x, z) !== -Infinity) {
+            return 'concrete';
+        }
+        for (const r of this.sceneRunways) {
+            const dx = x - r.center.x;
+            const dz = z - r.center.z;
+            const s = Math.sin(r.heading);
+            const c = Math.cos(r.heading);
+            if (Math.abs(dx * s + dz * c) <= r.halfLength && Math.abs(dx * c - dz * s) <= r.halfWidth + 3) {
+                return 'concrete';
+            }
+        }
+        return 'dirt';
+    }
+
+    /** Unit normal of the drawn ground at a point, from its slope. */
+    private groundNormalAt(x: number, z: number): THREE.Vector3 {
+        const h = 2;
+        return new THREE.Vector3(
+            -(this.drawnGroundHeightAt(x + h, z) - this.drawnGroundHeightAt(x - h, z)) / (2 * h),
+            1,
+            -(this.drawnGroundHeightAt(x, z + h) - this.drawnGroundHeightAt(x, z - h)) / (2 * h),
+        ).normalize();
+    }
+
+    /** Set once the crash has been handled, so a view that carries on through it is not reset every frame. */
+    private crashTransitionDone = false;
+
+    transitionFromPlayerToCrashed() {
+        if (this.view === PlayerViewState.CRASHED || this.crashTransitionDone) {
+            return;
+        }
+        this.crashTransitionDone = true;
         this.damageSmoke?.ensureCrashPlume(PLAYER_SIM_ID);
         this.leaveShowcaseIfActive();
-        // Keep orbit state for carrier view so numpad still works after crash
-        if (this.view !== PlayerViewState.CARRIER_OVER_STERN) {
+        // A flight view carries on through the crash with the same angles and
+        // distance (the camera follows the cockpit piece, see the player's
+        // wreck pose); anything else falls back to the orbiting crash camera.
+        const keepView = PlayerViewState.CARRIER_OVER_STERN === this.view || this.keepsViewThroughCrash(this.view);
+        if (!keepView) {
             this.resetOrbit();
         }
-        restoreMainCameraParameters(this.playerCamera.main);
-        // Keep carrier view on crash; otherwise switch to crash camera
-        if (this.view !== PlayerViewState.CARRIER_OVER_STERN) {
+        if (this.view !== PlayerViewState.COCKPIT_FRONT || !keepView) {
+            restoreMainCameraParameters(this.playerCamera.main);
+        }
+        if (!keepView) {
             this.view = PlayerViewState.CRASHED;
             this.cameraUpdater = this.getCameraUpdater(this.view);
         }
@@ -3191,6 +3619,8 @@ export class Game {
         }
         this.applySelectedAircraft();
         this.state = GameState.PLAYER;
+        this.stopReplay();
+        this.recorder.clear();
         if (this.kernelRunning) {
             // A respawn: blur the old view straight away rather than showing
             // the aircraft jump and the terrain around it fill in.
@@ -3204,6 +3634,8 @@ export class Game {
         this.spawnMenu.enabled = false;
         this.spawnPanel.hide();
         this.damageSmoke?.reset();
+        this.wreckField?.clear();
+        this.impactMarks?.clear();
         // A respawn at another airfield of a big area can land where nothing
         // has streamed in yet: build it, and its neighbours, before placing.
         const near = at !== undefined
@@ -3220,8 +3652,13 @@ export class Game {
         // enough to read as the spawn having done nothing. Pausing rather
         // than stepping through the wait means an airborne spawn does not
         // spend its groove falling into terrain that is not there yet.
+        const closeWing = requested === 'closeWing' && at === undefined;
         const place = () => {
-            if (at !== undefined) {
+            if (closeWing) {
+                // Airborne over the base, level, at a cruising speed.
+                this.player.reset(this.closeWingSpawnPosition(), this.baseHeading,
+                    this.approachSpawnState(CLOSE_WING_SPAWN_THROTTLE));
+            } else if (at !== undefined) {
                 this.player.reset(this.locationSpawnPosition(at), LOCATION_SPAWN_HEADING, {
                     velocity: headingForward(LOCATION_SPAWN_HEADING).multiplyScalar(APPROACH_SPEED_MPS),
                     throttle: PLAYER_APPROACH_SPAWN.throttle,
@@ -3282,7 +3719,7 @@ export class Game {
             this.setCarrierOverSternView();
         } else {
             this.spawnOpponent(spawn === 'headon');
-            this.spawnWingman();
+            this.spawnWingman(closeWing);
             this.setCockpitFrontView();
         }
         if (this.aiOpponent?.enabled) {
@@ -3415,7 +3852,143 @@ export class Game {
 
         this.debrisField = new DebrisField(this.materials);
         this.scene.add(this.debrisField);
+        this.impactMarks = new ImpactMarks(this.materials);
+        this.impactMarks.setMovingSurface(this.carrierSurface);
+        this.scene.add(this.impactMarks);
+        this.wreckField = new WreckField();
+        this.wreckField.setMovingSurface(this.carrierSurface);
+        // The sea: open water that is neither land nor the carrier's deck nor a pad standing in it.
+        const isOpenWater = (x: number, z: number): boolean =>
+            !this.planetTerrain.isLandAtWorld(x, z)
+            && !Number.isFinite(sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes))
+            && this.surfacePads.sampleYMax(x, z) === -Infinity;
+        // The sea's own height, not the ground height (which includes the carrier's hull and deck).
+        this.wreckField.setWaterTest(
+            isOpenWater,
+            (x, z) => this.planetTerrain.drawnHeightAtWorld(x, z) ?? this.planetTerrain.heightAtWorld(x, z));
+        this.wreckField.onSplash = (position, _velocity, strength) => {
+            this.damageSmoke?.spawnSplash(position, strength);
+        };
+        this.wreckField.onFoam = (position, radius, count) => {
+            this.damageSmoke?.spawnFoam(position, radius, count);
+        };
+        this.wreckField.onMark = (position, normal, dirX, dirZ, length, width, strength) => {
+            this.impactMarks?.add(position, normal, dirX, dirZ, length, width, strength);
+        };
+        this.wreckField.setGroundHeightAt((x, z) => this.drawnGroundHeightAt(x, z));
+        this.wreckField.onBreakup = (e) => {
+            // A burst per fireball-sized chunk of the hit: harder impacts throw more.
+            const bursts = 1 + Math.round(e.severity * 3);
+            for (let i = 0; i < bursts; i++) {
+                this._debugDebrisPos.copy(e.position);
+                this._debugDebrisPos.x += (Math.random() - 0.5) * 6;
+                this._debugDebrisPos.z += (Math.random() - 0.5) * 6;
+                this._debugDebrisPos.y += Math.random() * 3;
+                this.debrisField?.spawnDebugBurst(this._debugDebrisPos, e.velocity);
+            }
+            // The fireball at the moment of impact, and the lake of burning fuel it leaves.
+            this.damageSmoke?.spawnFireball(e.position, e.velocity, e.severity);
+            const field = this.wreckField;
+            // The lake is made of the fuel that falls out of the aircraft, from the crash on.
+            // (On the sea there is no ground for it to spread over: the fuel just splashes.)
+            if (!e.water) {
+                this.damageSmoke?.addFirePool(e.position, e.velocity, e.severity);
+            }
+            // Dust cloud where it hit, bigger and wider for a harder hit.
+            if (e.water) {
+                // Into the sea: a big splash and a mist, not dust.
+                this.damageSmoke?.spawnSplash(e.position, e.severity * 1.3);
+            } else {
+                this.damageSmoke?.spawnDust(e.position, e.velocity, Math.round(25 + 45 * e.severity), e.severity);
+            }
+            // Fires ride on the pieces: big at the fuselage, smaller at the wing roots.
+            for (const fire of e.fires) {
+                const fuselage = fire.kind === 'fuselage';
+                if (fire.kind === 'brand') {
+                    // A burning shard flung clear: a short, fierce fire that rides on it.
+                    this.damageSmoke?.addAnchoredFire(
+                        e.id, (out) => field?.fireWorld(fire, out) ?? false,
+                        { rate: 26, life: 8 + Math.random() * 14, trickle: 14, small: true, drips: 0 });
+                    continue;
+                }
+                this.damageSmoke?.addAnchoredFire(
+                    e.id, (out) => field?.fireWorld(fire, out) ?? false,
+                    {
+                        rate: fuselage ? 44 : 15,
+                        life: fuselage ? FUSELAGE_FIRE_LIFE_S : WING_ROOT_FIRE_LIFE_S,
+                        trickle: fuselage ? FUSELAGE_SMOULDER_S : WING_ROOT_SMOULDER_S,
+                        small: !fuselage,
+                        // Burning fuel runs off the fuselage and the wing roots and falls into the lake.
+                        drips: fuselage ? 9 : 3,
+                    });
+            }
+        };
+        // Fuel fires start as soon as the airframe is bent or torn, riding on the aircraft.
+        this.wreckField.onDamage = (e) => {
+            const entity = e.id === PLAYER_SIM_ID
+                ? this.player
+                : (this.aiOpponents.find(a => a.simId === e.id)
+                    ?? (this.wingman?.simId === e.id ? this.wingman : undefined));
+            if (!entity) {
+                return;
+            }
+            for (const fire of e.fires) {
+                const fuselage = fire.kind === 'fuselage';
+                this.damageSmoke?.addAnchoredFire(
+                    // Not the aircraft's own id: that would stand in for the wreck's fires at a crash.
+                    e.id + ':damage',
+                    (out) => entity.damagePointWorld(fire.local, out),
+                    {
+                        rate: fuselage ? 44 : 15,
+                        life: fuselage ? FUSELAGE_FIRE_LIFE_S : WING_ROOT_FIRE_LIFE_S,
+                        trickle: fuselage ? FUSELAGE_SMOULDER_S : WING_ROOT_SMOULDER_S,
+                        small: !fuselage,
+                        // The fuel runs out of the break and falls: the lake builds under it.
+                        drips: fuselage ? 9 : 3,
+                    });
+            }
+        };
+        this.wreckField.onBurn = (position, life, intensity) => {
+            this.damageSmoke?.addBurnSpot(position, life, intensity);
+        };
+        this.wreckField.onSplit = (position, velocity, strength) => {
+            // A piece shattering on the ground: a spray of chips and a puff of dust.
+            this.debrisField?.spawnDebugBurst(position, velocity);
+            this.damageSmoke?.spawnDust(position, velocity, Math.round(10 + 15 * strength), strength * 0.8);
+        };
+        this.wreckField.onDust = (position, velocity, count, strength) => {
+            this.damageSmoke?.spawnDust(position, velocity, count, strength * 0.6);
+        };
+        this.scene.add(this.wreckField);
+        this.player.setWreckField(this.wreckField);
         this.damageSmoke = new DamageSmokeField(this.materials);
+        this.damageSmoke.setGroundHeightAt((x, z) => this.drawnGroundHeightAt(x, z));
+        this.damageSmoke.setMovingSurface(this.carrierSurface);
+        this.damageSmoke.setWaterTest((x, z) =>
+            !this.planetTerrain.isLandAtWorld(x, z)
+            && !Number.isFinite(sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes))
+            && this.surfacePads.sampleYMax(x, z) === -Infinity);
+        // The ground under the lake of fire is scorched as it spreads along the fuselage path.
+        this.damageSmoke.onPoolMark = (position, dirX, dirZ, length, width) => {
+            const ground = (x: number, z: number) => this.drawnGroundHeightAt(x, z);
+            const h = 2;
+            const normal = new THREE.Vector3(
+                -(ground(position.x + h, position.z) - ground(position.x - h, position.z)) / (2 * h),
+                1,
+                -(ground(position.x, position.z + h) - ground(position.x, position.z - h)) / (2 * h),
+            ).normalize();
+            this.impactMarks?.add(position, normal, dirX, dirZ, length, width, 0.7);
+        };
+        // Burn marks appear under the fires and darken over time.
+        this.damageSmoke.onBurnMark = (position, radius, strength, growSeconds) => {
+            const heading = Math.random() * Math.PI * 2;
+            const size = radius * 2;
+            this.impactMarks?.addBurn(
+                position, this.groundNormalAt(position.x, position.z),
+                Math.sin(heading), Math.cos(heading), size * (0.8 + 0.5 * Math.random()), size, strength, growSeconds);
+        };
+        // The dust a contact throws up is the colour of what it touches.
+        this.damageSmoke.surfaceAt = (x, z) => this.surfaceKindAt(x, z);
         this.damageSmoke.setPoseProvider((targetId) => this.getDamageSmokePose(targetId));
         this.scene.add(this.damageSmoke);
         this.combatSim.onHits = (hits) => {
@@ -3424,10 +3997,21 @@ export class Game {
             if (gunHits.length > 0) {
                 this.debrisField?.spawnFromHits(gunHits);
                 this.damageSmoke?.spawnFromHits(gunHits);
+                // A collision with another aircraft says how hard it was: the airframe bends and tears.
+                for (const hit of gunHits) {
+                    if (hit.severity !== undefined) {
+                        this.noteSurvivableImpact(hit);
+                    }
+                }
             }
             if (scrapes.length > 0) {
                 this.damageSmoke?.spawnGroundScrapes(scrapes);
-                this.debrisField?.spawnGroundScrapes(scrapes);
+                // Sparks fly off ground and concrete, not off water.
+                this.debrisField?.spawnGroundScrapes(
+                    scrapes.filter(h => this.surfaceKindAt(h.position[0], h.position[2]) !== 'water'));
+                for (const scrape of scrapes) {
+                    this.noteSurvivableImpact(scrape);
+                }
             }
         };
 
@@ -3459,6 +4043,7 @@ export class Game {
             ai.enabled = false;
             this.combatSim.setEnabled(ai.simId, false);
             ai.setGroundHeightAt((x, z) => this.drawnGroundHeightAt(x, z));
+            if (this.wreckField) ai.setWreckField(this.wreckField);
             this.scene.add(ai);
             this.aiOpponents.push(ai);
         }
@@ -3491,6 +4076,7 @@ export class Game {
         this.wingman.enabled = false;
         this.combatSim.setEnabled(this.wingman.simId, false);
         this.wingman.setGroundHeightAt((x, z) => this.drawnGroundHeightAt(x, z));
+        if (this.wreckField) this.wingman.setWreckField(this.wreckField);
         this.scene.add(this.wingman);
 
         this.cameraUpdaters.set(
@@ -3606,9 +4192,13 @@ export class Game {
      * to sit in, so it starts overhead at {@link WINGMAN_HOLD_ALTITUDE_AGL_M}
      * and its pilot holds there until the player is actually flying.
      */
-    private spawnWingman(): void {
+    private spawnWingman(close = false): void {
         const wingman = this.wingman;
         if (!wingman) {
+            return;
+        }
+        if (close) {
+            this.spawnCloseWingman(wingman);
             return;
         }
         const p = this.player.position;
@@ -3643,6 +4233,26 @@ export class Game {
         // target, and drops back to the wing when none is left alive.
         this.combatSim.setTargetFaction(wingman.simId, Faction.ENEMY);
         this.combatSim.setPhase(wingman.simId, AiFlightPhase.FORMATION);
+    }
+
+    /**
+     * The wingman right beside the player on a parallel course: 4 m to the
+     * right and 2 m above, abreast, at the player's speed, flying straight. It
+     * holds heading, altitude and speed (it does not fly a formation slot of its
+     * own, which would pull it away), so any contact is the player's doing.
+     */
+    private spawnCloseWingman(wingman: AiAircraftEntity): void {
+        const p = this.player.position;
+        const forward = FORWARD.clone().applyQuaternion(this.player.quaternion).setY(0).normalize();
+        const heading = Math.atan2(forward.x, forward.z);
+        const right = RIGHT.clone().applyAxisAngle(UP, heading);
+        const position = new THREE.Vector3(p.x, p.y, p.z)
+            .addScaledVector(right, CLOSE_WING_SIDE_M)
+            .addScaledVector(UP, CLOSE_WING_ABOVE_M);
+        const velocity = this.player.velocityVector.clone();
+        this.combatSim.setPilotOptions(wingman.simId, this.opponentPilotOptions());
+        wingman.respawn({ position, heading, airborne: true, throttle: this.player.throttleUnit, velocity });
+        this.combatSim.setPhase(wingman.simId, AiFlightPhase.STRAIGHT);
     }
 
     /** After the straight-flight hold, promote AI opponents into ENGAGE. */
@@ -4046,6 +4656,7 @@ export class Game {
 
         // Aircraft, trails, particles, scenery, airfields, clouds.
         this.scene.rebase(shift);
+        this.recorder.rebase(shift);
         this.fixedCameraUpdater.rebase(shift);
 
         // The game's own records, rewritten in place so references to them
@@ -4470,18 +5081,67 @@ export class Game {
             );
         }
 
-        // The carrier and its cables need open water ten kilometres east, which
-        // is a fact about Gran Canaria and not about airbases. An imported area
-        // gets the runway and the hangars; a ship parked on a mountainside it
-        // does not.
-        if (!this.playArea.isHome) {
-            return;
-        }
-
         // Kuznetsov carrier from data/kuz.blend (exported via tools/export_kuz.py).
         // Collision soup is baked from the same GLB used for rendering.
         await this.models.waitForModel('assets/kuz.glb');
         const kuzModel = models.getModel('assets/kuz.glb');
+
+        // At home the ship has its old berth ten kilometres off the coast. In
+        // any other area it takes open water if there is some within reach and
+        // otherwise level ground, where it stays moored.
+        let atSea = true;
+        if (!this.playArea.isHome) {
+            const area = this.playArea.area;
+            const basis = this.planetTerrain.basis;
+            const f = this.baseFrame;
+            const site = chooseCarrierSite({ x: f.centerX, z: f.centerZ }, f.halfLength + 800, {
+                groundAt: (x, z) => this.planetTerrain.heightAtWorld(x, z),
+                isLand: (x, z) => this.planetTerrain.isLandAtWorld(x, z),
+                usable: (x, z) => {
+                    if (this.surfacePads.sampleYMax(x, z) !== -Infinity) {
+                        return false;
+                    }
+                    const g = worldToGeodetic(basis, x, 0, z);
+                    return areaContains(area, g.lat, g.lon);
+                },
+            });
+            KUZ_POSITION.x = site.x;
+            KUZ_POSITION.z = site.z;
+            atSea = site.atSea;
+            // The search ran on whatever tier was resident; seat the hull on the fine one.
+            await this.planetTerrain.pinArea(
+                site.x, site.z, 1500, this.planetTerrain.maxZoom ?? 0);
+        }
+        this.carrierSpeedMps = atSea ? CARRIER_SPEED_MPS : 0;
+        // The carrier is authored at scene y = 0, but ten km from the play
+        // origin the sea is drawn ~8 m lower (the earth curves away from the
+        // tangent plane), which left the ship hovering over the water. Sit it
+        // on the drawn sea surface and move the hull's waterline clip with it.
+        // Moored on land, the highest ground under the hull is that surface.
+        const seaY = atSea
+            ? this.planetTerrain.heightAtWorld(KUZ_POSITION.x, KUZ_POSITION.z)
+            : carrierSurfaceY(KUZ_POSITION.x, KUZ_POSITION.z,
+                (x, z) => this.planetTerrain.heightAtWorld(x, z));
+        // The hull mesh runs 15 m below its origin; the real ship draws ~10 m,
+        // so ride the model that much higher. The clip stays at the sea.
+        KUZ_POSITION.y = ARRESTOR_CARRIER_ORIGIN.y + seaY + KUZ_HULL_RAISE_M;
+        const clipData: { clipBelowYAbs?: number }[] = [];
+        for (const level of kuzModel.lod) {
+            for (const root of [...level.flats, ...level.volumes]) {
+                root.traverse(obj => {
+                    const mats = (obj as THREE.Mesh).material;
+                    for (const m of Array.isArray(mats) ? mats : mats ? [mats] : []) {
+                        const d = m.userData as { clipBelowYAbs?: number } | undefined;
+                        if (d && typeof d.clipBelowYAbs === 'number' && d.clipBelowYAbs > -1e20) {
+                            d.clipBelowYAbs = seaY + 0.05;
+                            clipData.push(d);
+                        }
+                    }
+                });
+            }
+        }
+        this.carrierClipData = clipData;
+        this.carrierAtSea = atSea;
         this.carrierMeshes.length = 0;
         const kuzCollision = bakeCollisionMeshFromModel(kuzModel);
         if (kuzCollision) {
@@ -4510,8 +5170,10 @@ export class Game {
         scene.add(arrestorCables);
         this.player.setArrestorCarrierPoseProvider(() => this.carrierPose());
 
-        const shipWake = new ShipWakeEntity(this.materials, () => this.carrierPose());
-        scene.add(shipWake);
+        if (atSea) {
+            const shipWake = new ShipWakeEntity(this.materials, () => this.carrierPose());
+            scene.add(shipWake);
+        }
 
         // Carrier-style ski jump 90 m ahead of the runway spawn, rising toward +Z (takeoff).
         this.skiJumps.length = 0;
@@ -4662,6 +5324,20 @@ export class Game {
         (globalThis as Record<string, unknown>).__skyDome = this.skyDome;
         (globalThis as Record<string, unknown>).__shell = ATMOSPHERE_SHELL_UNIFORMS;
         (globalThis as Record<string, unknown>).__player = this.player;
+        (globalThis as Record<string, unknown>).__carrierNudge = (dz: number) => { this.kuz?.position.addScaledVector(this.carrierBowDir, dz); };
+        (globalThis as Record<string, unknown>).__terrainProbe = (x: number, z: number) => ({
+            land: this.planetTerrain.isLandAtWorld(x, z), dem: this.planetTerrain.heightAtWorld(x, z),
+            drawn: this.planetTerrain.drawnHeightAtWorld(x, z),
+        });
+        (globalThis as Record<string, unknown>).__carrier = () => ({
+            position: this.kuz?.position.toArray(), speed: this.carrierSpeedMps,
+            meshes: this.carrierMeshes.length,
+            groundUnder: this.kuz ? this.groundHeightAt(this.kuz.position.x, this.kuz.position.z) : undefined,
+            demAt: this.kuz ? this.planetTerrain.heightAtWorld(this.kuz.position.x, this.kuz.position.z) : undefined,
+            drawnAt: this.kuz ? this.planetTerrain.drawnHeightAtWorld(this.kuz.position.x, this.kuz.position.z) : undefined,
+            rebases: this.rebaseCount,
+            quat: this.kuz?.quaternion.toArray(),
+        });
         // Re-base now - under the aircraft, or onto a given origin - and how
         // many have happened.
         (globalThis as Record<string, unknown>).__rebaseNow = (lat?: number, lon?: number) => {

@@ -16,6 +16,7 @@ import { PaletteCategory } from '../../config/palettes/palette';
 import { clamp, lerp } from '../../utils/math';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../materials/materials';
 import { updateUniforms } from '../utils';
+import { seaLevelSceneY } from '../../terrain/geodesy';
 
 /** Total trail length astern (m). */
 export const STERN_WAKE_LENGTH_M = 2000;
@@ -70,6 +71,9 @@ export class SternWakeRibbon {
     private head = 0;
     private count = 0;
     private seeded = false;
+    private originX = 0;
+    private originZ = 0;
+    private originSeaY = 0;
 
     private readonly segments: THREE.Mesh[] = [];
     private readonly positions: THREE.BufferAttribute[] = [];
@@ -161,7 +165,12 @@ export class SternWakeRibbon {
      * ranges, where absolute ENU coordinates would not be.
      */
     private layout(sternWorld: THREE.Vector3): void {
-        this.object.position.set(sternWorld.x, STERN_WAKE_SURFACE_Y, sternWorld.z);
+        // The sea curves away from the tangent plane; a flat strip would drift
+        // metres off it over 2 km. Vertices carry the drop relative to the root.
+        this.originX = sternWorld.x;
+        this.originZ = sternWorld.z;
+        this.originSeaY = seaLevelSceneY(sternWorld.x, sternWorld.z);
+        this.object.position.set(sternWorld.x, this.originSeaY + STERN_WAKE_SURFACE_Y, sternWorld.z);
 
         // Point 0 is the live transom; the rest is the sampled track astern.
         const points = Math.min(this.count + 1, SAMPLE_COUNT);
@@ -210,10 +219,12 @@ export class SternWakeRibbon {
     private placeQuad(position: THREE.BufferAttribute, a: number, b: number): void {
         const wa = sternWakeHalfWidthAt(this.stripDist[a]);
         const wb = sternWakeHalfWidthAt(this.stripDist[b]);
-        position.setXYZ(0, this.stripX[a] - this.stripNX[a] * wa, 0, this.stripZ[a] - this.stripNZ[a] * wa);
-        position.setXYZ(1, this.stripX[a] + this.stripNX[a] * wa, 0, this.stripZ[a] + this.stripNZ[a] * wa);
-        position.setXYZ(2, this.stripX[b] - this.stripNX[b] * wb, 0, this.stripZ[b] - this.stripNZ[b] * wb);
-        position.setXYZ(3, this.stripX[b] + this.stripNX[b] * wb, 0, this.stripZ[b] + this.stripNZ[b] * wb);
+        const vertex = (i: number, x: number, z: number) => position.setXYZ(
+            i, x, seaLevelSceneY(this.originX + x, this.originZ + z) - this.originSeaY, z);
+        vertex(0, this.stripX[a] - this.stripNX[a] * wa, this.stripZ[a] - this.stripNZ[a] * wa);
+        vertex(1, this.stripX[a] + this.stripNX[a] * wa, this.stripZ[a] + this.stripNZ[a] * wa);
+        vertex(2, this.stripX[b] - this.stripNX[b] * wb, this.stripZ[b] - this.stripNZ[b] * wb);
+        vertex(3, this.stripX[b] + this.stripNX[b] * wb, this.stripZ[b] + this.stripNZ[b] * wb);
         position.needsUpdate = true;
     }
 }

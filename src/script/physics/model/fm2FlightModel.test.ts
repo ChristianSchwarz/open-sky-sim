@@ -207,6 +207,51 @@ describe('FM2 rigid-body flight model', () => {
             `transonic load-factor limit cycle not damped: stddev=${gStd.toFixed(2)}g`);
     });
 
+    describe('graded touchdowns', () => {
+        const touchdown = (gearDown: boolean, speed: number, sink: number) => {
+            const model = new Fm2FlightModel();
+            model.reset();
+            model.position.set(1500, fm2GroundRestHeight(defaultFm2Config) + 0.2, -800);
+            model.velocityVector = new THREE.Vector3(0, -sink, speed);
+            model.setLanded(false);
+            model.setLandingGearDeployed(gearDown);
+            model.setThrottle(0);
+            model.snapPhysicsState();
+            let hard = 0;
+            for (let i = 0; i < 3 * 120 && !model.isCrashed(); i++) {
+                model.update(1 / 120);
+                hard = Math.max(hard, model.consumeHardLanding());
+            }
+            return { crashed: model.isCrashed(), hard };
+        };
+
+        it('gear down: a normal landing is untouched, a hard one is survivable and reported, a harder one is fatal', () => {
+            const normal = touchdown(true, 70, 3);
+            assert.equal(normal.crashed, false);
+            assert.equal(normal.hard, 0);
+            const hard = touchdown(true, 70, 11);
+            assert.equal(hard.crashed, false);
+            assert.ok(hard.hard > 0 && hard.hard < 1, `fraction ${hard.hard}`);
+            // Harder is more damage, linearly: a sink rate further on is a larger fraction.
+            assert.ok(touchdown(true, 70, 13).hard > hard.hard);
+            assert.equal(touchdown(true, 70, 25).crashed, true);
+        });
+
+        it('gear up: a level belly landing slides, a rougher one is reported, a steep or fast one is fatal', () => {
+            const gentle = touchdown(false, 70, 2.5);
+            assert.equal(gentle.crashed, false);
+            assert.equal(gentle.hard, 0);
+            const rough = touchdown(false, 70, 9);
+            assert.equal(rough.crashed, false);
+            assert.ok(rough.hard > 0 && rough.hard < 1, `fraction ${rough.hard}`);
+            assert.ok(touchdown(false, 70, 10).hard > rough.hard);
+            assert.equal(touchdown(false, 70, 14).crashed, true);
+            // Too fast is fatal whatever the sink rate; a little over the soft speed is survivable.
+            assert.equal(touchdown(false, 150, 1).crashed, true);
+            assert.equal(touchdown(false, 120, 1).crashed, false);
+        });
+    });
+
     it('sits stably on the runway with the engine at idle', () => {
         const model = new Fm2FlightModel();
         model.reset();

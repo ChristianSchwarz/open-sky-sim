@@ -6,6 +6,7 @@ import { Entity } from '../scene/entity';
 import { assertExpr, assertIsDefined } from '../utils/asserts';
 import { getOverlayLayout, getOverlayStrokeWidth } from '../scene/entities/overlay/overlayUtils';
 import { CanvasPainter } from './screen/canvasPainter';
+import { CanvasDirt, trackCanvasDirt } from './screen/canvasDirt';
 import { TextEffect } from './screen/text';
 import { beginRenderListPass, pruneRenderList } from './renderList';
 import { clearRenderOrigin, setRenderOrigin } from './renderOrigin';
@@ -47,6 +48,14 @@ interface CanvasRenderTarget extends BaseRenderTarget {
     type: RenderTargetType.CANVAS;
     target: THREE.CanvasTexture;
     painter: CanvasPainter;
+    /** What the painter drew on, for refreshing `target` in parts (refreshCanvas). */
+    dirt: CanvasDirt;
+    /**
+     * The same canvas as a texture three.js never uploads: the source a part
+     * is copied from (copyTextureToTexture uploads straight from the image
+     * only for a texture it has not seen).
+     */
+    source: THREE.CanvasTexture;
 }
 
 interface WebGLRenderTarget extends BaseRenderTarget {
@@ -91,6 +100,16 @@ export interface RenderLayer {
  * the stencil, and a target cannot carry a depth texture and a separate stencil
  * renderbuffer at once.
  */
+/** The compositor quad for a canvas target, v running top-down like the canvas's rows (flipY off). */
+function canvasPlane(width: number, height: number): THREE.PlaneGeometry {
+    const plane = new THREE.PlaneGeometry(width, height);
+    const uv = plane.getAttribute('uv') as THREE.BufferAttribute;
+    for (let i = 0; i < uv.count; i++) {
+        uv.setY(i, 1 - uv.getY(i));
+    }
+    return plane;
+}
+
 function sceneDepthTexture(width: number, height: number): THREE.DepthTexture {
     const texture = new THREE.DepthTexture(width, height, THREE.UnsignedInt248Type);
     texture.format = THREE.DepthStencilFormat;
@@ -286,11 +305,14 @@ export class Renderer {
             canvas.width = width;
             canvas.height = height;
             renderTarget.painter.clear();
+            renderTarget.dirt.resize(width, height);
             renderTarget.target.needsUpdate = true;
         }
 
         renderTarget.compositorObj.geometry.dispose();
-        renderTarget.compositorObj.geometry = new THREE.PlaneGeometry(width, height);
+        renderTarget.compositorObj.geometry = renderTarget.type === RenderTargetType.CANVAS
+            ? canvasPlane(width, height)
+            : new THREE.PlaneGeometry(width, height);
     }
 
     render(scene: Scene, renderLayers: RenderLayer[]) {
@@ -337,7 +359,10 @@ export class Renderer {
             }
 
             const skipRefresh = !!layer.skipRefresh;
-            const renderTarget = this.prepareRenderTarget(layer.target, palette, !skipRefresh, layer.clearColor);
+            // A target that starts with the sky needs no colour cleared: the
+            // deferred sky lands on every pixel nothing else covers.
+            const skyFirst = layer.lists.length === 1 && layer.lists[0] === SceneLayers.BackgroundSky;
+            const renderTarget = this.prepareRenderTarget(layer.target, palette, !skipRefresh, layer.clearColor, !skyFirst);
             if (skipRefresh) {
                 continue;
             }
@@ -358,6 +383,7 @@ export class Renderer {
                 this.gpuTimer.end();
             } else {
                 this.render2D(renderTarget, scene, layer, palette);
+                this.refreshCanvas(renderTarget);
             }
             cpuStats[label] = performance.now() - cpuStart;
         }
@@ -394,7 +420,7 @@ export class Renderer {
         this.gpuTimer.poll();
     }
 
-    prepareRenderTarget(target: string, palette: Palette, clear: boolean = true, clearColor?: string): RenderTarget {
+    prepareRenderTarget(target: string, palette: Palette, clear: boolean = true, clearColor?: string, clearColour = true): RenderTarget {
         const renderTarget = this.renderTargets.get(target);
         assertIsDefined(renderTarget);
         if (renderTarget.ready === false) {
@@ -402,14 +428,6 @@ export class Renderer {
             if (renderTarget.type === RenderTargetType.CANVAS) {
                 if (clear) {
                     renderTarget.painter.clear();
-                    // Dev aid: `__debugSkipCanvasUpload = true` from the
-                    // console freezes the HUD's on-screen content but skips
-                    // the full-canvas texture re-upload every frame, to A/B
-                    // how much of the compose pass's GPU time (__gpuStats)
-                    // that upload accounts for.
-                    if (!(globalThis as Record<string, unknown>).__debugSkipCanvasUpload) {
-                        renderTarget.target.needsUpdate = true;
-                    }
                 }
             } else {
                 renderTarget.compositorObj.position.set(
@@ -420,7 +438,7 @@ export class Renderer {
                 if (clear) {
                     this.renderer.setRenderTarget(renderTarget.target);
                     this.renderer.setClearColor(clearColor ?? PaletteColor(palette, PaletteCategory.BACKGROUND));
-                    this.renderer.clear();
+                    this.renderer.clear(clearColour, true, true);
                 }
             }
             this.composeScene.add(renderTarget.compositorObj);
@@ -667,6 +685,33 @@ export class Renderer {
         this.renderer.render(only, cam);
     }
 
+    /**
+     * Refresh the canvas's texture where the frame just painted changed it
+     * (CanvasDirt), not the whole canvas. Dev aids, from the console:
+     * `__debugSkipCanvasUpload = true` freezes the HUD on screen and uploads
+     * nothing, `__debugWholeCanvasUpload = true` uploads it whole every frame,
+     * as it used to be.
+     */
+    private refreshCanvas(renderTarget: CanvasRenderTarget): void {
+        const debug = globalThis as Record<string, unknown>;
+        const rects = renderTarget.dirt.take();
+        if (debug.__debugSkipCanvasUpload) {
+            return;
+        }
+        if (rects === undefined || debug.__debugWholeCanvasUpload) {
+            renderTarget.target.needsUpdate = true;
+            return;
+        }
+        for (const r of rects) {
+            Renderer._region.min.set(r.x, r.y);
+            Renderer._region.max.set(r.x + r.width, r.y + r.height);
+            Renderer._at.set(r.x, r.y);
+            this.renderer.copyTextureToTexture(renderTarget.source, renderTarget.target, Renderer._region, Renderer._at);
+        }
+    }
+    private static readonly _region = new THREE.Box2();
+    private static readonly _at = new THREE.Vector2();
+
     render2D(renderTarget: CanvasRenderTarget, scene: Scene, layer: RenderLayer, palette: Palette) {
         this.current2DRenderLists.clear();
         for (const listId of layer.lists) {
@@ -715,15 +760,19 @@ export class Renderer {
             const renderTarget: RenderTarget = { type, target, compositorObj, ready, x, y, width, height, textureScale };
             this.renderTargets.set(id, renderTarget);
         } else {
-            const { canvas, painter } = this.setupContext2D(width, height, options);
+            const { canvas, painter, dirt } = this.setupContext2D(width, height, options);
             assertIsDefined(canvas);
             const target = new THREE.CanvasTexture(canvas, undefined, undefined, undefined, THREE.NearestFilter, THREE.NearestFilter);
+            // Rows stored top-down, so a part copies to where it sits on the
+            // canvas; the compositor quad's v runs top-down to match.
+            target.flipY = false;
+            const source = new THREE.CanvasTexture(canvas);
             const compositorObj = new THREE.Mesh(
-                new THREE.PlaneGeometry(width, height),
+                canvasPlane(width, height),
                 new THREE.MeshBasicMaterial({ map: target, depthWrite: false, transparent: true })
             );
             compositorObj.position.set(x, y, 0);
-            const renderTarget: RenderTarget = { type, target, painter, compositorObj, ready, x, y, width, height };
+            const renderTarget: RenderTarget = { type, target, painter, dirt, source, compositorObj, ready, x, y, width, height };
             this.renderTargets.set(id, renderTarget);
         }
     }
@@ -732,7 +781,7 @@ export class Renderer {
         return this.renderTargets.has(id);
     }
 
-    private setupContext2D(width: number, height: number, options: RendererOptions | undefined): { canvas: HTMLCanvasElement, painter: CanvasPainter } {
+    private setupContext2D(width: number, height: number, options: RendererOptions | undefined): { canvas: HTMLCanvasElement, painter: CanvasPainter, dirt: CanvasDirt } {
         const canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
@@ -740,8 +789,10 @@ export class Renderer {
         if (!ctx) {
             throw Error('Unable to create CanvasRenderingContext2D');
         }
+        const dirt = new CanvasDirt(width, height);
+        trackCanvasDirt(ctx, dirt);
         const painter = new CanvasPainter(ctx, options?.textColors);
-        return { canvas, painter };
+        return { canvas, painter, dirt };
     }
 
     private updateViewportSize() {

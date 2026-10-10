@@ -18,6 +18,7 @@ import { Entity } from '../entity';
 import { Scene, SceneLayers } from '../scene';
 import { ARRESTOR_DECK_MID_X, ArrestorCarrierPose } from './arrestorCables';
 import { SternWakeRibbon } from './sternWake';
+import { seaLevelSceneY } from '../../terrain/geodesy';
 
 type FoamKind = 'stern' | 'bow';
 
@@ -171,6 +172,10 @@ export class ShipWakeEntity implements Entity {
         const material = materials.build({
             type: SceneMaterialPrimitiveType.PARTICLE_MESH,
             category: PaletteCategory.TERRAIN_SHALLOW_WATER,
+            // Foam is white, not the water palette's blue: in the default
+            // shading the shader paints with the material colour, and blue
+            // puffs on blue sea were invisible.
+            rawColor: '#e8f0f4',
             depthWrite: false,
         }) as THREE.RawShaderMaterial;
         // Foam lies on the water surface instead of billboarding.
@@ -220,7 +225,7 @@ export class ShipWakeEntity implements Entity {
                 this.emitPos.applyQuaternion(q);
             }
             this.emitPos.add(pose.position as THREE.Vector3);
-            this.emitPos.y = FOAM_SURFACE_Y;
+            this.emitPos.y = seaLevelSceneY(this.emitPos.x, this.emitPos.z) + FOAM_SURFACE_Y;
             this.system.position.copy(this.emitPos);
             const spawned = this.system.burst(n, true);
             let left = spawned;
@@ -234,7 +239,7 @@ export class ShipWakeEntity implements Entity {
                 }
                 const extra = this.extras[i];
                 extra.kind = emitter.kind;
-                p.position.y = FOAM_SURFACE_Y;
+                p.position.y = this.emitPos.y;
                 if (emitter.kind === 'bow') {
                     // ~4× prior bow life → long arms.
                     p.lifespan = 14 + Math.random() * 14;
@@ -284,7 +289,7 @@ export class ShipWakeEntity implements Entity {
             if (!p.isActive) {
                 continue;
             }
-            p.position.y = FOAM_SURFACE_Y;
+            p.position.y = seaLevelSceneY(p.position.x, p.position.z) + FOAM_SURFACE_Y;
             p.velocity.y = 0;
             const t = p.lifespan > 1e-6 ? p.life / p.lifespan : 1;
             const extra = this.extras[i];

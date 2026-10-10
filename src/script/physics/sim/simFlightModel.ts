@@ -18,6 +18,15 @@ export type SimFlightModel = FlightModel & {
     clearAngularVelocity(): void;
     contactSpeedIntoNormal(pointWorld: THREE.Vector3, normalWorld: THREE.Vector3): number;
     applyContactDragAt(pointWorld: THREE.Vector3, dt: number, dragPerSec: number, massFraction: number, maxFrac: number): void;
+    /** The aircraft's mass (kg), to work out what a contact must hold up. */
+    getMassKg(): number;
+    /** World velocity of the material point of the airframe now at `pointWorld` (CG velocity + spin x arm). */
+    pointVelocity(pointWorld: THREE.Vector3, out: THREE.Vector3): THREE.Vector3;
+    /**
+     * 1 / m + (r x d) . I^-1 (r x d): how much an impulse of unit size along `dirWorld`
+     * at `pointWorld` changes the speed of that point (the rigid body's effective inverse mass).
+     */
+    invEffectiveMass(pointWorld: THREE.Vector3, dirWorld: THREE.Vector3): number;
 };
 
 export function createSimFlightModel(kind: SimFlightModelKind, config?: Fm2AircraftConfig): SimFlightModel {

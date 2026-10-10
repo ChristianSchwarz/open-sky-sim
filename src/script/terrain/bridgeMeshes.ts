@@ -19,6 +19,7 @@ import { RoadsMode } from '../state/gameDefs';
 import { TerrainManifest, bridgeTileUrl } from './manifest';
 import { BridgeRole, PBR_BOX_FLOATS, PbrTile, decodePbr, pbrRole } from './pbr';
 import { ROAD_RENDER_ORDER, addTrackPasses, strokeGeometry } from './roadStrokes';
+import { nearDistanceInTile } from './tileFrameBounds';
 import { TileIndex } from './tileIndex';
 import { TileMeshes } from './tileMesh';
 import { TileStore } from './tileStore';
@@ -272,6 +273,16 @@ export function buildBridgeMeshes(
     return set;
 }
 
+/**
+ * Ground metres per pixel past which a part of a bridge is hidden: it is
+ * under half a pixel across. A tile's bridges are up to nine draws, and most
+ * of a view's tiles are kilometres off; a deck is ~10 m wide, a rail track
+ * ~1.5 m, a level-crossing sign ~0.5 m.
+ */
+const DECK_HIDE_PIXEL_M = 20;
+const TRACK_HIDE_PIXEL_M = 3;
+const FURNITURE_HIDE_PIXEL_M = 1;
+
 function triangles(set: BridgeMeshSet): number {
     let n = 0;
     for (const mesh of [set.deck, set.concrete, set.railDeck, set.signRed, set.signWhite, set.signPost,
@@ -434,12 +445,48 @@ export class BridgeMeshes {
     }
 
     /** Triangles the bridges of a drawn tile add, for the frame's count. */
+    /**
+     * What the tile's bridges cost the budget. The parts showLevel hides for
+     * range still count: like the land's far levels, the budget prices a tile
+     * as it is near, or the cut would shift as the view moves.
+     */
     trianglesOf(meshes: TileMeshes): number {
         const set = meshes.bridges;
         if (set === undefined || set === 'pending' || set === 'none' || !set.group.visible) {
             return 0;
         }
         return triangles(set);
+    }
+
+    /**
+     * Hide the parts of a tile's bridges under half a pixel across, seen from
+     * `eye` (world) with `pixelAngle` ground metres per pixel per metre of
+     * range. Each part by its own near edge: a tile is kilometres across, and
+     * most of its parts are a culvert's few triangles.
+     */
+    showLevel(meshes: TileMeshes, eye: THREE.Vector3, pixelAngle: number): void {
+        const tile = meshes.group;
+        const set = meshes.bridges;
+        if (set === undefined || set === 'pending' || set === 'none') {
+            return;
+        }
+        const show = (mesh: THREE.Mesh | undefined, limitM: number) => {
+            if (mesh) {
+                mesh.visible = nearDistanceInTile(mesh, tile, eye) * pixelAngle <= limitM;
+            }
+        };
+        show(set.deck, DECK_HIDE_PIXEL_M);
+        show(set.concrete, DECK_HIDE_PIXEL_M);
+        show(set.railDeck, DECK_HIDE_PIXEL_M);
+        show(set.track, TRACK_HIDE_PIXEL_M);
+        show(set.trackDetail, TRACK_HIDE_PIXEL_M);
+        show(set.trackTop, TRACK_HIDE_PIXEL_M);
+        show(set.signRed, FURNITURE_HIDE_PIXEL_M);
+        show(set.signWhite, FURNITURE_HIDE_PIXEL_M);
+        show(set.signPost, FURNITURE_HIDE_PIXEL_M);
+        for (const mesh of set.extra ?? []) {
+            show(mesh, FURNITURE_HIDE_PIXEL_M);
+        }
     }
 
     /** Sidecars nobody drew this generation may be evicted from the byte budget. */

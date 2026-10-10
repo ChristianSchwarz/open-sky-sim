@@ -36,6 +36,9 @@ import { Fm3Engine } from '../fm3/propulsion';
 import { invert3x3, RigidBody6, rotateBodyToWorld, rotateWorldToBody, WrenchFunction } from '../fm3/rigidBody6';
 import { FlightModel, ForceVectorSample } from './flightModel';
 import { FrameShift } from '../../terrain/geodesy';
+import {
+    BELLY_FATAL_HARDNESS, BELLY_SOFT_HARDNESS, bellyHardness, damageFraction, GEAR_FATAL_SINK_MPS,
+} from './landingLimits';
 
 const GRAVITY = 9.80665;
 const DEG = Math.PI / 180;
@@ -231,6 +234,39 @@ export class Fm3FlightModel extends FlightModel {
         this.applyImpulse(vx * j, vy * j, vz * j, ry * (vz * j) - rz * (vy * j), rz * (vx * j) - rx * (vz * j), rx * (vy * j) - ry * (vx * j));
     }
 
+    getMassKg(): number {
+        return this.massKg;
+    }
+
+    pointVelocity(pointWorld: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+        const t = this.tmp;
+        rotateBodyToWorld(this.obj.quaternion.toArray(), this.rb.omega[0], this.rb.omega[1], this.rb.omega[2], t);
+        const rx = pointWorld.x - this.obj.position.x;
+        const ry = pointWorld.y - this.obj.position.y;
+        const rz = pointWorld.z - this.obj.position.z;
+        return out.set(
+            this.velocity.x + (t[1] * rz - t[2] * ry),
+            this.velocity.y + (t[2] * rx - t[0] * rz),
+            this.velocity.z + (t[0] * ry - t[1] * rx),
+        );
+    }
+
+    invEffectiveMass(pointWorld: THREE.Vector3, dirWorld: THREE.Vector3): number {
+        const rx = pointWorld.x - this.obj.position.x;
+        const ry = pointWorld.y - this.obj.position.y;
+        const rz = pointWorld.z - this.obj.position.z;
+        const cx = ry * dirWorld.z - rz * dirWorld.y;
+        const cy = rz * dirWorld.x - rx * dirWorld.z;
+        const cz = rx * dirWorld.y - ry * dirWorld.x;
+        const b = this.tmp2;
+        rotateWorldToBody(this.obj.quaternion.toArray(), cx, cy, cz, b);
+        const Ii = this.rb.inertiaInv;
+        const ex = Ii[0] * b[0] + Ii[1] * b[1] + Ii[2] * b[2];
+        const ey = Ii[3] * b[0] + Ii[4] * b[1] + Ii[5] * b[2];
+        const ez = Ii[6] * b[0] + Ii[7] * b[1] + Ii[8] * b[2];
+        return 1 / this.massKg + b[0] * ex + b[1] * ey + b[2] * ez;
+    }
+
     applyExternalWrench(impulseWorld: THREE.Vector3, angularImpulseWorld: THREE.Vector3): void {
         this.applyImpulse(impulseWorld.x, impulseWorld.y, impulseWorld.z, angularImpulseWorld.x, angularImpulseWorld.y, angularImpulseWorld.z);
     }
@@ -383,6 +419,8 @@ export class Fm3FlightModel extends FlightModel {
 
     /** Landed and crash rules on the configured envelope (as FM2). */
     private handleGroundState(): void {
+        // How fast it was sinking as it met the ground, before the floor clamp below takes it out.
+        const sink = Math.max(0, -this.velocity.y);
         const terrainY = this.gear.groundHeightAt(this.obj.position.x, this.obj.position.z);
         const restY = terrainY + this.gear.restHeight;
         const onGround = this.obj.position.y <= restY + 0.25;
@@ -407,18 +445,30 @@ export class Fm3FlightModel extends FlightModel {
         const pitchAngle = Math.asin(clamp(fwd.y, -1, 1));
         const rollAngle = Math.asin(clamp(right.y, -1, 1));
         const env = this.config.envelope;
-        let maxCompress = 0;
-        for (const c of this.gear.compression) maxCompress = Math.max(maxCompress, c);
-        const oleoBottomed = !this.landingGearDeployed || maxCompress >= this.gear.maxStroke * 0.95;
-        const hardContact = oleoBottomed && this.velocity.y < -env.landingMaxVerticalSpeedMps;
         const badAttitude = Math.abs(rollAngle) > env.landingMaxRollRad || pitchAngle < env.landingMinPitchRad;
-        if (!this.landed && (hardContact || speed > env.landingMaxSpeedMps)) {
-            if (!this.landingGearDeployed || hardContact || badAttitude) {
+        if (!this.landingGearDeployed) {
+            // A belly landing is judged once, at touchdown; after that it is sliding, held up by the
+            // ground contact (the solid-world response), which needs the weight it carries.
+            if (this.landed) {
+                return;
+            }
+            const hardness = bellyHardness(sink, speed, rollAngle, pitchAngle, env.landingMinPitchRad);
+            if (hardness > BELLY_FATAL_HARDNESS) {
                 this.crashed = true;
                 return;
             }
+            this.reportHardLanding(damageFraction(hardness, BELLY_SOFT_HARDNESS, BELLY_FATAL_HARDNESS));
+            this.landed = true;
+            return;
         }
-        if (!this.landingGearDeployed && this.velocity.y < -1.0) {
+        // Gear down: up to the envelope's limit it is a landing; past it the airframe is damaged
+        // (gear legs shear, the structure bends); far past it, it is fatal.
+        if (sink > GEAR_FATAL_SINK_MPS) {
+            this.crashed = true;
+            return;
+        }
+        this.reportHardLanding(damageFraction(sink, env.landingMaxVerticalSpeedMps, GEAR_FATAL_SINK_MPS));
+        if (!this.landed && speed > env.landingMaxSpeedMps && badAttitude) {
             this.crashed = true;
             return;
         }

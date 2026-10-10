@@ -1609,6 +1609,7 @@ export class TerrainEntity implements Entity {
             : 0;
         if (camera) {
             this.buildings.beginFrame();
+            this.farLand.beginFrame();
         }
         for (const node of this.drawList) {
             const meshes = this.streamer.get(node.id);
@@ -1622,7 +1623,8 @@ export class TerrainEntity implements Entity {
                 // twice a refresh for a small, half-resolution display.
                 this.roads.showTrackDetail(meshes, true);
                 for (const trees of meshes.trees ?? []) {
-                    trees.count = treeInstancesToDraw(trees, undefined, 0);
+                    trees.count = treeInstancesToDraw(trees, meshes.group, undefined, 0);
+                    trees.visible = true;
                 }
                 continue;
             }
@@ -1632,15 +1634,16 @@ export class TerrainEntity implements Entity {
             }
             this.roads.showTrackDetail(meshes, nearM <= reach);
             this.roads.showLevel(meshes, roadLevelFor(nearM * pixelAngle));
+            this.bridges.showLevel(meshes, camera.position, pixelAngle);
             for (const trees of meshes.trees ?? []) {
-                trees.count = treeInstancesToDraw(trees, camera.position, pixelAngle);
+                trees.count = treeInstancesToDraw(trees, meshes.group, camera.position, pixelAngle);
+                // A patch thinned to nothing is still a draw call.
+                trees.visible = trees.count > 0;
             }
-            // Far land only in faceted shading: the smooth geometry is
-            // the near land's, welded.
             const smooth = this.landShading === TerrainShading.SMOOTH;
             const near = smooth ? meshes.landGeometrySmooth ?? meshes.landGeometryFaceted : meshes.landGeometryFaceted;
-            this.farLand.show(node.id, meshes, smooth ? 0 : FAR_LAND_MAX_PIXELS * nearM * pixelAngle,
-                PRIORITY_IN_FRUSTUM - nearM, near);
+            this.farLand.show(node.id, meshes, FAR_LAND_MAX_PIXELS * nearM * pixelAngle,
+                PRIORITY_IN_FRUSTUM - nearM, near, smooth && near === meshes.landGeometrySmooth);
         }
         if (camera) {
             this.roads.buildPendingLevels(ROAD_LEVEL_BUILD_MS);

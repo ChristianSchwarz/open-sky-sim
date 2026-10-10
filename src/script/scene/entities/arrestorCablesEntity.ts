@@ -185,7 +185,10 @@ export class ArrestorCablesEntity implements Entity {
     private deckLocalY(localX: number, localZ: number, liftM: number): number {
         const w = this.localDeckToWorldXZ(localX, localZ);
         const sampled = this.groundHeightAt(w.x, w.z);
-        const deckWorld = Math.max(sampled, ARRESTOR_DECK_Y_FALLBACK, ARRESTOR_CABLE_Y - 0.3);
+        // The floor is a carrier-local height: the ship rides the drawn sea, which
+        // is not at world Y 0, so a world-space floor lifted the wires off the deck.
+        const floorWorld = this.root.position.y + Math.max(ARRESTOR_DECK_Y_FALLBACK, ARRESTOR_CABLE_Y - 0.3);
+        const deckWorld = Math.max(sampled, floorWorld);
         return deckWorld + liftM - this.root.position.y;
     }
 

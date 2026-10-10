@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
     Lanes, Step, dataSteps, deletePlan, extractPathFor, formatDuration, isProgressLine, parseProgress, plan, chunkBbox,
     snapBboxToTiles, splitStream, stepOutcome, EXIT_NO_LAND, landChunks,
@@ -212,9 +214,15 @@ describe('the bake plans end with meshes then textures over the same box', () =>
             assert.equal(bboxOf(steps[mesh + 5]), bboxOf(steps[mesh]));
             assert.equal(tools[mesh + 6], 'tools/bake_planet_farland.ts', 'far land does not follow the grading');
             assert.equal(bboxOf(steps[mesh + 6]), bboxOf(steps[mesh]));
-            assert.equal(tools[mesh + 7], 'tools/bake_planet_buildings.ts', 'buildings do not follow the far land');
-            assert.equal(bboxOf(steps[mesh + 7]), bboxOf(steps[mesh]));
-            assert.equal(mesh + 8, steps.length, 'something runs after the buildings');
+            assert.deepEqual(tools.slice(mesh + 7, mesh + 10),
+                ['tools/import_lod2.py', 'tools/measure_buildings.py', 'tools/measure_roof_shapes.py'],
+                'the building inputs do not follow the far land');
+            for (const k of [7, 8, 9]) {
+                assert.equal(bboxOf(steps[mesh + k]), bboxOf(steps[mesh]));
+            }
+            assert.equal(tools[mesh + 10], 'tools/bake_planet_buildings.ts', 'buildings do not follow their inputs');
+            assert.equal(bboxOf(steps[mesh + 10]), bboxOf(steps[mesh]));
+            assert.equal(mesh + 11, steps.length, 'something runs after the buildings');
         } else {
             assert.equal(mesh + 2, steps.length, 'something runs after the texture bake');
         }
@@ -437,5 +445,43 @@ describe('Lanes', () => {
         await assert.rejects(lanes.join(), /cover bake exited/);
         assert.equal(ran, false);
         assert.ok(lanes.error);
+    });
+});
+
+describe('bake coverage', () => {
+    // Scripts in package.json that bake, fetch or measure source data, and why
+    // the area import does not run each of those left out. A new script that
+    // is neither in the plan nor here fails the test: either wire it into
+    // areaImport.ts or say why it does not belong there.
+    const NOT_IN_THE_IMPORT: Record<string, string> = {
+        'tools/bake_planet_roadgrade.ts': 'superseded by bake_planet_grade.ts (header says so)',
+        'tools/bake_planet_errors.ts': 'the mesh bake folds the errors itself; this is for old trees',
+        'tools/bake_tree_sprites.ts': 'one global sprite atlas, not area data',
+        'tools/verify_planet.ts': 'a verifier, writes nothing',
+        'tools/verify_airports.py': 'a verifier, writes nothing',
+        'tools/eval_buildings.ts': 'an evaluation against LoD2, writes nothing',
+        'tools/rebake_box.ts': 'runs the import plan own mesh steps',
+    };
+
+    it('has every baking script of package.json in the plan, or says why not', () => {
+        const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+        const scripts = Object.entries<string>(pkg.scripts)
+            .filter(([name]) => /^(bake|fetch|merge|rebake|verify|eval):/.test(name))
+            .map(([name, cmd]) => ({ name, tool: /tools\/[\w]+\.(py|ts)/.exec(cmd)?.[0] }));
+        const inPlan = new Set<string>();
+        const job = { name: 'Test Area', bbox: [7.6, 45.9, 7.8, 46.0] };
+        for (const s of plan(job)) {
+            for (const a of s.args) {
+                if (a.startsWith('tools/')) {
+                    inPlan.add(a);
+                }
+            }
+        }
+        const missing = scripts.filter(s => s.tool && !inPlan.has(s.tool) && !(s.tool in NOT_IN_THE_IMPORT));
+        assert.deepEqual(missing.map(s => `${s.name} -> ${s.tool}`), [],
+            'a baking script is not in the area import plan');
+        for (const tool of Object.keys(NOT_IN_THE_IMPORT)) {
+            assert.ok(!inPlan.has(tool), `${tool} is in the plan and also listed as left out`);
+        }
     });
 });

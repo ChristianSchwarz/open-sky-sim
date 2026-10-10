@@ -11,6 +11,7 @@ export class CrashedCameraUpdater extends CameraUpdater {
 
     private _v = new THREE.Vector3();
     private _p = new THREE.Vector3();
+    private _focus = new THREE.Vector3();
 
     constructor(actor: PlayerEntity, camera: THREE.PerspectiveCamera) {
         super(actor, camera);
@@ -29,13 +30,16 @@ export class CrashedCameraUpdater extends CameraUpdater {
             .applyQuaternion(this.camera.quaternion)
             .setY(0)
             .normalize();
+        // Follow the cockpit as it tumbles away; the stopped hull position if it broke up nowhere.
+        if (!this.actor.getWreckFocus(this._focus)) {
+            this._focus.copy(this.actor.getDisplayPosition());
+        }
         this.camera.position
-            .copy(this.actor.getDisplayPosition())
-        this.camera.position
+            .copy(this._focus)
             .addScaledVector(UP, 25)
             .addScaledVector(this._v, 50.0 * -1);
         this._p
-            .copy(this.actor.getDisplayPosition())
+            .copy(this._focus)
             .addScaledVector(this._v, 50);
         this.camera.lookAt(this._p);
     }

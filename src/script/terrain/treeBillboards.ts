@@ -19,6 +19,7 @@ import * as THREE from 'three';
 import { PaletteCategory } from '../config/palettes/palette';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../scene/materials/materials';
 import { TREE_MIN_SPACING_PX } from '../scene/materials/shaders/treeBillboardVP';
+import { nearDistanceInTile } from './tileFrameBounds';
 import { TREE_SPECIES_COUNT, Species } from '../scene/vegetation/treeSprites';
 import { PtmTile } from './ptm';
 
@@ -267,30 +268,32 @@ export function treeSpacingM(densityScale: number): number {
 /** Cells a side a tile's trees are split into, see buildTreeMeshes. */
 const TREE_CELLS = 4;
 
-const nearSphere = new THREE.Sphere();
-
 /**
  * How many of a tree mesh's instances the screen-space thinning can keep
- * anywhere in it, seen from `eye` (world, like the mesh's matrixWorld) with
- * `pixelAngle` ground metres per pixel per metre of range: the shader's keep
- * fraction at the mesh's near edge, as a prefix of the shuffled instances.
- * The rest are never submitted - a far forest's own vertex work otherwise,
- * even for the trees the shader drops. Without an eye, all of them.
+ * anywhere in it, seen from `eye` (scene frame) with `pixelAngle` ground
+ * metres per pixel per metre of range: the shader's keep fraction at the
+ * mesh's near edge, as a prefix of the shuffled instances. The rest are never
+ * submitted - a far forest's own vertex work otherwise, even for the trees
+ * the shader drops. Without an eye, all of them. `tileGroup` is the tile the
+ * mesh belongs to (see nearDistanceInTile).
  */
-export function treeInstancesToDraw(mesh: THREE.InstancedMesh, eye: THREE.Vector3 | undefined, pixelAngle: number): number {
+export function treeInstancesToDraw(
+    mesh: THREE.InstancedMesh, tileGroup: THREE.Object3D, eye: THREE.Vector3 | undefined, pixelAngle: number,
+): number {
     const total: number = mesh.userData.treeTotal ?? mesh.count;
     const spacingM: number = mesh.userData.treeSpacingM ?? 0;
-    if (spacingM <= 0 || eye === undefined || !mesh.boundingSphere) {
+    if (spacingM <= 0 || eye === undefined) {
         return total;
     }
-    nearSphere.copy(mesh.boundingSphere).applyMatrix4(mesh.matrixWorld);
-    const pixelM = Math.max(0, nearSphere.distanceToPoint(eye)) * pixelAngle;
+    const pixelM = nearDistanceInTile(mesh, tileGroup, eye) * pixelAngle;
     if (pixelM <= 0) {
         return total;
     }
     const spacingPx = spacingM / pixelM;
     const keep = Math.min(1, (spacingPx * spacingPx) / (TREE_MIN_SPACING_PX * TREE_MIN_SPACING_PX));
-    return Math.min(total, Math.ceil(keep * total));
+    // Down: the one tree that leaves is inside the shader's fade (TREE_THIN_FADE),
+    // and a patch with less than one tree left to keep is not drawn at all.
+    return Math.min(total, Math.floor(keep * total));
 }
 
 /**

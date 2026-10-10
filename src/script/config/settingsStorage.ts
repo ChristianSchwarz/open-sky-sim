@@ -16,7 +16,7 @@ import { RENDER_SCALES } from "./configService";
 const STORAGE_KEY = 'retroflightsim.settings';
 
 /** Spawn menu start modes (approach / runway / merge / carrier / highAlt / space). */
-export type SpawnMode = 'approach' | 'runway' | 'headon' | 'carrier' | 'carrierBarricade' | 'carrierTakeoff' | 'highAlt' | 'space';
+export type SpawnMode = 'approach' | 'runway' | 'headon' | 'carrier' | 'carrierBarricade' | 'carrierTakeoff' | 'highAlt' | 'space' | 'closeWing';
 
 export interface AppSettings {
     techProfile: string;
@@ -124,7 +124,7 @@ const TERRAIN_COLOURS = new Set<string>(Object.values(TerrainColours));
 const TERRAIN_SHADING_VALUES = new Set<string>(Object.values(TerrainShading));
 const ROADS_MODES = new Set<string>(Object.values(RoadsMode));
 const SPAWN_MODES = new Set<SpawnMode>([
-    'approach', 'runway', 'headon', 'carrier', 'carrierBarricade', 'carrierTakeoff', 'highAlt', 'space',
+    'approach', 'runway', 'headon', 'carrier', 'carrierBarricade', 'carrierTakeoff', 'highAlt', 'space', 'closeWing',
 ]);
 
 export function loadSettings(): AppSettings {

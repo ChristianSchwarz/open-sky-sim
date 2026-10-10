@@ -190,6 +190,72 @@ export function segmentHitsCollisionMesh(
     return true;
 }
 
+const _pairInv = new THREE.Quaternion();
+const _pairLocal = new THREE.Vector3();
+const _pairBodyA = new THREE.Vector3();
+const _pairBodyB = new THREE.Vector3();
+const _pairSample = new THREE.Vector3();
+
+/** True when `world` is inside the airframe `mesh` at `position`/`quaternion` (in its box, and not past its skin from its origin). */
+function pointInsideCollisionMesh(
+    world: THREE.Vector3, position: THREE.Vector3, quaternion: THREE.Quaternion, mesh: AircraftCollisionMesh,
+): boolean {
+    _pairInv.copy(quaternion).invert();
+    _pairLocal.copy(world).sub(position).applyQuaternion(_pairInv);
+    const { min, max } = mesh.aabb;
+    if (_pairLocal.x < min[0] || _pairLocal.x > max[0] || _pairLocal.y < min[1] || _pairLocal.y > max[1]
+        || _pairLocal.z < min[2] || _pairLocal.z > max[2]) {
+        return false;
+    }
+    // From the origin out to the point: if that crosses the skin, the point is outside it.
+    return !segmentHitsCollisionMesh(position, world, position, quaternion, mesh, _pairBodyA, _pairBodyB);
+}
+
+/**
+ * Two airframes in contact: a hull point of one inside the other. Writes the
+ * point (world) and the normal pointing from B toward A, and returns true.
+ * Cheap checks first; the skin tests only run for points inside the other's box.
+ */
+export function findAircraftPairContact(
+    posA: THREE.Vector3, quatA: THREE.Quaternion, meshA: AircraftCollisionMesh,
+    posB: THREE.Vector3, quatB: THREE.Quaternion, meshB: AircraftCollisionMesh,
+    outPoint: THREE.Vector3, outNormal: THREE.Vector3,
+): boolean {
+    let found = false;
+    let deepest = -Infinity;
+    const test = (
+        points: Float32Array, p1: THREE.Vector3, q1: THREE.Quaternion,
+        p2: THREE.Vector3, q2: THREE.Quaternion, m2: AircraftCollisionMesh, sign: number,
+    ): void => {
+        for (let i = 0; i + 2 < points.length; i += 3) {
+            _pairSample.set(points[i], points[i + 1], points[i + 2]).applyQuaternion(q1).add(p1);
+            if (!pointInsideCollisionMesh(_pairSample, p2, q2, m2)) {
+                continue;
+            }
+            // The deeper into the other, the closer to its centre.
+            const depth = -_pairSample.distanceTo(p2);
+            if (depth > deepest) {
+                deepest = depth;
+                found = true;
+                outPoint.copy(_pairSample);
+                outNormal.copy(_pairSample).sub(p2).multiplyScalar(sign);
+            }
+        }
+    };
+    test(collisionContactPoints(meshA).all, posA, quatA, posB, quatB, meshB, 1);
+    test(collisionContactPoints(meshB).all, posB, quatB, posA, quatA, meshA, -1);
+    if (found) {
+        if (outNormal.lengthSq() < 1e-8) {
+            outNormal.subVectors(posA, posB);
+        }
+        if (outNormal.lengthSq() < 1e-8) {
+            outNormal.set(0, 1, 0);
+        }
+        outNormal.normalize();
+    }
+    return found;
+}
+
 /** XZ cells the hull is sampled in; 8 gives ~2 m cells on a fighter. */
 const CONTACT_GRID = 8;
 
@@ -328,6 +394,46 @@ export function findCollisionMeshTerrainContact(
     outNormal.set(-(hR - hL) / (2 * e), 1, -(hU - hD) / (2 * e)).normalize();
     outPoint.copy(_best);
     return { point: outPoint, normal: outNormal, penetration: bestPen };
+}
+
+/** A hull contact point at or just under the ground: where it is, and how deep (m). */
+export interface TerrainContactSample {
+    x: number;
+    y: number;
+    z: number;
+    pen: number;
+}
+
+/**
+ * Every hull contact point that is under the ground or within `activeSlop` of
+ * it, not just the deepest: a rigid body rests on several, and which ones decide
+ * whether it stands, tips or slides. Fills `out` (reusing its entries), returns the count.
+ */
+export function collectCollisionMeshTerrainContacts(
+    position: THREE.Vector3,
+    quaternion: THREE.Quaternion,
+    mesh: AircraftCollisionMesh,
+    groundHeightAt: (x: number, z: number) => number,
+    margin: number,
+    activeSlop: number,
+    out: TerrainContactSample[],
+): number {
+    let n = 0;
+    forEachContactWorldSample(position, quaternion, collisionContactPoints(mesh).lower, (w) => {
+        const pen = (groundHeightAt(w.x, w.z) - margin) - w.y;
+        if (pen <= -activeSlop || n >= 96) {
+            return;
+        }
+        if (n >= out.length) {
+            out.push({ x: 0, y: 0, z: 0, pen: 0 });
+        }
+        const s = out[n++];
+        s.x = w.x;
+        s.y = w.y;
+        s.z = w.z;
+        s.pen = pen;
+    });
+    return n;
 }
 
 /** True when any hull contact point lies inside an upright obstacle cylinder. */

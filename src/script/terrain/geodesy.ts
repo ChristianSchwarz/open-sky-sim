@@ -199,6 +199,16 @@ export function geodeticOnSurfaceAtEnu(
 const _solveEcef: Ecef = { x: 0, y: 0, z: 0 };
 
 /**
+ * Scene Y of the sea surface at scene (x, z): the first-order curvature of the
+ * earth falling away from the play origin, ~8 m at 10 km. Things laid on open
+ * water (a ship, its wake) use this rather than y = 0, which far out hangs in
+ * the air above the drawn sea.
+ */
+export function seaLevelSceneY(x: number, z: number): number {
+    return -(x * x + z * z) / (2 * WGS84_A);
+}
+
+/**
  * Scene space: **x = east, y = up, z = south**. North is −z.
  *
  * The sign is not a matter of taste. Three.js is right-handed with +Y up, so

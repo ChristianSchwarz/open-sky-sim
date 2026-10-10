@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { BELLY_FATAL_HARDNESS, BELLY_SOFT_HARDNESS, damageFraction } from '../model/landingLimits';
 import { createSimFlightModel, modelKindFromDesc, SimFlightModel, SimFlightModelKind } from './simFlightModel';
 import { AiFlightPhase, AiPilotOptions } from '../../ai/aiPilot';
 import { AiPilotController } from '../../ai/aiPilotController';
@@ -38,10 +39,13 @@ import {
 import { AC, AC_STRIDE, PROJ_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
 import {
     AircraftCollisionMesh,
+    collectCollisionMeshTerrainContacts,
+    findAircraftPairContact,
     findCollisionMeshTerrainContact,
     segmentHitsCollisionMesh,
     segmentHitsSphere,
     SolidWorldContact,
+    TerrainContactSample,
 } from './aircraftCollision';
 import {
     SimAircraftDesc, SimAircraftSpawn, SimControlInputs,
@@ -86,6 +90,39 @@ const SOLID_SCRAPE_FX_MPS = 6;
 const SOLID_SCRAPE_DAMAGE_PER_MPS = 0.35;
 /** Min seconds between scrape FX bursts per aircraft. */
 const SOLID_SCRAPE_FX_COOLDOWN_S = 0.1;
+/** Two aircraft meeting: no damage below this relative speed (m/s), both destroyed at this one, linear between. */
+const MIDAIR_SOFT_MPS = 5;
+const MIDAIR_FATAL_MPS = 70;
+/** How much of their closing speed they bounce apart with. */
+const MIDAIR_RESTITUTION = 0.25;
+/** Seconds before the same two aircraft can damage each other again. */
+const MIDAIR_COOLDOWN_S = 1.0;
+/** The crash-scale severity (render side) a survivable landing is reported as: from none to destroyed. */
+const DAMAGE_SEVERITY_MIN = 0.2;
+const DAMAGE_SEVERITY_MAX = 1.1;
+/** The share of a contact point's swing speed (over the centre's own) that counts toward how hard a belly landing was. */
+const BELLY_SWING_SHARE = 0.3;
+/** A belly rubbing along the ground faster than this (m/s) throws sparks and dust, at up to this many points. */
+const SLIDE_FX_MIN_MPS = 3;
+const SLIDE_FX_POINTS = 3;
+const SLIDE_FX_INTERVAL_S = 0.07;
+/** A hull point within this distance (m) of the ground takes part in the rigid contact response. */
+const CONTACT_ACTIVE_SLOP_M = 0.12;
+/** Passes over the contact points per step, so several of them can share the load. */
+const RIGID_CONTACT_PASSES = 4;
+/** Sliding friction coefficient of the belly on the ground. */
+const RIGID_CONTACT_FRICTION = 0.5;
+/**
+ * How strongly a contact's support tips the aircraft over the contact point: the weight times this
+ * (the contact is in force about one frame in three, as for the belly friction below).
+ */
+const SUPPORT_TORQUE_FACTOR = 3;
+/**
+ * Deceleration (m/s^2) applied on the frames an aircraft sliding on its belly is in contact. It rides
+ * on the separation margin, so it is in contact about one frame in three: this gives roughly a
+ * friction coefficient of 0.4 overall (a ~600 m slide from landing speed).
+ */
+const BELLY_FRICTION_DECEL_MPS2 = 12;
 /** Extra separation after resolving penetration (m). */
 const SOLID_SLOP_M = 0.05;
 /**
@@ -158,6 +195,8 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
 
     /** Seconds since last solid-world scrape FX (smoke/sparks). */
     scrapeFxCooldown = 0;
+    /** Seconds until the next burst of sparks and dust from a sliding belly. */
+    slideFxCooldown = 0;
 
     /** Latched arrestor cable index within the active field, or -1. */
     arrestorLatch = -1;
@@ -435,6 +474,14 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     readVelocity(target: THREE.Vector3): THREE.Vector3 { return target.copy(this.model.velocityVector); }
     getHitRadius(): number { return this.hitRadius; }
     isAlive(): boolean { return this.enabled && this.health > 0 && !this.model.isCrashed(); }
+    /** How far from its origin the airframe reaches: its collision mesh's box, else its hit sphere. */
+    collisionReach(): number {
+        const box = this.collision?.aabb;
+        if (box) {
+            return 0.5 * Math.hypot(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]) + 1;
+        }
+        return this.hitRadius;
+    }
 
     applyDamage(amount: number): void {
         if (this.health <= 0) {
@@ -1122,6 +1169,9 @@ export class CombatSim implements ProjectileSink {
             if (a.scrapeFxCooldown > 0) {
                 a.scrapeFxCooldown = Math.max(0, a.scrapeFxCooldown - delta);
             }
+            if (a.slideFxCooldown > 0) {
+                a.slideFxCooldown = Math.max(0, a.slideFxCooldown - delta);
+            }
             a.applyInputsToModel();
             if (a.model.isCrashed()) {
                 // FlightModel.step() no-ops once crashed, which would otherwise
@@ -1138,11 +1188,20 @@ export class CombatSim implements ProjectileSink {
                 this.endCarrierRelativeFrame(a, delta, onCarrierFrame);
             }
             if (!parked) {
+                // A hard but survivable touchdown (gear down past the sink limit, or a rough belly
+                // landing): the airframe is damaged and the render side bends and tears it.
+                const fraction = a.model.consumeHardLanding();
+                // (A belly landing with a collision mesh is judged by its contact, below.)
+                if (fraction > 0 && (a.isGearDeployed() || !a.collision)) {
+                    this.applyHardLanding(a, fraction);
+                }
                 this.resolveSolidWorldContact(a, delta);
             }
             this.resolveArrestor(a, delta);
             a.resolveFiring();
         }
+        // 4b. Aircraft against each other.
+        this.resolveAircraftCollisions(delta);
         // 5. Guns + projectiles (hits already cleared; scrapes may have appended).
         for (const a of this.aircraft.values()) {
             if (!a.enabled || !a.gun) continue;
@@ -1422,6 +1481,11 @@ export class CombatSim implements ProjectileSink {
             if (contact && this.isUnresolvedTerrain(contact.point.x, contact.point.z)) {
                 return null;
             }
+            // Every point of the hull on or near the ground, for a rigid-body response.
+            this.contactSampleCount = contact && !gearDown
+                ? collectCollisionMeshTerrainContacts(
+                    pos, quat, a.collision, groundAt, terrainMargin, CONTACT_ACTIVE_SLOP_M, this.contactSamples)
+                : 0;
             return contact;
         }
 
@@ -1468,7 +1532,18 @@ export class CombatSim implements ProjectileSink {
         const pos = a.model.position;
 
         // Contact-point speed into the surface (CG + spin), for FX / fatality.
-        const impactSpeed = a.model.contactSpeedIntoNormal(contact.point, n);
+        let impactSpeed = a.model.contactSpeedIntoNormal(contact.point, n);
+        const samples = this.contactSampleCount;
+        this.contactSampleCount = 0;
+        if (samples > 0 && n.y > 0.5 && !a.isGearDeployed()) {
+            // A rigid body touching down on its belly or tail: how hard it came in is how fast its
+            // centre was sinking, plus a part of what the contact point's own swing adds. (A tail
+            // strike swings the tail end down at several m/s with the centre barely sinking at all;
+            // that is for the contact impulse to deal with, it is not the airframe hitting at that speed.)
+            const v = a.model.velocityVector;
+            const cgInto = Math.max(0, -(v.x * n.x + v.y * n.y + v.z * n.z));
+            impactSpeed = cgInto + BELLY_SWING_SHARE * Math.max(0, impactSpeed - cgInto);
+        }
 
         // Soft rolling contact: gear springs own the vertical constraint — do not
         // push the body or apply scrapes that fight taxi on deck.
@@ -1480,37 +1555,327 @@ export class CombatSim implements ProjectileSink {
         pos.y += contact.penetration + SOLID_SLOP_M;
 
         // Mild drag at the hit point (linear + torque). No bounce / no velocity dump.
-        a.model.applyContactDragAt(
-            contact.point,
-            delta,
-            SOLID_CONTACT_DRAG_PER_S,
-            SOLID_CONTACT_DRAG_MASS_FRAC,
-            SOLID_CONTACT_DRAG_MAX_FRAC,
-        );
-        a.model.snapPhysicsState();
+        const rigid = samples > 0 && n.y > 0.5 && !a.isGearDeployed();
+        if (!rigid) {
+            a.model.applyContactDragAt(
+                contact.point,
+                delta,
+                SOLID_CONTACT_DRAG_PER_S,
+                SOLID_CONTACT_DRAG_MASS_FRAC,
+                SOLID_CONTACT_DRAG_MAX_FRAC,
+            );
+            a.model.snapPhysicsState();
+        }
 
-        const fatal = impactSpeed >= SOLID_CRASH_IMPACT_MPS
+        // The surface stops what is going into it. Without this the same inward speed met the
+        // ground again every frame, and a belly landing drained its health in a fraction of a
+        // second (a 12 m/s sink was 4 health a frame) until it was destroyed.
+        const vel = a.model.velocityVector;
+        const into = vel.x * n.x + vel.y * n.y + vel.z * n.z;
+        if (!rigid && into < 0) {
+            vel.addScaledVector(n, -into);
+            a.model.snapPhysicsState();
+        }
+        // Gear up, it slides on its belly: sliding friction brings it to a halt (a ~1 km slide from
+        // landing speed) instead of skating on at nearly the speed it arrived with.
+        if (!rigid && !a.isGearDeployed() && n.y > 0.5) {
+            const vn = vel.x * n.x + vel.y * n.y + vel.z * n.z;
+            const tx = vel.x - n.x * vn;
+            const ty = vel.y - n.y * vn;
+            const tz = vel.z - n.z * vn;
+            const slide = Math.hypot(tx, ty, tz);
+            if (slide > 1e-3) {
+                const take = Math.min(slide, BELLY_FRICTION_DECEL_MPS2 * delta);
+                const k = take / slide;
+                vel.x -= tx * k;
+                vel.y -= ty * k;
+                vel.z -= tz * k;
+                a.model.snapPhysicsState();
+            }
+        }
+
+        // On its belly it takes far less than on its gear: the same graded limit as the flight
+        // model's (a rough belly landing is damage, a sink rate past it is the end).
+        const crashSpeed = a.isGearDeployed() ? SOLID_CRASH_IMPACT_MPS : BELLY_FATAL_HARDNESS;
+        // What holds it up holds it up at the contact. Where that is not under the centre of
+        // gravity (a tail on the ground, one wingtip) the weight tips it over the contact point:
+        // without this it stood there on its tail, at whatever attitude it had arrived with.
+        if (rigid) {
+            this.resolveRigidContacts(a, n, samples, contact.penetration + SOLID_SLOP_M);
+        } else if (n.y > 0.5) {
+            const w = a.model.getMassKg() * 9.80665 * delta * SUPPORT_TORQUE_FACTOR;
+            this.supportRel.subVectors(contact.point, pos);
+            this.supportImpulse.set(-this.supportRel.z * w, 0, this.supportRel.x * w);
+            a.model.applyExternalWrench(this.zeroVec, this.supportImpulse);
+        }
+
+        const fatal = impactSpeed >= crashSpeed
             || contact.penetration >= SOLID_CRASH_PENETRATION_M;
         if (fatal) {
             a.model.setCrashed(true);
             a.applyDamage(a.health);
-            this.emitScrapeFx(a, contact.point, /*force*/ true);
+            this.emitScrapeFx(a, contact.point, /*force*/ true, impactSpeed);
             return;
         }
 
-        if (impactSpeed >= SOLID_SCRAPE_FX_MPS) {
+        if (rigid) {
+            // A clean belly landing is no damage at all. Beyond it the damage grows linearly with
+            // the sink rate, from nothing to the airframe destroyed at the fatal limit.
+            const fraction = damageFraction(impactSpeed, BELLY_SOFT_HARDNESS, BELLY_FATAL_HARDNESS);
+            if (fraction > 0) {
+                a.applyDamage(fraction * a.maxHealth);
+                if (a.health <= 0) {
+                    a.model.setCrashed(true);
+                }
+                this.emitScrapeFx(
+                    a, contact.point, false, impactSpeed,
+                    DAMAGE_SEVERITY_MIN + fraction * (DAMAGE_SEVERITY_MAX - DAMAGE_SEVERITY_MIN));
+            }
+        } else if (impactSpeed >= SOLID_SCRAPE_FX_MPS) {
             const dmg = impactSpeed * SOLID_SCRAPE_DAMAGE_PER_MPS;
             a.applyDamage(dmg);
             if (a.health <= 0) {
                 a.model.setCrashed(true);
             }
-            this.emitScrapeFx(a, contact.point, false);
+            this.emitScrapeFx(a, contact.point, false, impactSpeed);
         } else if (contact.penetration > 0.15) {
-            this.emitScrapeFx(a, contact.point, false);
+            this.emitScrapeFx(a, contact.point, false, impactSpeed);
         }
     }
 
-    private emitScrapeFx(a: SimAircraft, point: THREE.Vector3, force: boolean): void {
+    /**
+     * The airframe as a rigid body on the ground: at every hull point on or near it, an impulse
+     * stops the point's approach (no bounce) and Coulomb friction brakes its sliding, each through
+     * the body's own mass and inertia. Where those points are decides what happens: on the belly
+     * it slides; on the tail, one wingtip or the nose, the weight acts about the support and it
+     * topples over onto the next point down. A few passes let the points share the load.
+     */
+    private resolveRigidContacts(a: SimAircraft, n: THREE.Vector3, count: number, lift: number): void {
+        const model = a.model;
+        const pos = model.position;
+        let slidePoints = 0;
+        for (let pass = 0; pass < RIGID_CONTACT_PASSES; pass++) {
+            for (let i = 0; i < count; i++) {
+                const s = this.contactSamples[i];
+                // The sample positions were taken before the aircraft was lifted clear.
+                if (s.pen - lift <= -CONTACT_ACTIVE_SLOP_M) {
+                    continue;
+                }
+                this.rigidPoint.set(s.x, s.y + lift, s.z);
+                model.pointVelocity(this.rigidPoint, this.rigidVel);
+                const vn = this.rigidVel.dot(n);
+                if (vn >= 0) {
+                    continue;
+                }
+                const j = -vn / model.invEffectiveMass(this.rigidPoint, n);
+                this.rigidImpulse.copy(n).multiplyScalar(j);
+                this.rigidArm.subVectors(this.rigidPoint, pos);
+                this.rigidAngular.crossVectors(this.rigidArm, this.rigidImpulse);
+                model.applyExternalWrench(this.rigidImpulse, this.rigidAngular);
+
+                // Friction along the sliding direction, no more than the normal impulse allows.
+                model.pointVelocity(this.rigidPoint, this.rigidVel);
+                this.rigidTangent.copy(this.rigidVel).addScaledVector(n, -this.rigidVel.dot(n));
+                const slide = this.rigidTangent.length();
+                if (slide < 1e-4) {
+                    continue;
+                }
+                if (pass === 0 && slide > SLIDE_FX_MIN_MPS && a.slideFxCooldown <= 0 && slidePoints < SLIDE_FX_POINTS) {
+                    // Remember where the airframe is rubbing along the ground, for sparks and dust.
+                    this.slideAt[slidePoints++].copy(this.rigidPoint);
+                }
+                this.rigidTangent.multiplyScalar(1 / slide);
+                const jt = Math.min(RIGID_CONTACT_FRICTION * j, slide / model.invEffectiveMass(this.rigidPoint, this.rigidTangent));
+                this.rigidImpulse.copy(this.rigidTangent).multiplyScalar(-jt);
+                this.rigidAngular.crossVectors(this.rigidArm, this.rigidImpulse);
+                model.applyExternalWrench(this.rigidImpulse, this.rigidAngular);
+            }
+        }
+        model.snapPhysicsState();
+        if (slidePoints > 0) {
+            a.slideFxCooldown = SLIDE_FX_INTERVAL_S;
+            const vel = model.velocityVector;
+            for (let i = 0; i < slidePoints; i++) {
+                const p = this.slideAt[i];
+                this.hits.push({
+                    position: [p.x, p.y, p.z],
+                    velocity: [vel.x, vel.y, vel.z],
+                    targetId: a.id,
+                    damage: 0,
+                    source: 'scrape',
+                    slide: true,
+                });
+            }
+        }
+    }
+
+    /**
+     * Mid-air collisions. Two live airframes whose hulls interpenetrate bump:
+     * momentum is exchanged through the contact point (so they are thrown apart
+     * and spun), and each is damaged in proportion to how fast they met: nothing
+     * for a brush, destroyed at head-on speeds, linear in between.
+     */
+    private resolveAircraftCollisions(delta: number): void {
+        const live: SimAircraft[] = [];
+        for (const a of this.aircraft.values()) {
+            if (a.enabled && a.health > 0 && !a.model.isCrashed()) {
+                live.push(a);
+            }
+        }
+        for (const [key, t] of this.pairCooldown) {
+            if (t - delta <= 0) {
+                this.pairCooldown.delete(key);
+            } else {
+                this.pairCooldown.set(key, t - delta);
+            }
+        }
+        for (let i = 0; i < live.length; i++) {
+            for (let j = i + 1; j < live.length; j++) {
+                const a = live[i];
+                const b = live[j];
+                const reach = a.collisionReach() + b.collisionReach();
+                if (a.model.position.distanceToSquared(b.model.position) > reach * reach) {
+                    continue;
+                }
+                if (this.pairContact(a, b)) {
+                    this.collide(a, b, delta);
+                }
+            }
+        }
+    }
+
+    private readonly pairCooldown = new Map<string, number>();
+    private readonly pairPoint = new THREE.Vector3();
+    private readonly pairNormal = new THREE.Vector3();
+    private readonly pairVelA = new THREE.Vector3();
+    private readonly pairVelB = new THREE.Vector3();
+    private readonly pairRel = new THREE.Vector3();
+    private readonly pairImpulse = new THREE.Vector3();
+    private readonly pairArm = new THREE.Vector3();
+    private readonly pairTorque = new THREE.Vector3();
+
+    private pairContact(a: SimAircraft, b: SimAircraft): boolean {
+        if (a.collision && b.collision) {
+            return findAircraftPairContact(
+                a.model.position, a.model.quaternion, a.collision,
+                b.model.position, b.model.quaternion, b.collision,
+                this.pairPoint, this.pairNormal,
+            );
+        }
+        // No meshes: the hit spheres, at their working size.
+        this.pairNormal.subVectors(a.model.position, b.model.position);
+        const dist = this.pairNormal.length();
+        const reach = a.collisionReach() + b.collisionReach();
+        if (dist >= reach) {
+            return false;
+        }
+        if (dist > 1e-6) {
+            this.pairNormal.multiplyScalar(1 / dist);
+        } else {
+            this.pairNormal.set(0, 1, 0);
+        }
+        this.pairPoint.copy(b.model.position).addScaledVector(this.pairNormal, b.collisionReach());
+        return true;
+    }
+
+    private collide(a: SimAircraft, b: SimAircraft, delta: number): void {
+        const n = this.pairNormal; // from b toward a
+        const point = this.pairPoint;
+        a.model.pointVelocity(point, this.pairVelA);
+        b.model.pointVelocity(point, this.pairVelB);
+        this.pairRel.subVectors(this.pairVelA, this.pairVelB);
+        const closing = -this.pairRel.dot(n);
+        const relSpeed = this.pairRel.length();
+
+        // Momentum exchange along the contact normal, nearly inelastic: they are not left
+        // overlapping, and the off-centre blow throws them apart and spins them.
+        if (closing > 0) {
+            const ia = a.model.invEffectiveMass(point, n);
+            const ib = b.model.invEffectiveMass(point, n);
+            const j = (1 + MIDAIR_RESTITUTION) * closing / (ia + ib);
+            this.pairImpulse.copy(n).multiplyScalar(j);
+            this.pairArm.subVectors(point, a.model.position);
+            this.pairTorque.crossVectors(this.pairArm, this.pairImpulse);
+            a.model.applyExternalWrench(this.pairImpulse, this.pairTorque);
+            this.pairImpulse.multiplyScalar(-1);
+            this.pairArm.subVectors(point, b.model.position);
+            this.pairTorque.crossVectors(this.pairArm, this.pairImpulse);
+            b.model.applyExternalWrench(this.pairImpulse, this.pairTorque);
+        } else {
+            // Already parting but still overlapping: ease them apart.
+            const ma = a.model.getMassKg();
+            const mb = b.model.getMassKg();
+            const push = 0.05;
+            a.model.position.addScaledVector(n, push * mb / (ma + mb));
+            b.model.position.addScaledVector(n, -push * ma / (ma + mb));
+        }
+        a.model.snapPhysicsState();
+        b.model.snapPhysicsState();
+
+        // Damage, once per collision (they stay overlapped for a few frames): linear in the speed
+        // they met at, from nothing for a brush to both destroyed at head-on speeds.
+        const key = a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id;
+        if (this.pairCooldown.has(key)) {
+            return;
+        }
+        this.pairCooldown.set(key, MIDAIR_COOLDOWN_S);
+        const fraction = damageFraction(relSpeed, MIDAIR_SOFT_MPS, MIDAIR_FATAL_MPS);
+        if (fraction <= 0) {
+            return;
+        }
+        for (const x of [a, b]) {
+            x.applyDamage(fraction * x.maxHealth);
+            if (x.health <= 0) {
+                // Destroyed: it comes apart where it is (the render side breaks it up and drops the pieces).
+                x.model.setCrashed(true);
+            }
+            const vel = x.model.velocityVector;
+            this.hits.push({
+                position: [point.x, point.y, point.z],
+                velocity: [vel.x, vel.y, vel.z],
+                targetId: x.id,
+                damage: 5,
+                impactSpeed: relSpeed,
+                severity: DAMAGE_SEVERITY_MIN + fraction * (DAMAGE_SEVERITY_MAX - DAMAGE_SEVERITY_MIN),
+                source: 'gun',
+            });
+        }
+    }
+
+    private readonly slideAt = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    private readonly contactSamples: TerrainContactSample[] = [];
+    private contactSampleCount = 0;
+    private readonly rigidPoint = new THREE.Vector3();
+    private readonly rigidVel = new THREE.Vector3();
+    private readonly rigidImpulse = new THREE.Vector3();
+    private readonly rigidAngular = new THREE.Vector3();
+    private readonly rigidArm = new THREE.Vector3();
+    private readonly rigidTangent = new THREE.Vector3();
+
+    private readonly supportRel = new THREE.Vector3();
+    private readonly supportImpulse = new THREE.Vector3();
+    private readonly zeroVec = new THREE.Vector3();
+
+    /** A hard landing that did not destroy the aircraft: it takes damage and the render side is told of the impact. */
+    private applyHardLanding(a: SimAircraft, fraction: number): void {
+        // Linear from nothing at the soft limit to destroyed at the fatal one.
+        a.applyDamage(fraction * a.maxHealth);
+        const pos = a.model.position;
+        const vel = a.model.velocityVector;
+        this.hits.push({
+            position: [pos.x, pos.y - 1, pos.z],
+            velocity: [vel.x, vel.y, vel.z],
+            targetId: a.id,
+            damage: 5,
+            impactSpeed: 0,
+            severity: DAMAGE_SEVERITY_MIN + fraction * (DAMAGE_SEVERITY_MAX - DAMAGE_SEVERITY_MIN),
+            source: 'scrape',
+        });
+    }
+
+    private emitScrapeFx(
+        a: SimAircraft, point: THREE.Vector3, force: boolean, impactSpeed: number, severity?: number,
+    ): void {
         if (!force && a.scrapeFxCooldown > 0) return;
         a.scrapeFxCooldown = SOLID_SCRAPE_FX_COOLDOWN_S;
         const vel = a.model.velocityVector;
@@ -1519,6 +1884,8 @@ export class CombatSim implements ProjectileSink {
             velocity: [vel.x, vel.y, vel.z],
             targetId: a.id,
             damage: force ? 50 : 5,
+            impactSpeed,
+            severity,
             source: 'scrape',
         });
     }

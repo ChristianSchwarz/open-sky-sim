@@ -300,8 +300,17 @@ export class SceneMaterialManager implements KernelTask {
     private palette: Palette;
     private fog: FogQuality;
     private shading: DisplayShading;
-    private materials: THREE.ShaderMaterial[] = [];
-    private fxFire: THREE.ShaderMaterial[] = [];
+    /** Every live material; a disposed one leaves (see build). */
+    private materials = new Set<THREE.ShaderMaterial>();
+    private fxFire = new Set<THREE.ShaderMaterial>();
+    /**
+     * The palette every material in `materials` already shows, bar those in
+     * `unpainted`, built since. The renderer sets the palette every frame and
+     * per layer; walking every material each time was 2 % of the main thread
+     * for a palette that only changes with the time of day.
+     */
+    private paintedPalette: Palette | undefined;
+    private unpainted: THREE.ShaderMaterial[] = [];
     private waterTweak: ColourTweak = defaultColourTweak();
 
     constructor(palette: Palette, fog: FogQuality, shading: DisplayShading) {
@@ -424,10 +433,17 @@ export class SceneMaterialManager implements KernelTask {
         if (!p.rawColor) {
             this.applyWaterTweak(p.category, material.uniforms as SceneMaterialUniforms);
         }
-        this.materials.push(material);
+        this.materials.add(material);
+        this.unpainted.push(material);
         if (data.category === PaletteCategory.FX_FIRE) {
-            this.fxFire.push(material);
+            this.fxFire.add(material);
         }
+        // Tiles, trees and their materials come and go all flight long; the
+        // set held on to every one of them, and setPalette walked them all.
+        material.addEventListener('dispose', () => {
+            this.materials.delete(material);
+            this.fxFire.delete(material);
+        });
         return material;
     }
 
@@ -443,12 +459,12 @@ export class SceneMaterialManager implements KernelTask {
         // them per-pixel: a steady retro dither with no temporal flicker.
         const color = this.colorCache.getColor(PaletteColor(this.palette, PaletteCategory.FX_FIRE));
         const colorSecondary = this.colorCache.getColor(PaletteColor(this.palette, PaletteCategory.FX_FIRE__B));
-        for (let i = 0; i < this.fxFire.length; i++) {
-            const data = this.fxFire[i].userData as SceneMaterialData & { afterburnerThrottleDriven?: boolean };
+        for (const m of this.fxFire) {
+            const data = m.userData as SceneMaterialData & { afterburnerThrottleDriven?: boolean };
             if (data.afterburnerThrottleDriven) {
                 continue;
             }
-            const u = this.fxFire[i].uniforms as SceneMaterialUniforms;
+            const u = m.uniforms as SceneMaterialUniforms;
             u.color.value.copy(color);
             u.colorSecondary.value.copy(colorSecondary);
         }
@@ -751,67 +767,72 @@ export class SceneMaterialManager implements KernelTask {
 
     setPalette(palette: Palette) {
         this.palette = palette;
+        const toPaint = palette === this.paintedPalette ? this.unpainted : this.materials;
+        for (const m of toPaint) {
+            this.paint(m, palette);
+        }
+        this.paintedPalette = palette;
+        this.unpainted = [];
+        this.updateFxFire();
+    }
 
-        for (let i = 0; i < this.materials.length; i++) {
-            const m = this.materials[i];
-            const d = m.userData as SceneMaterialData & { wingtipTrailDriven?: boolean };
-            if (d.wingtipTrailDriven) {
-                continue;
+    private paint(m: THREE.ShaderMaterial, palette: Palette): void {
+        const d = m.userData as SceneMaterialData & { wingtipTrailDriven?: boolean };
+        if (d.wingtipTrailDriven) {
+            return;
+        }
+        const u = m.uniforms as SceneMaterialUniforms;
+        const c = d.category;
+        if (!d.rawColor) {
+            u.color.value.copy(this.colorCache.getColor(PaletteColor(palette, c)));
+            u.colorSecondary.value.copy(this.colorCache.getColor(PaletteColorShade(palette, c)));
+            this.applyWaterTweak(c, u);
+        } else if (palette.light) {
+            // A raw colour opted out of the palette, so the blend above
+            // never reaches it: a mod's camo used to stay at noon
+            // brightness against a midnight landscape, lit or not. The
+            // uniforms are linear light, which is what the factor is in,
+            // so it multiplies straight in with no round trip.
+            const raw = this.colorCache.getColor(d.rawColor);
+            const light = palette.light;
+            u.color.value.setRGB(raw.r * light[0], raw.g * light[1], raw.b * light[2]);
+            u.colorSecondary.value.copy(u.color.value);
+        }
+        if (d.shaded && d.terrain) {
+            // Two halves, matching what the modes are made of: the tone
+            // table follows the blended palette like any authored colour,
+            // and the imagery light factor is the raw-colour one above.
+            const tones = u.uToneColor.value as Float32Array;
+            for (let t = 0; t * 3 < tones.length; t++) {
+                const category = d.terrain.toneCategories[t] ?? PaletteCategory.TERRAIN_DEFAULT;
+                this.colorCache.getColor(PaletteColor(palette, category)).toArray(tones, t * 3);
             }
-            const u = m.uniforms as SceneMaterialUniforms;
-            const c = d.category;
-            if (!d.rawColor) {
-                u.color.value.copy(this.colorCache.getColor(PaletteColor(palette, c)));
-                u.colorSecondary.value.copy(this.colorCache.getColor(PaletteColorShade(palette, c)));
-                this.applyWaterTweak(c, u);
-            } else if (palette.light) {
-                // A raw colour opted out of the palette, so the blend above
-                // never reaches it: a mod's camo used to stay at noon
-                // brightness against a midnight landscape, lit or not. The
-                // uniforms are linear light, which is what the factor is in,
-                // so it multiplies straight in with no round trip.
-                const raw = this.colorCache.getColor(d.rawColor);
-                const light = palette.light;
-                u.color.value.setRGB(raw.r * light[0], raw.g * light[1], raw.b * light[2]);
-                u.colorSecondary.value.copy(u.color.value);
-            }
-            if (d.shaded && d.terrain) {
-                // Two halves, matching what the modes are made of: the tone
-                // table follows the blended palette like any authored colour,
-                // and the imagery light factor is the raw-colour one above.
-                const tones = u.uToneColor.value as Float32Array;
-                for (let t = 0; t * 3 < tones.length; t++) {
-                    const category = d.terrain.toneCategories[t] ?? PaletteCategory.TERRAIN_DEFAULT;
-                    this.colorCache.getColor(PaletteColor(palette, category)).toArray(tones, t * 3);
-                }
-                const light = palette.light ?? [1, 1, 1];
-                (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);
-            }
-            if (d.shaded && d.vertexTones) {
-                this.fillVertexTones(d.vertexTones, palette, u.uVertexTone.value, u.uVertexToneShade.value);
-                // Own colours opted out of the palette: the imagery light, as for terrain.
-                const light = palette.light ?? [1, 1, 1];
-                (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);
-            }
-            if (!d.shaded && d.markCategories) {
-                u.uMarkColorA.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[0])));
-                u.uMarkColorB.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[1])));
-            }
-            u.fogDensity.value = palette.values[FogValueCategory(c)];
-            u.fogColor.value.copy(this.colorCache.getColor(PaletteColor(palette, FogColorCategory(c))));
-            if (d.particles && d.ramp) {
-                if (d.category === PaletteCategory.FX_SMOKE) {
-                    d.ramp[0].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_SMOKE)));
-                    d.ramp[1].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_SMOKE__B)));
-                    d.ramp[2].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_SMOKE__C)));
-                } else if (d.category === PaletteCategory.FX_FIRE) {
-                    d.ramp[0].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_FIRE)));
-                    d.ramp[1].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_FIRE__B)));
-                    d.ramp[2].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_SMOKE)));
-                }
+            const light = palette.light ?? [1, 1, 1];
+            (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);
+        }
+        if (d.shaded && d.vertexTones) {
+            this.fillVertexTones(d.vertexTones, palette, u.uVertexTone.value, u.uVertexToneShade.value);
+            // Own colours opted out of the palette: the imagery light, as for terrain.
+            const light = palette.light ?? [1, 1, 1];
+            (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);
+        }
+        if (!d.shaded && d.markCategories) {
+            u.uMarkColorA.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[0])));
+            u.uMarkColorB.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[1])));
+        }
+        u.fogDensity.value = palette.values[FogValueCategory(c)];
+        u.fogColor.value.copy(this.colorCache.getColor(PaletteColor(palette, FogColorCategory(c))));
+        if (d.particles && d.ramp) {
+            if (d.category === PaletteCategory.FX_SMOKE) {
+                d.ramp[0].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_SMOKE)));
+                d.ramp[1].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_SMOKE__B)));
+                d.ramp[2].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_SMOKE__C)));
+            } else if (d.category === PaletteCategory.FX_FIRE) {
+                d.ramp[0].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_FIRE)));
+                d.ramp[1].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_FIRE__B)));
+                d.ramp[2].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_SMOKE)));
             }
         }
-        this.updateFxFire();
     }
 
     /**
@@ -821,6 +842,7 @@ export class SceneMaterialManager implements KernelTask {
      */
     setWaterTweak(tweak: ColourTweak) {
         this.waterTweak = { ...tweak };
+        this.paintedPalette = undefined;
         this.setPalette(this.palette);
     }
 
@@ -836,8 +858,7 @@ export class SceneMaterialManager implements KernelTask {
     setFog(fog: FogQuality) {
         this.fog = fog;
 
-        for (let i = 0; i < this.materials.length; i++) {
-            const m = this.materials[i];
+        for (const m of this.materials) {
             const d = m.userData as SceneMaterialData;
             d.fog = this.fog;
             const u = m.uniforms as SceneMaterialUniforms;
@@ -854,8 +875,7 @@ export class SceneMaterialManager implements KernelTask {
     setShadingType(shadingType: DisplayShading) {
         this.shading = shadingType;
 
-        for (let i = 0; i < this.materials.length; i++) {
-            const m = this.materials[i];
+        for (const m of this.materials) {
             const d = m.userData as SceneMaterialData;
             d.shading = shadingType;
             const u = m.uniforms as SceneMaterialUniforms;

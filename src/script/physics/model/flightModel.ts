@@ -32,6 +32,9 @@ export abstract class FlightModel {
     protected velocity: THREE.Vector3 = new THREE.Vector3(); // m/s
 
     protected crashed: boolean = false;
+    /** A touchdown hard enough to damage the airframe that was not fatal, until the sim collects it (m/s of sink). */
+    private pendingHardLanding = 0;
+    private hardLandingCooldownS = 0;
     protected landed: boolean = true;
     protected landingGearDeployed: boolean = true;
     protected flapsExtended: boolean = true;
@@ -183,9 +186,29 @@ export abstract class FlightModel {
         this.syncPreviousState();
     }
 
+    /**
+     * Note a hard but survivable touchdown: how far toward destroyed it went, 0..1
+     * (see landingLimits.damageFraction). A second one within seconds is the same.
+     */
+    protected reportHardLanding(fraction: number): void {
+        if (this.hardLandingCooldownS > 0 || fraction <= 0) {
+            return;
+        }
+        this.pendingHardLanding = Math.max(this.pendingHardLanding, fraction);
+        this.hardLandingCooldownS = 2;
+    }
+
+    /** How far toward destroyed a survivable hard landing went since the last call (0..1), or 0. */
+    consumeHardLanding(): number {
+        const v = this.pendingHardLanding;
+        this.pendingHardLanding = 0;
+        return v;
+    }
+
     update(delta: number): void {
         this.deltaRemainder += delta;
         while (this.deltaRemainder >= SIM_DELTA) {
+            this.hardLandingCooldownS = Math.max(0, this.hardLandingCooldownS - SIM_DELTA);
             this.savePreviousState();
             this.step(SIM_DELTA);
             this.deltaRemainder -= SIM_DELTA;

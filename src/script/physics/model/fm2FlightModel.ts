@@ -33,6 +33,9 @@ import { RigidBody } from '../fm2/rigidBody';
 import { FlightModel, ForceVectorSample } from './flightModel';
 import { FrameShift } from '../../terrain/geodesy';
 import { WorldQuery } from '../../ai/worldQuery';
+import {
+    BELLY_FATAL_HARDNESS, BELLY_SOFT_HARDNESS, bellyHardness, damageFraction, GEAR_FATAL_SINK_MPS,
+} from './landingLimits';
 
 const GRAVITY = 9.80665;
 
@@ -104,6 +107,8 @@ export class Fm2FlightModel extends FlightModel {
 
     /** Per-leg oleo compression from the last gear-force step (m). */
     private readonly gearCompression: number[];
+    /** Sink rate (m/s) as the step's contacts began, before the ground clamps zero it. */
+    private stepSinkMps = 0;
 
     /** Body Y when level on flat ground (deepest gear contact at world y=0). */
     private get groundRestY(): number {
@@ -237,6 +242,24 @@ export class Fm2FlightModel extends FlightModel {
      * Inward speed of the body at `pointWorld` along `normalWorld` (m/s).
      * Zero when the contact is separating or sliding purely tangentially.
      */
+    getMassKg(): number {
+        return this.rb.mass;
+    }
+
+    pointVelocity(pointWorld: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+        this._impulseR.subVectors(pointWorld, this.obj.position);
+        this._omegaWorld.copy(this.rb.angularVelocityBody).applyQuaternion(this.obj.quaternion);
+        return out.crossVectors(this._omegaWorld, this._impulseR).add(this.velocity);
+    }
+
+    invEffectiveMass(pointWorld: THREE.Vector3, dirWorld: THREE.Vector3): number {
+        this._impulseR.subVectors(pointWorld, this.obj.position);
+        // r x d in the body frame, through the (diagonal) inertia.
+        this._v.crossVectors(this._impulseR, dirWorld).applyQuaternion(this.invOrient.copy(this.obj.quaternion).invert());
+        const I = this.rb.inertia;
+        return 1 / this.rb.mass + this._v.x * this._v.x / I.x + this._v.y * this._v.y / I.y + this._v.z * this._v.z / I.z;
+    }
+
     contactSpeedIntoNormal(pointWorld: THREE.Vector3, normalWorld: THREE.Vector3): number {
         this.rb.orientation.copy(this.obj.quaternion);
         this.rb.velocityWorld.copy(this.velocity);
@@ -465,6 +488,8 @@ export class Fm2FlightModel extends FlightModel {
         // Publish rigid-body state back to the base model.
         this.obj.quaternion.copy(this.rb.orientation);
         this.velocity.copy(this.rb.velocityWorld);
+        // How fast it was sinking as it met the ground, before the contact clamps take it out.
+        this.stepSinkMps = Math.max(0, -this.velocity.y);
         // Soft springs alone tunnel on rising terrain; clamp contacts to the
         // heightfield (hills, ski jumps, flat datum — anything groundHeightAt returns).
         this.resolveGearTerrainPenetration();
@@ -845,25 +870,34 @@ export class Fm2FlightModel extends FlightModel {
         const rollAngle = Math.asin(clamp(this._right.y, -1, 1));
 
         const env = this.config.envelope;
-        // Sink-rate crashes only count once the oleo is bottomed (or gear is up).
-        // Mid-stroke compression is normal spring travel, not a hard deck strike.
-        let maxCompress = 0;
-        for (let i = 0; i < this.gearCompression.length; i++) {
-            if (this.gearCompression[i] > maxCompress) maxCompress = this.gearCompression[i];
-        }
-        const oleoBottomed = !this.landingGearDeployed
-            || maxCompress >= this.maxGearStrokeM * 0.95;
-        const hardContact = oleoBottomed
-            && this.velocity.y < -env.landingMaxVerticalSpeedMps;
+        // The sink rate the aircraft arrived with: the gear stops and clamps it, so by now the
+        // velocity says nothing. (Mid-stroke spring travel at a normal rate is not a hard landing.)
+        const sink = this.stepSinkMps;
         const badAttitude = Math.abs(rollAngle) > env.landingMaxRollRad || pitchAngle < env.landingMinPitchRad;
 
-        if (!this.landed && (hardContact || speed > env.landingMaxSpeedMps)) {
-            if (!this.landingGearDeployed || hardContact || badAttitude) {
+        if (!this.landingGearDeployed) {
+            // A belly landing is judged once, at touchdown; after that it is sliding, held up by the
+            // ground contact (the solid-world response), which needs the weight it carries.
+            if (this.landed) {
+                return;
+            }
+            const hardness = bellyHardness(sink, speed, rollAngle, pitchAngle, env.landingMinPitchRad);
+            if (hardness > BELLY_FATAL_HARDNESS) {
                 this.crashed = true;
                 return;
             }
+            this.reportHardLanding(damageFraction(hardness, BELLY_SOFT_HARDNESS, BELLY_FATAL_HARDNESS));
+            this.landed = true;
+            return;
         }
-        if (!this.landingGearDeployed && this.velocity.y < -1.0) {
+        // Gear down: up to the envelope's limit it is a landing; past it the airframe is damaged
+        // (gear legs shear, the structure bends); far past it, it is fatal.
+        if (sink > GEAR_FATAL_SINK_MPS) {
+            this.crashed = true;
+            return;
+        }
+        this.reportHardLanding(damageFraction(sink, env.landingMaxVerticalSpeedMps, GEAR_FATAL_SINK_MPS));
+        if (!this.landed && speed > env.landingMaxSpeedMps && badAttitude) {
             this.crashed = true;
             return;
         }

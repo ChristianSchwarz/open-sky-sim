@@ -17,6 +17,9 @@ import { Scene, SceneLayers } from "../scene";
 import { AircraftFx } from './aircraftFx';
 import { AircraftForceVectors } from './aircraftForceVectors';
 import { setAircraftShadowPose } from './aircraftShadow';
+import { WreckField, WreckPart, WreckTracker } from './wreckField';
+import { AirframeDamage } from './airframeDamage';
+import { attachToRenderList } from '../../render/renderList';
 import { trackAircraftMaterial, trackAircraftMesh } from './aircraftDebug';
 import { SUN_STATE } from '../materials/shaders/sun';
 import { WeaponsTarget } from './weaponsTarget';
@@ -182,6 +185,24 @@ export class PlayerEntity implements Entity {
 
     private _v = new THREE.Vector3();
     private _q = new THREE.Quaternion();
+    private readonly wreck = new WreckTracker();
+    /** What hard but survivable ground impacts have done to the airframe: bent, torn. */
+    readonly damage = new AirframeDamage();
+    private damageLowestHealth = Infinity;
+    private readonly _dmgPos = new THREE.Vector3();
+    private readonly _dmgQuat = new THREE.Quaternion();
+    /**
+     * After a crash the camera frame is held at the last good heading from
+     * before it, so the camera keeps its angles and does not flip with the
+     * tumbling wreckage; only its position follows the cockpit piece.
+     */
+    private _steadyValid = false;
+    private readonly _preCrashHeading = new THREE.Vector3(0, 0, 1);
+    private readonly _steadyPos = new THREE.Vector3();
+    private readonly _steadyQuat = new THREE.Quaternion();
+    private readonly _steadyHeading = new THREE.Vector3(0, 0, 1);
+    private readonly _steadyFwd = new THREE.Vector3();
+    private readonly _wreckVel = new THREE.Vector3();
     private readonly _hinge = new THREE.Vector3();
     private readonly _hookDir = new THREE.Vector3();
     private readonly _hookStowedDir = new THREE.Vector3();
@@ -207,6 +228,10 @@ export class PlayerEntity implements Entity {
         shift.point(this.displayPosition);
         shift.orientation(this.displayQuaternion);
         shift.vector(this.displayVelocity);
+        shift.point(this._steadyPos);
+        shift.orientation(this._steadyQuat);
+        shift.vector(this._steadyHeading);
+        shift.vector(this._preCrashHeading);
         shift.point(this.shadowPosition);
         shift.orientation(this.shadowQuaternion);
         shift.vector(this.carrierRideLocal);
@@ -217,6 +242,7 @@ export class PlayerEntity implements Entity {
     private simulationPaused = false;
     private _exteriorView: boolean = false;
     private _showcaseMode = false;
+    private replayPose: { position: THREE.Vector3; quaternion: THREE.Quaternion; velocity: THREE.Vector3 } | undefined;
     private showcasePosition = new THREE.Vector3(0, PLANE_DISTANCE_TO_GROUND, 0);
     private showcaseQuaternion = new THREE.Quaternion();
     private showcasePickLists: Map<string, THREE.Scene> = new Map([
@@ -433,6 +459,7 @@ export class PlayerEntity implements Entity {
         if (simHealth >= 0) {
             this.health = simHealth;
         }
+        this.repairDamageIfRestored();
 
         if (!this.isWorkerControlled()) {
             if (this.health <= 0) {
@@ -529,6 +556,13 @@ export class PlayerEntity implements Entity {
             this.displayVelocity.set(0, 0, 0);
             return;
         }
+        if (this.replayPose) {
+            this.displayPosition.copy(this.replayPose.position);
+            this.displayQuaternion.copy(this.replayPose.quaternion);
+            this.displayVelocity.copy(this.replayPose.velocity);
+            this._steadyValid = false;
+            return;
+        }
         this.flightModel.getRenderPosition(this.displayPosition);
         this.flightModel.getRenderQuaternion(this.displayQuaternion);
         this.flightModel.getRenderVelocity(this.displayVelocity);
@@ -540,6 +574,38 @@ export class PlayerEntity implements Entity {
                 pose.position.z + this.carrierRideLocal.z,
             );
         }
+        // Once the airframe has broken up, every view rides the cockpit piece.
+        if (this.wreck.shown
+            && this.wreck.field?.cockpitBodyPose(PLAYER_SIM_ID, this.displayPosition, this.displayQuaternion)) {
+            this.steadyWreckPose();
+        } else {
+            this._steadyValid = false;
+            // Remember the last usable heading (not when pointing straight up or down).
+            const fwd = this._steadyFwd.copy(FORWARD).applyQuaternion(this.displayQuaternion);
+            fwd.y = 0;
+            if (fwd.lengthSq() > 0.09) {
+                this._preCrashHeading.copy(fwd).normalize();
+            }
+        }
+    }
+
+    /**
+     * Replace the wreckage pose by one a camera can sit on without flipping:
+     * the place of the cockpit piece, smoothed over its bounces, but with a
+     * frame fixed at the heading the aircraft had before the crash. Its own
+     * pitch, roll and spin never reach the camera.
+     */
+    private steadyWreckPose(): void {
+        if (!this._steadyValid) {
+            this._steadyValid = true;
+            this._steadyHeading.copy(this._preCrashHeading);
+            this._steadyQuat.setFromUnitVectors(FORWARD, this._steadyHeading);
+            this._steadyPos.copy(this.displayPosition);
+        } else {
+            this._steadyPos.lerp(this.displayPosition, 0.22);
+        }
+        this.displayPosition.copy(this._steadyPos);
+        this.displayQuaternion.copy(this._steadyQuat);
     }
 
     /**
@@ -833,6 +899,8 @@ export class PlayerEntity implements Entity {
 
     render3D(targetWidth: number, targetHeight: number, camera: THREE.Camera, lists: Map<string, THREE.Scene>, palette: Palette): void {
 
+        this.updateWreck();
+
         // No planform silhouette once the sun is too low to cast one.
         if (!this.isCrashed && !this._showcaseMode && SUN_STATE.shadowStrength > 0) {
             setAircraftShadowPose(
@@ -846,7 +914,7 @@ export class PlayerEntity implements Entity {
                 SceneLayers.EntityFX, SceneLayers.EntityFX, lists);
         }
 
-        if (this._exteriorView) {
+        if (this._exteriorView && !this.wreck.shown) {
             this.updateDisplayTransform();
             this.fx.update(
                 this.throttleUnit,
@@ -861,10 +929,20 @@ export class PlayerEntity implements Entity {
                 lodCount - 1,
             );
 
-            this.modelBody.addToRenderList(
-                this.displayPosition, this.displayQuaternion, this.obj.scale,
-                targetWidth, camera, palette,
-                SceneLayers.EntityFlats, SceneLayers.EntityVolumes, lists, lod);
+            if (this.damage.root) {
+                // Bent and torn by an impact it survived: the damaged airframe, in place of the whole one.
+                const list = lists.get(SceneLayers.EntityVolumes);
+                if (list) {
+                    this.damage.root.position.copy(this.displayPosition);
+                    this.damage.root.quaternion.copy(this.displayQuaternion);
+                    attachToRenderList(list, this.damage.root);
+                }
+            } else {
+                this.modelBody.addToRenderList(
+                    this.displayPosition, this.displayQuaternion, this.obj.scale,
+                    targetWidth, camera, palette,
+                    SceneLayers.EntityFlats, SceneLayers.EntityVolumes, lists, lod);
+            }
 
             this.fx.addAfterburnerToRenderList(lists);
 
@@ -889,9 +967,13 @@ export class PlayerEntity implements Entity {
                 const showLandingGear = this._showcaseMode
                     || this.gearAnimated
                     || this.landingGearState !== AircraftDeviceState.RETRACTED;
-                if (showLandingGear) {
+                if (showLandingGear && !this.damage.gearInRoot && !this.damage.isPartRipped(0)) {
+                    this._dmgPos.copy(this.displayPosition);
+                    this._dmgQuat.copy(this.displayQuaternion);
+                    this.damage.transformPart(
+                        0, this._dmgPos, this._dmgQuat, this.displayPosition, this.displayQuaternion, this.obj.scale);
                     this.modelLandingGear?.addToRenderList(
-                        this.displayPosition, this.displayQuaternion, this.obj.scale,
+                        this._dmgPos, this._dmgQuat, this.obj.scale,
                         targetWidth, camera, palette,
                         SceneLayers.EntityFlats, SceneLayers.EntityVolumes, lists, 0);
                 }
@@ -908,9 +990,14 @@ export class PlayerEntity implements Entity {
                 }
                 for (let i = 0; i < this.controlSurfaceDescriptors.length; i++) {
                     const d = this.controlSurfaceDescriptors[i];
+                    if (this.damage.isPartRipped(1 + i) || this.damage.rootParts.has(1 + i)) {
+                        continue; // torn off by an earlier impact
+                    }
                     poseSurface(
                         d, d.parentIndex >= 0 ? this.controlSurfaceDescriptors[d.parentIndex] : undefined,
                         this.displayPosition, this.displayQuaternion, this._v, this._q);
+                    this.damage.transformPart(
+                        1 + i, this._v, this._q, this.displayPosition, this.displayQuaternion, this.obj.scale);
                     d.model.addToRenderList(
                         this._v, this._q, this.obj.scale,
                         targetWidth, camera, palette,
@@ -1121,6 +1208,15 @@ export class PlayerEntity implements Entity {
         this.updateDisplayTransform();
     }
 
+    /**
+     * Show the aircraft at a recorded pose instead of the sim's (flight replay);
+     * `undefined` returns to the live one. The caller keeps the sim paused.
+     */
+    setReplayPose(pose: { position: THREE.Vector3; quaternion: THREE.Quaternion; velocity: THREE.Vector3 } | undefined): void {
+        this.replayPose = pose;
+        this.updateDisplayTransform();
+    }
+
     get showcaseMode(): boolean {
         return this._showcaseMode;
     }
@@ -1189,6 +1285,119 @@ export class PlayerEntity implements Entity {
      */
     setGroundHeightAt(fn: (x: number, z: number) => number): void {
         this.groundHeightAt = fn;
+    }
+
+    /** The pilot's eye on the wreck piece it is on, for the crash camera. False if no wreck. */
+    getWreckFocus(out: THREE.Vector3): boolean {
+        return this.wreck.shown && (this.wreck.field?.cockpitWorld(PLAYER_SIM_ID, out) ?? false);
+    }
+
+    /** Where the airframe goes to pieces when it crashes. */
+    setWreckField(field: WreckField): void {
+        this.wreck.field = field;
+    }
+
+    /** Break the airframe up on the frame it first reads as crashed. */
+    private updateWreck(): void {
+        const field = this.wreck.field;
+        if (!field || this._showcaseMode) {
+            return;
+        }
+        this.updateDisplayTransform();
+        const vel = this.wreck.sample(this.isCrashed, this.displayVelocity, this._wreckVel);
+        if (vel === undefined) {
+            return;
+        }
+        this.wreck.shown = field.spawn({
+            id: PLAYER_SIM_ID,
+            cockpit: this.cockpitOffset.clone(),
+            body: this.modelBody.model,
+            position: this.displayPosition.clone(),
+            quaternion: this.displayQuaternion.clone(),
+            scale: this.obj.scale.clone(),
+            velocity: vel.clone(),
+            parts: this.collectWreckParts(),
+            damage: this.damage.active ? this.damage : undefined,
+        });
+    }
+
+    /** The gear and control surfaces as pieces, at their undamaged poses (gear id 0, surface i id 1 + i). */
+    private collectWreckParts(): WreckPart[] {
+        const parts: WreckPart[] = [];
+        if (this.modelLandingGear && (this.landingGearState !== AircraftDeviceState.RETRACTED || this.gearAnimated)) {
+            parts.push({
+                id: 0,
+                model: this.modelLandingGear.model,
+                position: this.displayPosition.clone(),
+                quaternion: this.displayQuaternion.clone(),
+                kind: 'gear',
+            });
+        }
+        for (let i = 0; i < this.controlSurfaceDescriptors.length; i++) {
+            const d = this.controlSurfaceDescriptors[i];
+            poseSurface(
+                d, d.parentIndex >= 0 ? this.controlSurfaceDescriptors[d.parentIndex] : undefined,
+                this.displayPosition, this.displayQuaternion, this._v, this._q);
+            parts.push({
+                id: 1 + i,
+                model: d.model.model,
+                position: this._v.clone(),
+                quaternion: this._q.clone(),
+                kind: 'surface',
+            });
+        }
+        return parts;
+    }
+
+    /**
+     * The aircraft has hit the ground hard but not hard enough to be destroyed:
+     * bend its airframe and tear off what the blow is hard enough to take
+     * (see WreckField.applyDamage). `severity` is on the crash scale, `hit` the
+     * impact point in the scene. It carries on flying, or sliding, damaged.
+     */
+    noteGroundImpact(severity: number, hit: THREE.Vector3): void {
+        const field = this.wreck.field;
+        if (!field || this._showcaseMode || this.isCrashed || this.wreck.shown) {
+            return;
+        }
+        this.updateDisplayTransform();
+        field.applyDamage({
+            id: PLAYER_SIM_ID,
+            cockpit: this.cockpitOffset.clone(),
+            body: this.modelBody.model,
+            position: this.displayPosition.clone(),
+            quaternion: this.displayQuaternion.clone(),
+            scale: this.obj.scale.clone(),
+            velocity: this.displayVelocity.clone(),
+            parts: this.collectWreckParts(),
+        }, this.damage, severity, hit);
+        this.damageLowestHealth = Math.min(this.damageLowestHealth, this.health);
+    }
+
+    /**
+     * A point of the airframe (body frame, metres) in the scene, for fires that
+     * start on it when it is damaged. False once the aircraft has crashed: its
+     * wreck carries its own fires then.
+     */
+    damagePointWorld(local: THREE.Vector3, out: THREE.Vector3): boolean {
+        if (this.isCrashed || this.wreck.shown) {
+            return false;
+        }
+        out.copy(local).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
+        return true;
+    }
+
+    /** A new aircraft (health back to full after it was lower) is not damaged. */
+    private repairDamageIfRestored(): void {
+        if (!this.damage.active) {
+            this.damageLowestHealth = Infinity;
+            return;
+        }
+        this.damageLowestHealth = Math.min(this.damageLowestHealth, this.health);
+        if (this.health >= this.maxHealth && this.damageLowestHealth < this.maxHealth - 0.1) {
+            this.damage.reset();
+            this.damageLowestHealth = Infinity;
+        }
     }
 
     /**

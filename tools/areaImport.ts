@@ -694,7 +694,15 @@ export function dataSteps(
             // --osm-landuse here is what writes the LVR4 landuse regions the
             // mesh bake cuts facets along; the cover stage's flag of the same
             // name only paints .plc classes and cannot produce them.
-            args: ['tools/bake_osm_coast.py', `--bbox=${bbox}`, '--osm-landuse', pbfArg],
+            //
+            // --allow-tiny-land: the heights step above has already skipped
+            // every box with no land, so a box that reaches here has some, and
+            // near an archipelago it can be a sliver (a Canary chunk holding
+            // only La Palma's northern tip is 0.08 % land). The coast tool's
+            // "did not close" guard exists for live-Overpass fetches that lose
+            // a chain; the importer reads a complete local extract.
+            args: ['tools/bake_osm_coast.py', `--bbox=${bbox}`, '--osm-landuse', pbfArg,
+                '--allow-tiny-land'],
         },
         // The road vectors: their own layer beside the coast's, read only by
         // the texture and road-stroke bakes at the very end. So they run in
@@ -758,6 +766,13 @@ function gradeSteps(bbox: string, rebaking = false): Step[] {
         {
             label: 'measuring lines and bridge ends in the lidar', cmd: PYTHON,
             args: ['tools/measure_lidar.py', `--bbox=${bbox}`],
+            // An unreachable lidar server (IGN's WCS times out for minutes at
+            // a time) is exit 1 with the rest of the leaves measured. The
+            // measurements only refine the beds, so grade without them and let
+            // a re-run measure the gap rather than stop the import here.
+            partialCode: 1,
+            partialWarning: 'the lidar source could not be reached for some leaves, so their '
+                + 'road and rail beds were graded from the height model alone - re-run to measure them',
         },
         {
             label: rebaking ? 'rebaking bridges' : 'baking bridges', cmd: process.execPath,
@@ -771,6 +786,26 @@ function gradeSteps(bbox: string, rebaking = false): Step[] {
             label: rebaking ? 'rebaking far land' : 'baking far land', cmd: process.execPath,
             args: ['--import', 'tsx', 'tools/bake_planet_farland.ts', '--bbox', bbox],
         },
+        // What the building bake reads beyond the OSM footprints: LoD2 first
+        // (it adds the .bvl footprints OSM lacks, which the colours then cover),
+        // then roof colours off the orthophotos, then heights and ridges off
+        // the surface model. Each is wired for a few surveying offices only
+        // (Bavaria, Brandenburg, Berlin) and skips a leaf outside them, so for
+        // any other area they finish at once. A leaf that fails to download
+        // is exit 1 with the rest written: the import goes on, a re-run fills
+        // the gap, and a leaf already measured is not fetched again.
+        ...['import_lod2.py', 'measure_buildings.py', 'measure_roof_shapes.py'].map((tool): Step => ({
+            label: {
+                'import_lod2.py': 'matching LoD2 buildings',
+                'measure_buildings.py': 'measuring roof colours',
+                'measure_roof_shapes.py': 'fitting roof shapes',
+            }[tool]!,
+            cmd: PYTHON,
+            args: [`tools/${tool}`, `--bbox=${bbox}`],
+            partialCode: 1,
+            partialWarning: 'some leaves could not be fetched or measured, so their buildings keep '
+                + 'the rule-based look - re-run the import to fill them in',
+        })),
         {
             label: rebaking ? 'rebaking buildings' : 'baking buildings', cmd: process.execPath,
             args: ['--import', 'tsx', 'tools/bake_planet_buildings.ts', '--bbox', bbox],
@@ -1169,7 +1204,11 @@ export function ensureTerrain(): void {
     const work = hasSource
         ? (async () => {
             // Unscoped: every tile the source pyramid holds, not one box.
-            const steps = meshSteps([]).map(s => ({ ...s, args: s.args.slice(0, 3) }));
+            // The Python measuring stages (lidar, LoD2, roof colours and
+            // shapes) are left out: each needs a box or a leaf to look at,
+            // and they only add to a pyramid that has been baked with data.
+            const steps = meshSteps([]).filter(s => s.cmd === process.execPath)
+                .map(s => ({ ...s, args: s.args.slice(0, 3) }));
             job.stepCount = steps.length;
             for (let i = 0; i < steps.length; i++) {
                 await runStep(job, steps[i], i);

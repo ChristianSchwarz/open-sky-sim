@@ -29,7 +29,7 @@ export const TERRAIN_VIEW_RANGE_M = 450000;
 
 export const DEBRIS_PARTICLE_COUNT = 48;
 /** Hit fire/smoke puff pool (shared across aircraft leaks). */
-export const DAMAGE_SMOKE_PARTICLE_COUNT = 480;
+export const DAMAGE_SMOKE_PARTICLE_COUNT = 4800;
 
 
 export const AIRBASE_RUNWAY = { x: 0, y: 0, z: 0 };

@@ -79,6 +79,7 @@ const SPAWN_ACTIONS: { mode: SpawnMode; label: string; key: string }[] = [
     { mode: 'carrierBarricade', label: 'Carrier barricade', key: '8' },
     { mode: 'highAlt', label: '10 km', key: '6' },
     { mode: 'space', label: 'Space', key: '7' },
+    { mode: 'closeWing', label: 'Wingtip', key: '9' },
 ];
 
 /** A row of the Help tab: the keys, then what they do. */
@@ -119,6 +120,7 @@ const VIEWS_HELP: HelpEntry[] = [
     { keys: ['F3'], action: 'Exterior left/right' },
     { keys: ['F6'], action: 'Exterior back/front of AI plane (looks at player)' },
     { keys: ['F12'], action: 'Aircraft showcase (black background, orbit with numpad)' },
+    { keys: ['F4'], action: 'Replay the flight so far (Space pause, arrows seek and speed, or move the camera in the Free view; F4/Esc exit)' },
     { keys: ['4'], action: 'To/from target' },
     { keys: ['Num 4', 'Num 6', 'Num 8', 'Num 2'], action: 'Move camera around aircraft' },
     { keys: ['Num 5'], action: 'Recenter camera' },

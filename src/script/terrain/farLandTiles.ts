@@ -7,7 +7,9 @@
  * the drawn-height index reads it, the smooth shading is built from it. A far
  * level only follows: its border corners are the near border's vertices,
  * copied over whenever the stitcher has moved them, so the far land meets its
- * neighbours exactly where the near land would.
+ * neighbours exactly where the near land would. In SMOOTH shading a level is
+ * welded the way the near land is (buildSmoothLandGeometry), the first time it
+ * is wanted, a few a frame.
  */
 
 import * as THREE from 'three';
@@ -15,16 +17,26 @@ import { TerrainManifest, farLandTileUrl } from './manifest';
 import { PflTile, decodePfl, landFingerprint } from './pfl';
 import { borderEntryIndex } from './ptm';
 import { TileIndex } from './tileIndex';
-import { TileMeshes, leanEdgeNormals } from './tileMesh';
+import { TileMeshes, buildSmoothLandGeometryFromFaceted, leanEdgeNormals } from './tileMesh';
 import { TileStore } from './tileStore';
 import { TileKey } from './tiling';
 import { LAND_TONE_BASE } from './tones';
 
 /** Decoded sidecars kept; a bound one no longer needs its bytes. */
 const FAR_LAND_CACHE_BYTES = 32 * 1024 * 1024;
+/** Main-thread time a frame may spend welding far levels for SMOOTH shading. */
+const SMOOTH_BUILD_MS = 2;
+
+export interface FarLandLevel {
+    toleranceM: number;
+    geometry: THREE.BufferGeometry;
+    borderMap: Uint32Array;
+    /** The level welded for SMOOTH shading, once wanted; 'none' when it has no land. */
+    smooth?: THREE.BufferGeometry | 'none';
+}
 
 export interface FarLandMeshes {
-    levels: Array<{ toleranceM: number; geometry: THREE.BufferGeometry; borderMap: Uint32Array }>;
+    levels: FarLandLevel[];
     /** SeamState.version the border corners were last copied at. */
     seamVersion: number;
     bytes: number;
@@ -41,6 +53,8 @@ export class FarLandTiles {
     private index: TileIndex | undefined;
     private attached = 0;
     private triangles = 0;
+    /** performance.now() past which no more levels are welded this frame. */
+    private smoothDeadline = 0;
 
     constructor(opts: FarLandOptions) {
         const spec = opts.manifest.farLand;
@@ -65,14 +79,21 @@ export class FarLandTiles {
         return this.store !== undefined && id.z === this.zoom && (this.index ? this.index.has(id) : true);
     }
 
+    /** Start a frame's budget for welding levels (SMOOTH_BUILD_MS). */
+    beginFrame(): void {
+        this.smoothDeadline = performance.now() + SMOOTH_BUILD_MS;
+    }
+
     /**
      * Draw a tile's land at the coarsest far level within `maxToleranceM`
      * (0: the near land), fetching its sidecar the first time one is wanted.
      * `near` is the geometry the near land is drawn with in the current
-     * shading; without it, or for a tile without far land, nothing changes.
+     * shading, `smooth` whether that shading is SMOOTH; without `near`, or for
+     * a tile without far land, nothing changes. A level not yet welded for
+     * SMOOTH draws the near land meanwhile.
      */
     show(id: TileKey, meshes: TileMeshes, maxToleranceM: number, priority: number,
-        near: THREE.BufferGeometry | undefined): void {
+        near: THREE.BufferGeometry | undefined, smooth = false): void {
         const land = meshes.land;
         if (!land || !near) {
             return;
@@ -82,12 +103,18 @@ export class FarLandTiles {
         if (maxToleranceM > 0 && far === undefined && this.has(id)) {
             this.request(id, meshes, priority);
         } else if (far !== undefined && far !== 'pending' && far !== 'none') {
+            let pick: FarLandLevel | undefined;
             for (const level of far.levels) {
                 if (level.toleranceM <= maxToleranceM) {
-                    geometry = level.geometry;
+                    pick = level;
                 }
             }
-            if (geometry !== near) {
+            if (pick && smooth && pick.smooth === undefined && performance.now() < this.smoothDeadline) {
+                this.weld(meshes, far, pick);
+            }
+            const chosen = pick && (smooth ? pick.smooth : pick.geometry);
+            if (chosen && chosen !== 'none') {
+                geometry = chosen;
                 this.followSeam(meshes, far);
             }
         }
@@ -150,6 +177,21 @@ export class FarLandTiles {
         return far;
     }
 
+    /**
+     * Weld a level for SMOOTH shading, from its faceted geometry as the seam
+     * left it; followSeam keeps it there from then on.
+     */
+    private weld(meshes: TileMeshes, far: FarLandMeshes, level: FarLandLevel): void {
+        const smooth = buildSmoothLandGeometryFromFaceted(level.geometry);
+        level.smooth = smooth ?? 'none';
+        if (smooth) {
+            const bytes = (smooth.getAttribute('position').array as Int16Array).byteLength * 3
+                + (smooth.getIndex()?.array.byteLength ?? 0);
+            far.bytes += bytes;
+            meshes.bytes += bytes;
+        }
+    }
+
     /** Copy the near border, as the stitcher left it, onto each level's border corners. */
     private followSeam(meshes: TileMeshes, far: FarLandMeshes): void {
         const version = meshes.seam?.version ?? 0;
@@ -172,6 +214,20 @@ export class FarLandTiles {
                 pos[corner + 2] = near[slot + 2];
             }
             attr.needsUpdate = true;
+            // The welded level: its index maps each faceted corner to the
+            // shared vertex it became.
+            if (level.smooth !== undefined && level.smooth !== 'none') {
+                const smoothAttr = level.smooth.getAttribute('position') as THREE.BufferAttribute;
+                const smoothPos = smoothAttr.array as Int16Array;
+                const welded = level.smooth.getIndex()!.array;
+                for (let i = 0; i < map.length; i += 2) {
+                    const v = welded[map[i]] * 3, slot = map[i + 1] * 3;
+                    smoothPos[v] = near[slot];
+                    smoothPos[v + 1] = near[slot + 1];
+                    smoothPos[v + 2] = near[slot + 2];
+                }
+                smoothAttr.needsUpdate = true;
+            }
         }
     }
 
@@ -181,6 +237,9 @@ export class FarLandTiles {
         if (far !== undefined && far !== 'pending' && far !== 'none') {
             for (const level of far.levels) {
                 level.geometry.dispose();
+                if (level.smooth !== undefined && level.smooth !== 'none') {
+                    level.smooth.dispose();
+                }
                 this.triangles -= level.geometry.getAttribute('position').count / 3;
             }
             this.attached--;

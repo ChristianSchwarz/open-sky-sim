@@ -126,10 +126,26 @@ export interface SimHitEvent {
     targetId: string;
     damage: number;
     /**
+     * For a ground scrape: how fast the contact point was going into the surface
+     * (m/s). The render side judges how badly the airframe is bent or torn by it.
+     */
+    impactSpeed?: number;
+    /**
+     * For a ground impact that damages the airframe: how hard, on the crash scale
+     * (0.2 .. 1.5), when the sim has already worked it out (a belly landing's damage
+     * grows linearly from none to destroyed). Used in place of one from `impactSpeed`.
+     */
+    severity?: number;
+    /**
      * `gun` (default): airframe fire/smoke + debris.
      * `scrape`: ground-contact puff at the impact point only (no hull fire).
      */
     source?: 'gun' | 'scrape';
+    /**
+     * For a scrape: the airframe is sliding along the ground at this contact point
+     * (not striking it): sparks and a little dust, no damage and no bending.
+     */
+    slide?: boolean;
 }
 
 interface SimSnapshot {

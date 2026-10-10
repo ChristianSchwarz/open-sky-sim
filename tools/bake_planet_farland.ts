@@ -14,6 +14,8 @@
  *     --bbox w,s,e,n   only leaves in this box; the index is merged
  *     --jobs N         worker threads (default: CPUs - 1)
  *     --levels a,b     tolerances in metres (default 1,4)
+ *     --resume         skip leaves whose sidecar is newer than their mesh
+ *                      (an interrupted run); the index still covers them all
  *     --no-bundle      run the worker under tsx instead of an esbuild bundle
  */
 
@@ -39,10 +41,11 @@ interface Args {
     jobs?: number;
     levelsM: number[];
     noBundle: boolean;
+    resume: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-    const a: Args = { dir: 'assets/terrain', levelsM: [1, 4], noBundle: false };
+    const a: Args = { dir: 'assets/terrain', levelsM: [1, 4], noBundle: false, resume: false };
     for (let i = 0; i < argv.length; i++) {
         const k = argv[i];
         const next = () => argv[++i];
@@ -56,6 +59,7 @@ function parseArgs(argv: string[]): Args {
         } else if (k === '--jobs') a.jobs = Math.max(1, Number(next()));
         else if (k === '--levels') a.levelsM = next().split(',').map(Number);
         else if (k === '--no-bundle') a.noBundle = true;
+        else if (k === '--resume') a.resume = true;
         else throw new Error(`unknown argument ${k}`);
     }
     if (a.levelsM.length === 0 || !a.levelsM.every(m => m > 0) || a.levelsM.some((m, i) => i > 0 && m <= a.levelsM[i - 1])) {
@@ -98,24 +102,30 @@ async function main(): Promise<void> {
     const leafZoom: number = manifest.mesh.maxZoom;
     const tiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath)))
         .filter(k => k.z === leafZoom && (args.bbox === undefined || overlaps(boundsOf(k), args.bbox)));
-    const jobs = Math.max(1, Math.min(args.jobs ?? os.cpus().length - 1, tiles.length));
-    console.log(`bake_planet_farland: ${tiles.length} leaves${args.bbox ? ' (scoped)' : ''}, levels ${args.levelsM.join(', ')} m, `
+    // Resuming: a sidecar written after its leaf's mesh was is that mesh's.
+    const mtime = (f: string) => (fs.existsSync(f) ? fs.statSync(f).mtimeMs : -1);
+    const todo = args.resume
+        ? tiles.filter(k => mtime(tileFile(args.dir, k, FAR_LAND_EXT)) < mtime(tileFile(args.dir, k, '.ptm')))
+        : tiles;
+    const jobs = Math.max(1, Math.min(args.jobs ?? os.cpus().length - 1, todo.length));
+    console.log(`bake_planet_farland: ${todo.length} leaves${todo.length < tiles.length ? ` of ${tiles.length} (resumed)` : ''}`
+        + `${args.bbox ? ' (scoped)' : ''}, levels ${args.levelsM.join(', ')} m, `
         + `${jobs} workers, ${(freeBytes(args.dir) / 1e9).toFixed(1)} GB free`);
     const cfg: FarLandConfig = { dir: args.dir, enuOrigin: manifest.enuOrigin, levelsM: args.levelsM };
     const worker = await prepareWorker(args.noBundle);
 
-    const results: Array<FarLandResult | undefined> = new Array(tiles.length);
+    const results: Array<FarLandResult | undefined> = new Array(todo.length);
     const errors: string[] = [];
     let stoppedForDisk = false;
     await new Promise<void>((resolve, reject) => {
-        if (tiles.length === 0) {
+        if (todo.length === 0) {
             resolve();
             return;
         }
         let next = 0, done = 0, running = 0, lastLine = 0;
         const workers: Worker[] = [];
         const dispatch = (w: Worker): boolean => {
-            if (next >= tiles.length || stoppedForDisk) {
+            if (next >= todo.length || stoppedForDisk) {
                 return false;
             }
             if (next % 50 === 0 && freeBytes(args.dir) < MIN_FREE_BYTES) {
@@ -124,7 +134,7 @@ async function main(): Promise<void> {
             }
             const idx = next++;
             running++;
-            w.postMessage({ idx, key: tiles[idx] });
+            w.postMessage({ idx, key: todo[idx] });
             return true;
         };
         const finish = () => {
@@ -144,9 +154,9 @@ async function main(): Promise<void> {
                 } else {
                     results[msg.idx] = msg.result;
                 }
-                if (Date.now() - lastLine > 1000 || done === tiles.length) {
+                if (Date.now() - lastLine > 1000 || done === todo.length) {
                     const el = (Date.now() - t0) / 1000;
-                    process.stdout.write(`\r  ${done}/${tiles.length} (${((done / tiles.length) * 100).toFixed(1)}%)  ${(el / 60).toFixed(1)} min   `);
+                    process.stdout.write(`\r  ${done}/${todo.length} (${((done / todo.length) * 100).toFixed(1)}%)  ${(el / 60).toFixed(1)} min   `);
                     lastLine = Date.now();
                 }
                 if (!dispatch(w) && running === 0) {

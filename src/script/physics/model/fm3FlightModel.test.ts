@@ -40,6 +40,39 @@ function assertFinite(model: Fm3FlightModel): void {
 }
 
 describe('FM3 flight model', () => {
+    it('grades touchdowns: normal, hard but survivable and reported, fatal', () => {
+        const rest = fm2GroundRestHeight(defaultFm2Config);
+        const touchdown = (gearDown: boolean, speed: number, sink: number) => {
+            const model = new Fm3FlightModel();
+            model.reset();
+            model.position.set(0, rest + 0.2, 0);
+            model.quaternion.identity();
+            model.velocityVector = new THREE.Vector3(0, -sink, speed);
+            model.setLanded(false);
+            model.setLandingGearDeployed(gearDown);
+            model.setThrottle(0);
+            model.snapPhysicsState();
+            let hard = 0;
+            for (let i = 0; i < 3 * 120 && !model.isCrashed(); i++) {
+                model.update(DT);
+                hard = Math.max(hard, model.consumeHardLanding());
+            }
+            return { crashed: model.isCrashed(), hard };
+        };
+        const normal = touchdown(true, 70, 3);
+        assert.equal(normal.crashed, false);
+        assert.equal(normal.hard, 0);
+        const hardDown = touchdown(true, 70, 11);
+        assert.equal(hardDown.crashed, false);
+        assert.ok(hardDown.hard > 0 && hardDown.hard < 1);
+        assert.equal(touchdown(true, 70, 25).crashed, true);
+        const belly = touchdown(false, 70, 2.5);
+        assert.equal(belly.crashed, false);
+        assert.equal(belly.hard, 0);
+        assert.ok(touchdown(false, 70, 9).hard > 0);
+        assert.equal(touchdown(false, 70, 14).crashed, true);
+    });
+
     it('rests on the runway at idle', () => {
         const model = new Fm3FlightModel();
         const rest = fm2GroundRestHeight(defaultFm2Config);

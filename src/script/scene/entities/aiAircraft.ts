@@ -20,6 +20,9 @@ import { ModelManager } from '../models/models';
 import { Scene, SceneLayers } from '../scene';
 import { WeaponsTarget } from './weaponsTarget';
 import { flightConfigWithArrestorHook } from './arrestorCables';
+import { WreckField, WreckPart, WreckTracker } from './wreckField';
+import { AirframeDamage } from './airframeDamage';
+import { attachToRenderList } from '../../render/renderList';
 
 /** Same hit sphere as the player — shared airframe, different input only. */
 const DEFAULT_HIT_RADIUS = 10;
@@ -106,6 +109,13 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
     private readonly scale = new THREE.Vector3(1, 1, 1);
     private readonly _v = new THREE.Vector3();
     private readonly _q = new THREE.Quaternion();
+    private readonly wreck = new WreckTracker();
+    /** What hard but survivable ground impacts have done to the airframe: bent, torn. */
+    readonly damage = new AirframeDamage();
+    private damageLowestHealth = Infinity;
+    private readonly _dmgPos = new THREE.Vector3();
+    private readonly _dmgQuat = new THREE.Quaternion();
+    private readonly _wreckVel = new THREE.Vector3();
     /** Solid-ground Y under the aircraft (flat datum, hills, decks). Defaults to water/flat Y=0. */
     private groundHeightAt: (x: number, z: number) => number = () => 0;
 
@@ -300,6 +310,7 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
         if (health >= 0) {
             this.health = health;
         }
+        this.repairDamageIfRestored();
         if (this.gearAnimated) {
             this.modelLandingGear?.update(delta);
         }
@@ -465,6 +476,11 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             this.displayVelocity,
         );
 
+        this.updateWreck();
+        if (this.wreck.shown) {
+            return;
+        }
+
         // No planform silhouette once the sun is too low to cast one.
         if (!this.isCrashed() && SUN_STATE.shadowStrength > 0) {
             setAircraftShadowPose(
@@ -483,10 +499,20 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             getLodLevel(this.displayPosition, this.scale, targetWidth, camera, this.modelBody.model.maxSize),
             lodCount - 1,
         );
-        this.modelBody.addToRenderList(
-            this.displayPosition, this.displayQuaternion, this.scale,
-            targetWidth, camera, palette,
-            SceneLayers.EntityFlats, SceneLayers.EntityVolumes, lists, lod);
+        if (this.damage.root) {
+            // Bent and torn by an impact it survived: the damaged airframe, in place of the whole one.
+            const list = lists.get(SceneLayers.EntityVolumes);
+            if (list) {
+                this.damage.root.position.copy(this.displayPosition);
+                this.damage.root.quaternion.copy(this.displayQuaternion);
+                attachToRenderList(list, this.damage.root);
+            }
+        } else {
+            this.modelBody.addToRenderList(
+                this.displayPosition, this.displayQuaternion, this.scale,
+                targetWidth, camera, palette,
+                SceneLayers.EntityFlats, SceneLayers.EntityVolumes, lists, lod);
+        }
 
         this.fx.addAfterburnerToRenderList(lists);
 
@@ -497,9 +523,13 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             // the clip to bind before drawing retracted gear (avoids open-door rest).
             const showLandingGear = this.gearDeployed
                 || (this.gearAnimated && this.gearAnimReady);
-            if (showLandingGear) {
+            if (showLandingGear && !this.damage.gearInRoot && !this.damage.isPartRipped(0)) {
+                this._dmgPos.copy(this.displayPosition);
+                this._dmgQuat.copy(this.displayQuaternion);
+                this.damage.transformPart(
+                    0, this._dmgPos, this._dmgQuat, this.displayPosition, this.displayQuaternion, this.scale);
                 this.modelLandingGear?.addToRenderList(
-                    this.displayPosition, this.displayQuaternion, this.scale,
+                    this._dmgPos, this._dmgQuat, this.scale,
                     targetWidth, camera, palette,
                     SceneLayers.EntityFlats, SceneLayers.EntityVolumes, lists, 0);
             }
@@ -510,9 +540,14 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
             }
             for (let i = 0; i < this.controlSurfaces.length; i++) {
                 const d = this.controlSurfaces[i];
+                if (this.damage.isPartRipped(1 + i) || this.damage.rootParts.has(1 + i)) {
+                    continue; // torn off by an earlier impact
+                }
                 poseSurface(
                     d, d.parentIndex >= 0 ? this.controlSurfaces[d.parentIndex] : undefined,
                     this.displayPosition, this.displayQuaternion, this._v, this._q);
+                this.damage.transformPart(
+                    1 + i, this._v, this._q, this.displayPosition, this.displayQuaternion, this.scale);
                 d.model.addToRenderList(
                     this._v, this._q, this.scale,
                     targetWidth, camera, palette,
@@ -525,5 +560,112 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
 
     render2D(_targetWidth: number, _targetHeight: number, _camera: THREE.Camera, _lists: Set<string>, _painter: CanvasPainter, _palette: Palette): void {
         // Nothing
+    }
+
+    /** Where the airframe goes to pieces when it crashes. */
+    setWreckField(field: WreckField): void {
+        this.wreck.field = field;
+    }
+
+    /** Break the airframe up on the frame it first reads as crashed. */
+    private updateWreck(): void {
+        const field = this.wreck.field;
+        if (!field) {
+            return;
+        }
+        const vel = this.wreck.sample(this.isCrashed(), this.displayVelocity, this._wreckVel);
+        if (vel === undefined) {
+            return;
+        }
+        this.wreck.shown = field.spawn({
+            id: this.simId,
+            body: this.modelBody.model,
+            position: this.displayPosition.clone(),
+            quaternion: this.displayQuaternion.clone(),
+            scale: this.scale.clone(),
+            velocity: vel.clone(),
+            parts: this.collectWreckParts(),
+            damage: this.damage.active ? this.damage : undefined,
+        });
+    }
+
+    /** The gear and control surfaces as pieces, at their undamaged poses (gear id 0, surface i id 1 + i). */
+    private collectWreckParts(): WreckPart[] {
+        const parts: WreckPart[] = [];
+        if (this.modelLandingGear && (this.gearDeployed || this.gearAnimated)) {
+            parts.push({
+                id: 0,
+                model: this.modelLandingGear.model,
+                position: this.displayPosition.clone(),
+                quaternion: this.displayQuaternion.clone(),
+                kind: 'gear',
+            });
+        }
+        for (let i = 0; i < this.controlSurfaces.length; i++) {
+            const d = this.controlSurfaces[i];
+            poseSurface(
+                d, d.parentIndex >= 0 ? this.controlSurfaces[d.parentIndex] : undefined,
+                this.displayPosition, this.displayQuaternion, this._v, this._q);
+            parts.push({
+                id: 1 + i,
+                model: d.model.model,
+                position: this._v.clone(),
+                quaternion: this._q.clone(),
+                kind: 'surface',
+            });
+        }
+        return parts;
+    }
+
+    /**
+     * The aircraft has hit the ground hard but not hard enough to be destroyed:
+     * bend its airframe and tear off what the blow is hard enough to take
+     * (see WreckField.applyDamage). `severity` is on the crash scale, `hit` the
+     * impact point in the scene.
+     */
+    noteGroundImpact(severity: number, hit: THREE.Vector3): void {
+        const field = this.wreck.field;
+        if (!field || this.isCrashed() || this.wreck.shown) {
+            return;
+        }
+        this.flightModel.getRenderPosition(this.displayPosition);
+        this.flightModel.getRenderQuaternion(this.displayQuaternion);
+        this.flightModel.getRenderVelocity(this.displayVelocity);
+        field.applyDamage({
+            id: this.simId,
+            body: this.modelBody.model,
+            position: this.displayPosition.clone(),
+            quaternion: this.displayQuaternion.clone(),
+            scale: this.scale.clone(),
+            velocity: this.displayVelocity.clone(),
+            parts: this.collectWreckParts(),
+        }, this.damage, severity, hit);
+        this.damageLowestHealth = Math.min(this.damageLowestHealth, this.health);
+    }
+
+    /**
+     * A point of the airframe (body frame, metres) in the scene, for fires that
+     * start on it when it is damaged. False once the aircraft has crashed: its
+     * wreck carries its own fires then.
+     */
+    damagePointWorld(local: THREE.Vector3, out: THREE.Vector3): boolean {
+        if (this.isCrashed() || this.wreck.shown) {
+            return false;
+        }
+        out.copy(local).applyQuaternion(this.displayQuaternion).add(this.displayPosition);
+        return true;
+    }
+
+    /** A new aircraft (health back to full after it was lower) is not damaged. */
+    private repairDamageIfRestored(): void {
+        if (!this.damage.active) {
+            this.damageLowestHealth = Infinity;
+            return;
+        }
+        this.damageLowestHealth = Math.min(this.damageLowestHealth, this.health);
+        if (this.health >= this.maxHealth && this.damageLowestHealth < this.maxHealth - 0.1) {
+            this.damage.reset();
+            this.damageLowestHealth = Infinity;
+        }
     }
 }
