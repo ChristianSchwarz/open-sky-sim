@@ -110,6 +110,9 @@ export function selectTiles(ctx: SuiteContext): number {
             }
         }
     }
+    // The manifest drives level errors and the ENU origin for the LOD and height suites.
+    fs.copyFileSync(path.join(ctx.terrainRoot, 'manifest.json'), path.join(outDir, 'manifest.json'));
+    count++;
     for (const name of INDEX_FILES) {
         const src = path.join(ctx.terrainRoot, name);
         if (!fs.existsSync(src)) continue;

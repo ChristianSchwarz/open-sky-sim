@@ -46,13 +46,14 @@ array's raw little-endian bytes and `head` is the first few elements.
 | `dogfight_geometry.json` | `ai/dogfightGeometry.ts` | Energy height, closure, tracking/aspect/angle-off, intercept time, ballistic aim, miss distance |
 | `flight_models.json` | `physics/model/{fm2,fm3}FlightModel.ts` | 26 scripted traces at 1/120 s, sampled at 20 Hz: cruise, roll, pitch, yaw, configuration, limiters off, stall, ground idle, takeoff, graded touchdowns, FM3 post-stall |
 | `ai_pilots.json` | `ai/{aiPilot,createAiPilot,shaw,aggressive,ace}` | 34 closed-loop traces at 60 Hz (sampled 20 Hz): all four pilot models through six engagements, skill tiers, ridge avoidance, navigate/straight/climb-out/RTB/approach/formation |
+| `terrain_lod.json` | `terrain/{lod,quadtree,culling}.ts` | lod.ts functions, horizon culling, and quadtree draw/want lists along 6 camera paths (low pass, turn in place, leaves loading, climb, re-based Alps, 400 km orbit) |
 | `flight_configs.json` | `physics/fm2/fm2AircraftConfig.ts`, `physics/fm3/f16Airframe.ts` | The exact config numbers the traces used |
 
 ## Not covered yet (later milestones)
 
 - Height queries with pads, water and rail beds (`HeightSampler`): needs a
   world; planned with workstream G.
-- Quadtree cuts and triangle budgets for scripted camera paths: workstream C.
+- Triangle-budget folding (coarsenToBudget) and streaming priorities: workstream C, with the terrain entity.
 - Belly landings, arrestor, midair: these are `CombatSim` behaviours, not the
   isolated flight model; workstream G.
 
