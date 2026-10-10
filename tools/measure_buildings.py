@@ -43,6 +43,16 @@ Vermessungsverwaltung - www.geodaten.bayern.de"). Outside a source the WMS
 answers white, which reads as no data. More sources (basemap.at,
 SWISSIMAGE, the other German states) slot into SOURCES.
 
+The last source is the fallback that covers everywhere: Sentinel-2 L2A true
+colour at 10 m (Sentinel2 below). A roof is one to a few pixels of it, mixed
+with whatever lies beside the roof, so it takes none of the fine steps above
+(no registration, no haze, no asphalt balance - L2A is already surface
+reflectance) and instead reads the pixels under the footprint weighted by
+their cover. Its confidence is capped at COARSE_MAX_CONFIDENCE and falls with
+the roof's size, so the bake (MIN_ROOF_CONFIDENCE) takes it only for roofs of
+about 70 m2 and up: warehouses, blocks, halls. Smaller roofs keep their rule
+colour rather than a blend of the street.
+
 Usage::
 
     python tools/measure_buildings.py --bbox 11.03,47.46,11.17,47.60 [--jobs 4]
@@ -52,6 +62,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import io
 import math
@@ -100,6 +111,13 @@ VEIL_PERCENTILE = 0.5
 VEIL_FLOOR = 8.0
 GAIN_RANGE = (0.85, 1.18)
 MIN_ROAD_PIXELS = 400
+
+# The Sentinel-2 fallback: confidence ceiling, supersampling of a footprint, and
+# which scenes to read (the same summer window as the ground cover).
+COARSE_MAX_CONFIDENCE = 0.5
+COARSE_SUPERSAMPLE = 4
+SCENE_CELL_DEG = 0.25
+SCENE_START, SCENE_END, SCENE_MAX_CLOUD = '2023-06-01', '2023-08-31', 10.0
 
 M_PER_DEG_LAT = 111132.92
 
@@ -166,6 +184,9 @@ class Source:
     name = ''
     # A coarse lon/lat box; outside it the source is not asked at all.
     box = (0.0, 0.0, 0.0, 0.0)
+    # Ground size of a pixel for a source that is coarser than the roofs it
+    # colours; None for the orthophotos, which are read at RES_M.
+    res_m: Optional[float] = None
 
     def covers(self, w: float, s: float, e: float, n: float) -> bool:
         bw, bs, be, bn = self.box
@@ -226,7 +247,76 @@ class BrandenburgBerlin(WmsSource):
     layer = 'bebb_dop20c'
 
 
-SOURCES: List[Source] = [Bavaria(), BrandenburgBerlin()]
+class Sentinel2(Source):
+    """Sentinel-2 L2A true colour, 10 m, the fallback anywhere no orthophoto is wired.
+
+    Contains modified Copernicus Sentinel data. The least cloudy summer scene
+    of each MGRS square, found through Earth Search and read as COG windows
+    (tools/fetch_cover_sources.py does the same for the ground cover)."""
+    id = 3
+    name = 'sentinel2-l2a'
+    box = (-180.0, -90.0, 180.0, 90.0)
+    res_m = 10.0
+
+    _cells: Dict[Tuple[int, int], List[str]] = {}
+
+    def _scenes(self, w: float, s: float, e: float, n: float) -> List[str]:
+        import json
+        import fetch_cover_sources as fcs
+        cx = int(math.floor(((w + e) / 2) / SCENE_CELL_DEG))
+        cy = int(math.floor(((s + n) / 2) / SCENE_CELL_DEG))
+        if (cx, cy) in self._cells:
+            return self._cells[(cx, cy)]
+        path = os.path.join(CACHE_DIR, self.name, 'scenes', f'{cx}_{cy}.json')
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as fh:
+                hrefs = json.load(fh)
+        else:
+            pad = 0.02
+            cell = (cx * SCENE_CELL_DEG - pad, cy * SCENE_CELL_DEG - pad,
+                    (cx + 1) * SCENE_CELL_DEG + pad, (cy + 1) * SCENE_CELL_DEG + pad)
+            with contextlib.redirect_stdout(io.StringIO()):
+                hrefs = fcs.find_scenes(cell, SCENE_START, SCENE_END, SCENE_MAX_CLOUD, 12)
+            if hrefs:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'w', encoding='utf-8') as fh:
+                    json.dump(hrefs, fh)
+        self._cells[(cx, cy)] = hrefs
+        return hrefs
+
+    def fetch(self, w, s, e, n, width, height):
+        import fetch_cover_sources as fcs
+        from rasterio.enums import Resampling
+        from rasterio.transform import from_origin
+        key = hashlib.sha1(f'{w:.7f},{s:.7f},{e:.7f},{n:.7f},{width},{height}'.encode()).hexdigest()[:20]
+        path = os.path.join(CACHE_DIR, self.name, key[:2], f'{key}.npy')
+        if os.path.exists(path):
+            try:
+                return np.load(path), True
+            except (OSError, ValueError):
+                pass
+        hrefs = self._scenes(w, s, e, n)
+        if not hrefs:
+            return None, False
+        transform = from_origin(w, n, (e - w) / width, (n - s) / height)
+        out = np.zeros((3, height, width), dtype=np.uint8)
+        fcs._worker_pool(4)
+        with contextlib.redirect_stdout(io.StringIO()):
+            used = fcs.mosaic_into(out, transform, [fcs.vsicurl(h) for h in hrefs], [1, 2, 3],
+                                   Resampling.bilinear, nodata=0, target_m=self.res_m, jobs=4)
+        if used == 0:
+            return None, False
+        img = np.ascontiguousarray(np.moveaxis(out, 0, -1))
+        # Pixels no scene reached read as white, which no_data() already treats as missing.
+        img[~np.any(img != 0, axis=2)] = 255
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + '.tmp.npy'
+        np.save(tmp, img)
+        os.replace(tmp, path)
+        return img, False
+
+
+SOURCES: List[Source] = [Bavaria(), BrandenburgBerlin(), Sentinel2()]
 SOURCE_NAMES = {s.id: s.name for s in SOURCES}
 
 
@@ -275,7 +365,8 @@ def no_data(rgb: np.ndarray) -> np.ndarray:
 class Block:
     """An orthophoto block and the lon/lat -> pixel mapping of it."""
 
-    def __init__(self, img: np.ndarray, w: float, n: float, dlon: float, dlat: float):
+    def __init__(self, img: np.ndarray, w: float, n: float, dlon: float, dlat: float, coarse: bool = False):
+        self.coarse = coarse
         self.img = img.astype(np.float32)
         self.w, self.n, self.dlon, self.dlat = w, n, dlon, dlat
         self.h, self.wpx = img.shape[0], img.shape[1]
@@ -425,6 +516,46 @@ def sample_roof(block: Block, gains: np.ndarray, veil: float, rings_px: List[Lis
     return lab_to_srgb(med), confidence, len(rgb)
 
 
+def sample_coarse(block: Block, rings_px: List[List[Tuple[float, float]]]
+                  ) -> Optional[Tuple[np.ndarray, float, int]]:
+    """(sRGB colour, confidence 0..1, pixels touched) of one roof in a coarse block, or None.
+
+    Each pixel the footprint touches counts by the share of it the footprint
+    covers; green pixels (a garden, a tree beside the house) are left out."""
+    from shapely import affinity
+    try:
+        poly = Polygon(rings_px[0], rings_px[1:])
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+    except Exception:  # noqa: BLE001 - a broken outline is skipped, not fatal
+        return None
+    if poly.is_empty:
+        return None
+    minx, miny, maxx, maxy = poly.bounds
+    x0, y0 = max(0, int(math.floor(minx))), max(0, int(math.floor(miny)))
+    x1, y1 = min(block.wpx, int(math.ceil(maxx))), min(block.h, int(math.ceil(maxy)))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    ss = COARSE_SUPERSAMPLE
+    big = affinity.scale(poly, xfact=ss, yfact=ss, origin=(0, 0))
+    mask = rasterise(big, x0 * ss, y0 * ss, (x1 - x0) * ss, (y1 - y0) * ss)
+    cover = mask.reshape(y1 - y0, ss, x1 - x0, ss).mean(axis=(1, 3))
+    rgb = block.img[y0:y1, x0:x1]
+    live = (cover > 0) & ~no_data(rgb)
+    total = float(cover[live].sum())
+    if total <= 0:
+        return None
+    live &= ~vegetation(rgb)
+    kept = float(cover[live].sum())
+    if kept <= 0:
+        return None
+    wts = cover[live]
+    lab = srgb_to_lab(rgb[live].astype(np.float64))
+    mean = (lab * wts[:, None]).sum(axis=0) / wts.sum()
+    confidence = COARSE_MAX_CONFIDENCE * min(1.0, kept) * (kept / total)
+    return lab_to_srgb(mean), confidence, int(live.sum())
+
+
 # --- one leaf ----------------------------------------------------------------------
 
 def measure_leaf(x: int, y: int) -> dict:
@@ -446,19 +577,21 @@ def measure_leaf(x: int, y: int) -> dict:
              'blocks': 0, 'cacheHits': 0, 'downloadedMB': 0.0, 'shiftM': [], 'gains': [], 'veil': []}
     records: List[Tuple[int, int, int, int, int, int, int, int, int]] = []
     margin_lon, margin_lat = MARGIN_M / m_per_deg_lon(lat_c), MARGIN_M / M_PER_DEG_LAT
-    pad = int(round(MARGIN_M / RES_M))
 
     def fetch(key):
         bi, bj = key
         bw, bn = w + bi * blk_lon - margin_lon, n - bj * blk_lat + margin_lat
         be, bs = bw + blk_lon + 2 * margin_lon, bn - blk_lat - 2 * margin_lat
-        size = BLOCK_PX + 2 * pad
         for src in SOURCES:
             if not src.covers(bw, bs, be, bn):
                 continue
+            # The same ground at the source's own pixel size: the 2208 px of
+            # the orthophotos, or about 110 for a 10 m source.
+            size = int(math.ceil((BLOCK_PX * RES_M + 2 * MARGIN_M) / (src.res_m or RES_M)))
             img, hit = src.fetch(bw, bs, be, bn, size, size)
             if img is not None and no_data(img).mean() < 0.98:
-                return key, src, Block(img, bw, bn, (be - bw) / size, (bn - bs) / size), hit
+                return key, src, Block(img, bw, bn, (be - bw) / size, (bn - bs) / size,
+                                       coarse=src.res_m is not None), hit
         return key, None, None, False
 
     with ThreadPoolExecutor(4) as pool:
@@ -469,6 +602,17 @@ def measure_leaf(x: int, y: int) -> dict:
                 continue
             stats['blocks'] += 1
             stats['cacheHits'] += 1 if hit else 0
+            if block.coarse:
+                for b in members:
+                    got = sample_coarse(block, [[block.px(lon, lat) for lon, lat in r] for r in b.rings])
+                    if got is None:
+                        stats['tooSmall'] += 1
+                        continue
+                    rgb, conf, npx = got
+                    stats['measured'] += 1
+                    records.append((b.osm_id, int(rgb[0]), int(rgb[1]), int(rgb[2]),
+                                    int(round(conf * 255)), src.id, min(255, npx), 0, 0))
+                continue
             gains, _road_px = channel_gains(block, roads)
             veil = haze_veil(block)
             stats['gains'].append(gains.tolist())

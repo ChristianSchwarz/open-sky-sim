@@ -7,7 +7,7 @@ import numpy as np
 
 from measure_buildings import (
     RES_M, Block, block_shift, decode_bcs, encode_bcs, gradient, haze_veil, lab_to_srgb, luminance,
-    sample_roof, srgb_to_lab,
+    COARSE_MAX_CONFIDENCE, sample_coarse, sample_roof, srgb_to_lab,
 )
 
 
@@ -94,6 +94,34 @@ class Sampling(unittest.TestCase):
         img = np.full((120, 120, 3), 100, dtype=np.uint8)
         self.assertIsNone(sample_roof(_block(img), np.ones(3, dtype=np.float32), 0.0,
                                       [[(20, 20), (23, 20), (23, 23), (20, 23)]]))
+
+
+class Coarse(unittest.TestCase):
+    """The Sentinel-2 fallback: a roof is a few 10 m pixels, read by cover."""
+
+    def _ring(self, x0, y0, x1, y1):
+        return [[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
+
+    def test_a_large_roof_takes_its_pixels_colour(self):
+        img = np.full((40, 40, 3), (120, 118, 110), dtype=np.uint8)
+        img[10:14, 10:15] = (200, 120, 90)
+        rgb, conf, _n = sample_coarse(_block(img), self._ring(10, 10, 15, 14))
+        self.assertTrue(np.all(np.abs(rgb - np.array([200, 120, 90])) <= 2), rgb)
+        self.assertAlmostEqual(conf, COARSE_MAX_CONFIDENCE, places=2)
+
+    def test_a_house_is_too_unsure_to_use(self):
+        img = np.full((40, 40, 3), (200, 120, 90), dtype=np.uint8)
+        # 4 m x 4 m of a 10 m pixel: below the bake's MIN_ROOF_CONFIDENCE (0.35).
+        _rgb, conf, _n = sample_coarse(_block(img), self._ring(10.0, 10.0, 10.4, 10.4))
+        self.assertLess(conf, 0.35)
+
+    def test_green_pixels_are_left_out(self):
+        img = np.full((40, 40, 3), (60, 140, 60), dtype=np.uint8)
+        self.assertIsNone(sample_coarse(_block(img), self._ring(10, 10, 14, 14)))
+
+    def test_white_is_no_data(self):
+        img = np.full((40, 40, 3), 255, dtype=np.uint8)
+        self.assertIsNone(sample_coarse(_block(img), self._ring(10, 10, 14, 14)))
 
 
 class Store(unittest.TestCase):

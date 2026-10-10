@@ -239,7 +239,7 @@ const DATA_SOURCES: DataSourceGroup[] = [
                 licence: 'CC BY 4.0',
             },
             {
-                name: 'Sentinel-2 L2A true colour', scope: 'Imagery and Hybrid terrain colours',
+                name: 'Sentinel-2 L2A true colour', scope: 'Imagery and Hybrid terrain colours; roof colours of larger buildings outside the orthophoto areas',
                 credit: 'Contains modified Copernicus Sentinel data', licence: 'Copernicus Sentinel data terms',
             },
             {
