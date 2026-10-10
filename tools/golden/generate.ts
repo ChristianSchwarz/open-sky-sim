@@ -16,6 +16,7 @@ import { tilingSuite } from './suites/tiling';
 import { dogfightSuite } from './suites/dogfight';
 import { codecsSuite, selectTiles } from './suites/codecs';
 import { flightModelsSuite } from './suites/flightModels';
+import { aiSuite } from './suites/ai';
 
 export const GOLDEN_ROOT = path.resolve(__dirname, '../../tests/golden');
 const TERRAIN_ROOT = path.resolve(__dirname, '../../assets/terrain');
@@ -36,6 +37,7 @@ const SUITES: SuiteDef[] = [
     { name: 'dogfight', run: () => dogfightSuite() },
     { name: 'codecs', run: ctx => codecsSuite(ctx) },
     { name: 'flightModels', run: () => flightModelsSuite() },
+    { name: 'ai', run: () => aiSuite() },
 ];
 
 export interface GenerateResult {

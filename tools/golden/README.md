@@ -45,6 +45,7 @@ array's raw little-endian bytes and `head` is the first few elements.
 | `codecs.json` + `tiles/` | `terrain/{ptm,pdm,ptx,ptr,pbr,pbh,pbd,pfl,tileIndex,demTile}.ts` | 32 real tiles across zooms, 8 PIX1 indices, PDM bilinear/nearest samples |
 | `dogfight_geometry.json` | `ai/dogfightGeometry.ts` | Energy height, closure, tracking/aspect/angle-off, intercept time, ballistic aim, miss distance |
 | `flight_models.json` | `physics/model/{fm2,fm3}FlightModel.ts` | 26 scripted traces at 1/120 s, sampled at 20 Hz: cruise, roll, pitch, yaw, configuration, limiters off, stall, ground idle, takeoff, graded touchdowns, FM3 post-stall |
+| `ai_pilots.json` | `ai/{aiPilot,createAiPilot,shaw,aggressive,ace}` | 34 closed-loop traces at 60 Hz (sampled 20 Hz): all four pilot models through six engagements, skill tiers, ridge avoidance, navigate/straight/climb-out/RTB/approach/formation |
 | `flight_configs.json` | `physics/fm2/fm2AircraftConfig.ts`, `physics/fm3/f16Airframe.ts` | The exact config numbers the traces used |
 
 ## Not covered yet (later milestones)
@@ -54,4 +55,4 @@ array's raw little-endian bytes and `head` is the first few elements.
 - Quadtree cuts and triangle budgets for scripted camera paths: workstream C.
 - Belly landings, arrestor, midair: these are `CombatSim` behaviours, not the
   isolated flight model; workstream G.
-- AI pilot decisions on scripted scenarios: workstream H.
+
