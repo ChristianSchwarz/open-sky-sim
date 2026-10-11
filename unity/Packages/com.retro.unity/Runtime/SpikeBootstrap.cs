@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
 
 namespace Retro.Unity
 {
@@ -15,6 +16,31 @@ namespace Retro.Unity
         {
             if (Object.FindAnyObjectByType<TerrainRenderer>() != null) return;
             Create();
+        }
+
+        /// <summary>
+        /// The web game draws its palette as authored: no tonemapping, no vignette.
+        /// Bloom stays for what is brighter than white (the sun's overbright disc),
+        /// and SMAA stands in for the mip-trick supersampling. A global volume of
+        /// our own, above whatever the scene carries.
+        /// </summary>
+        private static void ConfigurePostProcessing(Camera cam)
+        {
+            var data = cam.GetComponent<UniversalAdditionalCameraData>() ?? cam.gameObject.AddComponent<UniversalAdditionalCameraData>();
+            data.renderPostProcessing = true;
+            data.antialiasing = AntialiasingMode.SubpixelMorphologicalAntiAliasing;
+            var profile = ScriptableObject.CreateInstance<VolumeProfile>();
+            var tone = profile.Add<Tonemapping>(true);
+            tone.mode.Override(TonemappingMode.None);
+            var vignette = profile.Add<Vignette>(true);
+            vignette.intensity.Override(0f);
+            var bloom = profile.Add<Bloom>(true);
+            bloom.threshold.Override(1.1f);
+            bloom.intensity.Override(0.6f);
+            var volume = new GameObject("Retro post-processing").AddComponent<Volume>();
+            volume.isGlobal = true;
+            volume.priority = 100;
+            volume.sharedProfile = profile;
         }
 
         /// <summary>PlayerPrefs key holding a one-shot spawn point, "lat,lon".</summary>
@@ -51,6 +77,7 @@ namespace Retro.Unity
             sun.shadows = LightShadows.Hard; // aircraft shadows (they replace the planform silhouettes)
             // The web game's sun at its default 14:00, and its direct/ambient balance.
             SunModel.Apply(sun, SunModel.DefaultHours);
+            ConfigurePostProcessing(cam);
             RenderSettings.fog = true;
             RenderSettings.fogMode = FogMode.ExponentialSquared;
             RenderSettings.fogDensity = 0.000012f;

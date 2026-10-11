@@ -7,7 +7,9 @@
         "Retro.Sim",
         "Retro.Game",
         "Unity.InputSystem",
-        "glTFast"
+        "glTFast",
+        "Unity.RenderPipelines.Universal.Runtime",
+        "Unity.RenderPipelines.Core.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
