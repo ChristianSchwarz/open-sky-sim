@@ -33,6 +33,7 @@ import { cloudsSuite } from './suites/clouds';
 import { carrierSuite } from './suites/carrier';
 import { cockpitSuite } from './suites/cockpit';
 import { canvasSuite } from './suites/canvas';
+import { hudSuite } from './suites/hud';
 
 export const GOLDEN_ROOT = path.resolve(__dirname, '../../tests/golden');
 /** The baked tree tiles are selected from; GOLDEN_TERRAIN_ROOT points a worktree (which has none) at a checkout's. */
@@ -69,6 +70,7 @@ const SUITES: SuiteDef[] = [
     { name: 'carrier', run: () => carrierSuite() },
     { name: 'cockpit', run: () => cockpitSuite() },
     { name: 'canvas', run: () => canvasSuite() },
+    { name: 'hud', run: () => hudSuite() },
 ];
 
 export interface GenerateResult {

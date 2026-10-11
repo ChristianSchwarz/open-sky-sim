@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Numerics;
 using System.Text;
 
 namespace Retro.Game
@@ -187,16 +188,42 @@ namespace Retro.Game
         }
 
         /// <summary>
-        /// Number.prototype.toFixed: the exact decimal value rounded half away
-        /// from zero (what .NET Core's exact "F" formatting does), with -0 shown
-        /// as "0" but a negative that rounds to zero keeping its sign.
+        /// Number.prototype.toFixed: the exact binary value scaled by 10^digits
+        /// and rounded half away from zero, in exact integer arithmetic (an
+        /// exact tie such as 0.5 or 154.5 rounds up, where .NET's "F" format
+        /// rounds it to even, and Mono's is not exact at all), with -0 shown as
+        /// "0" but a negative that rounds to zero keeping its sign.
         /// </summary>
         public static string ToFixed(double x, int digits)
         {
             if (double.IsNaN(x)) return "NaN";
             if (Math.Abs(x) >= 1e21 || double.IsInfinity(x)) return NumberToString(x);
             if (x == 0) x = 0; // -0 -> +0
-            return x.ToString("F" + digits.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+            long bits = BitConverter.DoubleToInt64Bits(x);
+            bool negative = bits < 0;
+            int exponent = (int)((bits >> 52) & 0x7FF);
+            long mantissa = bits & 0xFFFFFFFFFFFFFL;
+            if (exponent == 0) exponent = 1; // subnormal
+            else mantissa |= 1L << 52;
+            exponent -= 1075; // |x| = mantissa * 2^exponent
+            BigInteger n = new BigInteger(mantissa) * BigInteger.Pow(10, digits);
+            if (exponent >= 0)
+            {
+                n <<= exponent;
+            }
+            else
+            {
+                BigInteger den = BigInteger.One << -exponent;
+                BigInteger q = BigInteger.DivRem(n, den, out BigInteger r);
+                n = r * 2 >= den ? q + 1 : q;
+            }
+            string s = n.ToString(CultureInfo.InvariantCulture);
+            if (digits > 0)
+            {
+                if (s.Length <= digits) s = new string('0', digits - s.Length + 1) + s;
+                s = s.Substring(0, s.Length - digits) + "." + s.Substring(s.Length - digits);
+            }
+            return negative ? "-" + s : s;
         }
 
         /// <summary>
