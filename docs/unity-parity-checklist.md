@@ -18,20 +18,20 @@ Rows, not settings or keys: one row can cover several.
 
 | Area | Done | Partial | Missing |
 |---|---|---|---|
-| Simulation | 9 | 2 | 2 |
+| Simulation | 11 | 2 | 0 |
 | Terrain | 6 | 1 | 7 |
-| World detail | 8 | 0 | 4 |
+| World detail | 12 | 0 | 0 |
 | Sky and FX | 8 | 2 | 5 |
 | Aircraft | 3 | 1 | 2 |
 | HUD and cockpit | 8 | 3 | 3 |
 | Settings | 9 | 2 | 3 |
 | Input, views, replay, audio | 6 | 3 | 4 |
 | Boot and spawn | 3 | 1 | 1 |
-| **Total** | **60** | **15** | **31** |
+| **Total** | **66** | **15** | **25** |
 
 What is missing most visibly, in suggested order:
 1. ~~Engine audio~~ and ~~replay (F4)~~: done since the checklist was written (see the Input table).
-3. **Building and scenery colliders, and the glTF scenery**: the control tower, refinery, SAM radar and hangar. Aircraft fly through buildings.
+3. ~~Building and scenery colliders, and the glTF scenery~~: done since (see World detail).
 4. **Target cycling (T)**: without it the target is always the opponent, so the ILS and approach aids never appear.
 5. **Settings that are only stored**: smooth shading, colour adjust, far-tile textures, land-use reveal and supersampling.
 6. **Terrain**: runtime seam stitching, far land (`.pfl`), far cover textures (`.ptx`), rivers, and the land-use reveal.
@@ -47,8 +47,8 @@ What is missing most visibly, in suggested order:
 | Combat sim, gun, projectiles, faction targeting | done | 12 golden scenarios; a 1 s burst kills the opponent |
 | AI pilots (4 models), opponent + wingman | done | 34 closed-loop traces bit-identical; `U/Flight/Combat.cs` |
 | Carrier: berth, steaming, deck collider, arrestor, tailhook | done | trap on wire 1 verified |
-| Hill / ski-jump colliders | missing | sim colliders ported (`HillCollider`, `SkiJump`), never placed, no model |
-| Building colliders (surface pad + obstacle per building, streamed) | missing | web `game.ts:4781-4870`; Unity sends only runway pads (`PlayerFlight.cs:225`) |
+| Hill / ski-jump colliders | done | the ski jump on the base runway (see World detail); the web sends no hills either |
+| Building colliders (surface pad + obstacle per building, streamed) | done | `G/Airfield/AirbaseLayout.cs` BuildingCollider (7 tests), `U/Flight/AirfieldColliders.cs`: fields within 50 km of the start at boot, then one at a time in flight once their fine ground is resident, sent with `AddStaticColliders`; an aircraft under a new roof leaves that building hollow. Verified: a flight into a GCLP terminal crashes at its wall; Tenerife's 6 buildings streamed in 31 km out. Kept from the web: a building's AI cylinder stands on its own roof (obstacleBaseY reads the pads) |
 | Runway pads streamed as you fly | partial | built once at boot within 150 km; the web streams airfields within 50 km |
 | Wreck field, crash break-up, fires, fuel lake, sea, deck | done | `wreck.json` 98 tests; seen on screen |
 | Survivable airframe damage | done | injected scrape on the F-22, repair on respawn (`ece2e00c`) |
@@ -87,10 +87,10 @@ What is missing most visibly, in suggested order:
 | Stones / ground clutter | done | `VegetationRenderer.cs` |
 | Airfields: runways, markings (near + far textures), taxiways, unpaved strips, 50 km streaming | done | `AirfieldRenderer.cs` |
 | Airfield buildings (OSM boxes) | done | same box extrusion as the web |
-| glTF scenery (tower `control01`, refinery, `samradar01`, `hangar01`) + ground targets | missing | web `game.ts:4405-5217`, home area only |
-| Surface pads (drawn) | missing | none exist without the scenery |
-| Trees: surface-pad mask | missing | waits for the pads |
-| Hills / ski jump (drawn) | missing | see Simulation |
+| Airbase furniture (4 hangars, tower, 4 parked F-22s, ski jump, aprons, fallback runway) and the home scenario (refinery + 5 depots, SAM radar, warehouse as targets) | done | `U/Flight/Airbase.cs`; every glTF piece solid (17 deck-style colliders at GC), AI cylinders as setupCombat. Verified on screen at GCLP; a flight into a hangar crashes at its face. As on the web the furniture follows the area's base runway: at GCLP three hangars stand on the parallel runway 03R. Colliders take the finest LOD only (the web merges every LOD); the parked F-22s cast URP shadows instead of `f22_shadow.glb`. Targets are recorded but not selectable until T cycling |
+| Apron pavement squares | done | drawn where the base airfield has no OSM aprons (GCLP has, so none there) |
+| Trees: surface-pad mask | done | `VegetationRenderer.SetSurfacePads` (surfaceExclusion.ts), resident tiles re-scatter |
+| Ski jump (drawn + collider) | done | 90 m past the runway spawn on the base runway, as on the web. Hills: none placed on the web either (`hills` is sent empty) |
 
 ## Sky and FX
 

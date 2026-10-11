@@ -151,6 +151,7 @@ namespace Retro.Unity
             var vegetation = root.AddComponent<VegetationRenderer>();
             vegetation.terrain = terrain;
             vegetation.viewer = fly;
+            player.SurfacePadsChanged += vegetation.SetSurfacePads;
 
             // M8: the menu (Esc), with the spawn starts and the settings.
             var menu = new GameObject("Menu").AddComponent<MenuDialog>();

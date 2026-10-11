@@ -101,8 +101,10 @@ namespace Retro.Unity
         /// carrierDeck.ts bakeCollisionMeshFromModel: every drawn triangle with some area,
         /// in the model frame (glTFast negated x on import, so it is negated back).
         /// </summary>
-        private static AircraftCollisionMesh BakeCollision(Transform model)
+        /// <param name="rotation">The placed entity's turn (addSolidSceneryMesh's root matrix), applied in the scene frame.</param>
+        internal static AircraftCollisionMesh BakeCollision(Transform model, Quatd? rotation = null)
         {
+            Quatd q = rotation ?? Quatd.Identity;
             var flat = new List<double>();
             var vertices = new List<Vector3>();
             foreach (MeshFilter mf in model.GetComponentsInChildren<MeshFilter>(true))
@@ -113,12 +115,14 @@ namespace Retro.Unity
                 mesh.GetVertices(vertices);
                 for (int sub = 0; sub < mesh.subMeshCount; sub++)
                 {
+                    // Lines and points (lights) have no area: only meshes are solid, as in the TS.
+                    if (mesh.GetTopology(sub) != MeshTopology.Triangles) continue;
                     int[] tris = mesh.GetTriangles(sub);
                     for (int t = 0; t < tris.Length; t += 3)
                     {
-                        Vec3d a = Scene(toModel.MultiplyPoint3x4(vertices[tris[t]]));
-                        Vec3d b = Scene(toModel.MultiplyPoint3x4(vertices[tris[t + 1]]));
-                        Vec3d c = Scene(toModel.MultiplyPoint3x4(vertices[tris[t + 2]]));
+                        Vec3d a = Scene(toModel.MultiplyPoint3x4(vertices[tris[t]])).Rotate(q);
+                        Vec3d b = Scene(toModel.MultiplyPoint3x4(vertices[tris[t + 1]])).Rotate(q);
+                        Vec3d c = Scene(toModel.MultiplyPoint3x4(vertices[tris[t + 2]])).Rotate(q);
                         if (Vec3d.Cross(b - a, c - a).Length * 0.5 < 1e-6) continue;
                         flat.Add(a.X); flat.Add(a.Y); flat.Add(a.Z);
                         flat.Add(b.X); flat.Add(b.Y); flat.Add(b.Z);

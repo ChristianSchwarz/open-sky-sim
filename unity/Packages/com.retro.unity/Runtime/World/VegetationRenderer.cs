@@ -63,6 +63,7 @@ namespace Retro.Unity
         private string root;
         private TileIndex roadIndex, buildingIndex, bedIndex;
         private Func<double, double, bool> onAirfield;
+        private Func<double, double, bool> onSurface;
         private readonly Dictionary<TileKey, TileTrees> tiles = new Dictionary<TileKey, TileTrees>();
         private Mesh treeQuad, stoneQuad;
         private Material treeMaterial, stoneMaterial;
@@ -230,6 +231,25 @@ namespace Retro.Unity
             scatteredTiles = tiles.Count;
         }
 
+        /// <summary>
+        /// terrainEntity.setSurfaceExclusion (surfaceExclusion.ts): no trees on the game's own
+        /// pavement and roofs; tiles already scattered scatter again.
+        /// </summary>
+        public void SetSurfacePads(IReadOnlyList<Retro.Sim.SurfacePadCollider> pads)
+        {
+            var list = new List<SurfaceExclusionPad>(pads.Count);
+            foreach (Retro.Sim.SurfacePadCollider p in pads)
+            {
+                list.Add(new SurfaceExclusionPad
+                {
+                    CenterX = p.CenterX, CenterZ = p.CenterZ, Heading = p.Heading, HalfLength = p.HalfLength, HalfWidth = p.HalfWidth,
+                    SurfaceY = p.SurfaceY, BaseY = p.BaseY, Feather = p.Feather, Slope = p.Slope,
+                });
+            }
+            onSurface = SurfaceExclusion.Build(list);
+            foreach (TileTrees t in tiles.Values) t.DensityScale = double.NaN;
+        }
+
         private Task<TileVegetation> Scatter(DrawTile d, double densityScale)
         {
             PtmTile tile = d.Tile;
@@ -242,6 +262,7 @@ namespace Retro.Unity
             EnuBasis bakeBasis = terrain.Session.BakeBasis;
             int maxZoom = terrain.MaxZoom;
             Func<double, double, bool> airfields = onAirfield;
+            Func<double, double, bool> surface = onSurface;
             string dir = Path.Combine(root, key.Z.ToString(), key.X.ToString());
             return Task.Run(() =>
             {
@@ -271,8 +292,8 @@ namespace Retro.Unity
                         bed = RailBedExclusion.Build(pbd.Beds, RailBedExclusion.TileUp(bakeBasis, key), RailBedExclusion.CellMFor(key.Z, maxZoom));
                     }
                 }
-                // No surface pads: the Unity world places no scenery pads yet (surfaceExclusion.ts has nothing to test).
-                Func<double, double, double, bool> manMade = VegetationExclusion.ForTile(origin, frameFix, airfields, null, null, null);
+                // The airfields, and the pads the game stands on (surfaceExclusion.ts), in the play frame.
+                Func<double, double, double, bool> manMade = VegetationExclusion.ForTile(origin, frameFix, airfields, null, surface, null);
                 return TileVegetation.Build(tile, densityScale, VegetationExclusion.Combine(road, bed, manMade, building));
             });
         }

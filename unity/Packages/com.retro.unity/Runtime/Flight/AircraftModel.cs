@@ -138,6 +138,14 @@ namespace Retro.Unity
         /// One glTF from a pack (or the assets folder), its nearest LOD scene instantiated
         /// under a new child of `parent`; null when it cannot be read or `parent` died first.
         /// </summary>
+        /// <summary>A scenery model (a hangar, the tower, a parked F-22): loaded like a part, in the palette's colours.</summary>
+        public static async Task<Transform> LoadScenery(IAircraftFiles files, string file, Transform parent, string name)
+        {
+            Transform part = await LoadGltf(files, file, parent, name);
+            if (part != null) Remap(part);
+            return part;
+        }
+
         public static async Task<Transform> LoadGltf(IAircraftFiles files, string file, Transform parent, string name)
         {
 #if RETRO_GLTFAST

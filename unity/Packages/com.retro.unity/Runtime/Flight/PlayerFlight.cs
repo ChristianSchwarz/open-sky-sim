@@ -120,8 +120,22 @@ namespace Retro.Unity
         private const double AirfieldSurfaceEpsM = 1.5;
         /// <summary>game.ts SURFACE_PAD_FEATHER_M.</summary>
         private const double SurfacePadFeatherM = 15;
-        /// <summary>Every runway's pavement as solid ground (game.ts addRunwayPad).</summary>
-        private readonly List<Retro.Sim.SurfacePadCollider> runwayPads = new List<Retro.Sim.SurfacePadCollider>();
+        /// <summary>
+        /// game.ts surfacePads: every runway's pavement (addRunwayPad), the airbase aprons, and the
+        /// airfields' building roofs, as solid ground.
+        /// </summary>
+        private readonly List<Retro.Sim.SurfacePadCollider> surfacePads = new List<Retro.Sim.SurfacePadCollider>();
+        /// <summary>The hangars, tower, ramp and ski jump round the base (and the targets at home).</summary>
+        private Airbase airbase;
+        private AirfieldColliders airfieldColliders;
+        /// <summary>game.ts obstacles: the AI's cylinders, sent with the world and added as airfields stream in.</summary>
+        private readonly List<Obstacle> obstacles = new List<Obstacle>();
+
+        /// <summary>The solid pads changed (an airfield's buildings streamed in): trees keep off them.</summary>
+        public event Action<IReadOnlyList<Retro.Sim.SurfacePadCollider>> SurfacePadsChanged;
+
+        /// <summary>The scenery's weapons targets (the refinery, the SAM site, the warehouse at home).</summary>
+        public IReadOnlyList<Airbase.GroundTarget> GroundTargets => airbase?.Targets;
         /// <summary>Airfields this far from the frame origin count as the play area's.</summary>
         private const double AirfieldReachM = 150000;
 
@@ -243,6 +257,7 @@ namespace Retro.Unity
             if (aircraft.IsCrashed() && !wasCrashed) crashRecordTime = Recorder.EndTime;
             wasCrashed = aircraft.IsCrashed();
             RecordFlightFrame(Time.deltaTime);
+            StreamAirfieldColliders();
             engineAudio.Exterior = flightView != FlightView.Cockpit;
             engineAudio.Update(aircraft);
             Vec3d pos = aircraft.GetPosition();
@@ -262,11 +277,17 @@ namespace Retro.Unity
             if (carrier == null) BootWorld();
             // game.ts awaits kuz.glb before setupCombat: the deck goes to the sim with the world.
             if (!carrier.Settled) return false;
+            // And every scenery model, whose triangles are solid (activateSceneryColliders).
+            if (!airbase.Settled) return false;
 
             sim = new CombatSim(heightField);
             var world = new SerializedWorld
             {
-                SurfacePads = runwayPads,
+                // A copy: the sim keeps its own list and adds streamed buildings to it.
+                SurfacePads = new List<Retro.Sim.SurfacePadCollider>(surfacePads),
+                SkiJumps = SerializeSkiJumps(airbase.SkiJumps),
+                SceneryMeshes = SerializeMeshes(airbase.SceneryMeshes),
+                Obstacles = SetupObstacles(),
                 CarrierMeshes = new List<SerializedCarrierMesh>(),
                 ArrestorCables = new List<SerializedArrestorCables> { Carrier.Serialize(carrier.CableField()) },
             };
@@ -368,7 +389,7 @@ namespace Retro.Unity
             {
                 // The gear rests on the pavement that is drawn (AIRFIELD_SURFACE_EPS_M over the
                 // pad-flattened DEM), from the same three sampled points the pavement uses.
-                runwayPads.Add(new Retro.Sim.SurfacePadCollider
+                surfacePads.Add(new Retro.Sim.SurfacePadCollider
                 {
                     CenterX = r.Center.X, CenterZ = r.Center.Z, Heading = r.Heading,
                     HalfLength = r.HalfLength, HalfWidth = r.HalfWidth,
@@ -376,9 +397,130 @@ namespace Retro.Unity
                     Feather = SurfacePadFeatherM, Slope = r.Slope,
                 });
             }
+            // buildAirfieldsNear(activeRunway): the buildings round the start are solid from the first frame.
+            airfieldColliders = new AirfieldColliders(airfields, runways, heightField.Basis, heightField);
+            Vec3d startAt = startRunway?.Center ?? Vec3d.Zero;
+            foreach (AirfieldColliders.Built b in airfieldColliders.BuildNear(startAt.X, startAt.Z))
+            {
+                surfacePads.AddRange(b.Pads);
+                buildingObstacles.AddRange(b.Obstacles);
+            }
+            // addAirBase: the furniture stands round the area's own base runway, whichever one
+            // the player starts from; at home the Canaries scenario comes with it.
+            SceneRunway home = ActiveAirfield.PickStartRunway(runways);
+            bool realAprons = false;
+            foreach (Airfield a in airfields)
+            {
+                if (home != null && a.Icao == home.Icao && a.Name == home.Name) realAprons = a.Aprons.Count > 0;
+            }
+            airbase = new Airbase(AirbaseLayout.FrameOf(home), home != null, realAprons, IsHomeArea());
+            airbase.AddPads(GroundAtBoot, surfacePads);
             carrier = new Carrier(heightField, startRunway,
-                (x, z) => Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads) != double.NegativeInfinity,
+                (x, z) => Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, surfacePads) != double.NegativeInfinity,
                 new DirectoryFiles(assetsDir));
+            airbase.Place(GroundAtBoot, new DirectoryFiles(assetsDir));
+            SurfacePadsChanged?.Invoke(surfacePads);
+        }
+
+        /// <summary>The OSM buildings' cylinders before setupCombat stands them on the ground.</summary>
+        private readonly List<BuildingObstacle> buildingObstacles = new List<BuildingObstacle>();
+
+        /// <summary>Ground for placing scenery at boot: the fine tier settled first, as the web awaits it.</summary>
+        private double GroundAtBoot(double x, double z) => GroundAt(x, z, heightField.TierAtWorld(x, z) != Retro.Terrain.HeightTier.Fine);
+
+        /// <summary>playArea.isHome: the area holding the authored scenery's origin (the Canaries).</summary>
+        private bool IsHomeArea()
+        {
+            double lat = terrain.OriginLat, lon = terrain.OriginLon;
+            List<TerrainArea> areas = terrain.Areas();
+            if (areas.Count == 0)
+            {
+                // A pyramid without areas is one area: home when it is the one around the origin.
+                return Math.Abs(lat - AirbaseLayout.PlayOriginLat) < 1 && Math.Abs(lon - AirbaseLayout.PlayOriginLon) < 1;
+            }
+            foreach (TerrainArea a in areas)
+            {
+                bool here = PlayArea.AreaContains(a, lat, lon);
+                bool home = PlayArea.AreaContains(a, AirbaseLayout.PlayOriginLat, AirbaseLayout.PlayOriginLon);
+                if (here) return home;
+            }
+            return false;
+        }
+
+        /// <summary>obstacleBaseY: terrain and pavement only, never the scenery soups.</summary>
+        private double ObstacleBaseY(double x, double z) =>
+            Math.Max(Math.Max(heightField.HeightAtWorld(x, z), SkiJump.SampleSkiJumpSurfaceYMax(x, z, airbase.SkiJumps)),
+                Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, surfacePads));
+
+        private Obstacle MakeObstacle(double x, double z, double radius, double height) =>
+            new Obstacle { Position = new Vec3d(x, ObstacleBaseY(x, z), z), Radius = radius, Height = height };
+
+        /// <summary>
+        /// streamAirfields: the buildings of a field come within 50 km solid in flight, sent to the
+        /// sim on their own (addStaticColliders) and kept off by the trees.
+        /// </summary>
+        private void StreamAirfieldColliders()
+        {
+            AirfieldColliders.Built? got = airfieldColliders.Stream(aircraft.GetPosition(), AircraftUnder);
+            if (!got.HasValue || got.Value.Pads.Count == 0) return;
+            AirfieldColliders.Built b = got.Value;
+            var added = new List<Obstacle>();
+            surfacePads.AddRange(b.Pads);
+            foreach (BuildingObstacle o in b.Obstacles) added.Add(MakeObstacle(o.X, o.Z, o.Radius, o.Height));
+            obstacles.AddRange(added);
+            sim.AddStaticColliders(SerializedWorlds.SerializeStaticColliders(b.Pads, added));
+            SurfacePadsChanged?.Invoke(surfacePads);
+        }
+
+        /// <summary>aircraftUnder: a live aircraft over the pad and below its roof (plus the clearance).</summary>
+        private bool AircraftUnder(Retro.Sim.SurfacePadCollider pad)
+        {
+            foreach (SimAircraft a in sim.Aircraft)
+            {
+                if (!a.Enabled || (a.Id != PlayerId && !a.IsAlive())) continue;
+                Vec3d p = a.GetPosition();
+                if (p.Y < pad.SurfaceY + AirbaseLayout.BuildingStreamClearanceM
+                    && Retro.Sim.SurfacePads.SampleSurfacePadY(p.X, p.Z, pad) > double.NegativeInfinity) return true;
+            }
+            return false;
+        }
+
+        /// <summary>setupCombat's obstacles: the hangars and tower, every OSM building, and the targets at home.</summary>
+        private List<SerializedObstacle> SetupObstacles()
+        {
+            obstacles.Clear();
+            foreach (var (x, z, radius, height) in airbase.ObstacleSpecs()) obstacles.Add(MakeObstacle(x, z, radius, height));
+            foreach (BuildingObstacle o in buildingObstacles) obstacles.Add(MakeObstacle(o.X, o.Z, o.Radius, o.Height));
+            var list = new List<SerializedObstacle>();
+            foreach (Obstacle o in obstacles)
+            {
+                list.Add(new SerializedObstacle { Position = new[] { o.Position.X, o.Position.Y, o.Position.Z }, Radius = o.Radius, Height = o.Height });
+            }
+            return list;
+        }
+
+        private static List<SerializedSkiJump> SerializeSkiJumps(IReadOnlyList<Retro.Sim.SkiJumpCollider> ramps)
+        {
+            var list = new List<SerializedSkiJump>();
+            foreach (Retro.Sim.SkiJumpCollider r in ramps)
+            {
+                list.Add(new SerializedSkiJump
+                {
+                    OriginX = r.OriginX, OriginY = r.OriginY, OriginZ = r.OriginZ, Heading = r.Heading,
+                    Length = r.Length, Height = r.Height, HalfWidth = r.HalfWidth,
+                });
+            }
+            return list;
+        }
+
+        private static List<SerializedCarrierMesh> SerializeMeshes(IReadOnlyList<Retro.Sim.CarrierMeshCollider> meshes)
+        {
+            var list = new List<SerializedCarrierMesh>();
+            foreach (Retro.Sim.CarrierMeshCollider m in meshes)
+            {
+                list.Add(new SerializedCarrierMesh { OriginX = m.OriginX, OriginY = m.OriginY, OriginZ = m.OriginZ, Triangles = m.Triangles, Aabb = m.Aabb });
+            }
+            return list;
         }
 
         /// <summary>PlayerPrefs key of the selected aircraft id.</summary>
@@ -487,8 +629,14 @@ namespace Retro.Unity
                 heightField.Focus(new[] { new Vec3d(x, 0, z) });
                 heightField.WaitIdle(TimeSpan.FromSeconds(5));
             }
-            return Math.Max(Math.Max(heightField.HeightAtWorld(x, z), Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads)),
-                carrier.DeckYAt(x, z));
+            // groundHeightAt: the DEM, the ski jump, the pads, the scenery and the carrier.
+            double y = Math.Max(heightField.HeightAtWorld(x, z), Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, surfacePads));
+            if (airbase != null)
+            {
+                y = Math.Max(y, SkiJump.SampleSkiJumpSurfaceYMax(x, z, airbase.SkiJumps));
+                y = Math.Max(y, CarrierDeck.SampleCarrierMeshSurfaceYMax(x, z, airbase.SceneryMeshes));
+            }
+            return carrier != null ? Math.Max(y, carrier.DeckYAt(x, z)) : y;
         }
 
         private double GroundAt(double x, double z) => GroundAt(x, z, false);
@@ -559,7 +707,7 @@ namespace Retro.Unity
                 ? Fm2AircraftConfig.GroundRestHeight(current.Def.Flight)
                 : SimConstants.PlaneDistanceToGround;
             // groundHeightAt: the DEM, or the runway pavement over it.
-            double ground = Math.Max(heightField.HeightAtWorld(p.X, p.Z), Retro.Sim.SurfacePads.SampleSurfacePadYMax(p.X, p.Z, runwayPads));
+            double ground = Math.Max(heightField.HeightAtWorld(p.X, p.Z), Retro.Sim.SurfacePads.SampleSurfacePadYMax(p.X, p.Z, surfacePads));
             p.Y = ground + gearY;
             // A scene heading of 0 faces +Z, which is the body's nose.
             Quatd q = Quatd.FromAxisAngle(new Vec3d(0, 1, 0), r.Heading);
@@ -654,13 +802,13 @@ namespace Retro.Unity
         private bool IsOpenWater(double x, double z) =>
             !heightField.IsLandAtWorld(x, z)
             && double.IsNegativeInfinity(carrier.DeckYAt(x, z))
-            && double.IsNegativeInfinity(Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads));
+            && double.IsNegativeInfinity(Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, surfacePads));
 
         /// <summary>game.ts surfaceKindAt: what a contact throws up.</summary>
         private SmokeSurfaceKind SurfaceKindAt(double x, double z)
         {
             if (!double.IsNegativeInfinity(carrier.DeckYAt(x, z))) return SmokeSurfaceKind.Concrete;
-            bool onPad = !double.IsNegativeInfinity(Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads));
+            bool onPad = !double.IsNegativeInfinity(Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, surfacePads));
             if (!heightField.IsLandAtWorld(x, z) && !onPad) return SmokeSurfaceKind.Water;
             if (onPad) return SmokeSurfaceKind.Concrete;
             foreach (SceneRunway r in runways)
@@ -879,6 +1027,7 @@ namespace Retro.Unity
         {
             bool visible = !(flightView == FlightView.Cockpit && !aircraft.IsCrashed());
             carrier.Draw(view.ScenePosition);
+            airbase.Draw(view.ScenePosition);
             bool wrecked = wrecks.Track(PlayerId, aircraft, airframeView);
             if (Replaying && ReplayPlayer.Time < crashRecordTime)
             {
@@ -1012,6 +1161,8 @@ namespace Retro.Unity
             combatFx?.Dispose();
             wrecks?.Dispose();
             engineAudio?.Dispose();
+            airbase?.Destroy();
+            airfieldColliders?.Release();
             tailhook.Dispose();
             tracers?.Dispose();
         }
