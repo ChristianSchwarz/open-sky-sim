@@ -9,7 +9,7 @@ namespace Retro.Game
     /// screen-size LOD inputs and which levels draw anything. Geometry is in model space, metres,
     /// scene axes (x east, y up, z south), origin at the cluster's base centre.
     /// </summary>
-    public abstract class SkyModel
+    public abstract class SkyShapeModel
     {
         /// <summary>The lib name, e.g. "cloudLarge" (models are asked for as "lib:" + name).</summary>
         public string Name { get; }
@@ -23,7 +23,7 @@ namespace Retro.Game
         /// <summary>model.lod.length.</summary>
         public abstract int LodCount { get; }
 
-        protected SkyModel(string name)
+        protected SkyShapeModel(string name)
         {
             Name = name;
         }
@@ -39,7 +39,7 @@ namespace Retro.Game
     /// A cumulus cluster (cloudModelBuilder.ts CloudModelLibBuilder.build): a solid, smooth-shaded
     /// body plus one haze buffer whose prefixes make the four LOD levels.
     /// </summary>
-    public sealed class CloudModel : SkyModel
+    public sealed class CloudModel : SkyShapeModel
     {
         /// <summary>HAZE_SCATTER_HALF_ANGLE: top growth puffs scatter within this angle off straight-up.</summary>
         public static readonly double HazeScatterHalfAngle = Math.PI * 0.3;
@@ -222,7 +222,7 @@ namespace Retro.Game
     /// A cirrus streak (cirrusModelBuilder.ts CirrusModelLibBuilder.build): squashed detail-1
     /// icosahedra merged into one unshaded, stippled soup with flat normals; one LOD level.
     /// </summary>
-    public sealed class CirrusModel : SkyModel
+    public sealed class CirrusModel : SkyShapeModel
     {
         /// <summary>The streak material's uniform alphaDither (opaque share of the stipple).</summary>
         public const double AlphaDither = 0.35;
@@ -274,9 +274,9 @@ namespace Retro.Game
     /// </summary>
     public static class SkyModels
     {
-        private static readonly Lazy<Dictionary<string, SkyModel>> All = new Lazy<Dictionary<string, SkyModel>>(() =>
+        private static readonly Lazy<Dictionary<string, SkyShapeModel>> All = new Lazy<Dictionary<string, SkyShapeModel>>(() =>
         {
-            var models = new SkyModel[]
+            var models = new SkyShapeModel[]
             {
                 new CloudModel("cloudNone", Array.Empty<CloudPuffLobe>()),
                 new CloudModel("cloudSmall", CloudShapes.Small),
@@ -286,13 +286,13 @@ namespace Retro.Game
                 new CirrusModel("cirrusThin", CloudShapes.Thin),
                 new CirrusModel("cirrusWide", CloudShapes.Wide),
             };
-            var map = new Dictionary<string, SkyModel>();
-            foreach (SkyModel m in models) map.Add("lib:" + m.Name, m);
+            var map = new Dictionary<string, SkyShapeModel>();
+            foreach (SkyShapeModel m in models) map.Add("lib:" + m.Name, m);
             return map;
         });
 
         /// <summary>A model by its game URL, e.g. "lib:cloudLarge".</summary>
-        public static SkyModel Get(string url) =>
-            All.Value.TryGetValue(url, out SkyModel m) ? m : throw new ArgumentException($"no sky model \"{url}\"");
+        public static SkyShapeModel Get(string url) =>
+            All.Value.TryGetValue(url, out SkyShapeModel m) ? m : throw new ArgumentException($"no sky model \"{url}\"");
     }
 }

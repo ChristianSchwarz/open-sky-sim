@@ -119,7 +119,7 @@ namespace Retro.Game
         /// <summary>Tile slot in the field (row-major over the TilesInField^2 tiles) and cell in it.</summary>
         public int Tile, Cell;
         public int Variation;
-        public SkyModel Model;
+        public SkyShapeModel Model;
         /// <summary>Scene position of the model's origin (the base centre), metres.</summary>
         public Vec3d Position;
         /// <summary>Yaw about +Y in quarter turns (0..3) and the same as a quaternion.</summary>
@@ -153,14 +153,14 @@ namespace Retro.Game
         public readonly struct Cell
         {
             public readonly int Variation;
-            public readonly SkyModel Model;
+            public readonly SkyShapeModel Model;
             public readonly int LodBias;
             /// <summary>Offset from the tile centre, metres.</summary>
             public readonly double OffsetX, OffsetZ;
             public readonly int QuarterTurns;
             public readonly Quatd Rotation;
 
-            public Cell(int variation, SkyModel model, int lodBias, double offsetX, double offsetZ, int quarterTurns, Quatd rotation)
+            public Cell(int variation, SkyShapeModel model, int lodBias, double offsetX, double offsetZ, int quarterTurns, Quatd rotation)
             {
                 Variation = variation;
                 Model = model;
@@ -190,7 +190,7 @@ namespace Retro.Game
         /// repeatable one.
         /// </param>
         public SceneryField(FieldArea area, SceneryFieldSettings options, Func<double, double, double> heightAt,
-            Func<double> random, Func<string, SkyModel> models = null)
+            Func<double> random, Func<string, SkyShapeModel> models = null)
         {
             models ??= SkyModels.Get;
             _options = options;
@@ -219,7 +219,7 @@ namespace Retro.Game
             }
         }
 
-        private Cell BuildCell(int row, int col, Func<double> random, Func<string, SkyModel> models)
+        private Cell BuildCell(int row, int col, Func<double> random, Func<string, SkyShapeModel> models)
         {
             int variation = PickVariation(random());
             SceneryFieldCellVariation v = _options.CellVariations[variation];
@@ -344,7 +344,7 @@ namespace Retro.Game
         }
 
         /// <summary>resolveLodLevel: -1 = draw nothing.</summary>
-        public static int Resolve(SkyModel model, int requested)
+        public static int Resolve(SkyShapeModel model, int requested)
         {
             int populated = 0, first = -1;
             for (int i = 0; i < model.LodCount; i++)

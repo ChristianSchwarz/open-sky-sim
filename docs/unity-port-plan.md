@@ -29,7 +29,7 @@ runtime, rendering, sim/AI, UI/input). Nothing in the repo was changed to produc
 | J sky, palette CPU half | Done, golden-verified (`sky.json`): sun clock, atmosphere march, sky model, daytime palette blend, dome and glare geometry and colours; shaders not started | `com.retro.game/Runtime/Sky` |
 | J effects, K-P (HUD, UI, wreck) | Not started | |
 
-`cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity (242 tests). All trig goes through `Retro.Core.JsTrig`, a port of V8's fdlibm, so closed-loop traces stay bit-identical to the browser.
+`cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity (248 tests). All trig goes through `Retro.Core.JsTrig`, a port of V8's fdlibm, so closed-loop traces stay bit-identical to the browser.
 
 ## 1. Decisions already made
 

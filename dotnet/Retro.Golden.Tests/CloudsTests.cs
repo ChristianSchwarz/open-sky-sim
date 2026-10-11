@@ -88,7 +88,7 @@ public class CloudsTests
         foreach (JsonElement x in Fx.GetProperty("models").EnumerateArray())
         {
             string name = x.GetProperty("name").GetString()!;
-            SkyModel model = SkyModels.Get("lib:" + name);
+            SkyShapeModel model = SkyModels.Get("lib:" + name);
             m.Equal($"{name} maxSize", Num(x, "maxSize"), model.MaxSize);
             m.Equal($"{name} centerY", Num(x, "centerY"), model.CenterY);
             m.Equal($"{name} lodCount", x.GetProperty("lodCount").GetInt32(), model.LodCount);
