@@ -108,6 +108,13 @@ namespace Retro.Game
         public PaletteTime Time;
         public Dictionary<PaletteCategory, string[]> Colors;
         public Dictionary<PaletteCategory, double> Values;
+        /// <summary>
+        /// palette.ts Palette.light: linear-light RGB factor for colours the
+        /// palette does not own (a mod's raw #rrggbb materials, canopy glass).
+        /// Only blended palettes carry it (see DaytimePalette.Blend); null on an
+        /// authored palette, which means neutral. Added by hand to the generated file.
+        /// </summary>
+        public double[] Light;
 
         /// <summary>palette.ts PaletteColor: the base colour.</summary>
         public string Color(PaletteCategory c) => Colors[c][0];
