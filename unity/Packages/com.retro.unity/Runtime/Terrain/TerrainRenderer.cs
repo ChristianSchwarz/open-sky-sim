@@ -32,6 +32,15 @@ namespace Retro.Unity
     {
         public int maxZoom;
         public double[] levelGeometricErrorM;
+        public string[] swatches;
+        public LuminanceJson luminance;
+    }
+
+    [Serializable]
+    internal sealed class LuminanceJson
+    {
+        public float mid = 0.28f;
+        public float spread = 0.1f;
     }
 
     /// <summary>
@@ -56,6 +65,10 @@ namespace Retro.Unity
         public Material waterDeepMaterial;
         public Material waterShallowMaterial;
 
+        [Tooltip("Land colour mode (the Graphics tab's Terrain colour).")]
+        public TerrainColourMode colourMode = TerrainColourMode.Hybrid;
+        [Range(0, 1)] public float landuseBlend = TerrainColours.LanduseBlendDefault;
+
         [Range(1, 4)] public float detailScale = 1;
         public float detailDistanceKm = 12;
         [Range(1, 10)] public float leafScale = 1.5f;
@@ -74,6 +87,9 @@ namespace Retro.Unity
         public bool triangleBudgetHit;
 
         private TerrainSession session;
+        private ManifestJson manifest;
+        private TerrainColourMode appliedMode = (TerrainColourMode)(-1);
+        private float appliedBlend = -1;
         private readonly Dictionary<TileKey, TileGpuMeshes> gpu = new Dictionary<TileKey, TileGpuMeshes>();
         private readonly Queue<(TileKey Key, PtmTile Tile)> uploadQueue = new Queue<(TileKey, PtmTile)>();
         private float reconcileTimer;
@@ -90,7 +106,7 @@ namespace Retro.Unity
                 enabled = false;
                 return;
             }
-            ManifestJson manifest = JsonUtility.FromJson<ManifestJson>(File.ReadAllText(Path.Combine(root, "manifest.json")));
+            manifest = JsonUtility.FromJson<ManifestJson>(File.ReadAllText(Path.Combine(root, "manifest.json")));
             session = new TerrainSession(new TerrainSessionOptions
             {
                 Root = root,
@@ -148,6 +164,13 @@ namespace Retro.Unity
         private void Update()
         {
             if (session == null || viewer == null) return;
+            if (colourMode != appliedMode || landuseBlend != appliedBlend)
+            {
+                LuminanceJson lum = manifest.mesh.luminance ?? new LuminanceJson();
+                TerrainColours.Apply(landMaterial, colourMode, landuseBlend, manifest.mesh.swatches, lum.mid, lum.spread);
+                appliedMode = colourMode;
+                appliedBlend = landuseBlend;
+            }
 
             // Reconcile at the TS cadence (RECONCILE_INTERVAL_MS); upload every frame within budget.
             reconcileTimer -= Time.unscaledDeltaTime * 1000;

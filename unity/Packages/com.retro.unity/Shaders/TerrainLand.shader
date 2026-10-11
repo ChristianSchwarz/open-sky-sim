@@ -3,8 +3,8 @@
 // Vertex streams are the PTM wire formats: POSITION SNorm16x4 (xyz, pad; the
 // object matrix carries quantScale * 32767 and the z mirror into Unity axes),
 // NORMAL SNorm8x4 (xyz, pad), COLOR UNorm8x4 (sRGB rgb, TerrainClass / 255).
-// Faceted Lambert from the URP main light plus SH ambient and URP fog; the
-// colour modes, land-use reveal and the leaf dissolve come later.
+// Colour from the four modes of terrainCover.ts (TerrainCover.hlsl); faceted
+// Lambert from the URP main light plus SH ambient and URP fog.
 Shader "Retro/TerrainLand"
 {
     Properties
@@ -36,6 +36,7 @@ Shader "Retro/TerrainLand"
             #pragma multi_compile_fog
             #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            #include "TerrainCover.hlsl"
 
             struct Attributes
             {
@@ -60,8 +61,9 @@ Shader "Retro/TerrainLand"
                 o.positionWS = positionWS;
                 o.positionCS = TransformWorldToHClip(positionWS);
                 o.normalWS = TransformObjectToWorldNormal(v.normalOS.xyz);
-                // Baked colours are sRGB bytes; the project renders in linear space.
-                o.albedo = SRGBToLinear(v.color.rgb);
+                // The colour mode decides per vertex (constant over a facet); land-use
+                // size reveal is not wired yet, so every region shows fully.
+                o.albedo = RetroFacetColor(v.color.rgb, v.color.a * 255.0, 1.0);
                 o.fog = ComputeFogFactor(o.positionCS.z);
                 return o;
             }
@@ -70,7 +72,9 @@ Shader "Retro/TerrainLand"
             {
                 float3 n = normalize(i.normalWS);
                 Light sun = GetMainLight(TransformWorldToShadowCoord(i.positionWS));
-                half ndl = saturate(dot(n, sun.direction)) * sun.shadowAttenuation;
+                // terrainVP.ts: N.L raised to SHADOW_CONTRAST_POWER (2.2) so slope relief reads
+                // from shading alone; the URP light and ambient carry the 45/55 split (SunModel).
+                half ndl = pow(saturate(dot(n, sun.direction)), 2.2) * sun.shadowAttenuation;
                 half3 ambient = SampleSH(n);
                 half3 c = i.albedo * _Brightness * (sun.color * ndl + ambient);
                 c = MixFog(c, i.fog);

@@ -29,19 +29,15 @@ namespace Retro.Unity
             FlyCamera fly = cam.GetComponent<FlyCamera>();
             if (fly == null) fly = cam.gameObject.AddComponent<FlyCamera>();
 
-            if (Object.FindAnyObjectByType<Light>() == null)
+            Light sun = Object.FindAnyObjectByType<Light>();
+            if (sun == null)
             {
-                var sun = new GameObject("Sun").AddComponent<Light>();
+                sun = new GameObject("Sun").AddComponent<Light>();
                 sun.type = LightType.Directional;
-                sun.intensity = 1.2f;
-                sun.color = new Color(1f, 0.96f, 0.88f);
-                sun.transform.rotation = Quaternion.Euler(45, 150, 0);
-                sun.shadows = LightShadows.None;
             }
-            RenderSettings.ambientMode = AmbientMode.Trilight;
-            RenderSettings.ambientSkyColor = new Color(0.55f, 0.65f, 0.80f);
-            RenderSettings.ambientEquatorColor = new Color(0.45f, 0.48f, 0.50f);
-            RenderSettings.ambientGroundColor = new Color(0.25f, 0.23f, 0.20f);
+            sun.shadows = LightShadows.None;
+            // The web game's sun at its default 14:00, and its direct/ambient balance.
+            SunModel.Apply(sun, SunModel.DefaultHours);
             RenderSettings.fog = true;
             RenderSettings.fogMode = FogMode.ExponentialSquared;
             RenderSettings.fogDensity = 0.000012f;
