@@ -65,6 +65,9 @@ namespace Retro.Unity
             var buildings = root.AddComponent<BuildingRenderer>();
             buildings.terrain = terrain;
             buildings.viewer = fly;
+            var vegetation = root.AddComponent<VegetationRenderer>();
+            vegetation.terrain = terrain;
+            vegetation.viewer = fly;
             return terrain;
         }
     }
