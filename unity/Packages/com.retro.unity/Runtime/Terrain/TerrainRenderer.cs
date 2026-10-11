@@ -97,6 +97,9 @@ namespace Retro.Unity
         public double originLat = double.NaN;
         public double originLon = double.NaN;
 
+        /// <summary>What a tile costs beyond its land and water (roads, bridges); set before Start.</summary>
+        public Func<TileKey, int> extraTriangles;
+
         [Tooltip("The view this terrain follows (position and orientation in double precision).")]
         public FlyCamera viewer;
 
@@ -137,6 +140,8 @@ namespace Retro.Unity
         public TerrainSession Session => session;
         /// <summary>The folder the pyramid is read from; null until Start found it.</summary>
         public string Root { get; private set; }
+        /// <summary>The pyramid's deepest mesh zoom (manifest mesh.maxZoom).</summary>
+        public int MaxZoom => manifest != null ? manifest.mesh.maxZoom : 12;
 
         /// <summary>The collision surface over the same pyramid and frame, for the sim.</summary>
         public DemHeightField CreateHeightField()
@@ -170,6 +175,7 @@ namespace Retro.Unity
                 OriginHeight = double.IsNaN(originLat) ? manifest.enuOrigin.height : 0,
             });
             session.IsUploaded = k => gpu.ContainsKey(k);
+            session.ExtraTriangles = extraTriangles;
             session.Meshes.Loaded += (k, t) => uploadQueue.Enqueue((k, t));
             session.Meshes.Evicted += (k, _) =>
             {

@@ -167,6 +167,10 @@ namespace Retro.Unity
             return m;
         }
 
+        /// <summary>What a tile's roads cost the terrain budget: full detail by the roads setting, 0 until attached.</summary>
+        public int BudgetTrianglesOf(TileKey key) =>
+            gpu.TryGetValue(key, out TileRoads t) ? t.Cpu.BudgetTriangles(mode) : 0;
+
         private TileRoads Upload(PtrTile ptr, DrawTile d)
         {
             var t = new TileRoads { TileQuantScale = d.Tile.QuantScale };

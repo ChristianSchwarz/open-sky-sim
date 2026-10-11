@@ -61,7 +61,7 @@ namespace Retro.Unity
         }
 
         private string root;
-        private TileIndex roadIndex, buildingIndex;
+        private TileIndex roadIndex, buildingIndex, bedIndex;
         private Func<double, double, bool> onAirfield;
         private readonly Dictionary<TileKey, TileTrees> tiles = new Dictionary<TileKey, TileTrees>();
         private Mesh treeQuad, stoneQuad;
@@ -78,6 +78,7 @@ namespace Retro.Unity
             root = terrain.Root;
             roadIndex = LoadIndex("index_roads.bin");
             buildingIndex = LoadIndex("index_buildings.bin");
+            bedIndex = LoadIndex("index_beds.bin");
 
             // The area's airfields, once (airfieldExclusion.ts), in the play frame.
             EnuBasis basis = terrain.Session.Basis;
@@ -238,6 +239,9 @@ namespace Retro.Unity
             Quatd frameFix = d.FrameFix;
             bool hasRoads = roadIndex != null && roadIndex.Has(key);
             bool hasBuildings = buildingIndex != null && buildingIndex.Has(key);
+            bool hasBeds = bedIndex != null && bedIndex.Has(key);
+            EnuBasis bakeBasis = terrain.Session.BakeBasis;
+            int maxZoom = terrain.MaxZoom;
             Func<double, double, bool> airfields = onAirfield;
             string dir = Path.Combine(root, key.Z.ToString(), key.X.ToString());
             return Task.Run(() =>
@@ -257,8 +261,20 @@ namespace Retro.Unity
                     BuildingExclusion b = File.Exists(p) ? BuildingExclusion.Build(TileFile.Pbh(File.ReadAllBytes(p))) : null;
                     if (b != null) building = b.Contains;
                 }
+                // Off the railway beds and their batters (loadBeds): the bed's own vertical, a 32 m grid at the leaf.
+                Func<double, double, double, bool> bed = null;
+                if (hasBeds)
+                {
+                    string p = Path.Combine(dir, key.Y + ".pbd");
+                    PbdTile pbd = File.Exists(p) ? TileFile.Pbd(File.ReadAllBytes(p)) : null;
+                    if (pbd != null && pbd.Beds.Length > 0)
+                    {
+                        bed = RailBedExclusion.Build(pbd.Beds, RailBedExclusion.TileUp(bakeBasis, key), RailBedExclusion.CellMFor(key.Z, maxZoom));
+                    }
+                }
+                // No surface pads: the Unity world places no scenery pads yet (surfaceExclusion.ts has nothing to test).
                 Func<double, double, double, bool> manMade = VegetationExclusion.ForTile(origin, frameFix, airfields, null, null, null);
-                return TileVegetation.Build(tile, densityScale, VegetationExclusion.Combine(road, null, manMade, building));
+                return TileVegetation.Build(tile, densityScale, VegetationExclusion.Combine(road, bed, manMade, building));
             });
         }
 

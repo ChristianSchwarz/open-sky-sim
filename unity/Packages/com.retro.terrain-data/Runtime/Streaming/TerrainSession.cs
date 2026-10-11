@@ -176,7 +176,7 @@ namespace Retro.Terrain
                     TriangleBudgetHit = true;
                     break;
                 }
-                DrawnTriangles += TileTriangles(tile);
+                DrawnTriangles += TileTriangles(tile) + Extra(n.Id);
                 DrawList.Add(new DrawTile
                 {
                     Key = n.Id,
@@ -193,13 +193,22 @@ namespace Retro.Terrain
 
         private static double NearM(QuadNode n, Vec3d cam) => Math.Max(0, Vec3d.Distance(n.Center, cam) - n.Radius);
 
-        /// <summary>Land and water triangles of a tile (countTriangles(asNear = true); roads and bridges come later).</summary>
+        /// <summary>Land and water triangles of a tile (countTriangles(asNear = true)).</summary>
         public static int TileTriangles(PtmTile t) => t.LandPositions.Length / 9 + t.WaterIndices.Length / 3;
+
+        /// <summary>
+        /// What else a tile costs the budget once its sidecars are attached
+        /// (terrainEntity.ts tileTriangles: roads at full detail by the roads
+        /// setting, every bridge triangle). Null charges nothing.
+        /// </summary>
+        public Func<TileKey, int> ExtraTriangles;
+
+        private int Extra(TileKey id) => ExtraTriangles != null ? ExtraTriangles(id) : 0;
 
         private int Cost(QuadNode node)
         {
             PtmTile t = IsUploaded(node.Id) ? Meshes.Peek(node.Id) : null;
-            return t != null ? TileTriangles(t) : OceanPatchTriangles;
+            return t != null ? TileTriangles(t) + Extra(node.Id) : OceanPatchTriangles;
         }
 
         /// <summary>

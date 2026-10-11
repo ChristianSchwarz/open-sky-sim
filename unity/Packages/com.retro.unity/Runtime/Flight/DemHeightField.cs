@@ -27,6 +27,10 @@ namespace Retro.Unity
         private readonly TileCache<DemTile> fine;
         private readonly Dictionary<TileKey, DemTile> coarse = new Dictionary<TileKey, DemTile>();
         private readonly HeightSampler sampler;
+        private readonly List<FlattenPad> pads;
+        private readonly int coarseZoom;
+        /// <summary>Points other systems want the fine tier around (airfields being built), with their radii.</summary>
+        private readonly Dictionary<object, (Vec3d Point, double RadiusM)> extraFocus = new Dictionary<object, (Vec3d, double)>();
 
         public readonly EnuBasis Basis;
         public readonly double SeaLevel;
@@ -54,10 +58,12 @@ namespace Retro.Unity
                 Enu enu = Geodesy.EcefToEnu(basis, Geodesy.GeodeticToEcef(lat, lon, 0));
                 return (enu.E, enu.N);
             }
+            this.coarseZoom = coarseZoom;
             List<FlattenPad> padList = (pads ?? Enumerable.Empty<FlattenPadRecord>())
                 .Select(p => FlattenPads.FromRecord(p, ToEnu))
                 .Where(p => JsMath.Hypot(p.CenterX, p.CenterZ) - FlattenPads.ReachM(p) <= PadReachM)
                 .ToList();
+            this.pads = padList;
 
             sampler = new HeightSampler(new HeightSamplerOptions
             {
@@ -93,9 +99,9 @@ namespace Retro.Unity
             var wants = new List<(TileKey, double)>();
             var seen = new HashSet<TileKey>();
             double priority = 1;
-            foreach (Vec3d p in points)
+            void Want(Vec3d p, double radiusM)
             {
-                foreach (TileKey id in FineTileIdsAround(p.X, p.Z, FocusRadiusM))
+                foreach (TileKey id in FineTileIdsAround(p.X, p.Z, radiusM))
                 {
                     if (!seen.Add(id)) continue;
                     if (!index.Has(id)) continue;
@@ -104,8 +110,50 @@ namespace Retro.Unity
                 }
                 priority *= 0.5;
             }
+            foreach (Vec3d p in points) Want(p, FocusRadiusM);
+            foreach (var (p, r) in extraFocus.Values) Want(p, r);
             fine.SetWants(wants);
             fine.Pump();
+        }
+
+        /// <summary>Keep the fine tier around a point resident for `owner` until <see cref="ReleaseFocus"/>.</summary>
+        public void HoldFocus(object owner, Vec3d point, double radiusM) => extraFocus[owner] = (point, radiusM);
+
+        public void ReleaseFocus(object owner) => extraFocus.Remove(owner);
+
+        /// <summary>
+        /// A sampler over the fine tiles resident around a point right now, safe to
+        /// use off the main thread (DEM tiles are immutable; the cache is not
+        /// touched). False while any fine tile there is still loading, unless
+        /// `allowPartial`, which answers from the coarse tier where fine is missing.
+        /// </summary>
+        public bool TrySnapshot(Vec3d centre, double radiusM, bool allowPartial, out HeightSampler snapshot)
+        {
+            snapshot = null;
+            var tiles = new Dictionary<TileKey, DemTile>();
+            foreach (TileKey id in FineTileIdsAround(centre.X, centre.Z, radiusM))
+            {
+                if (!index.Has(id) || fine.IsAbsent(id)) continue;
+                DemTile t = fine.Peek(id);
+                if (t == null)
+                {
+                    if (!allowPartial) return false;
+                    continue;
+                }
+                tiles[id] = t;
+            }
+            var coarseCopy = new Dictionary<TileKey, DemTile>(coarse);
+            snapshot = new HeightSampler(new HeightSamplerOptions
+            {
+                Basis = Basis,
+                SeaLevel = SeaLevel,
+                QueryZoom = sampler.QueryZoom,
+                CoarseZoom = coarseZoom,
+                Pads = pads,
+                Fine = id => tiles.TryGetValue(id, out DemTile t) ? t : null,
+                Coarse = id => coarseCopy.TryGetValue(id, out DemTile t) ? t : null,
+            });
+            return true;
         }
 
         /// <summary>Blocks until no fine load is in flight (spawn only).</summary>

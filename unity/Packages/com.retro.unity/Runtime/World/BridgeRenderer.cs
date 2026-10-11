@@ -120,6 +120,9 @@ namespace Retro.Unity
             residentTiles = cache.Count;
         }
 
+        /// <summary>What a tile's bridges cost the terrain budget: every triangle bound, shown or not.</summary>
+        public int TrianglesOf(TileKey key) => gpu.TryGetValue(key, out TileBridges t) ? t.Cpu.Triangles() : 0;
+
         private static TileBridges Upload(PbrTile pbr, float tileQuantScale)
         {
             var t = new TileBridges { Cpu = BridgeMeshes.Build(pbr, tileQuantScale), TileQuantScale = tileQuantScale };

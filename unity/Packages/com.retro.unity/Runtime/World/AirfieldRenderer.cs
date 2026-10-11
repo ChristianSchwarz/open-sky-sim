@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using Retro.Core;
 using Retro.Game;
 using Retro.Terrain;
@@ -35,6 +36,7 @@ namespace Retro.Unity
         public int knownAirfields;
         public int builtAirfields;
         public int drawnAirfields;
+        [Tooltip("Main-thread time of the last upload (the build itself runs on a worker).")]
         public float lastBuildMs;
 
         private const int FlatQueueBase = 2010;
@@ -52,6 +54,8 @@ namespace Retro.Unity
             public List<Gpu>[] Flats;
             public List<Gpu>[] Volumes;
             public Texture2D[] Marks;
+            /// <summary>Unpaved strips waiting for the colour of the ground under them.</summary>
+            public List<(AirfieldGroundStrip Strip, Task<TileCover?> Cover)> Strips = new List<(AirfieldGroundStrip, Task<TileCover?>)>();
         }
 
         private readonly List<(Airfield Airfield, Vec3d Centre)> airfields = new List<(Airfield, Vec3d)>();
@@ -73,7 +77,8 @@ namespace Retro.Unity
                 scanTimer = 1;
                 Scan();
             }
-            if (toBuild.Count > 0) BuildOne(toBuild.Dequeue());
+            PumpBuilds();
+            FinishStrips();
             Draw();
             builtAirfields = built.Count;
         }
@@ -119,23 +124,72 @@ namespace Retro.Unity
             }
         }
 
-        private void BuildOne(Airfield airfield)
+        /// <summary>Reach of the fine ground an airfield is draped on: its runways and taxiways.</summary>
+        private const double DrapeRadiusM = 6000;
+        /// <summary>How long a build waits for the fine tier before draping on what is there.</summary>
+        private const float DrapeWaitS = 3;
+
+        private sealed class Job
         {
-            queued.Remove(airfield);
-            var clock = System.Diagnostics.Stopwatch.StartNew();
+            public Airfield Airfield;
+            public Vec3d Centre;
+            public float Since;
+            public Task<AirfieldGeometry> Task;
+        }
+
+        private Job job;
+
+        /// <summary>
+        /// One airfield at a time: hold the fine ground under it, then build its
+        /// geometry on a worker against a snapshot of that ground, then upload.
+        /// Nothing here blocks the frame on the tile loads.
+        /// </summary>
+        private void PumpBuilds()
+        {
             DemHeightField ground = player != null ? player.HeightField : null;
-            Func<double, double, double> groundAt = null;
-            if (ground != null)
+            if (job == null)
             {
-                // The fine tier under the airfield first, so the drape is not a coarse guess.
-                Vec3d centre = Geodesy.GeodeticToWorld(basis, airfield.Lat, airfield.Lon, 0);
-                ground.Focus(new[] { player.Aircraft != null ? player.Aircraft.GetPosition() : centre, centre });
-                ground.WaitIdle(TimeSpan.FromSeconds(2));
-                groundAt = (e, n) => ground.Sampler.GeodeticHeightAtEnu(e, n);
+                if (toBuild.Count == 0) return;
+                Airfield next = toBuild.Dequeue();
+                job = new Job
+                {
+                    Airfield = next,
+                    Centre = Geodesy.GeodeticToWorld(basis, next.Lat, next.Lon, 0),
+                    Since = Time.unscaledTime,
+                };
+                ground?.HoldFocus(this, job.Centre, DrapeRadiusM);
             }
-            AirfieldGeometry g = AirfieldGeometryBuilder.Build(airfield, basis, groundAt,
-                contour => ShapeUtils.TriangulateShape(contour, NoHoles));
-            if (g == null) return;
+            if (job.Task == null)
+            {
+                Func<double, double, double> groundAt = null;
+                if (ground != null)
+                {
+                    bool late = Time.unscaledTime - job.Since > DrapeWaitS;
+                    if (!ground.TrySnapshot(job.Centre, DrapeRadiusM, late, out HeightSampler snapshot)) return;
+                    ground.ReleaseFocus(this);
+                    groundAt = (e, n) => snapshot.GeodeticHeightAtEnu(e, n);
+                }
+                Airfield a = job.Airfield;
+                EnuBasis frame = basis;
+                job.Task = Task.Run(() => AirfieldGeometryBuilder.Build(a, frame, groundAt,
+                    contour => ShapeUtils.TriangulateShape(contour, NoHoles)));
+                return;
+            }
+            if (!job.Task.IsCompleted) return;
+            Job done = job;
+            job = null;
+            queued.Remove(done.Airfield);
+            if (done.Task.IsFaulted)
+            {
+                Debug.LogException(done.Task.Exception);
+                return;
+            }
+            if (done.Task.Result != null) built[done.Airfield] = UploadAll(done.Task.Result);
+        }
+
+        private Built UploadAll(AirfieldGeometry g)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             var b = new Built
             {
                 Geometry = g,
@@ -155,8 +209,74 @@ namespace Retro.Unity
                 for (int i = 0; i < flats.Count; i++) b.Flats[l].Add(Upload(flats[i], b, FlatQueueBase + i));
                 foreach (AirfieldPart p in g.Levels[l].Volumes) b.Volumes[l].Add(Upload(p, b, -1));
             }
-            built[airfield] = b;
+            // game.ts finalizeGroundStrip: once, from the finest baked tile under each sample
+            // (a guarded sea-level strip is never repainted).
+            foreach (AirfieldGroundStrip strip in g.GroundStrips)
+            {
+                if (!double.IsPositiveInfinity(strip.PaintedZoom)) b.Strips.Add((strip, FinestCover(strip)));
+            }
             lastBuildMs = (float)clock.Elapsed.TotalMilliseconds;
+            return b;
+        }
+
+        /// <summary>terrainEntity.ts finestCoverAtWorld for a strip's three samples, combined, off the main thread.</summary>
+        private Task<TileCover?> FinestCover(AirfieldGroundStrip strip)
+        {
+            TerrainSession session = terrain.Session;
+            string dir = terrain.Root;
+            int zoom = terrain.MaxZoom;
+            Vec3d[] samples = strip.Samples;
+            return Task.Run(() =>
+            {
+                var covers = new List<TileCover?>();
+                foreach (Vec3d p in samples)
+                {
+                    Geodetic geo = Geodesy.GeodeticOnSurfaceAtEnu(session.Basis, p.X, -p.Z);
+                    TileKey id = Tiling.AtLonLat(zoom, geo.Lon, geo.Lat);
+                    string path = Path.Combine(dir, id.Z.ToString(), id.X.ToString(), id.Y + ".ptm");
+                    if (!File.Exists(path))
+                    {
+                        covers.Add(null);
+                        continue;
+                    }
+                    PtmTile tile = TileFile.Ptm(File.ReadAllBytes(path));
+                    // Into the tile's own axes (the TS skips the frame fix; exact only at the bake origin).
+                    Vec3d local = (p - session.TileOrigin(id, tile.CenterHeightM)).Rotate(session.FrameFix.Conjugate());
+                    covers.Add(TileCovers.CoverInPtmTile(tile, local.X / tile.QuantScale, local.Z / tile.QuantScale, zoom));
+                }
+                return TileCovers.Combine(covers);
+            });
+        }
+
+        /// <summary>repaintGroundStrip: the strip's pavement, in every level, takes the ground's colour lifted by its lighten.</summary>
+        private static void Repaint(Built b, AirfieldGroundStrip strip, TileCover cover)
+        {
+            Color c = TerrainColours.FromHex("#" + cover.Rgb.ToString("x6"));
+            foreach (List<Gpu> level in b.Flats)
+            {
+                foreach (Gpu g in level)
+                {
+                    if (g.Mesh.name != strip.PaintKey) continue;
+                    g.Material.SetColor("_Color", c);
+                    g.Material.SetFloat("_Overbright", (float)strip.Lighten);
+                }
+            }
+            strip.PaintedZoom = double.PositiveInfinity;
+        }
+
+        private void FinishStrips()
+        {
+            foreach (Built b in built.Values)
+            {
+                for (int i = b.Strips.Count - 1; i >= 0; i--)
+                {
+                    var (strip, task) = b.Strips[i];
+                    if (!task.IsCompleted) continue;
+                    b.Strips.RemoveAt(i);
+                    if (task.IsFaulted) Debug.LogException(task.Exception);
+                    else if (task.Result.HasValue) Repaint(b, strip, task.Result.Value);
+                }
+            }
         }
 
         private static Texture2D MarkTexture(MarkingTexture m)

@@ -95,6 +95,11 @@ namespace Retro.Unity
             bridges.terrain = terrain;
             bridges.viewer = fly;
             bridges.roads = roads;
+            // terrainEntity.ts tileTriangles: roads and bridges count against the 600k fold.
+            terrain.extraTriangles = k => roads.BudgetTrianglesOf(k) + bridges.TrianglesOf(k);
+            var walls = root.AddComponent<RailWallRenderer>();
+            walls.terrain = terrain;
+            walls.viewer = fly;
             var vegetation = root.AddComponent<VegetationRenderer>();
             vegetation.terrain = terrain;
             vegetation.viewer = fly;
