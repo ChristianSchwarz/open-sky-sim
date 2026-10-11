@@ -43,7 +43,9 @@ namespace Retro.Game
     /// per spawn 4 emitter draws (direction xyz, speed) then 5 config draws (life,
     /// size start, size end, rotation start, rotation end), and one draw per
     /// <see cref="Update"/> for the fractional spawn while the pool has room.
-    /// Forces, the bounding box and re-base are not ported (no carrier user).
+    /// A custom <see cref="ICpuParticleEmitter"/> (e.g. <see cref="SphereParticleEmitter"/>)
+    /// replaces the point emitter's 4 draws with its own. Forces (<see cref="AddForce"/>)
+    /// and <see cref="Rebase"/> are ported (added for debrisField.ts); the bounding box is not.
     /// </summary>
     public sealed class CpuParticleSystem
     {
@@ -51,6 +53,9 @@ namespace Retro.Game
         private readonly Func<double> random;
         private readonly double emitterMinSpeed;
         private readonly double emitterMaxSpeed;
+        /// <summary>When set, replaces the built-in PointEmitter.</summary>
+        private readonly ICpuParticleEmitter emitter;
+        private readonly System.Collections.Generic.List<ICpuParticleForce> forces = new System.Collections.Generic.List<ICpuParticleForce>();
         private int aliveCount;
 
         public readonly CpuParticle[] Particles;
@@ -75,6 +80,33 @@ namespace Retro.Game
             for (int i = 0; i < Particles.Length; i++)
             {
                 Particles[i] = new CpuParticle();
+            }
+        }
+
+        /// <summary>A system whose particles are placed by <paramref name="emitter"/> instead of the PointEmitter.</summary>
+        public CpuParticleSystem(CpuParticleSystemConfig config, ICpuParticleEmitter emitter, Func<double> random)
+            : this(config, 0, 0, random)
+        {
+            this.emitter = emitter ?? throw new ArgumentNullException(nameof(emitter));
+        }
+
+        /// <summary>particleSystem.ts addForce: applied to every live particle each update, in order.</summary>
+        public void AddForce(ICpuParticleForce force)
+        {
+            forces.Add(force ?? throw new ArgumentNullException(nameof(force)));
+        }
+
+        /// <summary>
+        /// particleSystem.ts rebase: the emitter position and every particle (live or not)
+        /// are carried into the re-based frame (positions as points, velocities as vectors).
+        /// </summary>
+        public void Rebase(FrameShift shift)
+        {
+            Position = shift.Point(Position);
+            foreach (CpuParticle p in Particles)
+            {
+                p.Position = shift.Point(p.Position);
+                p.Velocity = shift.Vector(p.Velocity);
             }
         }
 
@@ -162,6 +194,10 @@ namespace Retro.Game
                 }
                 else
                 {
+                    for (int f = 0; f < forces.Count; f++)
+                    {
+                        forces[f].Apply(delta, p);
+                    }
                     p.Position = p.Position.AddScaled(p.Velocity, delta);
                 }
             }
@@ -196,13 +232,14 @@ namespace Retro.Game
             p.IsActive = true;
             p.Spawns++;
 
-            // PointEmitter.emit
-            p.Position = Position;
-            double vx = random() * 2 - 1;
-            double vy = random() * 2 - 1;
-            double vz = random() * 2 - 1;
-            double speed = Lerp(random(), emitterMinSpeed, emitterMaxSpeed);
-            p.Velocity = new Vec3d(vx, vy, vz).Normalized() * speed;
+            if (emitter != null)
+            {
+                emitter.Emit(Position, p, random);
+            }
+            else
+            {
+                EmitPoint(p);
+            }
 
             p.Life = 0;
             p.Lifespan = RandomRange(config.ParticleLifeMin, config.ParticleLifeMax);
@@ -210,6 +247,17 @@ namespace Retro.Game
             p.SizeEnd = RandomRange(config.ParticleSizeEndMin, config.ParticleSizeEndMax);
             p.RotationStart = RandomRange(config.ParticleRotationStartMin, config.ParticleRotationStartMax);
             p.RotationEnd = RandomRange(config.ParticleRotationEndMin, config.ParticleRotationEndMax);
+        }
+
+        /// <summary>PointEmitter.emit.</summary>
+        private void EmitPoint(CpuParticle p)
+        {
+            p.Position = Position;
+            double vx = random() * 2 - 1;
+            double vy = random() * 2 - 1;
+            double vz = random() * 2 - 1;
+            double speed = Lerp(random(), emitterMinSpeed, emitterMaxSpeed);
+            p.Velocity = new Vec3d(vx, vy, vz).Normalized() * speed;
         }
 
         private static double Lerp(double t, double n0, double n1) => n0 + t * (n1 - n0);
