@@ -14,7 +14,8 @@ runtime, rendering, sim/AI, UI/input). Nothing in the repo was changed to produc
 | C streaming store, budget folding | Done: `TileCache`, `TerrainSession`, 600k fold (integration test on the real pyramid) | `.../terrain-data/Runtime/Streaming` |
 | D terrain rendering | URP: tiles in wire formats, four colour modes, web lighting balance, leaf dissolve, sea; land-use reveal and far cover textures still open | `unity/Packages/com.retro.unity/Runtime/Terrain` |
 | E buildings (CPU side) | Done, golden-verified: earcut/`ShapeUtils` port (index-exact), roof/wall extrusion of the 3 real PBH tiles bit-identical, draw-range budget, tree exclusion, tones; URP shader and residency not written | `.../terrain-data/Runtime/Buildings`, `com.retro.core/Runtime/Math/{Earcut,ShapeUtils}.cs` |
-| E roads, trees | Not started | |
+| E roads, rails, bridges (CPU side) | Done, golden-verified on 6 .ptr + 4 .pbr tiles: stroke split by kind, far road levels, trees' road mask, bridge parts and furniture boxes (`tests/golden/roads.json`); shaders still to write | `.../terrain-data/Runtime/Roads` |
+| E trees, stones | In progress (m5-vegetation) | |
 | F FM2 + FM3 | Done, all 26 traces match | `unity/Packages/com.retro.sim/Runtime/Physics` |
 | G height queries + airfield pads | Done, golden-verified | `.../terrain-data/Runtime/Height` |
 | G combat sim, colliders, arrestor, collision, player input, gun | Done, all 12 scenarios match (most to ~1e-13) | `tests/golden/combat_sim.json` |
