@@ -11,7 +11,8 @@ The C# port of the game (see `docs/unity-port-plan.md`).
   (the only place scene axes become Unity axes), the URP shaders, and
   `Flight/` (`PlayerFlight` drives the ported `CombatSim`; `DemHeightField`
   is its collision surface) and `World/` (airfields, roads and rails,
-  bridges, buildings, trees, each streamed per drawn tile).
+  bridges, buildings, trees, each streamed per drawn tile; `SkyRenderer` and
+  `CloudRenderer` for the time of day, palette, fog, sky and clouds).
 - `RetroFlight/`: the Unity project (Unity 6, Universal 3D template). Its
   `Packages/manifest.json` references the packages above as `file:../../Packages/...`.
 
@@ -30,6 +31,7 @@ The C# port of the game (see `docs/unity-port-plan.md`).
 3. Flying uses the web game's keys (the sim reads them itself): arrows for
    pitch and roll, X/Y yaw, numpad +/- throttle, G gear, F flaps, B airbrakes,
    A autopilot, Space gun. F1 cockpit, F2 chase back/front, R respawn.
+   N toggles night and 14:00; `SkyRenderer.hours` on the `Sky` object sets any hour.
 4. F10 toggles the free camera: WASD to move, Q/E down/up, hold the right
    mouse button to look, wheel for speed, Shift for 10x. Tile and memory
    stats are on the `Terrain` object.
