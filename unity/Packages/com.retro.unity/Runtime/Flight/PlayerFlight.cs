@@ -508,7 +508,7 @@ namespace Retro.Unity
         public Vec3d GetDisplayWorldDirection() => SceneAxes.Forward.Rotate(aircraft.GetQuaternion());
         public Vec3d GetDisplayWorldUp() => SceneAxes.Up.Rotate(aircraft.GetQuaternion());
         public Vec3d GetDisplayWorldRight() => SceneAxes.Right.Rotate(aircraft.GetQuaternion());
-        public WeaponsTarget WeaponsTarget => null;
+        public WeaponsTarget WeaponsTarget => combat?.Target();
 
         public bool GetWreckFocus(out Vec3d focus)
         {
@@ -524,7 +524,12 @@ namespace Retro.Unity
             Keyboard k = Keyboard.current;
             if (k == null) return;
             FlightView before = flightView;
-            if (k.f1Key.wasPressedThisFrame) flightView = FlightView.Cockpit;
+            if (k.f1Key.wasPressedThisFrame)
+            {
+                // A second F1 in the cockpit padlocks the current target.
+                if (flightView == FlightView.Cockpit && WeaponsTarget != null) cockpitCamera.SetPadlock(!cockpitCamera.IsPadlock());
+                flightView = FlightView.Cockpit;
+            }
             if (k.f2Key.wasPressedThisFrame) flightView = flightView == FlightView.ChaseBack ? FlightView.ChaseFront : FlightView.ChaseBack;
             if (k.f3Key.wasPressedThisFrame) flightView = FlightView.CarrierStern;
             if (k.f6Key.wasPressedThisFrame)

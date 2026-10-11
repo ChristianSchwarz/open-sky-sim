@@ -76,6 +76,8 @@ namespace Retro.Unity
             }
             sun.shadows = LightShadows.Hard; // aircraft shadows (they replace the planform silhouettes)
             ConfigurePostProcessing(cam);
+            // The sim keeps flying with the window in the background (and the editor unfocused).
+            Application.runInBackground = true;
             // Time of day: the palette, sun, ambient, fog and sky all follow it (14:00 by default).
             var sky = new GameObject("Sky").AddComponent<SkyRenderer>();
             sky.sun = sun;

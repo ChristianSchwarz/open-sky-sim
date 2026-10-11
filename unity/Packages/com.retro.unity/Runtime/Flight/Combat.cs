@@ -131,6 +131,33 @@ namespace Retro.Unity
 
         public SimAircraft Opponent => sim.GetAircraft(OpponentId(0));
 
+        /// <summary>
+        /// The player's weapons target (beginFlight's setWeaponsTarget(aiOpponent)): the
+        /// primary opponent while it is in the sky. Its size is the airframe's largest
+        /// extent, from the collision box.
+        /// </summary>
+        public WeaponsTarget Target()
+        {
+            SimAircraft o = Opponent;
+            if (o == null || !o.Enabled) return null;
+            AircraftView view = ViewOf(OpponentId(0));
+            double size = 15;
+            if (view?.Def?.CollisionMesh != null)
+            {
+                ColliderAabb box = view.Def.CollisionMesh.Aabb;
+                size = Math.Max(box.Max[0] - box.Min[0], Math.Max(box.Max[1] - box.Min[1], box.Max[2] - box.Min[2]));
+            }
+            return new WeaponsTarget
+            {
+                Position = o.GetPosition(),
+                LocalCenter = Vec3d.Zero,
+                MaxSize = size,
+                TargetType = "Enemy plane",
+                TargetLocation = "Airborne",
+                Airborne = true,
+            };
+        }
+
         /// <summary>beginFlight's tail: the opponents and the wingman for this sortie.</summary>
         public void Begin(SpawnMode mode, Func<double, double, double> groundAt)
         {
