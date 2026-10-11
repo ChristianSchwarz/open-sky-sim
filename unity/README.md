@@ -21,7 +21,7 @@ The C# port of the game (see `docs/unity-port-plan.md`).
 1. Open `unity/RetroFlight` in Unity 6.
 2. Press Play in any scene: `SpikeBootstrap` creates the camera, a sun, the
    terrain, the sea and the player's aircraft (on the nearest base runway;
-   `PlayerFlight.startOnRunway` off starts airborne) when the scene has no
+   `PlayerFlight.spawnMode` picks the web game's other starts, Location is airborne at `spawnLat`/`spawnLon`) when the scene has no
    `TerrainRenderer` yet. To start elsewhere in the baked pyramid, set the
    PlayerPref `retro.spawn` to `"lat,lon"` before pressing Play (read once). The F-22 is read from `assets/*.glb` with glTFast
    (`com.unity.cloud.gltfast`); `PlayerFlight.flightModel` switches FM2/FM3.

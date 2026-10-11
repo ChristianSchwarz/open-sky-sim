@@ -18,6 +18,8 @@ namespace Retro.Unity
         ChaseBack,
         ChaseFront,
         Free,
+        /// <summary>F6: behind (or, pressed again, ahead of) the opponent, looking at the player.</summary>
+        AiChase,
     }
 
     /// <summary>
@@ -28,8 +30,10 @@ namespace Retro.Unity
     /// Keys go to the sim as KeyboardEvent.key names (the sim owns the
     /// keyboard and gamepad handling, as in the TS), so flaps, gear, brakes,
     /// autopilot and the layouts all behave as on the web. Views use the
-    /// ported camera updaters: F1 cockpit, F2 chase back/front, F10 free
-    /// camera, R respawns.
+    /// ported camera updaters: F1 cockpit, F2 chase back/front, F6 the
+    /// opponent, F10 free camera. R restarts the flight; Ctrl+1..9 starts one
+    /// in that spawn mode (the spawn menu's digits). Each flight brings the
+    /// opponent and the wingman (<see cref="Combat"/>).
     /// </summary>
     [DefaultExecutionOrder(-50)]
     public sealed class PlayerFlight : MonoBehaviour, ICameraActor
@@ -40,8 +44,8 @@ namespace Retro.Unity
         public FlyCamera view;
 
         [Header("Spawn")]
-        [Tooltip("Lined up on the nearest base runway (game.ts runwaySpawnPosition); off: airborne at the point below.")]
-        public bool startOnRunway = true;
+        [Tooltip("The spawn menu's start (game.ts beginFlight); Location is airborne at the point below. Ctrl+digit in flight.")]
+        public SpawnMode spawnMode = SpawnMode.Runway;
         [Tooltip("ICAO (or name) of the airfield to start at; empty picks the nearest base.")]
         public string preferIcao = "";
         public double spawnLat = 27.75;
@@ -75,10 +79,11 @@ namespace Retro.Unity
         private readonly Dictionary<int, string> heldKeys = new Dictionary<int, string>();
         private bool gamepadActive;
         private double gamepadThrottle;
-        private Mesh airframe;
-        private Material airframeMaterial;
-        private AircraftModel model;
-        private readonly AircraftFxRenderer fx = new AircraftFxRenderer();
+        private readonly AircraftView airframeView = new AircraftView("Player aircraft");
+        private Combat combat;
+        private AiExteriorCameraUpdater aiChase;
+        private ExteriorViewHeading aiChaseHeading = ExteriorViewHeading.Back;
+        private TracerRenderer tracers;
         private Fm2AircraftConfig config;
         private List<SceneRunway> runways = new List<SceneRunway>();
         private SceneRunway startRunway;
@@ -86,7 +91,6 @@ namespace Retro.Unity
         private List<AircraftCatalogue.Entry> catalogue;
         private System.Threading.Tasks.Task<List<AircraftCatalogue.Entry>> catalogueTask;
         private AircraftCatalogue.Entry current;
-        private double sweepUnit;
 
         /// <summary>The flyable aircraft found at boot: the F-22 and every pack.</summary>
         public IReadOnlyList<AircraftCatalogue.Entry> Catalogue => catalogue;
@@ -100,9 +104,6 @@ namespace Retro.Unity
         private readonly List<Retro.Sim.SurfacePadCollider> runwayPads = new List<Retro.Sim.SurfacePadCollider>();
         /// <summary>Airfields this far from the frame origin count as the play area's.</summary>
         private const double AirfieldReachM = 150000;
-        // player.ts device animations: progress units and their durations (s).
-        private double gearUnit, flapsUnit, airbrakesUnit;
-        private const double GearAnimS = 3, FlapsAnimS = 2, AirbrakesAnimS = 1.5;
 
         /// <summary>The last keys forwarded to the sim, newest last ("+key" down, "-key" up), for debugging input.</summary>
         public readonly Queue<string> KeyLog = new Queue<string>();
@@ -157,7 +158,6 @@ namespace Retro.Unity
             heightField.Focus(new[] { pos, pos.AddScaled(aircraft.GetVelocity(), 5) });
             PlaceCamera(Time.deltaTime);
             DrawAirframe();
-            DrawFx();
         }
 
         private bool TryBoot()
@@ -230,15 +230,15 @@ namespace Retro.Unity
             chaseBack = new ExteriorFrontBehindCameraUpdater(this, pose, ExteriorViewHeading.Back);
             chaseFront = new ExteriorFrontBehindCameraUpdater(this, pose, ExteriorViewHeading.Front);
             crashedCamera = new CrashedCameraUpdater(this, pose);
-            airframe = BuildAirframe();
-            model = new AircraftModel(current.Def, current.Files, "Player aircraft");
-            fx.Configure(current.Def);
-            SnapDevices();
-            airframeMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
-            airframeMaterial.SetColor("_BaseColor", new Color(0.55f, 0.58f, 0.6f));
-            airframeMaterial.SetFloat("_Smoothness", 0.35f);
-            Debug.Log($"Retro flight: {flightModel}, {runways.Count} runways near, start "
-                + (startOnRunway && startRunway != null ? $"{startRunway.Icao} {startRunway.Name} {startRunway.Ref}" : $"airborne at {spawnLat}, {spawnLon}")
+            airframeView.Load(current.Def, current.Files);
+            airframeView.Snap(aircraft);
+            // setupCombat: the opponent and the wingman, parked until the flight begins.
+            combat = new Combat(sim, PlayerId, current.Def, current.Files, config, flightModel, aircraft.GetPosition(), 0);
+            aiChase = new AiExteriorCameraUpdater(this, pose, new SimChaseTarget(sim, Combat.OpponentId(0)), aiChaseHeading);
+            tracers = new TracerRenderer();
+            combat.Begin(spawnMode, GroundAt);
+            Debug.Log($"Retro flight: {flightModel}, {runways.Count} runways near, start {spawnMode} "
+                + (startRunway != null ? $"{startRunway.Icao} {startRunway.Name} {startRunway.Ref}" : $"at {spawnLat}, {spawnLon}")
                 + $"; ground tiles fine {heightField.FineResident}, coarse {heightField.CoarseResident}");
             return true;
         }
@@ -268,16 +268,97 @@ namespace Retro.Unity
             current = next;
             config = AircraftDefs.FlightConfigWithArrestorHook(current.Def);
             sim.SetAircraftConfig(PlayerId, config, flightModel, current.Def.CollisionMesh);
-            model?.Destroy();
-            model = new AircraftModel(current.Def, current.Files, "Player aircraft");
-            fx.Configure(current.Def);
-            sweepUnit = 0;
+            airframeView.Load(current.Def, current.Files);
+            combat.SetAircraft(current.Def, current.Files, config, flightModel);
             PlayerPrefs.SetString(AircraftPref, current.Def.Id);
             Debug.Log($"Retro flight: now flying {current.Def.Name}");
         }
 
-        private SimAircraftSpawn MakeSpawn() =>
-            startOnRunway && startRunway != null ? RunwaySpawn(startRunway) : AirborneSpawn();
+        // game.ts spawn heights and states.
+        private const double LandApproachFinalM = 4500;
+        private static readonly double IlsGlideslopeTan = Math.Tan(3.0 * Math.PI / 180);
+        private const double HighAltitudeM = 10000;
+        private const double SpaceAltitudeM = 100000;
+        private const double CloseWingAltitudeAglM = 1500;
+        private const double ApproachThrottle = 0.38, SpaceThrottle = 1, CloseWingThrottle = 0.75;
+
+        private SimAircraftSpawn MakeSpawn()
+        {
+            SpawnMode mode = spawnMode;
+            if (mode == SpawnMode.Carrier || mode == SpawnMode.CarrierTakeoff)
+            {
+                // No carrier in the world yet: the nearest thing is the land approach.
+                Debug.LogWarning($"Retro flight: {mode} needs the carrier, starting on approach");
+                mode = SpawnMode.Approach;
+            }
+            if (mode == SpawnMode.Location || startRunway == null) return AirborneSpawn();
+            SceneRunway r = startRunway;
+            Vec3d fwd = ActiveAirfield.HeadingForward(r.Heading);
+            switch (mode)
+            {
+                case SpawnMode.Runway:
+                    return RunwaySpawn(r);
+                case SpawnMode.HighAlt:
+                    return OverBase(r, HighAltitudeM, SpaceThrottle);
+                case SpawnMode.Space:
+                    return OverBase(r, SpaceAltitudeM, SpaceThrottle);
+                case SpawnMode.CloseWing:
+                    return OverBase(r, CloseWingAltitudeAglM, CloseWingThrottle);
+                default:
+                {
+                    // Approach and head-on: a short final on the runway axis, on the glideslope.
+                    Vec3d p = r.Center - fwd * LandApproachFinalM;
+                    p.Y = GroundAt(p.X, p.Z, true) + LandApproachFinalM * IlsGlideslopeTan;
+                    return Airborne(p, r.Heading, ApproachThrottle);
+                }
+            }
+        }
+
+        /// <summary>Overhead the base runway centre, the given height above its ground.</summary>
+        private SimAircraftSpawn OverBase(SceneRunway r, double aglM, double throttle)
+        {
+            Vec3d p = r.Center;
+            p.Y = GroundAt(p.X, p.Z, true) + aglM;
+            return Airborne(p, r.Heading, throttle);
+        }
+
+        /// <summary>approachSpawnState: level, down the runway heading at approach speed.</summary>
+        private static SimAircraftSpawn Airborne(Vec3d p, double heading, double throttle)
+        {
+            Quatd q = Quatd.FromAxisAngle(new Vec3d(0, 1, 0), heading);
+            Vec3d v = ActiveAirfield.HeadingForward(heading) * Combat.ApproachSpeedMps;
+            return new SimAircraftSpawn
+            {
+                Position = new[] { p.X, p.Y, p.Z },
+                Quaternion = new[] { q.X, q.Y, q.Z, q.W },
+                Velocity = new[] { v.X, v.Y, v.Z },
+                Landed = false,
+                Throttle = throttle,
+                Airborne = true,
+            };
+        }
+
+        /// <summary>groundHeightAt: the DEM, or a runway pavement over it; `settle` waits for the fine DEM there first.</summary>
+        private double GroundAt(double x, double z, bool settle)
+        {
+            if (settle)
+            {
+                heightField.Focus(new[] { new Vec3d(x, 0, z) });
+                heightField.WaitIdle(TimeSpan.FromSeconds(5));
+            }
+            return Math.Max(heightField.HeightAtWorld(x, z), Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads));
+        }
+
+        private double GroundAt(double x, double z) => GroundAt(x, z, false);
+
+        /// <summary>game.ts beginFlight: the player placed for the mode, then the opponent and the wingman.</summary>
+        public void BeginFlight(SpawnMode mode)
+        {
+            if (sim == null) return;
+            spawnMode = mode;
+            Respawn();
+            combat.Begin(mode, GroundAt);
+        }
 
         /// <summary>
         /// game.ts runwaySpawnPosition: on the axis, RUNWAY_SPAWN_INSET_M in from the
@@ -341,20 +422,8 @@ namespace Retro.Unity
             sim.Respawn(PlayerId, spawn);
             sim.GetPlayerInput(PlayerId)?.SyncThrottle(spawn.Throttle);
             sim.SyncEffectiveThrottle(PlayerId, spawn.Throttle);
-            SnapDevices();
-            fx.Fx.ResetTrails();
+            airframeView.Snap(aircraft);
         }
-
-        /// <summary>Gear, flaps and airbrakes shown where the sim has them, without the transit.</summary>
-        private void SnapDevices()
-        {
-            gearUnit = aircraft.IsGearDeployed() ? 1 : 0;
-            flapsUnit = aircraft.IsFlapsExtended() ? 1 : 0;
-            airbrakesUnit = aircraft.IsAirbrakesExtended() ? 1 : 0;
-        }
-
-        private static double Toward(double unit, bool target, double durationS, double dt) =>
-            Math.Max(0, Math.Min(1, unit + (target ? dt : -dt) / durationS));
 
         // --- Camera --------------------------------------------------------------------
 
@@ -374,6 +443,10 @@ namespace Retro.Unity
                 case FlightView.Cockpit: cockpitCamera.Update(delta); break;
                 case FlightView.ChaseBack: chaseBack.Update(delta); break;
                 case FlightView.ChaseFront: chaseFront.Update(delta); break;
+                case FlightView.AiChase:
+                    if (combat.Opponent != null && combat.Opponent.Enabled) aiChase.Update(delta);
+                    else chaseBack.Update(delta);
+                    break;
             }
             view.SetPose(pose.Position, pose.Quaternion, fovDeg);
         }
@@ -402,8 +475,26 @@ namespace Retro.Unity
             FlightView before = flightView;
             if (k.f1Key.wasPressedThisFrame) flightView = FlightView.Cockpit;
             if (k.f2Key.wasPressedThisFrame) flightView = flightView == FlightView.ChaseBack ? FlightView.ChaseFront : FlightView.ChaseBack;
+            if (k.f6Key.wasPressedThisFrame)
+            {
+                // aiExteriorCameraUpdater.ts: F6 again swaps behind and ahead of the opponent.
+                if (flightView == FlightView.AiChase)
+                {
+                    aiChaseHeading = aiChaseHeading == ExteriorViewHeading.Back ? ExteriorViewHeading.Front : ExteriorViewHeading.Back;
+                    aiChase.SetHeading(aiChaseHeading);
+                }
+                flightView = FlightView.AiChase;
+            }
+            if (k.ctrlKey.isPressed)
+            {
+                for (int d = 1; d <= 9; d++)
+                {
+                    if (d == 8) continue; // the barricade start is gone
+                    if (k[Key.Digit1 + (d - 1)].wasPressedThisFrame) BeginFlight((SpawnMode)d);
+                }
+            }
             if (k.f10Key.wasPressedThisFrame) flightView = flightView == FlightView.Free ? FlightView.ChaseBack : FlightView.Free;
-            if (k.rKey.wasPressedThisFrame && flightView != FlightView.Free) Respawn();
+            if (k.rKey.wasPressedThisFrame && flightView != FlightView.Free) BeginFlight(spawnMode);
             if (before != flightView && flightView == FlightView.Free)
             {
                 ReleaseAllKeys();
@@ -513,99 +604,13 @@ namespace Retro.Unity
 
         // --- Airframe ------------------------------------------------------------------
 
+        /// <summary>The airframe, plumes and trails; the airframe itself is hidden from the cockpit.</summary>
         private void DrawAirframe()
         {
-            double dt = Time.deltaTime;
-            gearUnit = Toward(gearUnit, aircraft.IsGearDeployed(), GearAnimS, dt);
-            flapsUnit = Toward(flapsUnit, aircraft.IsFlapsExtended(), FlapsAnimS, dt);
-            airbrakesUnit = Toward(airbrakesUnit, aircraft.IsAirbrakesExtended(), AirbrakesAnimS, dt);
-            if (current.Def.SwingWings != null)
-            {
-                double target = WingSweep.Target(wingSweepMode, aircraft.GetAirspeed(), current.Def.SwingWings);
-                sweepUnit = WingSweep.Step(sweepUnit, target, dt, current.Def.SwingWings);
-            }
             bool visible = !(flightView == FlightView.Cockpit && !aircraft.IsCrashed());
-            if (model != null && model.Loaded)
-            {
-                model.SetVisible(visible);
-                if (!visible) return;
-                FlightModel fm = aircraft.Model;
-                model.Pose(aircraft.GetPosition(), aircraft.GetQuaternion(), view.ScenePosition, new AircraftPoseInputs
-                {
-                    CommandedElevator = fm.CommandedElevator,
-                    CommandedAileron = fm.CommandedAileron,
-                    CommandedRudder = fm.CommandedRudder,
-                    RollDemand = aircraft.GetRollInput(),
-                    FlapsUnit = flapsUnit,
-                    AirbrakesUnit = airbrakesUnit,
-                    GearUnit = gearUnit,
-                    SweepUnit = sweepUnit,
-                    AngleOfAttack = aircraft.GetAngleOfAttack(),
-                    Still = aircraft.IsCrashed(),
-                });
-                return;
-            }
-            // The stand-in until (or unless) the glTF parts load.
-            if (!visible || airframe == null) return;
-            Matrix4x4 m = SceneFrame.TileMatrix(aircraft.GetPosition(), view.ScenePosition, aircraft.GetQuaternion(), 1);
-            var rp = new RenderParams(airframeMaterial) { shadowCastingMode = ShadowCastingMode.Off, receiveShadows = false };
-            Graphics.RenderMesh(rp, airframe, 0, m);
-        }
-
-        /// <summary>Afterburner plumes and wingtip trails (aircraftFx.ts), on the airframe's display pose.</summary>
-        private void DrawFx()
-        {
-            fx.BindTips(model);
-            fx.Draw(new AircraftFxInput
-            {
-                ThrottleLever = aircraft.GetThrottle(),
-                AbDetents = aircraft.Model.UseAfterburnerThrottleDetents,
-                Position = aircraft.GetPosition(),
-                Quaternion = aircraft.GetQuaternion(),
-                Velocity = aircraft.GetVelocity(),
-                WingSweep = sweepUnit,
-            }, view.ScenePosition);
-        }
-
-        /// <summary>A stand-in airframe in body axes (+Z nose, +Y up, +X port), ~15 m long, until the glTF models are ported.</summary>
-        private static Mesh BuildAirframe()
-        {
-            var verts = new List<Vector3>();
-            var tris = new List<int>();
-            void Box(Vector3 c, Vector3 h)
-            {
-                int b = verts.Count;
-                for (int f = 0; f < 6; f++)
-                {
-                    int axis = f / 2;
-                    float s = f % 2 == 0 ? 1 : -1;
-                    Vector3 n = Vector3.zero;
-                    n[axis] = s;
-                    Vector3 u = Vector3.zero, v = Vector3.zero;
-                    u[(axis + 1) % 3] = 1;
-                    v[(axis + 2) % 3] = 1;
-                    int i0 = verts.Count;
-                    foreach (var (a, bb) in new[] { (-1f, -1f), (1f, -1f), (1f, 1f), (-1f, 1f) })
-                    {
-                        Vector3 p = n + u * a + v * bb;
-                        verts.Add(c + Vector3.Scale(p, h));
-                    }
-                    if (s > 0) tris.AddRange(new[] { i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3 });
-                    else tris.AddRange(new[] { i0, i0 + 2, i0 + 1, i0, i0 + 3, i0 + 2 });
-                }
-                _ = b;
-            }
-            Box(new Vector3(0, 0, 0), new Vector3(0.8f, 0.8f, 7.5f));          // fuselage
-            Box(new Vector3(0, 0.75f, 4.5f), new Vector3(0.45f, 0.4f, 1.6f));   // canopy
-            Box(new Vector3(0, 0, -0.5f), new Vector3(5f, 0.12f, 2.2f));        // wing
-            Box(new Vector3(0, 0, -6.2f), new Vector3(2.4f, 0.1f, 1.0f));       // tailplane
-            Box(new Vector3(0, 1.8f, -6.0f), new Vector3(0.1f, 1.4f, 1.1f));    // fin
-            var mesh = new Mesh { name = "airframe stand-in" };
-            mesh.SetVertices(verts);
-            mesh.SetTriangles(tris, 0);
-            mesh.RecalculateNormals();
-            mesh.RecalculateBounds();
-            return mesh;
+            airframeView.Draw(aircraft, view.ScenePosition, Time.deltaTime, visible, wingSweepMode);
+            combat.Draw(view.ScenePosition, Time.deltaTime);
+            tracers.Draw(sim, view.ScenePosition, view.UnityCamera);
         }
 
         // --- HUD (debug readout until the HUD is ported) --------------------------------
@@ -636,8 +641,9 @@ namespace Retro.Unity
 
         private void OnDestroy()
         {
-            model?.Destroy();
-            fx.Dispose();
+            airframeView.Destroy();
+            combat?.Destroy();
+            tracers?.Dispose();
         }
     }
 }
