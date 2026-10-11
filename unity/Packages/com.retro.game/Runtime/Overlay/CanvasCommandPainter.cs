@@ -109,7 +109,7 @@ namespace Retro.Game
         }
 
         /// <summary>Drop the commands of the previous frame; the context state stays.</summary>
-        public void BeginFrame() => Context.Commands.Clear();
+        public void BeginFrame() => Context.BeginFrame();
 
         // State
 
