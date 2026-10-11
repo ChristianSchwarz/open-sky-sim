@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using Retro.Core;
 using Retro.Terrain;
 using UnityEngine;
@@ -17,6 +18,40 @@ namespace Retro.Unity
         public EnuOriginJson enuOrigin;
         public MeshJson mesh;
         public double seaLevel;
+        public HeightJson height;
+        public FlattenPadJson[] flattenPads;
+    }
+
+    [Serializable]
+    internal sealed class HeightJson
+    {
+        public int queryZoom = 11;
+        public int coarseZoom = 7;
+    }
+
+    /// <summary>A manifest flatten pad. JsonUtility has no nullables: NaN stands for an absent field.</summary>
+    [Serializable]
+    internal sealed class FlattenPadJson
+    {
+        public double lat;
+        public double lon;
+        public double halfW;
+        public double halfD;
+        public double featherM;
+        public double heightMsl;
+        public double headingDeg = double.NaN;
+        public double gradient = double.NaN;
+        public double gradientHeadingDeg = double.NaN;
+        public string icao;
+
+        private static double? Opt(double v) => double.IsNaN(v) ? (double?)null : v;
+
+        public FlattenPadRecord ToRecord() => new FlattenPadRecord
+        {
+            Lat = lat, Lon = lon, HalfW = halfW, HalfD = halfD, FeatherM = featherM, HeightMsl = heightMsl,
+            HeadingDeg = Opt(headingDeg), Gradient = Opt(gradient), GradientHeadingDeg = Opt(gradientHeadingDeg),
+            Icao = string.IsNullOrEmpty(icao) ? null : icao,
+        };
     }
 
     [Serializable]
@@ -96,10 +131,22 @@ namespace Retro.Unity
         private readonly Stopwatch clock = Stopwatch.StartNew();
 
         public TerrainSession Session => session;
+        /// <summary>The folder the pyramid is read from; null until Start found it.</summary>
+        public string Root { get; private set; }
+
+        /// <summary>The collision surface over the same pyramid and frame, for the sim.</summary>
+        public DemHeightField CreateHeightField()
+        {
+            if (session == null) return null;
+            HeightJson h = manifest.height ?? new HeightJson();
+            return new DemHeightField(Root, session.Basis, manifest.seaLevel, h.queryZoom, h.coarseZoom,
+                (manifest.flattenPads ?? Array.Empty<FlattenPadJson>()).Select(p => p.ToRecord()));
+        }
 
         private void Start()
         {
             string root = ResolveRoot();
+            Root = root;
             if (root == null)
             {
                 Debug.LogError("Retro terrain: no assets/terrain/manifest.json found. Set TerrainRenderer.terrainRoot.");
@@ -167,7 +214,8 @@ namespace Retro.Unity
             if (colourMode != appliedMode || landuseBlend != appliedBlend)
             {
                 LuminanceJson lum = manifest.mesh.luminance ?? new LuminanceJson();
-                TerrainColours.Apply(landMaterial, colourMode, landuseBlend, manifest.mesh.swatches, lum.mid, lum.spread);
+                if (lodProps == null) lodProps = new MaterialPropertyBlock();
+                TerrainColours.Apply(lodProps, colourMode, landuseBlend, manifest.mesh.swatches, lum.mid, lum.spread);
                 appliedMode = colourMode;
                 appliedBlend = landuseBlend;
             }
@@ -182,7 +230,7 @@ namespace Retro.Unity
                 session.Update(new TerrainView
                 {
                     Position = viewer.ScenePosition,
-                    Orientation = SceneFrame.SceneCameraOrientation(viewer.headingDeg, viewer.pitchDeg),
+                    Orientation = viewer.SceneOrientation,
                     FovYDeg = cam.fieldOfView,
                     Aspect = cam.aspect,
                     ScreenHeightPx = cam.pixelHeight,

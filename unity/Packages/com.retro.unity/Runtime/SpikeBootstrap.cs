@@ -48,6 +48,11 @@ namespace Retro.Unity
             terrain.viewer = fly;
             var sea = root.AddComponent<SeaSurface>();
             sea.viewer = fly;
+
+            // M4: the player's aircraft on the ported sim; F10 hands the camera back to free flight.
+            var player = new GameObject("Player").AddComponent<PlayerFlight>();
+            player.terrain = terrain;
+            player.view = fly;
             return terrain;
         }
     }

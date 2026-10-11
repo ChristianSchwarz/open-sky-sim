@@ -66,8 +66,14 @@ namespace Retro.Unity
             return c;
         }
 
-        /// <summary>Configure a land material from the manifest's swatches and luminance window.</summary>
-        public static void Apply(Material m, TerrainColourMode mode, float landuseBlend, string[] swatchesHex, float shadeMid, float shadeSpread)
+        /// <summary>
+        /// Configure land drawing from the manifest's swatches and luminance window.
+        /// The values go in the draws' property block, not the material: none of
+        /// them is a declared shader property, and Unity drops undeclared material
+        /// values whenever it reloads the shader (an asset import in the editor
+        /// is enough), which left the land black mid-flight.
+        /// </summary>
+        public static void Apply(MaterialPropertyBlock m, TerrainColourMode mode, float landuseBlend, string[] swatchesHex, float shadeMid, float shadeSpread)
         {
             var tones = new Vector4[LandToneCount];
             for (int i = 0; i < LandToneCount; i++)

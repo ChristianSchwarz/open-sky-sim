@@ -11,16 +11,18 @@ runtime, rendering, sim/AI, UI/input). Nothing in the repo was changed to produc
 | A core math, geodesy, FrameShift, tiling | Done, golden-verified | `unity/Packages/com.retro.core` |
 | B terrain codecs (8 formats + PIX1) | Done, golden-verified on 32 real tiles | `unity/Packages/com.retro.terrain-data/Runtime/Codecs` |
 | C LOD policy + quadtree selection | Done, golden-verified on 6 camera paths | `.../terrain-data/Runtime/Lod` |
-| C streaming store, budget folding | Not started | |
-| D-E terrain rendering, roads, buildings, trees | Blocked: needs a Unity install | |
+| C streaming store, budget folding | Done: `TileCache`, `TerrainSession`, 600k fold (integration test on the real pyramid) | `.../terrain-data/Runtime/Streaming` |
+| D terrain rendering | URP: tiles in wire formats, four colour modes, web lighting balance, leaf dissolve, sea; land-use reveal and far cover textures still open | `unity/Packages/com.retro.unity/Runtime/Terrain` |
+| E roads, buildings, trees | Not started | |
 | F FM2 + FM3 | Done, all 26 traces match | `unity/Packages/com.retro.sim/Runtime/Physics` |
 | G height queries + airfield pads | Done, golden-verified | `.../terrain-data/Runtime/Height` |
 | G combat sim, colliders, arrestor, collision, player input, gun | Done, all 12 scenarios match (most to ~1e-13) | `tests/golden/combat_sim.json` |
 | H dogfight geometry | Done | `.../sim/Runtime/Ai/DogfightGeometry.cs` |
 | H AI pilots (4 models) | Done, all 34 closed-loop traces bit-identical (V8-exact trig in `JsTrig`) | `.../sim/Runtime/Ai` |
 | O game state: spawn search, camera routes, runway pick, carrier site, recorder, re-base, all camera modes | Done, 74 tests ported from TS plus oracle checks | `unity/Packages/com.retro.game` |
-| M2 terrain spike | Engine-free streaming core done (integration-tested on Gran Canaria); Unity URP layer written, awaiting first compile | `unity/Packages/com.retro.unity` |
-| I-P (mods, sky, HUD, UI, wreck, Unity integration) | Not started; need Unity | |
+| M2 terrain spike | Done: Gran Canaria on screen in Unity 6 / URP, handedness and floating origin verified | `unity/Packages/com.retro.unity`, `docs/unity-spike/` |
+| M4 fly (first cut) | FM2 on the ported `CombatSim` over a streamed DEM height field; keys and gamepad go to the sim; F1 cockpit, F2 chase, crash orbit; crash on fine terrain verified. Open: runway spawn and landing, FM3 switch, glTF airframe with animated surfaces, respawn resetting the latched arrow stick | `unity/Packages/com.retro.unity/Runtime/Flight` |
+| I-P (mods, sky, HUD, UI, wreck) | Not started | |
 
 `cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity (202 tests). All trig goes through `Retro.Core.JsTrig`, a port of V8's fdlibm, so closed-loop traces stay bit-identical to the browser.
 

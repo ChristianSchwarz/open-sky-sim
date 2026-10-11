@@ -54,6 +54,13 @@ namespace Retro.Unity
                 * Quatd.FromAxisAngle(new Vec3d(1, 0, 0), pitchDeg * deg);
         }
 
+        /// <summary>
+        /// A scene rotation as a Unity rotation: R' = M R M with M the z mirror,
+        /// which keeps the angle and maps the axis to (-x, -y, z). A three.js
+        /// camera (looking down its -Z) becomes a Unity camera looking down +Z.
+        /// </summary>
+        public static Quaternion ToUnity(Quatd q) => new Quaternion((float)-q.X, (float)-q.Y, (float)q.Z, (float)q.W);
+
         /// <summary>The Unity camera rotation for the same heading/pitch (Unity looks down +Z = north).</summary>
         public static Quaternion UnityCameraRotation(double headingDeg, double pitchDeg) =>
             Quaternion.Euler((float)-pitchDeg, (float)headingDeg, 0);

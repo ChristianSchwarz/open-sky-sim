@@ -4,6 +4,8 @@
     "references": [
         "Retro.Core",
         "Retro.TerrainData",
+        "Retro.Sim",
+        "Retro.Game",
         "Unity.InputSystem"
     ],
     "includePlatforms": [],

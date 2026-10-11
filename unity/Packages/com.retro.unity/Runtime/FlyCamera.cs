@@ -60,10 +60,53 @@ namespace Retro.Unity
             UnityCamera.nearClipPlane = 2;
             UnityCamera.fieldOfView = 50;
             transform.position = Vector3.zero;
+            SceneOrientation = SceneFrame.SceneCameraOrientation(headingDeg, pitchDeg);
+        }
+
+        /// <summary>
+        /// The view orientation in scene axes, three.js convention (looks down
+        /// its own -Z): what the terrain's frustum culling reads.
+        /// </summary>
+        public Quatd SceneOrientation { get; private set; } = Quatd.Identity;
+
+        /// <summary>True while something else (a flight view) places the camera each frame.</summary>
+        public bool External { get; private set; }
+
+        /// <summary>
+        /// Place the camera from outside (chase and cockpit views): scene
+        /// position, three.js-convention orientation and vertical FOV. Holds
+        /// until <see cref="ReleasePose"/>.
+        /// </summary>
+        public void SetPose(Vec3d position, Quatd orientation, double fovDeg)
+        {
+            External = true;
+            ScenePosition = position;
+            SceneOrientation = orientation;
+            UnityCamera.fieldOfView = (float)fovDeg;
+            transform.SetPositionAndRotation(Vector3.zero, SceneFrame.ToUnity(orientation));
+            UpdateFarPlane();
+        }
+
+        /// <summary>Back to the free camera, looking where the last pose looked (heading/pitch only).</summary>
+        public void ReleasePose()
+        {
+            if (!External) return;
+            External = false;
+            Vec3d f = new Vec3d(0, 0, -1).Rotate(SceneOrientation);
+            headingDeg = System.Math.Atan2(f.X, -f.Z) * 180 / System.Math.PI;
+            pitchDeg = System.Math.Asin(System.Math.Max(-1, System.Math.Min(1, f.Y))) * 180 / System.Math.PI;
+        }
+
+        private void UpdateFarPlane()
+        {
+            if (basis == null) return;
+            double altitude = Geodesy.WorldToGeodetic(basis, ScenePosition.X, ScenePosition.Y, ScenePosition.Z).Height;
+            UnityCamera.farClipPlane = (float)Retro.Terrain.Lod.CameraFarForAltitudeM(altitude);
         }
 
         private void Update()
         {
+            if (External) return;
             float dt = Time.unscaledDeltaTime;
             ReadInput(out Vector3 move, out Vector2 look, out float wheel, out bool fast);
 
@@ -77,12 +120,9 @@ namespace Retro.Unity
             Vec3d delta = SceneFrame.ToScene(unityMove) * step;
             ScenePosition = ScenePosition + delta;
 
+            SceneOrientation = SceneFrame.SceneCameraOrientation(headingDeg, pitchDeg);
             transform.SetPositionAndRotation(Vector3.zero, rotation);
-            if (basis != null)
-            {
-                double altitude = Geodesy.WorldToGeodetic(basis, ScenePosition.X, ScenePosition.Y, ScenePosition.Z).Height;
-                UnityCamera.farClipPlane = (float)Retro.Terrain.Lod.CameraFarForAltitudeM(altitude);
-            }
+            UpdateFarPlane();
         }
 
         private static void ReadInput(out Vector3 move, out Vector2 look, out float wheel, out bool fast)
