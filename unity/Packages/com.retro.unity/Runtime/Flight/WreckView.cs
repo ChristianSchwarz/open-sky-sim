@@ -31,6 +31,12 @@ namespace Retro.Unity
             new Dictionary<WreckFragment, List<(Mesh, Material)>>();
         private readonly Dictionary<string, WreckTracker> trackers = new Dictionary<string, WreckTracker>();
 
+        /// <summary>An aircraft by sim id and how it is drawn (the player's or an AI's), or default.</summary>
+        public Func<string, (SimAircraft Aircraft, AircraftView View)> Resolve;
+
+        /// <summary>game.ts LIVE_DAMAGE_MIN_SEVERITY: the least blow that bends a flying airframe.</summary>
+        private const double LiveDamageMinSeverity = 0.3;
+
         public WreckView(CombatFxView fx, Func<double, double, double> groundAt, Func<double, double, bool> isOpenWater,
             Func<double, double, double> seaSurface, IWreckMovingSurface deck)
         {
@@ -54,6 +60,55 @@ namespace Retro.Unity
             Field.OnDust = (p, v, count, strength) => fx.Smoke.SpawnDust(p, v, count, strength * 0.6);
             Field.OnSplash = (p, v, strength) => fx.Smoke.SpawnSplash(p, strength);
             Field.OnFoam = (p, radius, count) => fx.Smoke.SpawnFoam(p, radius, count);
+            Field.OnDamage = Damaged;
+        }
+
+        /// <summary>
+        /// game.ts noteSurvivableImpact: a hard knock the aircraft lives through (not the fatal one)
+        /// bends and tears its airframe (the entity's noteGroundImpact, WreckField.applyDamage).
+        /// </summary>
+        public void NoteSurvivableImpact(SimHitEvent hit)
+        {
+            if (hit.ImpactSpeed == null || hit.Damage >= 50 || Resolve == null) return;
+            double along = JsMath.Hypot(hit.Velocity[0], hit.Velocity[2]);
+            // The sim's own measure when it has one (a belly landing's grows from nothing), else speed into and along the ground.
+            double severity = hit.Severity ?? (hit.ImpactSpeed.Value + 0.35 * along) / 110;
+            if (severity < (hit.Severity != null ? 0.2 : LiveDamageMinSeverity)) return;
+            (SimAircraft a, AircraftView view) = Resolve(hit.TargetId);
+            if (a == null || view == null || a.IsCrashed() || IsShown(hit.TargetId)) return;
+            WreckSource src = view.WreckSource(hit.TargetId, a.GetVelocity());
+            if (src == null) return;
+            Field.ApplyDamage(src, view.Damage, severity, new Vec3d(hit.Position[0], hit.Position[1], hit.Position[2]));
+            view.NoteDamageHealth(a.Health);
+        }
+
+        private bool IsShown(string id) => trackers.TryGetValue(id, out WreckTracker t) && t.Shown;
+
+        /// <summary>
+        /// onDamage: fuel fires start where the airframe bent or tore and ride on the flying
+        /// aircraft (under "id:damage", so the wreck's own fires can stand in at a crash).
+        /// </summary>
+        private void Damaged(WreckDamageEvent e)
+        {
+            if (Resolve == null) return;
+            string id = e.Id;
+            foreach (WreckDamageFire fire in e.Fires)
+            {
+                Vec3d local = fire.Local;
+                bool Where(out Vec3d w)
+                {
+                    // damagePointWorld: false once the aircraft has crashed (its wreck carries its fires).
+                    w = default;
+                    (SimAircraft a, _) = Resolve(id);
+                    if (a == null || a.IsCrashed() || IsShown(id)) return false;
+                    w = local.Rotate(a.GetQuaternion()) + a.GetPosition();
+                    return true;
+                }
+                bool fuselage = fire.Kind == WreckFireKind.Fuselage;
+                fx.Smoke.AddAnchoredFire(id + ":damage", Where, fuselage ? 44 : 15,
+                    fuselage ? FuselageFireLifeS : WingRootFireLifeS, !fuselage,
+                    fuselage ? FuselageSmoulderS : WingRootSmoulderS, fuselage ? 9 : 3);
+            }
         }
 
         /// <summary>game.ts onBreakup: bursts by severity, the fireball, the fuel (lake or splash), dust, and fires on the pieces.</summary>
@@ -121,11 +176,14 @@ namespace Retro.Unity
             foreach (WreckTracker t in trackers.Values) t.Shown = false;
         }
 
-        /// <summary>A new piece's meshes, once: scene-frame soup, wound for the mirrored draw.</summary>
-        private void Add(WreckFragment f)
+        /// <summary>A new piece's meshes, once.</summary>
+        private void Add(WreckFragment f) => meshes[f] = BuildMeshes(f.Meshes);
+
+        /// <summary>Scene-frame triangle soups as Unity meshes, wound for the mirrored draw, with their materials.</summary>
+        public static List<(Mesh Mesh, Material Material)> BuildMeshes(List<WreckMeshData> data)
         {
             var list = new List<(Mesh, Material)>();
-            foreach (WreckMeshData d in f.Meshes)
+            foreach (WreckMeshData d in data)
             {
                 int n = d.VertexCount;
                 var v = new Vector3[n];
@@ -151,7 +209,7 @@ namespace Retro.Unity
                 mesh.RecalculateBounds();
                 list.Add((mesh, d.Material as Material));
             }
-            meshes[f] = list;
+            return list;
         }
 
         private void Remove(WreckFragment f)

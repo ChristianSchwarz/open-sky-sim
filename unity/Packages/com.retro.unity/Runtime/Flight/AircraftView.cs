@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using Retro.Core;
 using Retro.Game;
 using Retro.Sim;
+using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Retro.Unity
 {
@@ -23,6 +26,12 @@ namespace Retro.Unity
         private double gearUnit, flapsUnit, airbrakesUnit, sweepUnit;
 
         public FlyableAircraftDef Def { get; private set; }
+
+        /// <summary>Damage from hard impacts it survived (player.ts / aiAircraft.ts damage).</summary>
+        public readonly AirframeDamage Damage = new AirframeDamage();
+        private List<WreckMeshData> rootData;
+        private List<(Mesh Mesh, Material Material)> rootMeshes;
+        private double damageLowestHealth = double.PositiveInfinity;
         public AircraftFx Fx => fx.Fx;
         public bool Loaded => model != null && model.Loaded;
 
@@ -42,6 +51,7 @@ namespace Retro.Unity
             Def = def;
             model = new AircraftModel(def, files, name);
             fx.Configure(def);
+            Damage.Reset();
             sweepUnit = 0;
         }
 
@@ -65,6 +75,7 @@ namespace Retro.Unity
         public void Draw(SimAircraft aircraft, Vec3d camera, double dt, bool visible, WingSweepMode sweepMode, bool wrecked = false)
         {
             if (Def == null) return;
+            RepairIfRestored(aircraft);
             if (wrecked)
             {
                 model?.SetVisible(false);
@@ -96,7 +107,8 @@ namespace Retro.Unity
                         SweepUnit = sweepUnit,
                         AngleOfAttack = aircraft.GetAngleOfAttack(),
                         Still = aircraft.IsCrashed(),
-                    });
+                    }, Damage);
+                    DrawRoot(aircraft, camera);
                 }
             }
             fx.BindTips(model);
@@ -112,7 +124,29 @@ namespace Retro.Unity
         }
 
         /// <summary>The airframe as the wreck field takes it apart, where it was last drawn; null before it has loaded.</summary>
-        public WreckSource WreckSource(string id, Vec3d velocity) => model?.WreckSource(id, velocity, true);
+        public WreckSource WreckSource(string id, Vec3d velocity) => model?.WreckSource(id, velocity, true, Damage);
+
+        /// <summary>The health when a blow landed, for the repair once it is restored.</summary>
+        public void NoteDamageHealth(double health) => damageLowestHealth = Math.Min(damageLowestHealth, health);
+
+        /// <summary>
+        /// repairDamageIfRestored: damage goes once the aircraft is back to full health after
+        /// having been below it (a respawn).
+        /// </summary>
+        private void RepairIfRestored(SimAircraft a)
+        {
+            if (!Damage.Active)
+            {
+                damageLowestHealth = double.PositiveInfinity;
+                return;
+            }
+            damageLowestHealth = Math.Min(damageLowestHealth, a.Health);
+            if (a.Health >= a.MaxHealth && damageLowestHealth < a.MaxHealth - 0.1)
+            {
+                Damage.Reset();
+                damageLowestHealth = double.PositiveInfinity;
+            }
+        }
 
         /// <summary>Hidden altogether (a parked AI airframe).</summary>
         public void Hide()
@@ -120,8 +154,37 @@ namespace Retro.Unity
             model?.SetVisible(false);
         }
 
+        /// <summary>The bent and torn airframe in place of the whole one, at the aircraft's pose.</summary>
+        private void DrawRoot(SimAircraft aircraft, Vec3d camera)
+        {
+            if (!Damage.Active) return;
+            if (!ReferenceEquals(rootData, Damage.Root))
+            {
+                FreeRoot();
+                rootData = Damage.Root;
+                rootMeshes = WreckView.BuildMeshes(rootData);
+            }
+            Matrix4x4 m = SceneFrame.TileMatrix(aircraft.GetPosition(), camera, aircraft.GetQuaternion(), 1);
+            foreach ((Mesh mesh, Material mat) in rootMeshes)
+            {
+                if (mat == null) continue;
+                Graphics.RenderMesh(new RenderParams(mat) { shadowCastingMode = ShadowCastingMode.On, receiveShadows = true }, mesh, 0, m);
+            }
+        }
+
+        private void FreeRoot()
+        {
+            if (rootMeshes != null)
+            {
+                foreach ((Mesh mesh, _) in rootMeshes) UnityEngine.Object.Destroy(mesh);
+            }
+            rootMeshes = null;
+            rootData = null;
+        }
+
         public void Destroy()
         {
+            FreeRoot();
             model?.Destroy();
             model = null;
             fx.Dispose();

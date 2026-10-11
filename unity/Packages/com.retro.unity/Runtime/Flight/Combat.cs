@@ -296,7 +296,8 @@ namespace Retro.Unity
             sim.SetTarget(playerId, null);
         }
 
-        private AircraftView ViewOf(string id)
+        /// <summary>How an AI airframe is drawn, or null for an id that is not one of them.</summary>
+        public AircraftView ViewOf(string id)
         {
             foreach ((string i, AircraftView v) in others)
             {

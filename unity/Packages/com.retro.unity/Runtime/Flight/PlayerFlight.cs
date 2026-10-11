@@ -192,7 +192,7 @@ namespace Retro.Unity
                 double step = Math.Min(delta, 1.0 / 30);
                 sim.Step(step);
                 // The sim clears its hits every step: take them as they come.
-                if (sim.HitCount > 0) combatFx.OnHits(sim.Hits);
+                if (sim.HitCount > 0) TakeHits(sim.Hits);
                 delta -= step;
             }
 
@@ -281,6 +281,7 @@ namespace Retro.Unity
             wrecks = new WreckView(combatFx, GroundAt, IsOpenWater, heightField.HeightAtWorld, carrier);
             // setupCombat: the opponent and the wingman, parked until the flight begins.
             combat = new Combat(sim, PlayerId, current.Def, current.Files, config, flightModel, aircraft.GetPosition(), 0);
+            wrecks.Resolve = id => id == PlayerId ? (aircraft, airframeView) : (sim.GetAircraft(id), combat?.ViewOf(id));
             aiChase = new AiExteriorCameraUpdater(this, pose, new SimChaseTarget(sim, Combat.OpponentId(0)), aiChaseHeading);
             tracers = new TracerRenderer();
             combat.Begin(spawnMode, GroundAt);
@@ -565,6 +566,19 @@ namespace Retro.Unity
             combatFx?.Reset();
             wrecks?.Clear();
             wasCrashed = false;
+        }
+
+        /// <summary>
+        /// game.ts combatSim.onHits: chips, smoke and sparks, and a knock the aircraft lives
+        /// through bends its airframe (a collision's own severity, or any hard scrape).
+        /// </summary>
+        private void TakeHits(List<SimHitEvent> hits)
+        {
+            combatFx.OnHits(hits);
+            foreach (SimHitEvent h in hits)
+            {
+                if (h.Source == "scrape" || h.Severity != null) wrecks.NoteSurvivableImpact(h);
+            }
         }
 
         /// <summary>damageSmoke's pose provider: an enabled aircraft's live pose, or null.</summary>

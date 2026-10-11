@@ -69,6 +69,7 @@ namespace Retro.Unity
         private readonly double[] deflections;
         // The scene poses applied last frame, for a wreck to start from.
         private Vec3d posedPosition;
+        private bool gearDown;
         private Quatd posedQuaternion = Quatd.Identity;
         private readonly Vec3d[] surfacePositions;
         private readonly Quatd[] surfaceQuaternions;
@@ -269,9 +270,17 @@ namespace Retro.Unity
         }
 
         /// <summary>Place every part for this frame: aircraft pose in scene axes, camera position for the floating origin.</summary>
-        public void Pose(Vec3d position, Quatd quaternion, Vec3d camera, in AircraftPoseInputs inputs)
+        /// <param name="damage">
+        /// Damage the airframe survived (player.ts / aiAircraft.ts render3D): while it is active the
+        /// bent body is drawn elsewhere, so the glTF body hides; a ripped part or one taken into the
+        /// bent body hides; the rest move with the bend (TransformPart).
+        /// </param>
+        public void Pose(Vec3d position, Quatd quaternion, Vec3d camera, in AircraftPoseInputs inputs, AirframeDamage damage = null)
         {
             if (!Loaded) return;
+            bool damaged = damage != null && damage.Active;
+            body.gameObject.SetActive(!damaged);
+            var unit = new Vec3d(1, 1, 1);
             Quaternion bodyRotation = SceneFrame.ToUnity(quaternion) * HalfTurnY;
             Vector3 bodyPosition = SceneFrame.ToUnity(position - camera);
             body.SetPositionAndRotation(bodyPosition, bodyRotation);
@@ -279,8 +288,20 @@ namespace Retro.Unity
             posedQuaternion = quaternion;
             if (gear != null)
             {
-                gear.gameObject.SetActive(def.GearAnimated || inputs.GearUnit > 0);
-                gear.SetPositionAndRotation(bodyPosition, bodyRotation);
+                gearDown = def.GearAnimated || inputs.GearUnit > 0;
+                bool gearGone = damaged && (damage.GearInRoot || damage.IsPartRipped(0));
+                gear.gameObject.SetActive((def.GearAnimated || inputs.GearUnit > 0) && !gearGone);
+                if (damaged && !gearGone)
+                {
+                    Vec3d gp = position;
+                    Quatd gq = quaternion;
+                    damage.TransformPart(0, ref gp, ref gq, position, quaternion, unit);
+                    gear.SetPositionAndRotation(SceneFrame.ToUnity(gp - camera), SceneFrame.ToUnity(gq) * HalfTurnY);
+                }
+                else
+                {
+                    gear.SetPositionAndRotation(bodyPosition, bodyRotation);
+                }
                 if (def.GearAnimated) SampleGear(inputs.GearUnit);
             }
             for (int i = 0; i < surfaces.Length; i++)
@@ -294,6 +315,18 @@ namespace Retro.Unity
                 var (p, q) = WingSweep.PoseSurface(Hinge(i), parent, position, quaternion);
                 surfacePositions[i] = p;
                 surfaceQuaternions[i] = q;
+                if (damaged)
+                {
+                    // Torn off by an earlier impact, or bent into the body: not drawn on its own.
+                    bool gone = damage.IsPartRipped(1 + i) || damage.RootParts.Contains(1 + i);
+                    surfaces[i].gameObject.SetActive(!gone);
+                    if (gone) continue;
+                    damage.TransformPart(1 + i, ref p, ref q, position, quaternion, unit);
+                }
+                else if (!surfaces[i].gameObject.activeSelf)
+                {
+                    surfaces[i].gameObject.SetActive(true);
+                }
                 surfaces[i].SetPositionAndRotation(SceneFrame.ToUnity(p - camera), SceneFrame.ToUnity(q) * HalfTurnY);
             }
         }
@@ -303,7 +336,7 @@ namespace Retro.Unity
         /// collectWreckParts): the body, the gear while it is down (or animated), and every
         /// hinged surface where it was last posed, each as its drawn meshes in the model frame.
         /// </summary>
-        public WreckSource WreckSource(string id, Vec3d velocity, bool gearShown)
+        public WreckSource WreckSource(string id, Vec3d velocity, bool gearShown, AirframeDamage damage = null)
         {
             if (!Loaded) return null;
             var src = new WreckSource
@@ -314,8 +347,10 @@ namespace Retro.Unity
                 Quaternion = posedQuaternion,
                 Velocity = velocity,
                 Cockpit = def.CockpitOffset,
+                Damage = damage != null && damage.Active ? damage : null,
             };
-            if (gear != null && gear.gameObject.activeSelf && gearShown)
+            // collectWreckParts: the gear while it is down (or animated), whatever damage did to it.
+            if (gear != null && gearDown && gearShown)
             {
                 src.Parts.Add(new WreckPart { Model = WreckModelOf(gear), Position = posedPosition, Quaternion = posedQuaternion, Kind = WreckPartKind.Gear, Id = 0 });
             }
@@ -346,7 +381,7 @@ namespace Retro.Unity
             var normals = new List<Vector3>();
             var tris = new List<int>();
             Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
-            foreach (MeshFilter mf in part.GetComponentsInChildren<MeshFilter>(false))
+            foreach (MeshFilter mf in part.GetComponentsInChildren<MeshFilter>(true))
             {
                 Renderer r = mf.GetComponent<Renderer>();
                 Mesh mesh = mf.sharedMesh;
