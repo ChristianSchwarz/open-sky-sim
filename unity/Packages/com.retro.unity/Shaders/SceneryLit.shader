@@ -22,7 +22,10 @@ Shader "Retro/SceneryLit"
         {
             Name "ForwardLit"
             Tags { "LightMode" = "UniversalForward" }
-            Cull Back
+            // Front faces are counter-clockwise in the right-handed scene axes; the z
+            // mirror in the object matrix turns them clockwise-from-behind, and
+            // Graphics.RenderMesh does not flip winding for a mirrored matrix.
+            Cull Front
 
             HLSLPROGRAM
             #pragma vertex vert

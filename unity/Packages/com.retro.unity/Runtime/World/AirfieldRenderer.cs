@@ -38,6 +38,7 @@ namespace Retro.Unity
         public float lastBuildMs;
 
         private const int FlatQueueBase = 2010;
+        private static readonly IReadOnlyList<(double X, double Y)>[] NoHoles = Array.Empty<IReadOnlyList<(double X, double Y)>>();
 
         private sealed class Gpu
         {
@@ -132,7 +133,8 @@ namespace Retro.Unity
                 ground.WaitIdle(TimeSpan.FromSeconds(2));
                 groundAt = (e, n) => ground.Sampler.GeodeticHeightAtEnu(e, n);
             }
-            AirfieldGeometry g = AirfieldGeometryBuilder.Build(airfield, basis, groundAt, null);
+            AirfieldGeometry g = AirfieldGeometryBuilder.Build(airfield, basis, groundAt,
+                contour => ShapeUtils.TriangulateShape(contour, NoHoles));
             if (g == null) return;
             var b = new Built
             {

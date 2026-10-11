@@ -86,7 +86,17 @@ public class AirfieldTests
             Func<double, double, double> ground = c.GetProperty("drape").GetBoolean()
                 ? (e, n) => 40 + 3 * JsTrig.Sin(e / 47) + 2 * JsTrig.Cos(n / 31)
                 : null;
-            AirfieldGeometry g = AirfieldGeometryBuilder.Build(airfield, basis, ground, _ => recorded[call++]);
+            // The oracle's faces, after checking the shared earcut port gives the same ones.
+            var noHoles = Array.Empty<IReadOnlyList<(double X, double Y)>>();
+            AirfieldGeometry g = AirfieldGeometryBuilder.Build(airfield, basis, ground, contour =>
+            {
+                List<int[]> faces = ShapeUtils.TriangulateShape(contour, noHoles);
+                List<int[]> expected = recorded[call];
+                m.Equal($"{name} triangulation {call}",
+                    string.Join(";", expected.Select(f => string.Join(",", f))),
+                    string.Join(";", faces.Select(f => string.Join(",", f))));
+                return recorded[call++];
+            });
             m.Equal($"{name} triangulation calls", recorded.Count, call);
 
             JsonElement r = c.GetProperty("result");

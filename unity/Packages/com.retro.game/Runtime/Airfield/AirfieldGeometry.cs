@@ -251,7 +251,8 @@ namespace Retro.Game
         /// Build one airfield; null for one with no runway. `groundElevationAt`
         /// (ellipsoidal height of the real ground at an ENU point) drapes the
         /// taxiways, aprons and buildings; without it they lie on the plane.
-        /// `triangulate` is three's ShapeUtils.triangulateShape for apron rings.
+        /// `triangulate` is three's ShapeUtils.triangulateShape for apron rings
+        /// (<see cref="ShapeUtils.TriangulateShape"/>); null leaves the aprons out.
         /// </summary>
         public static AirfieldGeometry Build(
             Airfield airfield, EnuBasis basis,
