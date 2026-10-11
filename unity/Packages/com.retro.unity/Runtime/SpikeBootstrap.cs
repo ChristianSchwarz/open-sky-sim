@@ -14,6 +14,16 @@ namespace Retro.Unity
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void AutoCreate()
         {
+            // A scene restart (the menu's pick in another area) builds the world again.
+            UnityEngine.SceneManagement.SceneManager.sceneLoaded -= Reloaded;
+            UnityEngine.SceneManagement.SceneManager.sceneLoaded += Reloaded;
+            if (Object.FindAnyObjectByType<TerrainRenderer>() != null) return;
+            Create();
+        }
+
+        private static void Reloaded(UnityEngine.SceneManagement.Scene scene, UnityEngine.SceneManagement.LoadSceneMode mode)
+        {
+            if (mode != UnityEngine.SceneManagement.LoadSceneMode.Single) return;
             if (Object.FindAnyObjectByType<TerrainRenderer>() != null) return;
             Create();
         }
@@ -131,6 +141,11 @@ namespace Retro.Unity
             var vegetation = root.AddComponent<VegetationRenderer>();
             vegetation.terrain = terrain;
             vegetation.viewer = fly;
+
+            // M8: the menu (Esc), with the spawn starts and the settings.
+            var menu = new GameObject("Menu").AddComponent<MenuDialog>();
+            menu.flight = player;
+            menu.terrain = terrain;
             return terrain;
         }
     }

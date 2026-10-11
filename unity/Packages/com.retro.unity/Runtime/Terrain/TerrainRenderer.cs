@@ -20,6 +20,18 @@ namespace Retro.Unity
         public double seaLevel;
         public HeightJson height;
         public FlattenPadJson[] flattenPads;
+        public AreaJson[] areas;
+    }
+
+    /// <summary>A manifest area (manifest.ts TerrainArea), degrees.</summary>
+    [Serializable]
+    internal sealed class AreaJson
+    {
+        public string name;
+        public double west;
+        public double south;
+        public double east;
+        public double north;
     }
 
     [Serializable]
@@ -139,6 +151,21 @@ namespace Retro.Unity
         private readonly Stopwatch clock = Stopwatch.StartNew();
 
         public TerrainSession Session => session;
+
+        /// <summary>The baked areas of the pyramid (manifest areas), for the spawn search.</summary>
+        public System.Collections.Generic.List<Retro.Game.TerrainArea> Areas()
+        {
+            var list = new System.Collections.Generic.List<Retro.Game.TerrainArea>();
+            foreach (AreaJson a in manifest?.areas ?? Array.Empty<AreaJson>())
+            {
+                list.Add(new Retro.Game.TerrainArea(a.name, a.west, a.south, a.east, a.north));
+            }
+            return list;
+        }
+
+        /// <summary>The play origin (geodetic degrees) the scene frame is built around.</summary>
+        public double OriginLat => double.IsNaN(originLat) ? manifest.enuOrigin.lat : originLat;
+        public double OriginLon => double.IsNaN(originLon) ? manifest.enuOrigin.lon : originLon;
         /// <summary>The folder the pyramid is read from; null until Start found it.</summary>
         public string Root { get; private set; }
         /// <summary>The pyramid's deepest mesh zoom (manifest mesh.maxZoom).</summary>

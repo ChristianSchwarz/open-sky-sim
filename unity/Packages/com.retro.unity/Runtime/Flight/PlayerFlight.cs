@@ -115,6 +115,15 @@ namespace Retro.Unity
         public readonly Queue<string> KeyLog = new Queue<string>();
 
         public CombatSim Sim => sim;
+
+        /// <summary>The menu is open (game.ts pauseForMenu): the sim holds, and keys go to the menu.</summary>
+        [NonSerialized] public bool menuOpen;
+
+        /// <summary>The runway the start buttons use (the base airfield).</summary>
+        public SceneRunway BaseRunway => startRunway;
+
+        /// <summary>The runways of the airfields in reach (game.ts sceneRunways).</summary>
+        public IReadOnlyList<SceneRunway> Runways => runways;
         public SceneRunway StartRunway => startRunway;
         public SimAircraft Aircraft => aircraft;
         public DemHeightField HeightField => heightField;
@@ -123,7 +132,7 @@ namespace Retro.Unity
         {
             if (sim == null && !TryBoot()) return;
 
-            ReadViewKeys();
+            if (!menuOpen) ReadViewKeys();
             // However the view became Free (key, inspector, script), the camera is the free one's.
             if (flightView == FlightView.Free && view.External)
             {
@@ -144,6 +153,13 @@ namespace Retro.Unity
                 catalogueTask = null;
             }
             if (aircraftId != current.Def.Id && catalogueTask == null) SwapAircraft();
+            if (menuOpen)
+            {
+                // pauseForMenu: no steps, no keys; the camera and the drawing carry on.
+                PlaceCamera(0);
+                DrawAirframe();
+                return;
+            }
             if (flightView != FlightView.Free)
             {
                 ForwardKeys();
@@ -400,6 +416,45 @@ namespace Retro.Unity
 
         private double GroundAt(double x, double z) => GroundAt(x, z, false);
 
+        // game.ts LOCATION_SPAWN_AGL_M and LOCATION_SPAWN_HEADING (north is scene -Z).
+        private const double LocationSpawnAglM = 600;
+        private const double LocationSpawnHeading = Math.PI;
+
+        /// <summary>
+        /// game.ts beginFlight with a destination: airborne over a geodetic point,
+        /// 600 m above its ground, heading north at approach speed.
+        /// </summary>
+        public void BeginFlightAt(double lat, double lon)
+        {
+            if (sim == null) return;
+            Vec3d p = Geodesy.GeodeticToWorld(heightField.Basis, lat, lon, 0);
+            p.Y = GroundAt(p.X, p.Z, true) + LocationSpawnAglM;
+            SimAircraftSpawn spawn = Airborne(p, LocationSpawnHeading, ApproachThrottle);
+            Place(spawn);
+            combat.Begin(SpawnMode.Location, GroundAt);
+        }
+
+        /// <summary>
+        /// game.ts selectAirfield: the airfield (ICAO, or name when it has none) becomes the
+        /// base the start buttons use. False when it is not among the airfields in reach.
+        /// </summary>
+        public bool SelectAirfield(string key)
+        {
+            SceneRunway pick = null;
+            foreach (SceneRunway r in runways)
+            {
+                if (r.Icao == key || (string.IsNullOrEmpty(r.Icao) && r.Name == key))
+                {
+                    pick = ActiveAirfield.PickStartRunway(runways, key);
+                    break;
+                }
+            }
+            if (pick == null) return false;
+            preferIcao = key;
+            startRunway = pick;
+            return true;
+        }
+
         /// <summary>game.ts beginFlight: the player placed for the mode, then the opponent and the wingman.</summary>
         public void BeginFlight(SpawnMode mode)
         {
@@ -464,7 +519,12 @@ namespace Retro.Unity
         public void Respawn()
         {
             if (sim == null) return;
-            SimAircraftSpawn spawn = MakeSpawn();
+            Place(MakeSpawn());
+        }
+
+        /// <summary>The player to a spawn, with a clean stick and devices shown where the sim has them.</summary>
+        private void Place(SimAircraftSpawn spawn)
+        {
             ReleaseAllKeys();
             // A fresh start: the arrows layout's latched stick goes back to centre.
             sim.InputBlur(PlayerId);
