@@ -59,6 +59,9 @@ namespace Retro.Unity
             airfields.terrain = terrain;
             airfields.viewer = fly;
             airfields.player = player;
+            var roads = root.AddComponent<RoadRenderer>();
+            roads.terrain = terrain;
+            roads.viewer = fly;
             return terrain;
         }
     }
