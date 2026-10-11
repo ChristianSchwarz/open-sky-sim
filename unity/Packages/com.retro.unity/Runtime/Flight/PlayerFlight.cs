@@ -63,7 +63,8 @@ namespace Retro.Unity
         public KeyboardControlLayoutId keyboardLayout = KeyboardControlLayoutId.ARROWS;
         public FlightView flightView = FlightView.ChaseBack;
         public double fovDeg = 50;
-        public bool showHud = true;
+        [Tooltip("The OnGUI debug readout (the ported HUD is the overlay).")]
+        public bool showHud = false;
 
         [Tooltip("Which aircraft: 'f22' or a pack id from dist/assets (see Catalogue).")]
         public string aircraftId = "f22";
@@ -119,6 +120,12 @@ namespace Retro.Unity
         /// <summary>The menu is open (game.ts pauseForMenu): the sim holds, and keys go to the menu.</summary>
         [NonSerialized] public bool menuOpen;
 
+        /// <summary>game.ts holdUntilStreamed: the flight waits for the terrain after a spawn.</summary>
+        [NonSerialized] public bool held;
+
+        /// <summary>A flight began (boot, a start button, a place): the streaming hold starts.</summary>
+        public event Action FlightBegan;
+
         /// <summary>The runway the start buttons use (the base airfield).</summary>
         public SceneRunway BaseRunway => startRunway;
 
@@ -153,7 +160,7 @@ namespace Retro.Unity
                 catalogueTask = null;
             }
             if (aircraftId != current.Def.Id && catalogueTask == null) SwapAircraft();
-            if (menuOpen)
+            if (menuOpen || held)
             {
                 // pauseForMenu: no steps, no keys; the camera and the drawing carry on.
                 PlaceCamera(0);
@@ -259,6 +266,7 @@ namespace Retro.Unity
             aiChase = new AiExteriorCameraUpdater(this, pose, new SimChaseTarget(sim, Combat.OpponentId(0)), aiChaseHeading);
             tracers = new TracerRenderer();
             combat.Begin(spawnMode, GroundAt);
+            FlightBegan?.Invoke();
             Debug.Log($"Retro flight: {flightModel}, {runways.Count} runways near, start {spawnMode} "
                 + (startRunway != null ? $"{startRunway.Icao} {startRunway.Name} {startRunway.Ref}" : $"at {spawnLat}, {spawnLon}")
                 + $"; ground tiles fine {heightField.FineResident}, coarse {heightField.CoarseResident}");
@@ -432,6 +440,7 @@ namespace Retro.Unity
             SimAircraftSpawn spawn = Airborne(p, LocationSpawnHeading, ApproachThrottle);
             Place(spawn);
             combat.Begin(SpawnMode.Location, GroundAt);
+            FlightBegan?.Invoke();
         }
 
         /// <summary>
@@ -462,6 +471,7 @@ namespace Retro.Unity
             spawnMode = mode;
             Respawn();
             combat.Begin(mode, GroundAt);
+            FlightBegan?.Invoke();
         }
 
         /// <summary>

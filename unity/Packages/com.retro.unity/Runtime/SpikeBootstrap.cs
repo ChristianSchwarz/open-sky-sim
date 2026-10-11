@@ -155,6 +155,9 @@ namespace Retro.Unity
             overlay.terrain = terrain;
             overlay.viewer = fly;
             overlay.targetView = targetView;
+            var boot = new GameObject("Boot").AddComponent<BootOverlay>();
+            boot.flight = player;
+            boot.terrain = terrain;
             return terrain;
         }
     }
