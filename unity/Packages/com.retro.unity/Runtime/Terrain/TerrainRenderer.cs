@@ -132,6 +132,7 @@ namespace Retro.Unity
         private ManifestJson manifest;
         private TerrainColourMode appliedMode = (TerrainColourMode)(-1);
         private float appliedBlend = -1;
+        private int appliedPalette;
         private readonly Dictionary<TileKey, TileGpuMeshes> gpu = new Dictionary<TileKey, TileGpuMeshes>();
         private readonly Queue<(TileKey Key, PtmTile Tile)> uploadQueue = new Queue<(TileKey, PtmTile)>();
         private float reconcileTimer;
@@ -224,13 +225,16 @@ namespace Retro.Unity
         private void Update()
         {
             if (session == null || viewer == null) return;
-            if (colourMode != appliedMode || landuseBlend != appliedBlend)
+            if (colourMode != appliedMode || landuseBlend != appliedBlend || appliedPalette != ScenePalette.Version)
             {
                 LuminanceJson lum = manifest.mesh.luminance ?? new LuminanceJson();
                 if (lodProps == null) lodProps = new MaterialPropertyBlock();
                 TerrainColours.Apply(lodProps, colourMode, landuseBlend, manifest.mesh.swatches, lum.mid, lum.spread);
                 appliedMode = colourMode;
                 appliedBlend = landuseBlend;
+                appliedPalette = ScenePalette.Version;
+                waterDeepMaterial.SetColor("_Color", ScenePalette.Tone(Retro.Game.PaletteCategory.TERRAIN_WATER));
+                waterShallowMaterial.SetColor("_Color", ScenePalette.Tone(Retro.Game.PaletteCategory.TERRAIN_SHALLOW_WATER));
             }
 
             // Reconcile at the TS cadence (RECONCILE_INTERVAL_MS); upload every frame within budget.

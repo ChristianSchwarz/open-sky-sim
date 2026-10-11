@@ -33,10 +33,12 @@ namespace Retro.Unity
         /// <summary>tones.ts LANDUSE_BLEND_DEFAULT.</summary>
         public const float LanduseBlendDefault = 0.5f;
 
-        /// <summary>hd-noon.ts TERRAIN_* colours for Sand, Grass, Bare, Forest, Scrub, Crop, Urban, Snow, Wetland.</summary>
-        private static readonly string[] NoonToneHex =
+        /// <summary>The palette categories of the land tones: Sand, Grass, Bare, Forest, Scrub, Crop, Urban, Snow, Wetland.</summary>
+        private static readonly Retro.Game.PaletteCategory[] LandToneCategories =
         {
-            "#b09a63", "#4a7a52", "#7d5f45", "#2f6b3c", "#6a7742", "#7f8f3c", "#7d7a76", "#d8dde2", "#3f7357",
+            Retro.Game.PaletteCategory.TERRAIN_SAND, Retro.Game.PaletteCategory.TERRAIN_GRASS, Retro.Game.PaletteCategory.TERRAIN_BARE,
+            Retro.Game.PaletteCategory.TERRAIN_FOREST, Retro.Game.PaletteCategory.TERRAIN_SCRUB, Retro.Game.PaletteCategory.TERRAIN_CROP,
+            Retro.Game.PaletteCategory.TERRAIN_URBAN, Retro.Game.PaletteCategory.TERRAIN_SNOW, Retro.Game.PaletteCategory.TERRAIN_WETLAND,
         };
 
         /// <summary>CLASS_TO_TONE, as a land tone index (tone - LAND_TONE_BASE). Classes 14 and 15 default to Grass.</summary>
@@ -79,7 +81,7 @@ namespace Retro.Unity
             for (int i = 0; i < LandToneCount; i++)
             {
                 // Palette colours are authored sRGB and used linear (THREE.Color does the same decode).
-                Color linear = FromHex(NoonToneHex[i]).linear;
+                Color linear = ScenePalette.Tone(LandToneCategories[i]).linear;
                 tones[i] = new Vector4(linear.r, linear.g, linear.b, 1);
             }
             var swatches = new Vector4[SwatchCount];
@@ -98,7 +100,9 @@ namespace Retro.Unity
             m.SetFloat("_ShadeSteps", HybridShadeSteps);
             m.SetFloat("_ShadeRange", HybridShadeRange);
             m.SetVector("_ShadeWindow", new Vector4(shadeMid, shadeSpread, 0, 0));
-            m.SetVector("_RawLight", Vector4.one);
+            // Imagery colours are not the palette's: they take its light (palette.ts Palette.light).
+            Color light = ScenePalette.RawLight;
+            m.SetVector("_RawLight", new Vector4(light.r, light.g, light.b, 1));
             m.SetFloat("_LanduseBlend", landuseBlend);
         }
     }

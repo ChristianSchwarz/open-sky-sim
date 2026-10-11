@@ -103,14 +103,13 @@ namespace Retro.Unity
                 return false;
             }
             Shader shader = Shader.Find("Retro/VegetationBillboard");
-            Palette palette = Palettes.HdNoon;
             treeMaterial = new Material(shader) { name = "trees" };
             treeMaterial.SetTexture("_MainTex", treeAtlas);
-            treeMaterial.SetColor("_Palette", TerrainColours.FromHex(palette.Color(PaletteCategory.TERRAIN_FOREST)));
+            ScenePalette.Bind(treeMaterial, "_Palette", PaletteCategory.TERRAIN_FOREST);
             treeMaterial.SetColor("_NoonForest", TerrainColours.FromHex("#2f6b3c"));
             stoneMaterial = new Material(shader) { name = "stones" };
             stoneMaterial.SetTexture("_MainTex", stoneAtlas);
-            stoneMaterial.SetColor("_Palette", TerrainColours.FromHex(palette.Color(PaletteCategory.TERRAIN_BARE)));
+            ScenePalette.Bind(stoneMaterial, "_Palette", PaletteCategory.TERRAIN_BARE);
             stoneMaterial.SetColor("_NoonForest", TerrainColours.FromHex("#2f6b3c"));
             treeQuad = Quad(TreeBillboards.QuadPositions, TreeBillboards.QuadUvs, TreeBillboards.QuadIndices);
             var stoneIdx = new int[GroundClutter.QuadPositions.Length / 3];

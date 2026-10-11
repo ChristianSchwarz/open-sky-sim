@@ -194,16 +194,16 @@ namespace Retro.Unity
         private static Material Remapped(string name)
         {
             if (RemappedMaterials.TryGetValue(name, out Material m) && m != null) return m;
-            string hex;
-            if (name == "GLASS" || name == "#d1f7ff") hex = GlassColor;
-            else if (RawColor.IsMatch(name)) hex = name;
+            m = new Material(Shader.Find("Retro/SceneryLit")) { name = "aircraft " + name };
+            // models.ts: a literal colour (a livery, the canopy) opts out of the palette but
+            // stands in the same light; a category name is the palette's own colour.
+            if (name == "GLASS" || name == "#d1f7ff") ScenePalette.Bind(m, "_Color", () => ScenePalette.Raw(GlassColor));
+            else if (RawColor.IsMatch(name)) ScenePalette.Bind(m, "_Color", () => ScenePalette.Raw(name));
             else
             {
                 PaletteCategory category = Enum.TryParse(name, out PaletteCategory c) ? c : PaletteCategory.VEHICLE_PLANE_GREY;
-                hex = Palettes.HdNoon.Color(category);
+                ScenePalette.Bind(m, "_Color", category);
             }
-            m = new Material(Shader.Find("Retro/SceneryLit")) { name = "aircraft " + name };
-            m.SetColor("_Color", TerrainColours.FromHex(hex));
             // glTFast already rewinds for Unity: these faces are front faces as they come.
             m.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Back);
             RemappedMaterials[name] = m;

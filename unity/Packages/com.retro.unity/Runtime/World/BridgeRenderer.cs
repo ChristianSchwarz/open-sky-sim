@@ -68,7 +68,6 @@ namespace Retro.Unity
                 BridgeMeshes.CacheBytes);
             cache.Evicted += (k, _) => Release(k);
             Shader lit = Shader.Find("Retro/SceneryLit");
-            Palette palette = Palettes.HdNoon;
             PaletteCategory[] tones =
             {
                 PaletteCategory.SCENERY_ROAD_MAIN, PaletteCategory.SCENERY_ROAD_SECONDARY, PaletteCategory.SCENERY_RAIL,
@@ -77,7 +76,7 @@ namespace Retro.Unity
             for (int r = 0; r < 6; r++)
             {
                 roleMaterials[r] = new Material(lit) { name = "bridge " + (BridgeRole)r };
-                roleMaterials[r].SetColor("_Color", TerrainColours.FromHex(palette.Color(tones[r])));
+                ScenePalette.Bind(roleMaterials[r], "_Color", tones[r]);
                 roleMaterials[r].SetFloat("_Cull", (float)CullMode.Off);
             }
             return true;

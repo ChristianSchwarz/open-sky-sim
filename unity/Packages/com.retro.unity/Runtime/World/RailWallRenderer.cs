@@ -54,7 +54,7 @@ namespace Retro.Unity
                 empty.Remove(k);
             };
             material = new Material(Shader.Find("Retro/SceneryLit")) { name = "rail walls" };
-            material.SetColor("_Color", TerrainColours.FromHex(Palettes.HdNoon.Color(PaletteCategory.SCENERY_ROAD_SECONDARY)));
+            ScenePalette.Bind(material, "_Color", PaletteCategory.SCENERY_ROAD_SECONDARY);
             material.SetFloat("_Cull", (float)CullMode.Off);
             return true;
         }

@@ -1,9 +1,11 @@
 // OSM buildings (shadedVP.ts with VERTEX_TONES, HD path): flat-shaded soup with
-// a colour per vertex (the palette tone, or the measured roof colour), lit per
+// a colour per vertex (a palette tone index, or the measured roof colour), lit per
 // vertex as the web game lights them - sky-weighted ambient, N.L sun - with
 // URP's main light and SH standing in for its sun uniforms, and URP fog.
 // Streams: POSITION Float32x3 (metres, tile-local; the object matrix carries
-// the frame fix and the z mirror), NORMAL SNorm8x4, COLOR UNorm8x4 (sRGB).
+// the frame fix and the z mirror), NORMAL SNorm8x4, COLOR UNorm8x4: alpha 255
+// is a measured sRGB roof colour in rgb, else alpha is the index into the
+// palette's tone table (globals _RetroBuildingTones, _RetroRawLight).
 Shader "Retro/BuildingLit"
 {
     Properties
@@ -26,6 +28,9 @@ Shader "Retro/BuildingLit"
             #pragma fragment frag
             #pragma multi_compile_fog
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+
+            float4 _RetroBuildingTones[16];
+            float4 _RetroRawLight;
 
             struct Attributes
             {
@@ -52,7 +57,11 @@ Shader "Retro/BuildingLit"
                 half skyView = lerp(0.65, 1.0, 0.5 + 0.5 * n.y);
                 half ambientScale = lerp(0.95, 1.0, rawNdl);
                 half3 light = SampleSH(n) * skyView * ambientScale + sun.color * rawNdl;
-                o.color = SRGBToLinear(v.color.rgb) * light;
+                float index = round(v.color.a * 255.0);
+                half3 albedo = index > 254.5
+                    ? SRGBToLinear(v.color.rgb) * _RetroRawLight.rgb
+                    : _RetroBuildingTones[(int)min(index, 15)].rgb;
+                o.color = albedo * light;
                 o.fog = ComputeFogFactor(o.positionCS.z);
                 return o;
             }

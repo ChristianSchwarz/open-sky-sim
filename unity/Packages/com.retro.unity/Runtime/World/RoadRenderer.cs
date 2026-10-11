@@ -70,7 +70,6 @@ namespace Retro.Unity
         internal Material RailBedMaterial => materials != null ? materials[2] : null;
         private Vec3d earthCentre;
         private readonly Stopwatch clock = new Stopwatch();
-        private readonly Palette palette = Palettes.HdNoon;
 
         private bool TryBoot()
         {
@@ -96,7 +95,7 @@ namespace Retro.Unity
             for (int i = 0; i < 3; i++)
             {
                 materials[i] = new Material(shader) { name = "roads " + Kinds[i], renderQueue = 2001 };
-                materials[i].SetColor("_Color", TerrainColours.FromHex(palette.Color(tones[i])));
+                ScenePalette.Bind(materials[i], "_Color", tones[i]);
             }
             // A railway's bed cuts out its switch zones and crossings; its sleepers go on after
             // every bed and its rails after every sleeper (RAIL_TOP_RENDER_ORDER).
@@ -104,6 +103,8 @@ namespace Retro.Unity
             materials[2].SetFloat("_Rail", 1);
             SleeperMaterial = RailPass(shader, materials[2], 1, 2002);
             RailMaterial = RailPass(shader, materials[2], 2, 2003);
+            ScenePalette.Bind(SleeperMaterial, "_Color", PaletteCategory.SCENERY_RAIL);
+            ScenePalette.Bind(RailMaterial, "_Color", PaletteCategory.SCENERY_RAIL);
             earthCentre = Geodesy.SceneFromEnu(Geodesy.EcefToEnu(terrain.Session.Basis, new Vec3d(0, 0, 0)));
             return true;
         }

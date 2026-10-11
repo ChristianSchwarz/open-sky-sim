@@ -75,9 +75,33 @@ namespace Retro.Unity
             return true;
         }
 
+        private int appliedPalette;
+        private static readonly int TonesId = Shader.PropertyToID("_RetroBuildingTones");
+        private static readonly int RawLightId = Shader.PropertyToID("_RetroRawLight");
+
+        /// <summary>The tone table (shadedVP.ts uVertexTone), linear, as globals: undeclared material arrays do not survive a shader reload.</summary>
+        private static void ApplyTones()
+        {
+            var tones = new Vector4[BuildingTones.VertexToneCount];
+            for (int i = 0; i < tones.Length; i++)
+            {
+                string name = BuildingTones.PaletteCategories[i < BuildingTones.PaletteCategories.Count ? i : 0];
+                Color c = ScenePalette.Tone((Retro.Game.PaletteCategory)Enum.Parse(typeof(Retro.Game.PaletteCategory), name)).linear;
+                tones[i] = new Vector4(c.r, c.g, c.b, 1);
+            }
+            Shader.SetGlobalVectorArray(TonesId, tones);
+            Color light = ScenePalette.RawLight;
+            Shader.SetGlobalVector(RawLightId, new Vector4(light.r, light.g, light.b, 1));
+        }
+
         private void Update()
         {
             if (cache == null && !TryBoot()) return;
+            if (appliedPalette != ScenePalette.Version)
+            {
+                ApplyTones();
+                appliedPalette = ScenePalette.Version;
+            }
             budget.Enabled = buildingsEnabled;
             Vec3d cam = viewer.ScenePosition;
             Camera unityCam = viewer.UnityCamera;
@@ -154,21 +178,20 @@ namespace Retro.Unity
                     normals[i * 4] = m.Normals[i * 3];
                     normals[i * 4 + 1] = m.Normals[i * 3 + 1];
                     normals[i * 4 + 2] = m.Normals[i * 3 + 2];
-                    // A measured roof colour where there is one (and the colour mode shows them), else the tone.
+                    // A measured roof colour where there is one (and the colour mode shows them): rgb,
+                    // alpha 255. Else the tone index in alpha, looked up in the palette's tone table.
                     if (rawRoofColours && m.RawColors[i * 4 + 3] > 127)
                     {
                         colors[i * 4] = m.RawColors[i * 4];
                         colors[i * 4 + 1] = m.RawColors[i * 4 + 1];
                         colors[i * 4 + 2] = m.RawColors[i * 4 + 2];
+                        colors[i * 4 + 3] = 255;
                     }
                     else
                     {
-                        int rgb = BuildingTones.Noon[m.Tones[i] % BuildingTones.Noon.Count];
-                        colors[i * 4] = (byte)(rgb >> 16);
-                        colors[i * 4 + 1] = (byte)(rgb >> 8);
-                        colors[i * 4 + 2] = (byte)rgb;
+                        colors[i * 4] = colors[i * 4 + 1] = colors[i * 4 + 2] = 0;
+                        colors[i * 4 + 3] = (byte)(m.Tones[i] % BuildingTones.VertexToneCount);
                     }
-                    colors[i * 4 + 3] = 255;
                 }
                 const MeshUpdateFlags quiet = MeshUpdateFlags.DontValidateIndices | MeshUpdateFlags.DontRecalculateBounds
                     | MeshUpdateFlags.DontNotifyMeshUsers;

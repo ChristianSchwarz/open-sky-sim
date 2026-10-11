@@ -74,6 +74,7 @@ namespace Retro.Unity
         {
             if (viewer == null || grid == null) return;
             Vec3d cam = viewer.ScenePosition;
+            material.SetColor("_Color", ScenePalette.Tone(Retro.Game.PaletteCategory.TERRAIN_WATER));
             // The shader adds the curvature drop for scene (x, z) = camera + vertex offset.
             material.SetVector("_CameraScene", new Vector4((float)cam.X, (float)cam.Y, (float)cam.Z, sink));
             material.SetFloat("_EarthRadius", (float)Geodesy.Wgs84A);

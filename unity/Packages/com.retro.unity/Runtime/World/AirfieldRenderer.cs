@@ -46,6 +46,7 @@ namespace Retro.Unity
         {
             public Mesh Mesh;
             public Material Material;
+            public AirfieldPaint Paint;
         }
 
         private sealed class Built
@@ -65,7 +66,6 @@ namespace Retro.Unity
         private Shader flatShader, litShader;
         private EnuBasis basis;
         private float scanTimer;
-        private readonly Palette palette = Palettes.HdNoon;
 
         private void Update()
         {
@@ -251,13 +251,15 @@ namespace Retro.Unity
         /// <summary>repaintGroundStrip: the strip's pavement, in every level, takes the ground's colour lifted by its lighten.</summary>
         private static void Repaint(Built b, AirfieldGroundStrip strip, TileCover cover)
         {
-            Color c = TerrainColours.FromHex("#" + cover.Rgb.ToString("x6"));
+            string hex = "#" + cover.Rgb.ToString("x6");
             foreach (List<Gpu> level in b.Flats)
             {
                 foreach (Gpu g in level)
                 {
                     if (g.Mesh.name != strip.PaintKey) continue;
-                    g.Material.SetColor("_Color", c);
+                    // On the paint, so the palette binding keeps lighting it as the day goes.
+                    g.Paint.RawColor = hex;
+                    g.Material.SetColor("_Color", ScenePalette.Raw(hex));
                     g.Material.SetFloat("_Overbright", (float)strip.Lighten);
                 }
             }
@@ -318,29 +320,31 @@ namespace Retro.Unity
             mesh.RecalculateBounds();
 
             Material material;
-            Color tone = TerrainColours.FromHex(part.Paint.RawColor ?? palette.Color(part.Paint.Category));
+            AirfieldPaint paint = part.Paint;
+            // A literal colour (a repainted strip) takes the palette's light; a tone is the palette's own.
+            Func<Color> tone = () => paint.RawColor != null ? ScenePalette.Raw(paint.RawColor) : ScenePalette.Tone(paint.Category);
             if (part.Shaded)
             {
                 material = new Material(litShader);
-                material.SetColor("_Color", tone);
+                ScenePalette.Bind(material, "_Color", tone);
             }
             else
             {
                 material = new Material(flatShader) { renderQueue = queue };
-                material.SetColor("_Color", tone);
+                ScenePalette.Bind(material, "_Color", tone);
                 material.SetFloat("_Overbright", (float)part.Paint.Lighten);
                 material.SetFloat("_MaxFootprint", (float)(part.Paint.MaxFootprintM ?? 0));
                 if (part.MarkedRunway >= 0 && b.Marks[part.MarkedRunway] != null)
                 {
                     material.SetTexture("_MarkMap", b.Marks[part.MarkedRunway]);
                     material.SetFloat("_Markings", 1);
-                    material.SetColor("_MarkColorA", TerrainColours.FromHex(palette.Color(PaletteCategory.SCENERY_BASE_RUNWAY_THRESHOLD)));
-                    material.SetColor("_MarkColorB", TerrainColours.FromHex(palette.Color(PaletteCategory.SCENERY_BASE_RUNWAY_LINES)));
+                    ScenePalette.Bind(material, "_MarkColorA", PaletteCategory.SCENERY_BASE_RUNWAY_THRESHOLD);
+                    ScenePalette.Bind(material, "_MarkColorB", PaletteCategory.SCENERY_BASE_RUNWAY_LINES);
                     material.SetVector("_MarkFade", new Vector4(
                         (float)AirfieldGeometryBuilder.MarkingTextureFadeOutM, (float)AirfieldGeometryBuilder.PaintMaxFootprintM, 0, 0));
                 }
             }
-            return new Gpu { Mesh = mesh, Material = material };
+            return new Gpu { Mesh = mesh, Material = material, Paint = part.Paint };
         }
 
         private void Draw()
