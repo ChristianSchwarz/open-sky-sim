@@ -61,9 +61,15 @@ namespace Retro.Unity
         /// Step the devices and draw. <paramref name="visible"/> false hides the airframe
         /// (the player's own in the cockpit) but keeps its plumes and trails.
         /// </summary>
-        public void Draw(SimAircraft aircraft, Vec3d camera, double dt, bool visible, WingSweepMode sweepMode)
+        /// <param name="wrecked">Shown as a wreck: neither the airframe nor its plumes and trails draw (render3D's early out).</param>
+        public void Draw(SimAircraft aircraft, Vec3d camera, double dt, bool visible, WingSweepMode sweepMode, bool wrecked = false)
         {
             if (Def == null) return;
+            if (wrecked)
+            {
+                model?.SetVisible(false);
+                return;
+            }
             gearUnit = Toward(gearUnit, aircraft.IsGearDeployed(), GearAnimS, dt);
             flapsUnit = Toward(flapsUnit, aircraft.IsFlapsExtended(), FlapsAnimS, dt);
             airbrakesUnit = Toward(airbrakesUnit, aircraft.IsAirbrakesExtended(), AirbrakesAnimS, dt);
@@ -104,6 +110,9 @@ namespace Retro.Unity
                 WingSweep = sweepUnit,
             }, camera);
         }
+
+        /// <summary>The airframe as the wreck field takes it apart, where it was last drawn; null before it has loaded.</summary>
+        public WreckSource WreckSource(string id, Vec3d velocity) => model?.WreckSource(id, velocity, true);
 
         /// <summary>Hidden altogether (a parked AI airframe).</summary>
         public void Hide()

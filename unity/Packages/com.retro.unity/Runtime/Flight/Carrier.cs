@@ -17,7 +17,7 @@ namespace Retro.Unity
     /// at 45 km/h along its bow until land comes up ahead, with the deck,
     /// arrestor wires and ship velocity kept in step in the sim.
     /// </summary>
-    public sealed class Carrier : IPosedEntity, IMovingSurface
+    public sealed class Carrier : IPosedEntity, IMovingSurface, IWreckMovingSurface
     {
         // game.ts
         /// <summary>KUZ_HULL_RAISE_M: the hull mesh runs 15 m below its origin, the real ship draws ~10 m.</summary>

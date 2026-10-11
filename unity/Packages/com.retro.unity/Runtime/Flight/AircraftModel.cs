@@ -67,6 +67,11 @@ namespace Retro.Unity
         private readonly Transform[] surfaces;
         private readonly int[] parentIndex;
         private readonly double[] deflections;
+        // The scene poses applied last frame, for a wreck to start from.
+        private Vec3d posedPosition;
+        private Quatd posedQuaternion = Quatd.Identity;
+        private readonly Vec3d[] surfacePositions;
+        private readonly Quatd[] surfaceQuaternions;
 
         public bool Loaded { get; private set; }
         public string Error { get; private set; }
@@ -80,6 +85,8 @@ namespace Retro.Unity
             surfaces = new Transform[def.Surfaces.Count];
             parentIndex = new int[def.Surfaces.Count];
             deflections = new double[def.Surfaces.Count];
+            surfacePositions = new Vec3d[def.Surfaces.Count];
+            surfaceQuaternions = new Quatd[def.Surfaces.Count];
             for (int i = 0; i < def.Surfaces.Count; i++)
             {
                 string parent = def.Surfaces[i].SweepParent;
@@ -268,6 +275,8 @@ namespace Retro.Unity
             Quaternion bodyRotation = SceneFrame.ToUnity(quaternion) * HalfTurnY;
             Vector3 bodyPosition = SceneFrame.ToUnity(position - camera);
             body.SetPositionAndRotation(bodyPosition, bodyRotation);
+            posedPosition = position;
+            posedQuaternion = quaternion;
             if (gear != null)
             {
                 gear.gameObject.SetActive(def.GearAnimated || inputs.GearUnit > 0);
@@ -283,8 +292,112 @@ namespace Retro.Unity
                 if (surfaces[i] == null) continue;
                 SurfaceHinge? parent = parentIndex[i] >= 0 ? Hinge(parentIndex[i]) : (SurfaceHinge?)null;
                 var (p, q) = WingSweep.PoseSurface(Hinge(i), parent, position, quaternion);
+                surfacePositions[i] = p;
+                surfaceQuaternions[i] = q;
                 surfaces[i].SetPositionAndRotation(SceneFrame.ToUnity(p - camera), SceneFrame.ToUnity(q) * HalfTurnY);
             }
+        }
+
+        /// <summary>
+        /// What the wreck field needs to take this airframe apart (player.ts / aiAircraft.ts
+        /// collectWreckParts): the body, the gear while it is down (or animated), and every
+        /// hinged surface where it was last posed, each as its drawn meshes in the model frame.
+        /// </summary>
+        public WreckSource WreckSource(string id, Vec3d velocity, bool gearShown)
+        {
+            if (!Loaded) return null;
+            var src = new WreckSource
+            {
+                Id = id,
+                Body = WreckModelOf(body),
+                Position = posedPosition,
+                Quaternion = posedQuaternion,
+                Velocity = velocity,
+                Cockpit = def.CockpitOffset,
+            };
+            if (gear != null && gear.gameObject.activeSelf && gearShown)
+            {
+                src.Parts.Add(new WreckPart { Model = WreckModelOf(gear), Position = posedPosition, Quaternion = posedQuaternion, Kind = WreckPartKind.Gear, Id = 0 });
+            }
+            for (int i = 0; i < surfaces.Length; i++)
+            {
+                if (surfaces[i] == null) continue;
+                src.Parts.Add(new WreckPart
+                {
+                    Model = WreckModelOf(surfaces[i]), Position = surfacePositions[i], Quaternion = surfaceQuaternions[i],
+                    Kind = WreckPartKind.Surface, Id = 1 + i,
+                });
+            }
+            return src;
+        }
+
+        private static readonly double[] IdentityMatrix = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
+        /// <summary>
+        /// A part's drawn meshes as the wreck field reads a three.js model: positions and
+        /// normals in the model frame (glTFast negated x on import and turned the winding to
+        /// match, so both are undone), one mesh per material, the Unity material as the handle.
+        /// Node transforms (and the gear's sampled clip) are baked in.
+        /// </summary>
+        private static WreckModel WreckModelOf(Transform part)
+        {
+            var model = new WreckModel();
+            var vertices = new List<Vector3>();
+            var normals = new List<Vector3>();
+            var tris = new List<int>();
+            Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
+            foreach (MeshFilter mf in part.GetComponentsInChildren<MeshFilter>(false))
+            {
+                Renderer r = mf.GetComponent<Renderer>();
+                Mesh mesh = mf.sharedMesh;
+                if (mesh == null || r == null || !r.enabled) continue;
+                Matrix4x4 toPart = part.worldToLocalMatrix * mf.transform.localToWorldMatrix;
+                mesh.GetVertices(vertices);
+                mesh.GetNormals(normals);
+                var positions = new float[vertices.Count * 3];
+                var nrm = normals.Count == vertices.Count ? new float[vertices.Count * 3] : null;
+                for (int v = 0; v < vertices.Count; v++)
+                {
+                    Vector3 pp = toPart.MultiplyPoint3x4(vertices[v]);
+                    positions[v * 3] = -pp.x;
+                    positions[v * 3 + 1] = pp.y;
+                    positions[v * 3 + 2] = pp.z;
+                    min = Vector3.Min(min, new Vector3(-pp.x, pp.y, pp.z));
+                    max = Vector3.Max(max, new Vector3(-pp.x, pp.y, pp.z));
+                    if (nrm != null)
+                    {
+                        Vector3 n = toPart.MultiplyVector(normals[v]).normalized;
+                        nrm[v * 3] = -n.x;
+                        nrm[v * 3 + 1] = n.y;
+                        nrm[v * 3 + 2] = n.z;
+                    }
+                }
+                Material[] mats = r.sharedMaterials;
+                for (int sub = 0; sub < mesh.subMeshCount; sub++)
+                {
+                    // Lines and points are not taken apart (the TS skips them too).
+                    if (mesh.GetTopology(sub) != MeshTopology.Triangles) continue;
+                    mesh.GetTriangles(tris, sub);
+                    var idx = new int[tris.Count];
+                    for (int t = 0; t + 2 < tris.Count; t += 3)
+                    {
+                        idx[t] = tris[t];
+                        idx[t + 1] = tris[t + 2];
+                        idx[t + 2] = tris[t + 1];
+                    }
+                    model.Meshes.Add(new WreckMeshInput
+                    {
+                        Positions = positions,
+                        Normals = nrm,
+                        Indices = idx,
+                        Matrix = IdentityMatrix,
+                        Material = sub < mats.Length ? mats[sub] : mats[mats.Length - 1],
+                    });
+                }
+            }
+            Vector3 size = max - min;
+            model.MaxSize = model.Meshes.Count > 0 ? Mathf.Max(size.x, Mathf.Max(size.y, size.z)) : 0;
+            return model;
         }
 
         private SurfaceHinge Hinge(int i) => new SurfaceHinge

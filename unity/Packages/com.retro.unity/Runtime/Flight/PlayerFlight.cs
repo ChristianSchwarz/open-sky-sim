@@ -92,6 +92,7 @@ namespace Retro.Unity
         private Carrier carrier;
         private CarrierFx carrierFx;
         private CombatFxView combatFx;
+        private WreckView wrecks;
         private bool wasCrashed;
         private readonly Tailhook tailhook = new Tailhook();
         private CarrierOverSternCameraUpdater carrierCamera;
@@ -196,6 +197,7 @@ namespace Retro.Unity
             }
 
             combatFx.Update(Time.deltaTime);
+            wrecks.Update(Time.deltaTime);
             // transitionFromPlayerToCrashed: the wreck's own smoke column.
             if (aircraft.IsCrashed() && !wasCrashed) combatFx.Smoke.EnsureCrashPlume(PlayerId);
             wasCrashed = aircraft.IsCrashed();
@@ -275,6 +277,8 @@ namespace Retro.Unity
             tailhook.Configure(current.Def);
             carrierFx = new CarrierFx(carrier, GroundAt);
             combatFx = new CombatFxView(SmokePose, GroundAt, IsOpenWater, SurfaceKindAt, carrier);
+            // The sea's own height for the pieces, not the ground (which includes the carrier's hull).
+            wrecks = new WreckView(combatFx, GroundAt, IsOpenWater, heightField.HeightAtWorld, carrier);
             // setupCombat: the opponent and the wingman, parked until the flight begins.
             combat = new Combat(sim, PlayerId, current.Def, current.Files, config, flightModel, aircraft.GetPosition(), 0);
             aiChase = new AiExteriorCameraUpdater(this, pose, new SimChaseTarget(sim, Combat.OpponentId(0)), aiChaseHeading);
@@ -559,6 +563,7 @@ namespace Retro.Unity
             airframeView.Snap(aircraft);
             tailhook.Snap(aircraft);
             combatFx?.Reset();
+            wrecks?.Clear();
             wasCrashed = false;
         }
 
@@ -800,11 +805,13 @@ namespace Retro.Unity
         {
             bool visible = !(flightView == FlightView.Cockpit && !aircraft.IsCrashed());
             carrier.Draw(view.ScenePosition);
-            airframeView.Draw(aircraft, view.ScenePosition, Time.deltaTime, visible, wingSweepMode);
-            if (visible) tailhook.Draw(aircraft, carrier.Pose, view.ScenePosition, Time.deltaTime);
+            bool wrecked = wrecks.Track(PlayerId, aircraft, airframeView);
+            airframeView.Draw(aircraft, view.ScenePosition, Time.deltaTime, visible, wingSweepMode, wrecked);
+            wrecks.Draw(view.ScenePosition);
+            if (visible && !wrecked) tailhook.Draw(aircraft, carrier.Pose, view.ScenePosition, Time.deltaTime);
             carrierFx.Draw(aircraft, tailhook.HingeBody, view.ScenePosition, Time.deltaTime);
             combatFx.Draw(view.ScenePosition, ScenePalette.Current);
-            combat.Draw(view.ScenePosition, Time.deltaTime);
+            combat.Draw(view.ScenePosition, Time.deltaTime, wrecks);
             tracers.Draw(sim, view.ScenePosition, view.UnityCamera);
         }
 
@@ -841,6 +848,7 @@ namespace Retro.Unity
             carrier?.Destroy();
             carrierFx?.Dispose();
             combatFx?.Dispose();
+            wrecks?.Dispose();
             tailhook.Dispose();
             tracers?.Dispose();
         }

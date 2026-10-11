@@ -305,8 +305,8 @@ namespace Retro.Unity
             return null;
         }
 
-        /// <summary>Draw every enabled airframe; parked ones are hidden.</summary>
-        public void Draw(Vec3d camera, double dt)
+        /// <summary>Draw every enabled airframe (parked ones are hidden); a crashed one goes to pieces in the wreck field.</summary>
+        public void Draw(Vec3d camera, double dt, WreckView wrecks)
         {
             foreach ((string id, AircraftView view) in others)
             {
@@ -316,7 +316,8 @@ namespace Retro.Unity
                     view.Hide();
                     continue;
                 }
-                view.Draw(a, camera, dt, true, WingSweepMode.Auto);
+                bool wrecked = wrecks != null && wrecks.Track(id, a, view);
+                view.Draw(a, camera, dt, true, WingSweepMode.Auto, wrecked);
             }
         }
 
