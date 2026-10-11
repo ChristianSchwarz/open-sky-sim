@@ -6,18 +6,18 @@ using Retro.Sim;
 
 namespace Retro.Unity
 {
-    /// <summary>game.ts SpawnMode: the spawn menu's start buttons (digits as on the web); Location is a searched place.</summary>
-    public enum SpawnMode
+    /// <summary>The spawn menu's digit keys (game.ts keypress 1..9); 8 was the barricade start, gone.</summary>
+    public static class SpawnKeys
     {
-        Location = 0,
-        Approach = 1,
-        Runway = 2,
-        HeadOn = 3,
-        Carrier = 4,
-        CarrierTakeoff = 5,
-        HighAlt = 6,
-        Space = 7,
-        CloseWing = 9,
+        private static readonly SpawnMode?[] ByDigit =
+        {
+            null, SpawnMode.Approach, SpawnMode.Runway, SpawnMode.Headon, SpawnMode.Carrier,
+            SpawnMode.CarrierTakeoff, SpawnMode.HighAlt, SpawnMode.Space, null, SpawnMode.CloseWing,
+        };
+
+        public static SpawnMode? ForDigit(int digit) => digit >= 0 && digit < ByDigit.Length ? ByDigit[digit] : null;
+
+        public static int Digit(SpawnMode mode) => Array.IndexOf(ByDigit, mode);
     }
 
     /// <summary>
@@ -188,7 +188,7 @@ namespace Retro.Unity
         /// <summary>beginFlight's tail: the opponents and the wingman for this sortie.</summary>
         public void Begin(SpawnMode mode, Func<double, double, double> groundAt)
         {
-            SpawnOpponents(mode == SpawnMode.HeadOn);
+            SpawnOpponents(mode == SpawnMode.Headon);
             SpawnWingman(mode == SpawnMode.CloseWing, groundAt);
         }
 

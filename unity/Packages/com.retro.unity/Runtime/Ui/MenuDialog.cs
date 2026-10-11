@@ -44,6 +44,7 @@ namespace Retro.Unity
         private Button menuButton;
         private readonly List<(string Name, Func<VisualElement> Build, Button Tab)> tabs = new List<(string, Func<VisualElement>, Button)>();
         private int activeTab;
+        private readonly Dictionary<string, Func<VisualElement>> overrides = new Dictionary<string, Func<VisualElement>>();
         private bool open;
         private TextField search;
         private VisualElement results;
@@ -152,6 +153,7 @@ namespace Retro.Unity
         public void AddTab(string name, Func<VisualElement> build)
         {
             int index = tabs.Count;
+            if (overrides.TryGetValue(name, out Func<VisualElement> given)) build = given;
             var tab = new Button(() => SelectTab(index)) { text = name };
             Style(tab, s =>
             {
@@ -171,6 +173,8 @@ namespace Retro.Unity
         /// <summary>Replace a tab's page builder (the settings model fills the other tabs).</summary>
         public void SetTab(string name, Func<VisualElement> build)
         {
+            // Before the tabs exist (another component's Start ran first): used when the tab is added.
+            overrides[name] = build;
             for (int i = 0; i < tabs.Count; i++)
             {
                 if (tabs[i].Name != name) continue;
@@ -211,7 +215,7 @@ namespace Retro.Unity
             {
                 foreach (SpawnMode mode in StartModes)
                 {
-                    if (k[Key.Digit1 + ((int)mode - 1)].wasPressedThisFrame) Start(mode);
+                    if (k[Key.Digit1 + (SpawnKeys.Digit(mode) - 1)].wasPressedThisFrame) Start(mode);
                 }
             }
 #endif
@@ -222,7 +226,7 @@ namespace Retro.Unity
         /// <summary>The spawn menu's start buttons (the barricade start is gone).</summary>
         private static readonly SpawnMode[] StartModes =
         {
-            SpawnMode.Approach, SpawnMode.Runway, SpawnMode.HeadOn, SpawnMode.Carrier,
+            SpawnMode.Approach, SpawnMode.Runway, SpawnMode.Headon, SpawnMode.Carrier,
             SpawnMode.CarrierTakeoff, SpawnMode.HighAlt, SpawnMode.Space, SpawnMode.CloseWing,
         };
 
@@ -230,7 +234,7 @@ namespace Retro.Unity
         {
             SpawnMode.Approach => "Approach (1)",
             SpawnMode.Runway => "Runway (2)",
-            SpawnMode.HeadOn => "Head-on (3)",
+            SpawnMode.Headon => "Head-on (3)",
             SpawnMode.Carrier => "Carrier land (4)",
             SpawnMode.CarrierTakeoff => "Carrier TO (5)",
             SpawnMode.HighAlt => "10 km (6)",

@@ -48,6 +48,8 @@ namespace Retro.Unity
         [Header("Spawn")]
         [Tooltip("The spawn menu's start (game.ts beginFlight); Location is airborne at the point below. Ctrl+digit in flight.")]
         public SpawnMode spawnMode = SpawnMode.Runway;
+        [Tooltip("Start airborne at the point below instead of the spawn mode (the web game's searched-place start).")]
+        public bool startAtLocation;
         [Tooltip("ICAO (or name) of the airfield to start at; empty picks the nearest base.")]
         public string preferIcao = "";
         public double spawnLat = 27.75;
@@ -116,6 +118,9 @@ namespace Retro.Unity
         public readonly Queue<string> KeyLog = new Queue<string>();
 
         public CombatSim Sim => sim;
+
+        /// <summary>The opponent and wingman of the sortie, once the flight has booted.</summary>
+        public Combat Combat => combat;
 
         /// <summary>The menu is open (game.ts pauseForMenu): the sim holds, and keys go to the menu.</summary>
         [NonSerialized] public bool menuOpen;
@@ -363,7 +368,7 @@ namespace Retro.Unity
                     : SimConstants.PlaneDistanceToGround;
                 return carrier.TakeoffSpawn(gearY, GroundAt);
             }
-            if (mode == SpawnMode.Location || startRunway == null) return AirborneSpawn();
+            if (startAtLocation || startRunway == null) return AirborneSpawn();
             SceneRunway r = startRunway;
             Vec3d fwd = ActiveAirfield.HeadingForward(r.Heading);
             switch (mode)
@@ -439,7 +444,7 @@ namespace Retro.Unity
             p.Y = GroundAt(p.X, p.Z, true) + LocationSpawnAglM;
             SimAircraftSpawn spawn = Airborne(p, LocationSpawnHeading, ApproachThrottle);
             Place(spawn);
-            combat.Begin(SpawnMode.Location, GroundAt);
+            combat.Begin(SpawnMode.Approach, GroundAt);
             FlightBegan?.Invoke();
         }
 
@@ -469,6 +474,7 @@ namespace Retro.Unity
         {
             if (sim == null) return;
             spawnMode = mode;
+            startAtLocation = false;
             Respawn();
             combat.Begin(mode, GroundAt);
             FlightBegan?.Invoke();
@@ -626,7 +632,8 @@ namespace Retro.Unity
                 for (int d = 1; d <= 9; d++)
                 {
                     if (d == 8) continue; // the barricade start is gone
-                    if (k[Key.Digit1 + (d - 1)].wasPressedThisFrame) BeginFlight((SpawnMode)d);
+                    SpawnMode? m = SpawnKeys.ForDigit(d);
+                    if (m.HasValue && k[Key.Digit1 + (d - 1)].wasPressedThisFrame) BeginFlight(m.Value);
                 }
             }
             if (k.f10Key.wasPressedThisFrame) flightView = flightView == FlightView.Free ? FlightView.ChaseBack : FlightView.Free;

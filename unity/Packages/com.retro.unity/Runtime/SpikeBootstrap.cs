@@ -155,6 +155,16 @@ namespace Retro.Unity
             overlay.terrain = terrain;
             overlay.viewer = fly;
             overlay.targetView = targetView;
+            // The stored settings, applied before anything above boots.
+            var settings = menu.gameObject.AddComponent<SettingsBridge>();
+            settings.flight = player;
+            settings.terrain = terrain;
+            settings.sky = sky;
+            settings.overlay = overlay;
+            settings.roads = roads;
+            settings.buildings = buildings;
+            settings.menu = menu;
+            settings.Init();
             var boot = new GameObject("Boot").AddComponent<BootOverlay>();
             boot.flight = player;
             boot.terrain = terrain;
