@@ -132,6 +132,33 @@ namespace Retro.Unity
         public SimAircraft Opponent => sim.GetAircraft(OpponentId(0));
 
         /// <summary>
+        /// The weapons target as the target MFD reads it (aiAircraft.ts WeaponsTarget getters):
+        /// speed, load factor, health, the pilot's stick and throttle, the manoeuvre it flies.
+        /// </summary>
+        public CockpitTarget CockpitTarget()
+        {
+            WeaponsTarget t = Target();
+            if (t == null) return null;
+            SimAircraft o = Opponent;
+            return new CockpitTarget
+            {
+                Position = t.Position,
+                LocalCenter = t.LocalCenter,
+                MaxSize = t.MaxSize,
+                TargetType = t.TargetType,
+                TargetLocation = t.TargetLocation,
+                Airborne = t.Airborne,
+                SpeedMps = o.GetVelocity().Length,
+                LoadFactorG = o.GetLoadFactorG(),
+                HealthFraction = o.MaxHealth > 0 ? o.Health / o.MaxHealth : 1,
+                StickPitch = o.GetPitchInput(),
+                StickRoll = o.GetRollInput(),
+                Throttle = o.GetThrottle(),
+                Maneuver = o.Pilot?.GetManeuverLabel(),
+            };
+        }
+
+        /// <summary>
         /// The player's weapons target (beginFlight's setWeaponsTarget(aiOpponent)): the
         /// primary opponent while it is in the sky. Its size is the airframe's largest
         /// extent, from the collision box.

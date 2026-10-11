@@ -309,6 +309,8 @@ namespace Retro.Sim
         public bool IsGearDeployed() => inGear;
         /// <summary>The roll input applied this step (+right), for drawing the surfaces.</summary>
         public double GetRollInput() => inRoll;
+        public double GetPitchInput() => inPitch;
+        public bool IsWheelBrakesApplied() => inBrakes;
         public bool IsFlapsExtended() => inFlaps;
         public bool IsAirbrakesExtended() => inAirbrakes;
         /// <summary>AI pilots have no hook control of their own: theirs follows the gear.</summary>

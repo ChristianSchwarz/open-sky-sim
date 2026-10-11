@@ -26,6 +26,9 @@ namespace Retro.Unity
         public AircraftFx Fx => fx.Fx;
         public bool Loaded => model != null && model.Loaded;
 
+        /// <summary>Gear, flaps and airbrakes through their transits, 0 in to 1 out.</summary>
+        public (double Gear, double Flaps, double Airbrakes) Units => (gearUnit, flapsUnit, airbrakesUnit);
+
         public AircraftView(string name)
         {
             this.name = name;

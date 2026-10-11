@@ -570,6 +570,15 @@ namespace Retro.Unity
         public Vec3d GetDisplayWorldRight() => SceneAxes.Right.Rotate(aircraft.GetQuaternion());
         public WeaponsTarget WeaponsTarget => combat?.Target();
 
+        /// <summary>The weapons target with the telemetry the target MFD shows.</summary>
+        public CockpitTarget CockpitTarget() => combat?.CockpitTarget();
+
+        /// <summary>Gear, flaps and airbrakes through their transits (for the device labels).</summary>
+        public (double Gear, double Flaps, double Airbrakes) DeviceUnits => airframeView.Units;
+
+        /// <summary>The tailhook swing, 0 stowed to 1 down.</summary>
+        public double HookUnit => tailhook.Unit;
+
         public bool GetWreckFocus(out Vec3d focus)
         {
             focus = default;
@@ -752,9 +761,6 @@ namespace Retro.Unity
                 $"{(aircraft.IsLanded() ? "LANDED  " : "")}{(aircraft.IsCrashed() ? "CRASHED (R to respawn)  " : "")}{(aircraft.Control == SimControlMode.Ai ? "AUTOPILOT  " : "")}" +
                 $"view {flightView}   ground tiles {heightField.FineResident}+{heightField.FineInFlight} ({heightField.TierAtWorld(p.X, p.Z)})";
             GUI.Label(new Rect(12, 8, 1200, 80), text, hudStyle);
-            // The target camera until the target MFD is drawn.
-            Texture target = GetComponent<TargetCameraView>()?.Texture;
-            if (target != null) GUI.DrawTexture(new Rect(Screen.width - target.width - 8, Screen.height - target.height - 8, target.width, target.height), target);
         }
 
         private void OnDisable()

@@ -149,6 +149,12 @@ namespace Retro.Unity
             var menu = new GameObject("Menu").AddComponent<MenuDialog>();
             menu.flight = player;
             menu.terrain = terrain;
+            // M8: the 2D overlay (cockpit MFDs, then the HUD) over the 3D view.
+            var overlay = new GameObject("Overlay").AddComponent<OverlayHost>();
+            overlay.flight = player;
+            overlay.terrain = terrain;
+            overlay.viewer = fly;
+            overlay.targetView = targetView;
             return terrain;
         }
     }

@@ -21,6 +21,18 @@ namespace Retro.Unity
         public HeightJson height;
         public FlattenPadJson[] flattenPads;
         public AreaJson[] areas;
+        public TerrainManifestTexture texture;
+    }
+
+    /// <summary>The manifest's cover-texture (.ptx) block.</summary>
+    [Serializable]
+    public sealed class TerrainManifestTexture
+    {
+        public int size = 256;
+        public int nearSize = 512;
+        public int nearZoom = 10;
+        public int minZoom = 4;
+        public int maxZoom = 11;
     }
 
     /// <summary>A manifest area (manifest.ts TerrainArea), degrees.</summary>
@@ -151,6 +163,9 @@ namespace Retro.Unity
         private readonly Stopwatch clock = Stopwatch.StartNew();
 
         public TerrainSession Session => session;
+
+        /// <summary>The cover textures (.ptx), or null when the pyramid has none.</summary>
+        public TerrainManifestTexture TextureInfo => manifest?.texture != null && manifest.texture.maxZoom > 0 ? manifest.texture : null;
 
         /// <summary>The baked areas of the pyramid (manifest areas), for the spawn search.</summary>
         public System.Collections.Generic.List<Retro.Game.TerrainArea> Areas()

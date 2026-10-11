@@ -30,6 +30,9 @@ namespace Retro.Unity
         /// <summary>Body-frame hinge (the cable shapes bend toward the tip on its ray).</summary>
         public Vec3d HingeBody => hingeBody;
 
+        /// <summary>The swing, 0 stowed to 1 down.</summary>
+        public double Unit => progress / AnimDurationS;
+
         /// <summary>arrestorHookPlacementForAircraft: tip from the def, hinge up and forward of it.</summary>
         public void Configure(FlyableAircraftDef def)
         {
