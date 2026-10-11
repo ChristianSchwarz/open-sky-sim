@@ -74,6 +74,10 @@ const riverVert = (rail: boolean): string => `
 
   attribute vec3 riverDir;
   attribute float riverHalf;
+#ifdef SECOND_TONE
+  attribute float secondTone;
+  varying float vSecondTone;
+#endif
 ` + (rail ? `
   // The class byte, ROAD_SIDE_BIT (64) set on the negative bank, and the
   // distance along the stroke in ALONG_STEP_M units (see ptr.ts).
@@ -96,6 +100,9 @@ const riverVert = (rail: boolean): string => `
   varying vec3 vViewDir;
 ${LOG_DEPTH_PARS_VERTEX}
   void main() {
+#ifdef SECOND_TONE
+    vSecondTone = secondTone;
+#endif
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vPosition = vec3(worldPos.x, 0.0, worldPos.z);
     vNormalView = vec3(0.0, 0.0, 1.0);

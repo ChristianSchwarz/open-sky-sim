@@ -52,6 +52,15 @@ export interface RoadMeshes {
     railTop?: THREE.Mesh;
     /** Set by RoadStrokes.showTrackDetail; the two passes above hide when false. */
     trackDetailInReach?: boolean;
+    /**
+     * Major and minor roads in one draw, at the level both are drawn at:
+     * the major triangles first, as their own meshes drew, the minor ones
+     * after, coloured per vertex (secondTone). Drawn instead of the two when
+     * every road is shown; the two stay for the MAJOR setting and the levels.
+     */
+    both?: THREE.Mesh;
+    /** The geometry of `both` per pair of major and minor index lists. */
+    bothGeometries?: Map<Uint16Array, Map<Uint16Array, THREE.BufferGeometry>>;
     /** Coarser index lists for the road kinds, drawn far off (see roadLod.ts). */
     lod?: RoadLod;
     /** Triangles bound at full detail, for the resident count. */
@@ -78,6 +87,11 @@ export interface RoadStrokesOptions {
     majorMaterial: THREE.Material;
     /** Tertiaries and below. */
     minorMaterial: THREE.Material;
+    /**
+     * Both in one draw: the major material, taking the minor tone per
+     * vertex (secondTone). Absent: one draw each.
+     */
+    bothMaterial?: THREE.Material;
     /** Railway track beds, the first pass. */
     railMaterial: THREE.Material;
     /** Sleepers, the second pass (uRailPass 1, transparent). Absent: beds only. */
@@ -115,7 +129,7 @@ const STROKE_KINDS: readonly StrokeKind[] = ['major', 'minor', 'rail'];
 
 /** A material per kind, and the rail stroke's second pass when there is one. */
 export type StrokeMaterials = Readonly<Record<StrokeKind, THREE.Material>>
-    & { readonly railDetail?: THREE.Material; readonly railTop?: THREE.Material };
+    & { readonly railDetail?: THREE.Material; readonly railTop?: THREE.Material; readonly both?: THREE.Material };
 
 /**
  * Draw order of the rail pass among the transparent meshes: after every
@@ -267,8 +281,62 @@ export function buildRoadMeshes(
             roads.railTop = passes.rails;
         }
     }
+    if (materials.both && roads.major && roads.minor) {
+        const vertices = tile.positions.length / 3;
+        const minor = new Uint8Array(vertices);
+        for (let v = 0; v < vertices; v++) {
+            minor[v] = kindOf(tile.directions[v * 4 + 3]) === 'minor' ? 1 : 0;
+        }
+        roads.major.geometry.setAttribute('secondTone', new THREE.BufferAttribute(minor, 1));
+        roads.bothGeometries = new Map();
+        const mesh = new THREE.Mesh(
+            bothGeometry(roads, roads.major.geometry, roads.minor.geometry),
+            materials.both,
+        );
+        mesh.frustumCulled = false;
+        mesh.matrixAutoUpdate = false;
+        mesh.renderOrder = ROAD_RENDER_ORDER;
+        if (onBeforeRender) {
+            mesh.onBeforeRender = onBeforeRender;
+        }
+        // Right after the two, so it draws where they did among the rail passes.
+        group.add(mesh);
+        group.children.pop();
+        group.children.splice(group.children.indexOf(roads.minor) + 1, 0, mesh);
+        roads.both = mesh;
+        roads.bytes += (mesh.geometry.getIndex()?.array.byteLength ?? 0) + minor.byteLength;
+    }
     roads.bytes += tile.positions.byteLength + tile.directions.byteLength + tile.halfWidths.byteLength;
     return roads;
+}
+
+/**
+ * The major and minor index lists one after the other over their shared
+ * vertices, cached per pair (RoadMeshes.both).
+ */
+function bothGeometry(roads: RoadMeshes, major: THREE.BufferGeometry, minor: THREE.BufferGeometry): THREE.BufferGeometry {
+    const a = major.getIndex()!.array as Uint16Array;
+    const b = minor.getIndex()!.array as Uint16Array;
+    const cache = roads.bothGeometries!;
+    let byMinor = cache.get(a);
+    if (!byMinor) {
+        byMinor = new Map();
+        cache.set(a, byMinor);
+    }
+    let g = byMinor.get(b);
+    if (!g) {
+        const index = new Uint16Array(a.length + b.length);
+        index.set(a);
+        index.set(b, a.length);
+        g = new THREE.BufferGeometry();
+        // Every level shares the full geometry's attributes, secondTone too.
+        for (const [name, attribute] of Object.entries(major.attributes)) {
+            g.setAttribute(name, attribute);
+        }
+        g.setIndex(new THREE.BufferAttribute(index, 1));
+        byMinor.set(b, g);
+    }
+    return g;
 }
 
 /** Triangles bound in every mesh, visible or not. */
@@ -303,6 +371,7 @@ export class RoadStrokes {
         this.maxZoom = spec?.maxZoom ?? -1;
         this.materials = {
             major: opts.majorMaterial, minor: opts.minorMaterial, rail: opts.railMaterial,
+            both: opts.bothMaterial,
             railDetail: opts.railDetailMaterial,
             railTop: opts.railTopMaterial,
         };
@@ -338,11 +407,15 @@ export class RoadStrokes {
     }
 
     private applyMode(roads: RoadMeshes): void {
+        const both = roads.both !== undefined && this.mode === RoadsMode.ALL;
+        if (roads.both) {
+            roads.both.visible = both;
+        }
         if (roads.major) {
-            roads.major.visible = this.mode !== RoadsMode.OFF;
+            roads.major.visible = this.mode !== RoadsMode.OFF && !both;
         }
         if (roads.minor) {
-            roads.minor.visible = this.mode === RoadsMode.ALL;
+            roads.minor.visible = this.mode === RoadsMode.ALL && !both;
         }
         if (roads.rail) {
             roads.rail.visible = this.mode !== RoadsMode.OFF;
@@ -525,6 +598,9 @@ export class RoadStrokes {
             }
             kind.mesh.geometry = geometry;
         }
+        if (roads.both && roads.major && roads.minor) {
+            roads.both.geometry = bothGeometry(roads, roads.major.geometry, roads.minor.geometry);
+        }
     }
 
     /** A tile is being released; drop its roads. */
@@ -537,6 +613,11 @@ export class RoadStrokes {
             roads.major?.geometry.dispose();
             roads.minor?.geometry.dispose();
             roads.rail?.geometry.dispose();
+            for (const byMinor of roads.bothGeometries?.values() ?? []) {
+                for (const geometry of byMinor.values()) {
+                    geometry.dispose();
+                }
+            }
             for (const kind of roads.lod?.kinds ?? []) {
                 for (const geometry of kind.geometries.values()) {
                     geometry.dispose();
@@ -570,6 +651,9 @@ export class RoadStrokes {
             return 0;
         }
         let n = 0;
+        if (!atFullDetail && roads.both?.visible) {
+            n += (roads.both.geometry.getIndex()?.count ?? 0) / 3;
+        }
         for (const mesh of [roads.major, roads.minor, roads.rail, roads.railDetail, roads.railTop]) {
             // At full detail for the budget, and by the roads setting rather
             // than by what is visible: a far level makes a tile lighter, and

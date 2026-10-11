@@ -342,6 +342,55 @@ type Leak = {
 };
 
 /**
+ * One puff's instance matrix, written straight into `out` at `offset`: the
+ * puff at `position`, scaled by `size`, facing `eye` (an Object3D lookAt, +Z
+ * towards it, world up) or lying flat (+Z up, for foam on water), then turned
+ * by `angle` about its own Z. The same matrix the Object3D route built, without
+ * its quaternion round trips: thousands of puffs a frame with a wreck burning.
+ */
+export function writePuffMatrix(
+    out: Float32Array, offset: number, position: THREE.Vector3, eye: THREE.Vector3,
+    size: number, angle: number, flat: boolean,
+): void {
+    let zx: number, zy: number, zz: number, xx: number, xy: number, xz: number, yx: number, yy: number, yz: number;
+    if (flat) {
+        // Rx(-90 deg): x along +X, y along -Z, z along +Y.
+        xx = 1; xy = 0; xz = 0;
+        yx = 0; yy = 0; yz = -1;
+        zx = 0; zy = 1; zz = 0;
+    } else {
+        zx = eye.x - position.x; zy = eye.y - position.y; zz = eye.z - position.z;
+        let len = Math.hypot(zx, zy, zz);
+        if (len === 0) {
+            zx = 0; zy = 0; zz = 1; len = 1;
+        }
+        zx /= len; zy /= len; zz /= len;
+        // x = up x z, up = +Y; straight above or below, nudge z as three.js does.
+        xx = zz; xy = 0; xz = -zx;
+        let xl = Math.hypot(xx, xz);
+        if (xl === 0) {
+            zz += 0.0001;
+            const zl = Math.hypot(zx, zy, zz);
+            zx /= zl; zy /= zl; zz /= zl;
+            xx = zz; xz = -zx;
+            xl = Math.hypot(xx, xz);
+        }
+        xx /= xl; xz /= xl;
+        // y = z x x
+        yx = zy * xz - zz * xy;
+        yy = zz * xx - zx * xz;
+        yz = zx * xy - zy * xx;
+    }
+    const c = Math.cos(angle), s = Math.sin(angle);
+    const ax = (xx * c + yx * s) * size, ay = (xy * c + yy * s) * size, az = (xz * c + yz * s) * size;
+    const bx = (yx * c - xx * s) * size, by = (yy * c - xy * s) * size, bz = (yz * c - xz * s) * size;
+    out[offset] = ax; out[offset + 1] = ay; out[offset + 2] = az; out[offset + 3] = 0;
+    out[offset + 4] = bx; out[offset + 5] = by; out[offset + 6] = bz; out[offset + 7] = 0;
+    out[offset + 8] = zx * size; out[offset + 9] = zy * size; out[offset + 10] = zz * size; out[offset + 11] = 0;
+    out[offset + 12] = position.x; out[offset + 13] = position.y; out[offset + 14] = position.z; out[offset + 15] = 1;
+}
+
+/**
  * Hit fire/smoke: puffs spawn at the impact point on the airframe, rise at
  * {@link RISE_MPS}, drift sideways, and cool yellow → red → gray.
  */
@@ -361,7 +410,6 @@ export class DamageSmokeField implements Entity {
     private readonly puffLevel: THREE.InstancedBufferAttribute;
     private readonly puffToneA: THREE.InstancedBufferAttribute;
     private readonly puffToneB: THREE.InstancedBufferAttribute;
-    private readonly puffPose = new THREE.Object3D();
     private readonly root = new THREE.Object3D();
     private readonly leaks: Leak[] = [];
     private readonly anchored: AnchoredFire[] = [];
@@ -1813,7 +1861,7 @@ export class DamageSmokeField implements Entity {
 
     private syncPuffs(camera: THREE.Camera, palette: Palette): void {
         this.cachePaletteColors(palette);
-        const mesh = this.puffPose;
+        const matrices = this.puffs.instanceMatrix.array as Float32Array;
         let live = 0;
         for (let i = 0; i < this.system.particles.length && i < DAMAGE_SMOKE_PARTICLE_COUNT; i++) {
             const p = this.system.particles[i];
@@ -1828,8 +1876,6 @@ export class DamageSmokeField implements Entity {
                     + (1 - FIRE_SIZE_GROWTH)
                     * ((progress - FIRE_PHASE_END) / (1 - FIRE_PHASE_END));
             const size = p.sizeStart + (p.sizeEnd - p.sizeStart) * sizeT;
-            mesh.position.copy(p.position);
-            mesh.scale.setScalar(size);
 
             // Yellow → red over the fire phase, then gray smoke for the rest.
             const flag = this.dustFlags[i];
@@ -1874,15 +1920,9 @@ export class DamageSmokeField implements Entity {
             this.puffLevel.array[live] = lerp(
                 fadeT, isDust || flag === 5 || flag === 6 || flag === 7 ? DUST_DITHER_START : SMOKE_DITHER_START, SMOKE_DITHER_END);
 
-            if (flag === 6) {
-                // Foam lies flat on the water, not standing up to face the camera.
-                mesh.rotation.set(-Math.PI / 2, 0, 0);
-            } else {
-                mesh.lookAt(camera.position);
-            }
-            mesh.rotateZ(p.rotationStart + (p.rotationEnd - p.rotationStart) * progress);
-            mesh.updateMatrix();
-            this.puffs.setMatrixAt(live, mesh.matrix);
+            // Foam lies flat on the water, not standing up to face the camera.
+            writePuffMatrix(matrices, live * 16, p.position, camera.position, size,
+                p.rotationStart + (p.rotationEnd - p.rotationStart) * progress, flag === 6);
             live++;
         }
         this.puffs.count = live;
@@ -1896,11 +1936,14 @@ export class DamageSmokeField implements Entity {
     }
 
     render3D(_targetWidth: number, _targetHeight: number, camera: THREE.Camera, lists: Map<string, THREE.Scene>, palette: Palette): void {
-        this.syncPuffs(camera, palette);
+        // Only for a pass that draws the puffs: the sky and glare passes come
+        // through here too, and re-facing thousands of puffs for each of them
+        // was a quarter of the main thread with a wreck burning.
         const list = lists.get(SceneLayers.EntityFX);
         if (!list) {
             return;
         }
+        this.syncPuffs(camera, palette);
         attachToRenderList(list, this.root);
     }
 

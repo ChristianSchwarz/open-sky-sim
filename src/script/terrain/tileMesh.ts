@@ -544,12 +544,10 @@ function waterGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(tile.waterPositions, 3));
     g.setIndex(new THREE.BufferAttribute(tile.waterIndices, 1));
-    for (let tone = 0; tone < tile.waterGroups.length; tone++) {
-        const [start, count] = tile.waterGroups[tone];
-        if (count > 0) {
-            g.addGroup(start, count, tone);
-        }
-    }
+    // Deep and shallow in one draw: the water material takes the shallow
+    // tone per vertex (its secondTone), and a vertex belongs to one tone only.
+    g.setAttribute('secondTone', new THREE.BufferAttribute(tile.waterTones, 1));
+    g.addGroup(0, tile.waterIndices.length, TerrainTone.Water);
     return g;
 }
 

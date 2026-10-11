@@ -21,6 +21,10 @@ const shader = (highp: boolean): string => `
   varying vec3 vToneA;
   varying vec3 vToneB;
 #endif
+#ifdef SECOND_TONE
+  attribute float secondTone;
+  varying float vSecondTone;
+#endif
 ${LOG_DEPTH_PARS_VERTEX}
   void main() {
   #ifdef USE_INSTANCING
@@ -40,6 +44,9 @@ ${LOG_DEPTH_PARS_VERTEX}
 #ifdef INSTANCE_TONES
     vToneA = toneA;
     vToneB = toneB;
+#endif
+#ifdef SECOND_TONE
+    vSecondTone = secondTone;
 #endif
     vec4 pos = projectionMatrix * viewPos;`+ (highp ? '' : `
     if (shadingType != 3) {

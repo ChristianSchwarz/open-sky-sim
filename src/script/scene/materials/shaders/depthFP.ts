@@ -178,6 +178,11 @@ const shader = (kind: 'stroke' | 'flat' | 'rail'): string => {
   varying vec3 vToneA;
   varying vec3 vToneB;
 #endif
+#ifdef SECOND_TONE
+  uniform vec3 uSecondTone;
+  uniform vec3 uSecondToneShade;
+  varying float vSecondTone;
+#endif
 ` + (flat ? `
   uniform sampler2D uMap;
   uniform float uMarkings;
@@ -254,6 +259,12 @@ ${DITHER_PARS_FRAGMENT}
 #ifdef INSTANCE_TONES
     primary = vToneA;
     secondary = vToneB;
+#endif
+#ifdef SECOND_TONE
+    if (vSecondTone > 0.5) {
+      primary = uSecondTone;
+      secondary = uSecondToneShade;
+    }
 #endif
     vec3 diffuse;
     if (colorDither > 0.5 || (shadingType == 0 && colorDither > -0.5)) {

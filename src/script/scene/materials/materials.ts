@@ -142,6 +142,14 @@ type SceneMaterialMeshProperties = {
              */
             instanceTones?: boolean;
             /**
+             * A second palette category, taken per vertex where a `secondTone`
+             * attribute is 1: the deep and shallow water of a tile, or its
+             * major and minor roads, in one draw instead of one each. Flat
+             * meshes and strokes; a mesh without the attribute draws in
+             * `category` alone.
+             */
+            secondTone?: PaletteCategory;
+            /**
              * Multiplier applied before the tone curve, for surfaces that are
              * brighter than a palette entry can say. Default 1.
              *
@@ -271,6 +279,8 @@ interface SceneFlatMaterialData {
     highp: boolean;
     /** The two paint categories of a marking mask, re-read on palette changes. */
     markCategories?: [PaletteCategory, PaletteCategory];
+    /** See SceneMaterialMeshProperties.secondTone. */
+    secondTone?: PaletteCategory;
 }
 
 interface SceneShadedMaterialData {
@@ -427,6 +437,12 @@ export class SceneMaterialManager implements KernelTask {
         if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && !p.river && p.instanceTones) {
             material.defines = { ...material.defines, INSTANCE_TONES: '' };
         }
+        if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && p.secondTone !== undefined) {
+            material.defines = { ...material.defines, SECOND_TONE: '' };
+            // A mesh without the attribute reads it as 0, whatever another
+            // program left in that attribute slot.
+            (material.defaultAttributeValues as Record<string, number[]>).secondTone = [0];
+        }
         if (p.type === SceneMaterialPrimitiveType.MESH && p.shaded && !p.terrain && p.vertexTones) {
             material.defines = { ...material.defines, VERTEX_TONES: '' };
         }
@@ -500,6 +516,8 @@ export class SceneMaterialManager implements KernelTask {
                 vertexTones: properties.vertexTones,
             } : {
                 markCategories: this.markingsOf(properties)?.categories,
+                secondTone: properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
+                    ? properties.secondTone : undefined,
             }),
             ramp: (properties.type === SceneMaterialPrimitiveType.PARTICLE_MESH && (
                 properties.category === PaletteCategory.FX_SMOKE
@@ -594,6 +612,8 @@ export class SceneMaterialManager implements KernelTask {
                         : this.markingsOf(properties)?.map ?? null,
                 },
                 uMarkings: { value: this.markingsOf(properties) ? 1 : 0 },
+                uSecondTone: { value: new THREE.Color() },
+                uSecondToneShade: { value: new THREE.Color() },
                 uMarkColorA: { value: this.markColor(properties, 0) },
                 uMarkColorB: { value: this.markColor(properties, 1) },
                 uMarkFade: {
@@ -815,6 +835,12 @@ export class SceneMaterialManager implements KernelTask {
             // Own colours opted out of the palette: the imagery light, as for terrain.
             const light = palette.light ?? [1, 1, 1];
             (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);
+        }
+        if (!d.shaded && d.secondTone !== undefined) {
+            const second = { color: u.uSecondTone, colorSecondary: u.uSecondToneShade } as unknown as SceneMaterialUniforms;
+            second.color.value.copy(this.colorCache.getColor(PaletteColor(palette, d.secondTone)));
+            second.colorSecondary.value.copy(this.colorCache.getColor(PaletteColorShade(palette, d.secondTone)));
+            this.applyWaterTweak(d.secondTone, second);
         }
         if (!d.shaded && d.markCategories) {
             u.uMarkColorA.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[0])));

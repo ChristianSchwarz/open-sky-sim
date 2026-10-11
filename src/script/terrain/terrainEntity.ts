@@ -765,7 +765,7 @@ export class TerrainEntity implements Entity {
         // Roads are the same kind of stroke as a river, in the two road
         // greys, and railways in their ballast brown: a motorway is not a canal, but the pixel floor that keeps a
         // canal readable from altitude is exactly what a road needs too.
-        const roadMaterial = (category: PaletteCategory, rail = false, railDetail?: 'sleepers' | 'rails') => {
+        const roadMaterial = (category: PaletteCategory, rail = false, railDetail?: 'sleepers' | 'rails', secondTone?: PaletteCategory) => {
             const m = opts.materials.build({
                 type: SceneMaterialPrimitiveType.MESH,
                 category,
@@ -774,12 +774,14 @@ export class TerrainEntity implements Entity {
                 river: true,
                 rail,
                 railDetail,
+                secondTone,
             }) as THREE.ShaderMaterial;
             trackTerrainMaterial(m);
             return m;
         };
         const majorRoadMaterial = roadMaterial(PaletteCategory.SCENERY_ROAD_MAIN);
         const minorRoadMaterial = roadMaterial(PaletteCategory.SCENERY_ROAD_SECONDARY);
+        const bothRoadMaterial = roadMaterial(PaletteCategory.SCENERY_ROAD_MAIN, false, undefined, PaletteCategory.SCENERY_ROAD_SECONDARY);
         // Three passes for track: every bed, then every sleeper, then every rail.
         const railMaterial = roadMaterial(PaletteCategory.SCENERY_RAIL, true);
         const railDetailMaterial = roadMaterial(PaletteCategory.SCENERY_RAIL, true, 'sleepers');
@@ -802,6 +804,9 @@ export class TerrainEntity implements Entity {
                 depthWrite: true,
                 shaded: false as const,
                 highp: true,
+                // A tile's water is one draw: deep in this tone, shallow per
+                // vertex (tileMesh waterGeometry).
+                secondTone: tone === TerrainTone.Water ? TONE_CATEGORIES[TerrainTone.ShallowWater] : undefined,
             }) as THREE.ShaderMaterial;
             mat.side = THREE.DoubleSide;
             mat.polygonOffset = true;
@@ -957,6 +962,7 @@ export class TerrainEntity implements Entity {
             baseUrl: base,
             majorMaterial: majorRoadMaterial,
             minorMaterial: minorRoadMaterial,
+            bothMaterial: bothRoadMaterial,
             railMaterial,
             railDetailMaterial,
             railTopMaterial,

@@ -1,9 +1,10 @@
 import * as THREE from 'three';
+import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { expect } from './testExpect';
 import { DAMAGE_SMOKE_PARTICLE_COUNT } from '../../defs';
 import { SceneMaterialManager } from '../materials/materials';
-import { DamageSmokeField } from './damageSmokeField';
+import { DamageSmokeField, writePuffMatrix } from './damageSmokeField';
 
 /** Enough of a material manager to build the field without a renderer. */
 const stubMaterials = { build: () => new THREE.MeshBasicMaterial() } as unknown as SceneMaterialManager;
@@ -676,5 +677,34 @@ describe('contact puffs', () => {
         expect(flags.has(4)).toBe(true);
         expect(flags.has(1)).toBe(true);
         expect(flags.has(7)).toBe(true);
+    });
+});
+
+describe('writePuffMatrix', () => {
+    it('builds the matrix the Object3D lookAt + rotateZ route did', () => {
+        const pose = new THREE.Object3D();
+        const out = new Float32Array(16);
+        const cases: Array<[THREE.Vector3, THREE.Vector3, number, number, boolean]> = [
+            [new THREE.Vector3(10, 5, -3), new THREE.Vector3(-200, 80, 400), 3.5, 0.7, false],
+            [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0), 1, 0, false],
+            [new THREE.Vector3(1, 2, 3), new THREE.Vector3(1, 500, 3), 2, -1.2, false],
+            [new THREE.Vector3(4, 0, 9), new THREE.Vector3(100, 100, 100), 6, 2.5, true],
+        ];
+        for (const [position, eye, size, angle, flat] of cases) {
+            pose.position.copy(position);
+            pose.scale.setScalar(size);
+            if (flat) {
+                pose.rotation.set(-Math.PI / 2, 0, 0);
+            } else {
+                pose.lookAt(eye);
+            }
+            pose.rotateZ(angle);
+            pose.updateMatrix();
+            writePuffMatrix(out, 0, position, eye, size, angle, flat);
+            for (let i = 0; i < 16; i++) {
+                assert.ok(Math.abs(out[i] - pose.matrix.elements[i]) < 1e-4 * Math.max(1, size),
+                    `element ${i}: ${out[i]} vs ${pose.matrix.elements[i]} (${JSON.stringify({ flat, angle })})`);
+            }
+        }
     });
 });
