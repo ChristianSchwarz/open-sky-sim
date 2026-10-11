@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Numerics;
 using System.Text;
 
 namespace Retro.Game
@@ -187,16 +188,35 @@ namespace Retro.Game
         }
 
         /// <summary>
-        /// Number.prototype.toFixed: the exact decimal value rounded half away
-        /// from zero (what .NET Core's exact "F" formatting does), with -0 shown
-        /// as "0" but a negative that rounds to zero keeping its sign.
+        /// Number.prototype.toFixed: the exact binary value scaled by 10^digits
+        /// and rounded half up in magnitude (1.25 -> "1.3", where .NET's "F1"
+        /// gives "1.2"), with -0 shown as "0" but a negative that rounds to
+        /// zero keeping its sign ("-0.00"). Done in BigInteger so ties are exact.
         /// </summary>
         public static string ToFixed(double x, int digits)
         {
             if (double.IsNaN(x)) return "NaN";
             if (Math.Abs(x) >= 1e21 || double.IsInfinity(x)) return NumberToString(x);
-            if (x == 0) x = 0; // -0 -> +0
-            return x.ToString("F" + digits.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+            bool negative = x < 0;
+            if (negative) x = -x;
+            long bits = BitConverter.DoubleToInt64Bits(x);
+            int exponent = (int)((bits >> 52) & 0x7FF);
+            long mantissa = bits & 0xFFFFFFFFFFFFFL;
+            if (exponent == 0) exponent = 1;
+            else mantissa |= 1L << 52;
+            exponent -= 1075; // x = mantissa * 2^exponent
+            BigInteger num = mantissa * BigInteger.Pow(10, digits);
+            BigInteger den = BigInteger.One;
+            if (exponent >= 0) num <<= exponent;
+            else den <<= -exponent;
+            BigInteger n = BigInteger.Divide(2 * num + den, 2 * den);
+            string s = n.ToString(CultureInfo.InvariantCulture);
+            if (digits > 0)
+            {
+                if (s.Length <= digits) s = new string('0', digits + 1 - s.Length) + s;
+                s = s.Substring(0, s.Length - digits) + "." + s.Substring(s.Length - digits);
+            }
+            return negative ? "-" + s : s;
         }
 
         /// <summary>

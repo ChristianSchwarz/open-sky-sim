@@ -215,6 +215,7 @@ namespace Retro.Core
                 if (i >= s.Length) throw Error(s, i, "unterminated string");
                 char c = s[i++];
                 if (c == '"') return sb.ToString();
+                if (c < ' ') throw Error(s, i - 1, "control character in string");
                 if (c != '\\')
                 {
                     sb.Append(c);
@@ -234,7 +235,14 @@ namespace Retro.Core
                     case 't': sb.Append('\t'); break;
                     case 'u':
                         if (i + 4 > s.Length) throw Error(s, i, "bad \\u escape");
-                        sb.Append((char)int.Parse(s.Substring(i, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
+                        int code = 0;
+                        for (int k = 0; k < 4; k++)
+                        {
+                            int h = HexDigit(s[i + k]);
+                            if (h < 0) throw Error(s, i + k, "bad \\u escape");
+                            code = code * 16 + h;
+                        }
+                        sb.Append((char)code);
                         i += 4;
                         break;
                     default: throw Error(s, i, "bad escape");
@@ -242,12 +250,51 @@ namespace Retro.Core
             }
         }
 
+        private static int HexDigit(char c)
+        {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        }
+
+        private static bool IsDigit(string s, int i) => i < s.Length && s[i] >= '0' && s[i] <= '9';
+
+        /// <summary>
+        /// The RFC 8259 number grammar exactly, as JSON.parse takes it: no
+        /// leading zeros, '+', bare '.', or hex. Too large a magnitude is
+        /// +-Infinity, as in JS.
+        /// </summary>
         private static double ParseNumber(string s, ref int i)
         {
             int start = i;
             if (s[i] == '-') i++;
-            while (i < s.Length && ((s[i] >= '0' && s[i] <= '9') || s[i] == '.' || s[i] == 'e' || s[i] == 'E' || s[i] == '+' || s[i] == '-')) i++;
-            return double.Parse(s.Substring(start, i - start), NumberStyles.Float, CultureInfo.InvariantCulture);
+            if (!IsDigit(s, i)) throw Error(s, i, "bad number");
+            if (s[i] == '0') i++;
+            else while (IsDigit(s, i)) i++;
+            if (i < s.Length && s[i] == '.')
+            {
+                i++;
+                if (!IsDigit(s, i)) throw Error(s, i, "bad number");
+                while (IsDigit(s, i)) i++;
+            }
+            if (i < s.Length && (s[i] == 'e' || s[i] == 'E'))
+            {
+                i++;
+                if (i < s.Length && (s[i] == '+' || s[i] == '-')) i++;
+                if (!IsDigit(s, i)) throw Error(s, i, "bad number");
+                while (IsDigit(s, i)) i++;
+            }
+            string text = s.Substring(start, i - start);
+            try
+            {
+                return double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture);
+            }
+            catch (OverflowException)
+            {
+                // Older runtimes throw where .NET Core 3+ (and JS) give Infinity.
+                return text[0] == '-' ? double.NegativeInfinity : double.PositiveInfinity;
+            }
         }
     }
 }
