@@ -1,5 +1,5 @@
 {
   "generator": "tools/golden/generate.ts",
-  "files": ["ai_pilots.json", "codecs.json", "dogfight_geometry.json", "flight_configs.json", "flight_models.json", "geodesy.json", "heights.json", "terrain_lod.json", "tiling.json"],
+  "files": ["ai_pilots.json", "codecs.json", "combat_sim.json", "dogfight_geometry.json", "flight_configs.json", "flight_models.json", "geodesy.json", "heights.json", "roads.json", "terrain_lod.json", "tiling.json"],
   "assets": []
 }

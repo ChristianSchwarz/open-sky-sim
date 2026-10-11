@@ -11,6 +11,7 @@ npm run golden:check           # fail if the code no longer matches the fixtures
 npm test                       # includes tools/golden/golden.test.ts
 node --import tsx tools/golden/generate.ts --select-tiles   # re-pick tile files from assets/terrain
 node --import tsx tools/golden/generate.ts --only geodesy,tiling
+node --import tsx tools/golden/generate.ts --select-road-tiles  # re-copy only tiles/roads/
 ```
 
 ## Rules
@@ -49,6 +50,7 @@ array's raw little-endian bytes and `head` is the first few elements.
 | `terrain_lod.json` | `terrain/{lod,quadtree,culling}.ts` | lod.ts functions, horizon culling, and quadtree draw/want lists along 6 camera paths (low pass, turn in place, leaves loading, climb, re-based Alps, 400 km orbit) |
 | `heights.json` + `tiles/height/` | `terrain/{heightSampler,flattenPad,demTile}.ts` | 651 ground queries around GCLP across the fine (z11), coarse (z7) and empty tiers, with the 33 manifest flatten pads; pad blend/surface checks |
 | `combat_sim.json` | `physics/sim/combatSim.ts` and its colliders, player input, guns | 12 scenarios at 60 Hz: AI duels, AI vs a firing player, keyboard takeoff, belly landings (fm2/fm3, mesh, fatal), arrestor trap, mid-air, roof landing, wingman formation |
+| `roads.json` + `tiles/roads/` | `terrain/{roadStrokes,roadLod,roadExclusion,bridgeMeshes}.ts` | 6 .ptr and 4 .pbr tiles (Gran Canaria z8/z10/z12, DACH z12 with rails, switch zones, deck track, crossing furniture): stroke split by kind, far road levels in order and lazily out of order, the trees' road mask at 4800 probes, bridge role split, furniture boxes, bounding spheres |
 | `flight_configs.json` | `physics/fm2/fm2AircraftConfig.ts`, `physics/fm3/f16Airframe.ts` | The exact config numbers the traces used |
 
 ## Not covered yet (later milestones)

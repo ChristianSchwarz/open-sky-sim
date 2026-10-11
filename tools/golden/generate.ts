@@ -5,6 +5,7 @@
  *   node --import tsx tools/golden/generate.ts --check          regenerate in memory, fail on drift
  *   node --import tsx tools/golden/generate.ts --select-tiles   also re-pick tile fixtures from assets/terrain
  *   node --import tsx tools/golden/generate.ts --only geodesy,tiling
+ *   node --import tsx tools/golden/generate.ts --select-road-tiles  re-copy only the roads suite's tiles
  *
  * See tools/golden/README.md for the fixture format and what each suite covers.
  */
@@ -20,6 +21,7 @@ import { aiSuite } from './suites/ai';
 import { quadtreeSuite } from './suites/quadtree';
 import { heightsSuite } from './suites/heights';
 import { combatSimSuite } from './suites/combatSim';
+import { copyRoadTiles, roadsSuite } from './suites/roads';
 
 export const GOLDEN_ROOT = path.resolve(__dirname, '../../tests/golden');
 const TERRAIN_ROOT = path.resolve(__dirname, '../../assets/terrain');
@@ -44,6 +46,7 @@ const SUITES: SuiteDef[] = [
     { name: 'quadtree', run: ctx => quadtreeSuite(ctx) },
     { name: 'heights', run: ctx => heightsSuite(ctx) },
     { name: 'combatSim', run: () => combatSimSuite() },
+    { name: 'roads', run: ctx => roadsSuite(ctx) },
 ];
 
 export interface GenerateResult {
@@ -82,6 +85,10 @@ function main(): void {
         if (check) throw new Error('--select-tiles cannot be combined with --check');
         const n = selectTiles({ goldenRoot: GOLDEN_ROOT, terrainRoot: TERRAIN_ROOT });
         console.log(`selected ${n} tile fixtures from ${TERRAIN_ROOT}`);
+    } else if (args.includes('--select-road-tiles')) {
+        if (check) throw new Error('--select-road-tiles cannot be combined with --check');
+        const n = copyRoadTiles({ goldenRoot: GOLDEN_ROOT, terrainRoot: TERRAIN_ROOT });
+        console.log(`copied ${n} road tile fixtures from ${TERRAIN_ROOT}`);
     }
 
     const { files, assets } = generateAll(only);

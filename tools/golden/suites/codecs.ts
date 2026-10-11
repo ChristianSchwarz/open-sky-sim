@@ -27,6 +27,7 @@ import { tileAtLonLat, tileKeyString, TileKey } from '../../../src/script/terrai
 import { describe, fnv1a32, hex32, Rng, sha256Hex, SuiteOutput } from '../lib';
 import type { SuiteContext } from '../generate';
 import { heightTileKeys } from './heights';
+import { copyRoadTiles } from './roads';
 
 /** Where we look for tiles worth keeping, in preference order. */
 const SITES: ReadonlyArray<readonly [string, number, number]> = [
@@ -120,6 +121,8 @@ export function selectTiles(ctx: SuiteContext): number {
         fs.copyFileSync(src, dest);
         count++;
     }
+    // The roads suite's own tiles (tiles/roads/), wiped with the rest above.
+    count += copyRoadTiles(ctx);
     // The manifest drives level errors and the ENU origin for the LOD and height suites.
     fs.copyFileSync(path.join(ctx.terrainRoot, 'manifest.json'), path.join(outDir, 'manifest.json'));
     count++;
