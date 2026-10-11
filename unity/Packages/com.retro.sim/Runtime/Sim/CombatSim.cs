@@ -158,6 +158,9 @@ namespace Retro.Sim
         /// <summary>The hits of the last step (a copy, as encodeSnapshot hands them out).</summary>
         public List<SimHitEvent> Hits => new List<SimHitEvent>(hits);
 
+        /// <summary>Hits of the last step, without copying them.</summary>
+        public int HitCount => hits.Count;
+
         public IReadOnlyList<ProjectileSlot> Projectiles => projectiles;
 
         public int ActiveProjectileCount

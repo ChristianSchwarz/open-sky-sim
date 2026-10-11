@@ -91,6 +91,8 @@ namespace Retro.Unity
         private TracerRenderer tracers;
         private Carrier carrier;
         private CarrierFx carrierFx;
+        private CombatFxView combatFx;
+        private bool wasCrashed;
         private readonly Tailhook tailhook = new Tailhook();
         private CarrierOverSternCameraUpdater carrierCamera;
         private Fm2AircraftConfig config;
@@ -188,9 +190,15 @@ namespace Retro.Unity
             {
                 double step = Math.Min(delta, 1.0 / 30);
                 sim.Step(step);
+                // The sim clears its hits every step: take them as they come.
+                if (sim.HitCount > 0) combatFx.OnHits(sim.Hits);
                 delta -= step;
             }
 
+            combatFx.Update(Time.deltaTime);
+            // transitionFromPlayerToCrashed: the wreck's own smoke column.
+            if (aircraft.IsCrashed() && !wasCrashed) combatFx.Smoke.EnsureCrashPlume(PlayerId);
+            wasCrashed = aircraft.IsCrashed();
             Vec3d pos = aircraft.GetPosition();
             heightField.Focus(new[] { pos, pos.AddScaled(aircraft.GetVelocity(), 5) });
             PlaceCamera(Time.deltaTime);
@@ -266,6 +274,7 @@ namespace Retro.Unity
             airframeView.Snap(aircraft);
             tailhook.Configure(current.Def);
             carrierFx = new CarrierFx(carrier, GroundAt);
+            combatFx = new CombatFxView(SmokePose, GroundAt, IsOpenWater, SurfaceKindAt, carrier);
             // setupCombat: the opponent and the wingman, parked until the flight begins.
             combat = new Combat(sim, PlayerId, current.Def, current.Files, config, flightModel, aircraft.GetPosition(), 0);
             aiChase = new AiExteriorCameraUpdater(this, pose, new SimChaseTarget(sim, Combat.OpponentId(0)), aiChaseHeading);
@@ -549,6 +558,45 @@ namespace Retro.Unity
             sim.SyncEffectiveThrottle(PlayerId, spawn.Throttle);
             airframeView.Snap(aircraft);
             tailhook.Snap(aircraft);
+            combatFx?.Reset();
+            wasCrashed = false;
+        }
+
+        /// <summary>damageSmoke's pose provider: an enabled aircraft's live pose, or null.</summary>
+        private DamageSmokePose SmokePose(string id)
+        {
+            SimAircraft a = sim?.GetAircraft(id);
+            if (a == null || !a.Enabled) return null;
+            return new DamageSmokePose
+            {
+                Position = a.GetPosition(),
+                Quaternion = a.GetQuaternion(),
+                Velocity = a.GetVelocity(),
+                IsAlive = a.IsAlive(),
+                IsCrashed = a.IsCrashed(),
+            };
+        }
+
+        /// <summary>The sea: neither land nor the carrier deck nor a pad standing in it.</summary>
+        private bool IsOpenWater(double x, double z) =>
+            !heightField.IsLandAtWorld(x, z)
+            && double.IsNegativeInfinity(carrier.DeckYAt(x, z))
+            && double.IsNegativeInfinity(Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads));
+
+        /// <summary>game.ts surfaceKindAt: what a contact throws up.</summary>
+        private SmokeSurfaceKind SurfaceKindAt(double x, double z)
+        {
+            if (!double.IsNegativeInfinity(carrier.DeckYAt(x, z))) return SmokeSurfaceKind.Concrete;
+            bool onPad = !double.IsNegativeInfinity(Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads));
+            if (!heightField.IsLandAtWorld(x, z) && !onPad) return SmokeSurfaceKind.Water;
+            if (onPad) return SmokeSurfaceKind.Concrete;
+            foreach (SceneRunway r in runways)
+            {
+                double dx = x - r.Center.X, dz = z - r.Center.Z;
+                double sn = Math.Sin(r.Heading), cs = Math.Cos(r.Heading);
+                if (Math.Abs(dx * sn + dz * cs) <= r.HalfLength && Math.Abs(dx * cs - dz * sn) <= r.HalfWidth + 3) return SmokeSurfaceKind.Concrete;
+            }
+            return SmokeSurfaceKind.Dirt;
         }
 
         // --- Camera --------------------------------------------------------------------
@@ -755,6 +803,7 @@ namespace Retro.Unity
             airframeView.Draw(aircraft, view.ScenePosition, Time.deltaTime, visible, wingSweepMode);
             if (visible) tailhook.Draw(aircraft, carrier.Pose, view.ScenePosition, Time.deltaTime);
             carrierFx.Draw(aircraft, tailhook.HingeBody, view.ScenePosition, Time.deltaTime);
+            combatFx.Draw(view.ScenePosition, ScenePalette.Current);
             combat.Draw(view.ScenePosition, Time.deltaTime);
             tracers.Draw(sim, view.ScenePosition, view.UnityCamera);
         }
@@ -791,6 +840,7 @@ namespace Retro.Unity
             combat?.Destroy();
             carrier?.Destroy();
             carrierFx?.Dispose();
+            combatFx?.Dispose();
             tailhook.Dispose();
             tracers?.Dispose();
         }

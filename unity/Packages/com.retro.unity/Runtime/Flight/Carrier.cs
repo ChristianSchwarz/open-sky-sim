@@ -17,7 +17,7 @@ namespace Retro.Unity
     /// at 45 km/h along its bow until land comes up ahead, with the deck,
     /// arrestor wires and ship velocity kept in step in the sim.
     /// </summary>
-    public sealed class Carrier : IPosedEntity
+    public sealed class Carrier : IPosedEntity, IMovingSurface
     {
         // game.ts
         /// <summary>KUZ_HULL_RAISE_M: the hull mesh runs 15 m below its origin, the real ship draws ~10 m.</summary>
@@ -234,6 +234,13 @@ namespace Retro.Unity
                 });
             }
             return s;
+        }
+
+        /// <summary>game.ts carrierSurface.contains: over the ship, and on it rather than high above it or below it.</summary>
+        public bool Contains(double x, double y, double z)
+        {
+            double deck = DeckYAt(x, z);
+            return !double.IsNegativeInfinity(deck) && y - deck < 5 && y - deck > -3;
         }
 
         /// <summary>The deck (or nothing) at a scene point: -Infinity off the ship.</summary>
