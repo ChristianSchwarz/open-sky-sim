@@ -63,6 +63,7 @@ namespace Retro.Unity
 
         public SimFlightModelKind flightModel = SimFlightModelKind.Fm2;
         public KeyboardControlLayoutId keyboardLayout = KeyboardControlLayoutId.ARROWS;
+        public KeyboardPitchStickMode keyboardPitchStickMode = KeyboardPitchStickMode.LAYOUT_DEFAULT;
         public FlightView flightView = FlightView.ChaseBack;
         public double fovDeg = 50;
         [Tooltip("The OnGUI debug readout (the ported HUD is the overlay).")]
@@ -244,6 +245,7 @@ namespace Retro.Unity
             }
             sim.SetWorld(world);
             sim.SetKeyboardLayout(keyboardLayout);
+            sim.SetKeyboardPitchStickMode(keyboardPitchStickMode);
             SimAircraftSpawn spawn = MakeSpawn();
             sim.AddAircraft(new SimAircraftDesc
             {

@@ -213,7 +213,12 @@ namespace Retro.Unity
             flight.Sim?.SetKeyboardLayout(layout);
         }
 
-        public void SetKeyboardPitchStickMode(KeyboardPitchStickMode mode) => flight.Sim?.SetKeyboardPitchStickMode(mode);
+        public void SetKeyboardPitchStickMode(KeyboardPitchStickMode mode)
+        {
+            // Kept on the flight too: the settings boot before the sim exists.
+            flight.keyboardPitchStickMode = mode;
+            flight.Sim?.SetKeyboardPitchStickMode(mode);
+        }
 
         /// <summary>"Fly here": the area was saved; restart the world around its centre.</summary>
         private void ReloadIntoArea()
