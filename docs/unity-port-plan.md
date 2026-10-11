@@ -26,9 +26,10 @@ runtime, rendering, sim/AI, UI/input). Nothing in the repo was changed to produc
 | M5 world detail | Done: airfields (golden-verified geometry, async build, unpaved strips repainted from the finest facet), roads/rails/bridges (in the terrain budget), rail walls, buildings, trees (road, building, bed, airfield masks), aircraft mod packs: 68 packs + F-22 (`aircraft.json` fixture: manifestToDef and hook placement), glTFast from the pack zip, material-name remap, swing wings, runway pavement as solid ground. Checked on screen at GC, Potsdam, Bautzen; F-14 sweep and Su-33 livery. Open: surface-pad mask for trees (no scenery pads yet), a pack's own flight config (none ships one), AI aircraft on packs (M7), spawn menu (M8) |
 | M4 fly | The ported `CombatSim` over a streamed DEM height field with airfield pads; start on the nearest base runway (airfields.json, `PickStartRunway`) or airborne; FM2/FM3 switch; keys and gamepad go to the sim; F-22 glTF parts via glTFast with hinged surfaces and the gear clip; F1 cockpit, F2 chase, crash orbit. Verified: takeoff from GCLP 03L, crash on fine terrain, FM3 swap in flight. Open: landing not yet flown by script, no HUD (M8) | `unity/Packages/com.retro.unity/Runtime/Flight` |
 | I aircraft and mods | Done for the player aircraft (see M5); AI use comes with M7 | `com.retro.game/Runtime/Aircraft`, `com.retro.unity/Runtime/Flight` |
-| J-P (sky, HUD, UI, wreck) | Not started | |
+| J clouds, cirrus, scenery field | CPU side golden-verified: three.js icosahedra, the seven sky models (solid body, 12-tier haze, LOD prefixes), the cloud/cirrus fields' deal, tile wrap, re-base, frustum and LOD on 7 camera paths; Unity drawing and URP shaders not written | `com.retro.game/Runtime/Clouds` |
+| J-P (rest of sky, HUD, UI, wreck) | Not started | |
 
-`cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity (236 tests). All trig goes through `Retro.Core.JsTrig`, a port of V8's fdlibm, so closed-loop traces stay bit-identical to the browser.
+`cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity (239 tests). All trig goes through `Retro.Core.JsTrig`, a port of V8's fdlibm, so closed-loop traces stay bit-identical to the browser.
 
 ## 1. Decisions already made
 
