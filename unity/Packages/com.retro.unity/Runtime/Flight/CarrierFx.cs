@@ -91,12 +91,8 @@ namespace Retro.Unity
             {
                 foreach (ArrestorCableShape c in cables.Cables)
                 {
-                    foreach (float[] quad in new[] { c.RibbonA, c.RibbonB })
-                    {
-                        int b = v.Count;
-                        for (int i = 0; i < 4; i++) v.Add(new Vector3(quad[i * 3], quad[i * 3 + 1], quad[i * 3 + 2]));
-                        idx.AddRange(new[] { b, b + 1, b + 2, b + 2, b + 1, b + 3 });
-                    }
+                    AddRibbon(c.RibbonA);
+                    AddRibbon(c.RibbonB);
                 }
                 Upload(ribbons, MeshTopology.Triangles);
                 Graphics.RenderMesh(rp, ribbons, 0, m);
@@ -107,7 +103,10 @@ namespace Retro.Unity
                 {
                     int b = v.Count;
                     for (int i = 0; i < 3; i++) v.Add(new Vector3(c.Line[i * 3], c.Line[i * 3 + 1], c.Line[i * 3 + 2]));
-                    idx.AddRange(new[] { b, b + 1, b + 1, b + 2 });
+                    idx.Add(b);
+                    idx.Add(b + 1);
+                    idx.Add(b + 1);
+                    idx.Add(b + 2);
                 }
                 Upload(lines, MeshTopology.Lines);
                 Graphics.RenderMesh(rp, lines, 0, m);
@@ -132,7 +131,7 @@ namespace Retro.Unity
                     v.Add(new Vector3(ribbon.Positions[o], ribbon.Positions[o + 1], ribbon.Positions[o + 2]));
                     uv.Add(level);
                 }
-                idx.AddRange(new[] { b, b + 1, b + 2, b + 2, b + 1, b + 3 });
+                QuadIndices(b);
             }
             if (idx.Count == 0) return;
             Upload(sternRibbon, MeshTopology.Triangles);
@@ -164,7 +163,12 @@ namespace Retro.Unity
                     v.Add(centre + new Vector3((float)(r * Math.Cos(a)), 0, (float)(r * Math.Sin(a))));
                     uv.Add(level);
                 }
-                for (int s = 0; s < DiscSides; s++) idx.AddRange(new[] { b, b + 1 + s, b + 2 + s });
+                for (int s = 0; s < DiscSides; s++)
+                {
+                    idx.Add(b);
+                    idx.Add(b + 1 + s);
+                    idx.Add(b + 2 + s);
+                }
             }
             if (idx.Count == 0) return;
             Upload(puffs, MeshTopology.Triangles);
@@ -172,12 +176,34 @@ namespace Retro.Unity
                 puffs, 0, SceneFrame.TileMatrix(camera, camera, Quatd.Identity, 1));
         }
 
+        private void QuadIndices(int b)
+        {
+            idx.Add(b);
+            idx.Add(b + 1);
+            idx.Add(b + 2);
+            idx.Add(b + 2);
+            idx.Add(b + 1);
+            idx.Add(b + 3);
+        }
+
+        private void AddRibbon(float[] quad)
+        {
+            int b = v.Count;
+            for (int i = 0; i < 4; i++) v.Add(new Vector3(quad[i * 3], quad[i * 3 + 1], quad[i * 3 + 2]));
+            QuadIndices(b);
+        }
+
         private void Upload(Mesh mesh, MeshTopology topology)
         {
             mesh.Clear();
             mesh.SetVertices(v);
-            if (uv.Count == v.Count) mesh.SetUVs(0, uv);
-            else mesh.SetUVs(0, new Vector2[v.Count]);
+            // The wires carry no dither level: zeros, kept in a list that is only ever grown.
+            if (uv.Count != v.Count)
+            {
+                uv.Clear();
+                for (int i = 0; i < v.Count; i++) uv.Add(Vector2.zero);
+            }
+            mesh.SetUVs(0, uv);
             mesh.SetIndices(idx, topology, 0);
             mesh.RecalculateBounds();
         }

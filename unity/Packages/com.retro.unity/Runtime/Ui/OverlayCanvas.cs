@@ -18,23 +18,36 @@ namespace Retro.Unity
     /// (1 px and odd multiples, pixel-centred) the browser's are crisp too.
     /// A clearRect erases what was drawn before it inside its rectangle (the
     /// cockpit's window onto the target camera).
+    ///
+    /// Everything lives in pooled flat buffers that keep their capacity from
+    /// frame to frame: the overlay redraws every frame and must not feed the
+    /// garbage collector.
     /// </summary>
     public sealed class OverlayCanvas : VisualElement
     {
         private const int ArcSegments = 48;
 
-        private sealed class Prim
+        private struct Prim
         {
-            public List<Vector2> Points;
-            public List<Vector2> Uvs;
+            public int Start, Count;
+            public bool Textured;
             public Color32 Color;
             public Texture Texture;
             public Rect Bounds;
+            public bool Removed;
         }
 
         private readonly List<Prim> prims = new List<Prim>();
-        private readonly List<List<Vector2>> clips = new List<List<Vector2>>();
+        private readonly List<Vector2> verts = new List<Vector2>();
+        private readonly List<Vector2> uvs = new List<Vector2>();
+        // A polygon being built, and two buffers the clipper ping-pongs between.
+        private List<Vector2> poly = new List<Vector2>(), polyUv = new List<Vector2>();
+        private List<Vector2> work = new List<Vector2>(), workUv = new List<Vector2>();
+        private readonly List<Vector2> arc = new List<Vector2>();
+        private readonly List<List<Vector2>> clipPool = new List<List<Vector2>>();
+        private int clipDepth;
         private readonly Func<HudFont, Texture> atlas;
+        private static readonly Color32 White = new Color32(255, 255, 255, 255);
 
         /// <summary>Primitives in the last frame (for stats).</summary>
         public int PrimitiveCount => prims.Count;
@@ -52,8 +65,10 @@ namespace Retro.Unity
         public void SetCommands(IReadOnlyList<CanvasCommand> commands)
         {
             prims.Clear();
-            clips.Clear();
-            foreach (CanvasCommand c in commands) Add(c);
+            verts.Clear();
+            uvs.Clear();
+            clipDepth = 0;
+            for (int i = 0; i < commands.Count; i++) Add(commands[i]);
             MarkDirtyRepaint();
         }
 
@@ -72,33 +87,48 @@ namespace Retro.Unity
                     StrokeRect(s);
                     break;
                 case StrokePathCommand s:
-                    foreach (PathShape shape in s.Shapes) StrokeShape(shape, s.LineWidth, s.M, C(s.Rgba));
+                {
+                    Color32 colour = C(s.Rgba);
+                    for (int i = 0; i < s.Shapes.Length; i++) StrokeShape(s.Shapes[i], s.LineWidth, s.M, colour);
                     break;
+                }
                 case FillPathCommand f:
-                    foreach (PathShape shape in f.Shapes) FillShape(shape, C(f.Rgba));
+                {
+                    Color32 colour = C(f.Rgba);
+                    for (int i = 0; i < f.Shapes.Length; i++) FillShape(f.Shapes[i], colour);
                     break;
+                }
                 case GlyphCommand g:
                 {
                     Texture tex = atlas(g.Font);
                     if (tex == null) break;
-                    Color32 tint = g.Tint == null ? new Color32(255, 255, 255, 255) : C(g.TintRgba);
+                    Color32 tint = g.Tint == null ? White : C(g.TintRgba);
                     AddTextured(g.Dx, g.Dy, g.Dw, g.Dh, g.M, tex,
                         g.Sx / tex.width, 1 - g.Sy / tex.height, (g.Sx + g.Sw) / tex.width, 1 - (g.Sy + g.Sh) / tex.height, tint);
                     break;
                 }
                 case ImageCommand im:
-                    if (im.Image is Texture t) AddTextured(im.Dx, im.Dy, im.Dw, im.Dh, im.M, t, 0, 1, 1, 0, new Color32(255, 255, 255, 255));
+                    if (im.Image is Texture t) AddTextured(im.Dx, im.Dy, im.Dw, im.Dh, im.M, t, 0, 1, 1, 0, White);
                     break;
                 case ClearRectCommand cl:
                     Clear(cl);
                     break;
                 case ClipPushCommand cp:
-                    clips.Add(ClipPolygon(cp.Shapes));
+                    PushClip(cp.Shapes);
                     break;
                 case ClipPopCommand _:
-                    if (clips.Count > 0) clips.RemoveAt(clips.Count - 1);
+                    if (clipDepth > 0) clipDepth--;
                     break;
             }
+        }
+
+        private void Quad(double x, double y, double w, double h, CanvasMatrix m)
+        {
+            poly.Clear();
+            poly.Add(P(m.Apply(x, y)));
+            poly.Add(P(m.Apply(x + w, y)));
+            poly.Add(P(m.Apply(x + w, y + h)));
+            poly.Add(P(m.Apply(x, y + h)));
         }
 
         private void AddRect(double x, double y, double w, double h, CanvasMatrix m, Color32 colour)
@@ -106,19 +136,20 @@ namespace Retro.Unity
             if (w == 0 || h == 0) return;
             if (w < 0) { x += w; w = -w; }
             if (h < 0) { y += h; h = -h; }
-            Emit(new List<Vector2> { P(m.Apply(x, y)), P(m.Apply(x + w, y)), P(m.Apply(x + w, y + h)), P(m.Apply(x, y + h)) }, null, colour, null);
+            Quad(x, y, w, h, m);
+            Emit(false, colour, null);
         }
 
         private void AddTextured(double x, double y, double w, double h, CanvasMatrix m, Texture tex,
             double u0, double v0, double u1, double v1, Color32 tint)
         {
-            var pts = new List<Vector2> { P(m.Apply(x, y)), P(m.Apply(x + w, y)), P(m.Apply(x + w, y + h)), P(m.Apply(x, y + h)) };
-            var uvs = new List<Vector2>
-            {
-                new Vector2((float)u0, (float)v0), new Vector2((float)u1, (float)v0),
-                new Vector2((float)u1, (float)v1), new Vector2((float)u0, (float)v1),
-            };
-            Emit(pts, uvs, tint, tex);
+            Quad(x, y, w, h, m);
+            polyUv.Clear();
+            polyUv.Add(new Vector2((float)u0, (float)v0));
+            polyUv.Add(new Vector2((float)u1, (float)v0));
+            polyUv.Add(new Vector2((float)u1, (float)v1));
+            polyUv.Add(new Vector2((float)u0, (float)v1));
+            Emit(true, tint, tex);
         }
 
         /// <summary>A butt-capped segment between device points, the line's width measured in user units of m.</summary>
@@ -126,7 +157,9 @@ namespace Retro.Unity
         {
             if (x0 == x1 && y0 == y1) return;
             (double x, double y)[] q = CanvasCommandPainter.SegmentQuad(x0, y0, x1, y1, width, m);
-            Emit(new List<Vector2> { P(q[0]), P(q[1]), P(q[2]), P(q[3]) }, null, colour, null);
+            poly.Clear();
+            for (int i = 0; i < 4; i++) poly.Add(P(q[i]));
+            Emit(false, colour, null);
         }
 
         private void StrokeShape(PathShape s, double width, CanvasMatrix m, Color32 colour)
@@ -147,11 +180,9 @@ namespace Retro.Unity
                     break;
                 }
                 default:
-                {
-                    List<(double x, double y)> arc = ArcPoints(s);
+                    ArcPoints(s.Cx, s.Cy, s.R, s.Start, s.End, s.Ccw, s.M);
                     for (int i = 1; i < arc.Count; i++) Segment(arc[i - 1].x, arc[i - 1].y, arc[i].x, arc[i].y, width, m, colour);
                     break;
-                }
             }
         }
 
@@ -163,29 +194,27 @@ namespace Retro.Unity
                     AddRect(s.X, s.Y, s.W, s.H, s.M, colour);
                     break;
                 case PathShapeKind.Arc:
-                {
-                    var pts = new List<Vector2> { P(s.M.Apply(s.Cx, s.Cy)) };
-                    foreach ((double x, double y) p in ArcPoints(s)) pts.Add(P(p));
-                    Emit(pts, null, colour, null);
+                    ArcPoints(s.Cx, s.Cy, s.R, s.Start, s.End, s.Ccw, s.M);
+                    poly.Clear();
+                    poly.Add(P(s.M.Apply(s.Cx, s.Cy)));
+                    poly.AddRange(arc);
+                    Emit(false, colour, null);
                     break;
-                }
             }
         }
 
-        /// <summary>An arc's outline in device space (start to end, ccw as given; a full turn for a circle).</summary>
-        private static List<(double x, double y)> ArcPoints(PathShape s)
+        /// <summary>An arc's outline in device space into <see cref="arc"/> (start to end, ccw as given; a full turn for a circle).</summary>
+        private void ArcPoints(double cx, double cy, double r, double start, double end, bool ccw, CanvasMatrix m)
         {
-            double start = s.Start, end = s.End;
-            double sweep = s.Ccw ? start - end : end - start;
+            double sweep = ccw ? start - end : end - start;
             if (sweep < 0 || sweep > 2 * Math.PI) sweep = 2 * Math.PI;
             int n = Math.Max(2, (int)Math.Ceiling(ArcSegments * sweep / (2 * Math.PI)));
-            var pts = new List<(double, double)>(n + 1);
+            arc.Clear();
             for (int i = 0; i <= n; i++)
             {
-                double t = start + (s.Ccw ? -1 : 1) * sweep * i / n;
-                pts.Add(s.M.Apply(s.Cx + s.R * Math.Cos(t), s.Cy + s.R * Math.Sin(t)));
+                double t = start + (ccw ? -1 : 1) * sweep * i / n;
+                arc.Add(P(m.Apply(cx + r * Math.Cos(t), cy + r * Math.Sin(t))));
             }
-            return pts;
         }
 
         /// <summary>strokeRect: the outline grown and shrunk by half the width, mitred (top and bottom carry the corners).</summary>
@@ -196,7 +225,8 @@ namespace Retro.Unity
             if (w == 0 && h == 0) return;
             if (w == 0 || h == 0)
             {
-                Segment(s.M.Apply(x, y).Item1, s.M.Apply(x, y).Item2, s.M.Apply(x + w, y + h).Item1, s.M.Apply(x + w, y + h).Item2, lw, s.M, colour);
+                (double x, double y) a = s.M.Apply(x, y), b = s.M.Apply(x + w, y + h);
+                Segment(a.x, a.y, b.x, b.y, lw, s.M, colour);
                 return;
             }
             if (w < 0) { x += w; w = -w; }
@@ -212,50 +242,59 @@ namespace Retro.Unity
         }
 
         /// <summary>A clip region as a convex device polygon: the first shape's rectangle or circle; none clips all.</summary>
-        private static List<Vector2> ClipPolygon(PathShape[] shapes)
+        private void PushClip(PathShape[] shapes)
         {
+            if (clipPool.Count <= clipDepth) clipPool.Add(new List<Vector2>());
+            List<Vector2> clip = clipPool[clipDepth++];
+            clip.Clear();
             foreach (PathShape s in shapes)
             {
                 if (s.Kind == PathShapeKind.Rect)
                 {
-                    return new List<Vector2>
-                    {
-                        P(s.M.Apply(s.X, s.Y)), P(s.M.Apply(s.X + s.W, s.Y)),
-                        P(s.M.Apply(s.X + s.W, s.Y + s.H)), P(s.M.Apply(s.X, s.Y + s.H)),
-                    };
+                    clip.Add(P(s.M.Apply(s.X, s.Y)));
+                    clip.Add(P(s.M.Apply(s.X + s.W, s.Y)));
+                    clip.Add(P(s.M.Apply(s.X + s.W, s.Y + s.H)));
+                    clip.Add(P(s.M.Apply(s.X, s.Y + s.H)));
+                    return;
                 }
                 if (s.Kind == PathShapeKind.Arc)
                 {
-                    var pts = new List<Vector2>();
-                    var full = PathShape.ArcShape(s.Cx, s.Cy, s.R, 0, 2 * Math.PI, false, s.M);
-                    List<(double x, double y)> arc = ArcPoints(full);
-                    for (int i = 0; i < arc.Count - 1; i++) pts.Add(P(arc[i]));
-                    return pts;
+                    ArcPoints(s.Cx, s.Cy, s.R, 0, 2 * Math.PI, false, s.M);
+                    for (int i = 0; i < arc.Count - 1; i++) clip.Add(arc[i]);
+                    return;
                 }
             }
-            return new List<Vector2>();
         }
 
-        private void Emit(List<Vector2> pts, List<Vector2> uvs, Color32 colour, Texture tex)
+        /// <summary>The polygon in <see cref="poly"/> (and <see cref="polyUv"/>), clipped, appended as a primitive.</summary>
+        private void Emit(bool textured, Color32 colour, Texture tex)
         {
-            foreach (List<Vector2> clip in clips)
+            for (int c = 0; c < clipDepth; c++)
             {
+                List<Vector2> clip = clipPool[c];
                 if (clip.Count < 3) return;
-                (pts, uvs) = ClipConvex(pts, uvs, clip);
-                if (pts.Count < 3) return;
+                ClipConvex(textured, clip);
+                if (poly.Count < 3) return;
             }
-            if (pts.Count < 3) return;
-            Vector2 min = pts[0], max = pts[0];
-            foreach (Vector2 p in pts)
+            if (poly.Count < 3) return;
+            Vector2 min = poly[0], max = poly[0];
+            for (int i = 0; i < poly.Count; i++)
             {
-                min = Vector2.Min(min, p);
-                max = Vector2.Max(max, p);
+                min = Vector2.Min(min, poly[i]);
+                max = Vector2.Max(max, poly[i]);
             }
-            prims.Add(new Prim { Points = pts, Uvs = uvs, Color = colour, Texture = tex, Bounds = Rect.MinMaxRect(min.x, min.y, max.x, max.y) });
+            prims.Add(new Prim
+            {
+                Start = verts.Count, Count = poly.Count, Textured = textured, Color = colour, Texture = tex,
+                Bounds = Rect.MinMaxRect(min.x, min.y, max.x, max.y),
+            });
+            verts.AddRange(poly);
+            if (textured) uvs.AddRange(polyUv);
+            else for (int i = 0; i < poly.Count; i++) uvs.Add(Vector2.zero);
         }
 
-        /// <summary>Sutherland-Hodgman against a convex polygon of either winding, carrying the UVs.</summary>
-        private static (List<Vector2>, List<Vector2>) ClipConvex(List<Vector2> pts, List<Vector2> uvs, List<Vector2> clip)
+        /// <summary>Sutherland-Hodgman of <see cref="poly"/> against a convex polygon of either winding, carrying the UVs.</summary>
+        private void ClipConvex(bool textured, List<Vector2> clip)
         {
             float area = 0;
             for (int i = 0; i < clip.Count; i++)
@@ -264,40 +303,47 @@ namespace Retro.Unity
                 area += a.x * b.y - b.x * a.y;
             }
             float sign = area >= 0 ? 1 : -1;
-            for (int e = 0; e < clip.Count && pts.Count > 0; e++)
+            for (int e = 0; e < clip.Count && poly.Count > 0; e++)
             {
                 Vector2 a = clip[e], b = clip[(e + 1) % clip.Count];
-                var outPts = new List<Vector2>();
-                var outUvs = uvs != null ? new List<Vector2>() : null;
-                float Side(Vector2 p) => sign * ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x));
-                for (int i = 0; i < pts.Count; i++)
+                work.Clear();
+                workUv.Clear();
+                for (int i = 0; i < poly.Count; i++)
                 {
-                    int j = (i + 1) % pts.Count;
-                    float si = Side(pts[i]), sj = Side(pts[j]);
+                    int j = (i + 1) % poly.Count;
+                    float si = sign * ((b.x - a.x) * (poly[i].y - a.y) - (b.y - a.y) * (poly[i].x - a.x));
+                    float sj = sign * ((b.x - a.x) * (poly[j].y - a.y) - (b.y - a.y) * (poly[j].x - a.x));
                     if (si >= 0)
                     {
-                        outPts.Add(pts[i]);
-                        outUvs?.Add(uvs[i]);
+                        work.Add(poly[i]);
+                        if (textured) workUv.Add(polyUv[i]);
                     }
                     if ((si >= 0) != (sj >= 0))
                     {
                         float t = si / (si - sj);
-                        outPts.Add(Vector2.Lerp(pts[i], pts[j], t));
-                        outUvs?.Add(Vector2.Lerp(uvs[i], uvs[j], t));
+                        work.Add(Vector2.Lerp(poly[i], poly[j], t));
+                        if (textured) workUv.Add(Vector2.Lerp(polyUv[i], polyUv[j], t));
                     }
                 }
-                pts = outPts;
-                uvs = outUvs;
+                (poly, work) = (work, poly);
+                (polyUv, workUv) = (workUv, polyUv);
             }
-            return (pts, uvs);
         }
 
-        /// <summary>clearRect: what lies wholly inside goes; the rest is cut back to outside the rectangle where it is a quad astride an edge.</summary>
+        /// <summary>clearRect: what lies wholly inside the rectangle goes.</summary>
         private void Clear(ClearRectCommand cl)
         {
             (double x, double y) a = cl.M.Apply(cl.X, cl.Y), b = cl.M.Apply(cl.X + cl.W, cl.Y + cl.H);
             Rect r = Rect.MinMaxRect((float)Math.Min(a.x, b.x), (float)Math.Min(a.y, b.y), (float)Math.Max(a.x, b.x), (float)Math.Max(a.y, b.y));
-            prims.RemoveAll(p => r.Contains(p.Bounds.min) && r.Contains(p.Bounds.max));
+            for (int i = 0; i < prims.Count; i++)
+            {
+                Prim p = prims[i];
+                if (!p.Removed && r.Contains(p.Bounds.min) && r.Contains(p.Bounds.max))
+                {
+                    p.Removed = true;
+                    prims[i] = p;
+                }
+            }
         }
 
         private void Generate(MeshGenerationContext mgc)
@@ -305,13 +351,21 @@ namespace Retro.Unity
             int i = 0;
             while (i < prims.Count)
             {
+                if (prims[i].Removed)
+                {
+                    i++;
+                    continue;
+                }
                 // A run of primitives on one texture, under the 16-bit index limit.
                 Texture tex = prims[i].Texture;
                 int vertices = 0, indices = 0, j = i;
-                while (j < prims.Count && prims[j].Texture == tex && vertices + prims[j].Points.Count < 60000)
+                while (j < prims.Count && (prims[j].Removed || (prims[j].Texture == tex && vertices + prims[j].Count < 60000)))
                 {
-                    vertices += prims[j].Points.Count;
-                    indices += (prims[j].Points.Count - 2) * 3;
+                    if (!prims[j].Removed)
+                    {
+                        vertices += prims[j].Count;
+                        indices += (prims[j].Count - 2) * 3;
+                    }
                     j++;
                 }
                 MeshWriteData mesh = mgc.Allocate(vertices, indices, tex);
@@ -319,38 +373,28 @@ namespace Retro.Unity
                 for (int k = i; k < j; k++)
                 {
                     Prim p = prims[k];
-                    for (int v = 0; v < p.Points.Count; v++)
+                    if (p.Removed) continue;
+                    float area = 0;
+                    for (int v = 0; v < p.Count; v++)
                     {
+                        Vector2 pos = verts[p.Start + v];
                         mesh.SetNextVertex(new Vertex
                         {
-                            position = new Vector3(p.Points[v].x, p.Points[v].y, Vertex.nearZ),
+                            position = new Vector3(pos.x, pos.y, Vertex.nearZ),
                             tint = p.Color,
-                            uv = p.Uvs != null ? p.Uvs[v] : Vector2.zero,
+                            uv = uvs[p.Start + v],
                         });
+                        Vector2 next = verts[p.Start + (v + 1) % p.Count];
+                        area += pos.x * next.y - next.x * pos.y;
                     }
-                    // UI Toolkit wants clockwise triangles (y down); fan both ways round by area sign.
-                    float area = 0;
-                    for (int v = 0; v < p.Points.Count; v++)
+                    // A fan, wound one way or the other by the polygon's own orientation.
+                    for (int v = 1; v < p.Count - 1; v++)
                     {
-                        Vector2 a = p.Points[v], b = p.Points[(v + 1) % p.Points.Count];
-                        area += a.x * b.y - b.x * a.y;
+                        mesh.SetNextIndex(baseIndex);
+                        mesh.SetNextIndex((ushort)(baseIndex + (area >= 0 ? v : v + 1)));
+                        mesh.SetNextIndex((ushort)(baseIndex + (area >= 0 ? v + 1 : v)));
                     }
-                    for (int v = 1; v < p.Points.Count - 1; v++)
-                    {
-                        if (area >= 0)
-                        {
-                            mesh.SetNextIndex(baseIndex);
-                            mesh.SetNextIndex((ushort)(baseIndex + v));
-                            mesh.SetNextIndex((ushort)(baseIndex + v + 1));
-                        }
-                        else
-                        {
-                            mesh.SetNextIndex(baseIndex);
-                            mesh.SetNextIndex((ushort)(baseIndex + v + 1));
-                            mesh.SetNextIndex((ushort)(baseIndex + v));
-                        }
-                    }
-                    baseIndex += (ushort)p.Points.Count;
+                    baseIndex += (ushort)p.Count;
                 }
                 i = j;
             }
