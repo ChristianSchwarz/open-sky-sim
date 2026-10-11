@@ -117,6 +117,9 @@ namespace Retro.Unity
             var player = new GameObject("Player").AddComponent<PlayerFlight>();
             player.terrain = terrain;
             player.view = fly;
+            var targetView = player.gameObject.AddComponent<TargetCameraView>();
+            targetView.flight = player;
+            targetView.viewer = fly;
 
             // M5: the world on top of the terrain.
             var airfields = root.AddComponent<AirfieldRenderer>();
