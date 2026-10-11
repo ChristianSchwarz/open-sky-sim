@@ -11,7 +11,11 @@ npm run golden:check           # fail if the code no longer matches the fixtures
 npm test                       # includes tools/golden/golden.test.ts
 node --import tsx tools/golden/generate.ts --select-tiles   # re-pick tile files from assets/terrain
 node --import tsx tools/golden/generate.ts --only geodesy,tiling
+node --import tsx tools/golden/generate.ts --select-vegetation --only vegetation   # re-copy its two leaves
+node --import tsx tools/golden/bakeAtlases.ts   # tree/stone atlas PNGs for Unity (not a fixture)
 ```
+
+In a worktree without `assets/terrain`, set `GOLDEN_TERRAIN_ROOT` to a checkout's for `--select-*`.
 
 ## Rules
 
@@ -50,6 +54,7 @@ array's raw little-endian bytes and `head` is the first few elements.
 | `heights.json` + `tiles/height/` | `terrain/{heightSampler,flattenPad,demTile}.ts` | 651 ground queries around GCLP across the fine (z11), coarse (z7) and empty tiers, with the 33 manifest flatten pads; pad blend/surface checks |
 | `combat_sim.json` | `physics/sim/combatSim.ts` and its colliders, player input, guns | 12 scenarios at 60 Hz: AI duels, AI vs a firing player, keyboard takeoff, belly landings (fm2/fm3, mesh, fatal), arrestor trap, mid-air, roof landing, wingman formation |
 | `flight_configs.json` | `physics/fm2/fm2AircraftConfig.ts`, `physics/fm3/f16Airframe.ts` | The exact config numbers the traces used |
+| `vegetation.json` + `tiles/vegetation/` | `terrain/{treeBillboards,stones,roadExclusion,buildingExclusion,airfieldExclusion,surfaceExclusion}.ts`, `railBed.ts` (bed mask), `terrainEntity.ts` (attachTrees) | Two z12 leaves (GCLP; a forest near Garmisch, drawn from a far play origin): five masks on 5,500 points each, tree and clutter scatter at three densities plus unmasked, the 4x4 cells with shuffled slots and their float32 instance arrays, bounding spheres, `treeInstancesToDraw` on 300 cases |
 
 ## Not covered yet (later milestones)
 
