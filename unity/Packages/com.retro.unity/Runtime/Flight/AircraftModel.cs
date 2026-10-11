@@ -185,7 +185,9 @@ namespace Retro.Unity
                     mats[i] = Remapped(name);
                 }
                 r.sharedMaterials = mats;
-                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                // Real shadow maps stand in for the web game's planform silhouettes.
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+                r.receiveShadows = true;
                 // Kept in the graph for debugging, never drawn.
                 if (collision) r.enabled = false;
             }

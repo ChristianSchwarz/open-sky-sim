@@ -35,7 +35,9 @@ Shader "Retro/AirfieldFlat"
             #pragma vertex vert
             #pragma fragment frag
             #pragma multi_compile_fog
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE
+            #pragma multi_compile_fragment _ _SHADOWS_SOFT
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
                 half4 _Color;
@@ -88,6 +90,10 @@ Shader "Retro/AirfieldFlat"
                     c = lerp(c, _MarkColorB.rgb, paint.g);
                 }
                 c *= _Overbright;
+                // An aircraft's shadow on the pavement: the paint is unlit, so the shadow
+                // takes away the sun's share, as on the lit land beside it.
+                half shadow = MainLightRealtimeShadow(TransformWorldToShadowCoord(i.positionWS));
+                c *= lerp(0.55, 1.0, shadow);
                 return half4(MixFog(c, i.fog), 1);
             }
             ENDHLSL

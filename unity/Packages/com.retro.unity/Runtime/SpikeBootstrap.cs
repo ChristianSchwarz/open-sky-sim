@@ -48,7 +48,7 @@ namespace Retro.Unity
                 sun = new GameObject("Sun").AddComponent<Light>();
                 sun.type = LightType.Directional;
             }
-            sun.shadows = LightShadows.None;
+            sun.shadows = LightShadows.Hard; // aircraft shadows (they replace the planform silhouettes)
             // The web game's sun at its default 14:00, and its direct/ambient balance.
             SunModel.Apply(sun, SunModel.DefaultHours);
             RenderSettings.fog = true;

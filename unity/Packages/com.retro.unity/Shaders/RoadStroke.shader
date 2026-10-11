@@ -47,7 +47,9 @@ Shader "Retro/RoadStroke"
             #pragma fragment frag
             #pragma multi_compile_fog
             #pragma shader_feature_local _RAIL
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE
+            #pragma multi_compile_fragment _ _SHADOWS_SOFT
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
 
             // roadStrokes.ts / ptr.ts constants.
             #define ALONG_STEP_M 0.05
@@ -82,6 +84,7 @@ Shader "Retro/RoadStroke"
             {
                 float4 positionCS : SV_POSITION;
                 half fog : TEXCOORD0;
+                float3 positionWS : TEXCOORD4;
             #if defined(_RAIL)
                 float3 rail : TEXCOORD1;  // across (m, signed by bank), along (m), half width (m)
                 float4 track : TEXCOORD2; // no sleepers, long +, long -, level crossing
@@ -110,7 +113,9 @@ Shader "Retro/RoadStroke"
                     float px = length(edgePx - centrePx);
                     if (px > 1.0e-4 && px < _MinHalfPixels) stretch = min(_MaxStretch, _MinHalfPixels / px);
                 }
-                o.positionCS = TransformWViewToHClip(centreView + offsetView * (halfM * stretch));
+                float3 widenedView = centreView + offsetView * (halfM * stretch);
+                o.positionCS = TransformWViewToHClip(widenedView);
+                o.positionWS = mul(UNITY_MATRIX_I_V, float4(widenedView, 1)).xyz;
                 o.fog = ComputeFogFactor(o.positionCS.z);
             #if defined(_RAIL)
                 float meta = round(v.dir.w * 127.0);
@@ -181,6 +186,8 @@ Shader "Retro/RoadStroke"
                     c = rails ? min(c * 2.4 + 0.08, 1) : min(c * 1.6, 1);
                 }
             #endif
+                // An aircraft's shadow across the road, as on the land beside it.
+                c *= lerp(0.55, 1.0, MainLightRealtimeShadow(TransformWorldToShadowCoord(i.positionWS)));
                 return half4(MixFog(c, i.fog), alpha);
             }
             ENDHLSL
