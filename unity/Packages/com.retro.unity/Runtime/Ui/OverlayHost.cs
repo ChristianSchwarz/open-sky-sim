@@ -102,6 +102,8 @@ namespace Retro.Unity
         [Header("Stats (read only)")]
         public int commands;
         public int primitives;
+        /// <summary>Bytes allocated last frame by: the HUD, the cockpit, the canvas mesh build (GC hunting).</summary>
+        public long allocHud, allocCockpit, allocCanvas;
 
         private UIDocument document;
         private OverlayCanvas canvas;
@@ -210,14 +212,18 @@ namespace Retro.Unity
             OverlayUtils.BeginOverlayFrame(painter, w, h, textEffect, palette);
             bool cockpitView = flight.flightView == FlightView.Cockpit && !flight.Aircraft.IsCrashed() && !flight.menuOpen;
             bool exteriorView = !cockpitView && !flight.menuOpen && flight.flightView != FlightView.Free;
+            long a0 = GC.GetTotalMemory(false);
             FillHudInputs();
             if (cockpitView) hud.Render2D(w, h, hudInputs, HudView(w, h), palette, painter);
+            allocHud = GC.GetTotalMemory(false) - a0;
             if (exteriorView) exterior.Render2D(w, h, hudInputs, palette, painter);
             Texture target = null;
             if (cockpitView)
             {
                 FillInputs();
+                long a1 = GC.GetTotalMemory(false);
                 frame = cockpit.Render(w, h, inputs, painter, frame);
+                allocCockpit = GC.GetTotalMemory(false) - a1;
                 mapSource?.Pump();
                 if (inputs.Target != null && targetView != null)
                 {
@@ -233,7 +239,9 @@ namespace Retro.Unity
             if (perfHud) perf.Render2D(w, h, PerfStats(), palette, painter);
             targetImage.image = target;
             targetImage.style.display = target != null ? DisplayStyle.Flex : DisplayStyle.None;
+            long a2 = GC.GetTotalMemory(false);
             canvas.SetCommands(painter.Commands);
+            allocCanvas = GC.GetTotalMemory(false) - a2;
             commands = painter.Commands.Count;
             primitives = canvas.PrimitiveCount;
         }

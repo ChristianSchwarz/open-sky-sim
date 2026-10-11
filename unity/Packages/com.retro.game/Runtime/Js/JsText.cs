@@ -194,7 +194,44 @@ namespace Retro.Game
         /// rounds it to even, and Mono's is not exact at all), with -0 shown as
         /// "0" but a negative that rounds to zero keeping its sign.
         /// </summary>
+        private static readonly double[] Pow10 = { 1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8 };
+
+        /// <summary>
+        /// toFixed without BigInteger when the answer cannot be in doubt: the
+        /// scaled magnitude is an exact-enough double and its fraction is not
+        /// within a hair of the .5 tie (where the exact binary value decides).
+        /// Null sends the caller to the exact path. The overlay formats every
+        /// readout this way each frame, so this saves the allocations.
+        /// </summary>
+        private static string ToFixedFast(double x, int digits)
+        {
+            if (digits < 0 || digits >= Pow10.Length) return null;
+            double scaled = Math.Abs(x) * Pow10[digits];
+            // Below 2^31 a double is spaced under 5e-7: the product is off by less than the tie guard.
+            if (!(scaled < 2147483648.0)) return null;
+            double floor = Math.Floor(scaled);
+            double frac = scaled - floor;
+            if (Math.Abs(frac - 0.5) < 1e-6) return null;
+            long n = (long)floor + (frac > 0.5 ? 1 : 0);
+            string s = n.ToString(CultureInfo.InvariantCulture);
+            if (digits > 0)
+            {
+                if (s.Length <= digits) s = new string('0', digits - s.Length + 1) + s;
+                s = s.Substring(0, s.Length - digits) + "." + s.Substring(s.Length - digits);
+            }
+            return x < 0 ? "-" + s : s;
+        }
+
         public static string ToFixed(double x, int digits)
+        {
+            if (double.IsNaN(x)) return "NaN";
+            if (Math.Abs(x) >= 1e21 || double.IsInfinity(x)) return NumberToString(x);
+            if (x == 0) x = 0; // -0 -> +0
+            return ToFixedFast(x, digits) ?? ToFixedExact(x, digits);
+        }
+
+        /// <summary>toFixed in exact integer arithmetic, always (the reference the fast path is tested against).</summary>
+        public static string ToFixedExact(double x, int digits)
         {
             if (double.IsNaN(x)) return "NaN";
             if (Math.Abs(x) >= 1e21 || double.IsInfinity(x)) return NumberToString(x);
