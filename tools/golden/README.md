@@ -49,6 +49,7 @@ array's raw little-endian bytes and `head` is the first few elements.
 | `terrain_lod.json` | `terrain/{lod,quadtree,culling}.ts` | lod.ts functions, horizon culling, and quadtree draw/want lists along 6 camera paths (low pass, turn in place, leaves loading, climb, re-based Alps, 400 km orbit) |
 | `heights.json` + `tiles/height/` | `terrain/{heightSampler,flattenPad,demTile}.ts` | 651 ground queries around GCLP across the fine (z11), coarse (z7) and empty tiers, with the 33 manifest flatten pads; pad blend/surface checks |
 | `combat_sim.json` | `physics/sim/combatSim.ts` and its colliders, player input, guns | 12 scenarios at 60 Hz: AI duels, AI vs a firing player, keyboard takeoff, belly landings (fm2/fm3, mesh, fatal), arrestor trap, mid-air, roof landing, wingman formation |
+| `buildings.json` | three `ShapeUtils`/earcut, `terrain/{buildingRoofs,buildingMeshes,buildingExclusion,buildingTones}.ts` | 34 triangulation cases (concave, holes, closed rings, self-intersecting, z-order hashed, an empty hole that throws), roof planes, 52 roof/wall shapes, the 3 PBH tiles extruded whole by the real `BuildingMeshes` (hashes + sampled triangles), tree exclusion points, 3 x 90 budget frames with a scripted clock, tone tables |
 | `flight_configs.json` | `physics/fm2/fm2AircraftConfig.ts`, `physics/fm3/f16Airframe.ts` | The exact config numbers the traces used |
 
 ## Not covered yet (later milestones)

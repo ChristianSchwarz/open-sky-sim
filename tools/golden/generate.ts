@@ -21,6 +21,7 @@ import { quadtreeSuite } from './suites/quadtree';
 import { heightsSuite } from './suites/heights';
 import { combatSimSuite } from './suites/combatSim';
 import { airfieldsSuite } from './suites/airfields';
+import { buildingsSuite } from './suites/buildings';
 
 export const GOLDEN_ROOT = path.resolve(__dirname, '../../tests/golden');
 const TERRAIN_ROOT = path.resolve(__dirname, '../../assets/terrain');
@@ -46,6 +47,7 @@ const SUITES: SuiteDef[] = [
     { name: 'heights', run: ctx => heightsSuite(ctx) },
     { name: 'combatSim', run: () => combatSimSuite() },
     { name: 'airfields', run: ctx => airfieldsSuite(ctx) },
+    { name: 'buildings', run: ctx => buildingsSuite(ctx) },
 ];
 
 export interface GenerateResult {
