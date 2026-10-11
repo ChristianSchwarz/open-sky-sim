@@ -21,7 +21,7 @@ The C# port of the game (see `docs/unity-port-plan.md`).
 1. Open `unity/RetroFlight` in Unity 6.
 2. Press Play in any scene: `SpikeBootstrap` creates the camera, a sun, the
    terrain, the sea and the player's aircraft (on the nearest base runway;
-   `PlayerFlight.spawnMode` picks the web game's other starts, Location is airborne at `spawnLat`/`spawnLon`) when the scene has no
+   `PlayerFlight.spawnMode` picks the web game's other starts, `startAtLocation` is airborne at `spawnLat`/`spawnLon`) when the scene has no
    `TerrainRenderer` yet. To start elsewhere in the baked pyramid, set the
    PlayerPref `retro.spawn` to `"lat,lon"` before pressing Play (read once). The F-22 is read from `assets/*.glb` with glTFast
    (`com.unity.cloud.gltfast`); `PlayerFlight.flightModel` switches FM2/FM3.
@@ -35,6 +35,10 @@ The C# port of the game (see `docs/unity-port-plan.md`).
    Ctrl+1..9 starts one in the spawn menu mode (1 approach, 2 runway, 3 head-on, 4 carrier
    approach, 5 carrier deck, 6 10 km, 7 space, 9 wingtip).
    N toggles night and 14:00; `SkyRenderer.hours` on the `Sky` object sets any hour.
+   Esc opens the menu (spawn starts, airfield/place search, settings); U cycles the HUD
+   focus, M the moving map, F9 the perf readout. Settings live in
+   `%USERPROFILE%/AppData/LocalLow/DefaultCompany/RetroFlight/settings.json` (the web
+   game's localStorage value, same encoding).
 4. F10 toggles the free camera: WASD to move, Q/E down/up, hold the right
    mouse button to look, wheel for speed, Shift for 10x. Tile and memory
    stats are on the `Terrain` object.
