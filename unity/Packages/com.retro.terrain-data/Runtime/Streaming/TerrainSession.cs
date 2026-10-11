@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Retro.Core;
 
 namespace Retro.Terrain
@@ -18,6 +19,8 @@ namespace Retro.Terrain
         public double OriginLat, OriginLon, OriginHeight;
         public long MeshCacheBytes = Lod.MeshCacheBytes;
         public int MaxConcurrentLoads = 8;
+        /// <summary>TERRAIN_TRIANGLE_BUDGET: the cut is folded, then capped, to fit this.</summary>
+        public int TriangleBudget = Lod.TerrainTriangleBudget;
     }
 
     /// <summary>One tile to draw this frame, placed in scene space (x east, y up, z south).</summary>
@@ -77,10 +80,23 @@ namespace Retro.Terrain
         public readonly List<DrawTile> DrawList = new List<DrawTile>();
         public int WantCount => wants.Count;
 
+        /// <summary>Triangle budget for the drawn cut (settable at runtime, like the Graphics slider).</summary>
+        public int TriangleBudget;
+        /// <summary>Tiles folded into their parents by the last reconcile.</summary>
+        public int CoarsenedTiles { get; private set; }
+        /// <summary>The last-resort cap cut the far edge of the list (the fold's parents were not resident).</summary>
+        public bool TriangleBudgetHit { get; private set; }
+        /// <summary>Triangles in the draw list (land at near cost, water, ocean stand-ins).</summary>
+        public int DrawnTriangles { get; private set; }
+
+        /// <summary>What a sea stand-in costs the budget (OCEAN_PATCH_TRIANGLES).</summary>
+        private const int OceanPatchTriangles = 10;
+
         public TerrainSession(TerrainSessionOptions opts)
         {
             this.opts = opts;
-            Basis = Geodesy.MakeEnuBasis(opts.OriginLat, opts.OriginLon, opts.OriginHeight);
+            TriangleBudget = opts.TriangleBudget;
+            Basis =Geodesy.MakeEnuBasis(opts.OriginLat, opts.OriginLon, opts.OriginHeight);
             BakeBasis = Geodesy.MakeEnuBasis(opts.BakeLat, opts.BakeLon, opts.BakeHeight);
             FrameFix = Geodesy.EnuFrameRotation(BakeBasis, Basis);
             MeshIndex = TileIndex.Decode(File.ReadAllBytes(Path.Combine(opts.Root, "index_mesh.bin")));
@@ -128,6 +144,8 @@ namespace Retro.Terrain
                 view.LeafScale > 0 ? view.LeafScale : Lod.LeafRefineDistanceScale, view.NowMs,
                 view.VisibleZoomCap > 0 ? view.VisibleZoomCap : double.PositiveInfinity, draw, wants);
 
+            List<QuadNode> cut = CoarsenToBudget(draw, view.Position, wants);
+
             var wantList = new List<(TileKey, double)>(wants.Count);
             foreach (TileWant w in wants)
             {
@@ -138,12 +156,23 @@ namespace Retro.Terrain
             Meshes.SetWants(wantList);
             Meshes.Pump();
 
+            // Last resort (syncGroup): nearest edge first, stop at the budget, so
+            // whatever the fold could not fit goes missing at the far edge.
+            cut.Sort((a, b) => NearM(a, view.Position).CompareTo(NearM(b, view.Position)));
             DrawList.Clear();
-            foreach (QuadNode n in draw)
+            DrawnTriangles = 0;
+            TriangleBudgetHit = false;
+            foreach (QuadNode n in cut)
             {
                 if (n.Ocean) continue;
                 PtmTile tile = Meshes.Get(n.Id);
                 if (tile == null) continue;
+                if (DrawnTriangles >= TriangleBudget)
+                {
+                    TriangleBudgetHit = true;
+                    break;
+                }
+                DrawnTriangles += TileTriangles(tile);
                 DrawList.Add(new DrawTile
                 {
                     Key = n.Id,
@@ -154,6 +183,119 @@ namespace Retro.Terrain
                     FadeM = n.FadeM,
                 });
             }
+        }
+
+        private static double NearM(QuadNode n, Vec3d cam) => Math.Max(0, Vec3d.Distance(n.Center, cam) - n.Radius);
+
+        /// <summary>Land and water triangles of a tile (countTriangles(asNear = true); roads and bridges come later).</summary>
+        public static int TileTriangles(PtmTile t) => t.LandPositions.Length / 9 + t.WaterIndices.Length / 3;
+
+        private int Cost(QuadNode node)
+        {
+            PtmTile t = IsUploaded(node.Id) ? Meshes.Peek(node.Id) : null;
+            return t != null ? TileTriangles(t) : OceanPatchTriangles;
+        }
+
+        /// <summary>
+        /// Fold the cut into coarser tiles, farthest first, until it fits the
+        /// triangle budget (terrainEntity.ts coarsenToBudget). A parent with a
+        /// grandchild or deeper in the cut cannot take over; a parent that is not
+        /// resident is asked for (added to `wants`) so the next reconcile can fold
+        /// into it. The result is still a valid quadtree cut.
+        /// </summary>
+        private List<QuadNode> CoarsenToBudget(List<QuadNode> drawn, Vec3d camPos, List<TileWant> wantsOut)
+        {
+            CoarsenedTiles = 0;
+            int total = 0;
+            var cut = new Dictionary<string, QuadNode>();
+            var cutOrder = new List<string>();
+            var under = new Dictionary<string, QuadNode>();
+            foreach (QuadNode node in drawn)
+            {
+                if (node.Under) under[node.Key] = node;
+                else
+                {
+                    cut[node.Key] = node;
+                    cutOrder.Add(node.Key);
+                }
+                total += Cost(node);
+            }
+            if (total <= TriangleBudget) return new List<QuadNode>(drawn);
+
+            var asked = new HashSet<string>();
+            while (total > TriangleBudget)
+            {
+                var deep = new HashSet<string>();
+                var parents = new Dictionary<string, TileKey>();
+                var parentOrder = new List<string>();
+                foreach (QuadNode node in cut.Values)
+                {
+                    TileKey? id = Tiling.Parent(node.Id);
+                    if (id == null) continue;
+                    string pk = id.Value.ToString();
+                    if (!parents.ContainsKey(pk))
+                    {
+                        parents[pk] = id.Value;
+                        parentOrder.Add(pk);
+                    }
+                    for (id = Tiling.Parent(id.Value); id != null; id = Tiling.Parent(id.Value))
+                    {
+                        if (!deep.Add(id.Value.ToString())) break;
+                    }
+                }
+                var candidates = new List<(string Key, QuadNode Node, double Distance)>();
+                foreach (string key in parentOrder)
+                {
+                    if (deep.Contains(key)) continue;
+                    QuadNode node = Quadtree.Node(key);
+                    if (node == null) continue;
+                    if (!IsUploaded(node.Id) && !node.Ocean)
+                    {
+                        if (asked.Add(key))
+                        {
+                            wantsOut.Add(new TileWant
+                            {
+                                Id = node.Id,
+                                SsePx = node.GeometricErrorM,
+                                DistanceM = Math.Max(1, Vec3d.Distance(camPos, node.Center) - node.Radius),
+                                InFrustum = true,
+                                Pinned = false,
+                            });
+                        }
+                        continue;
+                    }
+                    candidates.Add((key, node, Vec3d.Distance(camPos, node.Center) - node.Radius));
+                }
+                if (candidates.Count == 0) break;
+                // Stable sort, farthest first (Array.prototype.sort is stable).
+                candidates = candidates.Select((c, i) => (c, i)).OrderByDescending(t => t.c.Distance).ThenBy(t => t.i).Select(t => t.c).ToList();
+                foreach (var (key, node, _) in candidates)
+                {
+                    if (total <= TriangleBudget) break;
+                    if (node.Children != null)
+                    {
+                        foreach (QuadNode child in node.Children)
+                        {
+                            if (cut.TryGetValue(child.Key, out QuadNode c))
+                            {
+                                cut.Remove(child.Key);
+                                total -= Cost(c);
+                            }
+                        }
+                    }
+                    if (under.ContainsKey(key)) under.Remove(key);
+                    else total += Cost(node);
+                    node.Under = false;
+                    cut[key] = node;
+                    CoarsenedTiles++;
+                }
+            }
+            var output = new List<QuadNode>(cut.Values);
+            foreach (QuadNode node in under.Values)
+            {
+                if (node.Children != null && node.Children.Any(c => cut.ContainsKey(c.Key))) output.Add(node);
+            }
+            return output;
         }
     }
 }

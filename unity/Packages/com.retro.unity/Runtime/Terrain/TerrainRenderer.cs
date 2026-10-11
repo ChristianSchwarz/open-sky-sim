@@ -60,6 +60,8 @@ namespace Retro.Unity
         public float detailDistanceKm = 12;
         [Range(1, 10)] public float leafScale = 1.5f;
         public float uploadBudgetMs = 4;
+        [Tooltip("TERRAIN_TRIANGLE_BUDGET: far tiles fold into coarser ones to fit.")]
+        public int triangleBudget = Lod.TerrainTriangleBudget;
 
         [Header("Stats (read only)")]
         public int drawnTiles;
@@ -68,6 +70,8 @@ namespace Retro.Unity
         public int pendingLoads;
         public int drawnTriangles;
         public float residentMb;
+        public int coarsenedTiles;
+        public bool triangleBudgetHit;
 
         private TerrainSession session;
         private readonly Dictionary<TileKey, TileGpuMeshes> gpu = new Dictionary<TileKey, TileGpuMeshes>();
@@ -150,6 +154,7 @@ namespace Retro.Unity
             if (reconcileTimer <= 0)
             {
                 reconcileTimer = (float)Lod.ReconcileIntervalMs;
+                session.TriangleBudget = triangleBudget;
                 Camera cam = viewer.UnityCamera;
                 session.Update(new TerrainView
                 {
@@ -176,6 +181,8 @@ namespace Retro.Unity
             uploadedTiles = gpu.Count;
             pendingLoads = session.Meshes.InFlight;
             residentMb = session.Meshes.ResidentBytes / 1048576f;
+            coarsenedTiles = session.CoarsenedTiles;
+            triangleBudgetHit = session.TriangleBudgetHit;
         }
 
         private void PumpUploads()

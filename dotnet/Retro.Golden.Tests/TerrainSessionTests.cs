@@ -63,9 +63,14 @@ public class TerrainSessionTests
         var zooms = session.DrawList.GroupBy(d => d.Key.Z).OrderBy(g => g.Key).Select(g => $"z{g.Key}:{g.Count()}");
         output.WriteLine(string.Join(" ", zooms));
 
+        output.WriteLine($"triangles {session.DrawnTriangles} (budget {session.TriangleBudget}), coarsened {session.CoarsenedTiles}, cap hit {session.TriangleBudgetHit}");
         Assert.Equal(0, session.Meshes.Failures);
         Assert.Equal(0, session.WantCount);
         Assert.True(session.DrawList.Count > 20, "too few tiles drawn");
+        // Settled, the fold alone fits the budget; the far-edge cap must not cut.
+        Assert.False(session.TriangleBudgetHit, "the last-resort cap cut the view");
+        Assert.True(session.DrawnTriangles <= session.TriangleBudget, $"{session.DrawnTriangles} triangles over budget");
+        Assert.True(session.CoarsenedTiles > 0, "expected the unbudgeted cut to need folding here");
         Assert.Contains(session.DrawList, d => d.Key.Z == 12);
         // Same origin as the bake: no frame fix.
         Assert.Equal(1.0, Math.Abs(session.FrameFix.W), 12);
