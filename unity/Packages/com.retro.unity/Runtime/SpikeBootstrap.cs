@@ -75,13 +75,11 @@ namespace Retro.Unity
                 sun.type = LightType.Directional;
             }
             sun.shadows = LightShadows.Hard; // aircraft shadows (they replace the planform silhouettes)
-            // The web game's sun at its default 14:00, and its direct/ambient balance.
-            SunModel.Apply(sun, SunModel.DefaultHours);
             ConfigurePostProcessing(cam);
-            RenderSettings.fog = true;
-            RenderSettings.fogMode = FogMode.ExponentialSquared;
-            RenderSettings.fogDensity = 0.000012f;
-            RenderSettings.fogColor = new Color(0.68f, 0.76f, 0.86f);
+            // Time of day: the palette, sun, ambient, fog and sky all follow it (14:00 by default).
+            var sky = new GameObject("Sky").AddComponent<SkyRenderer>();
+            sky.sun = sun;
+            sky.viewer = fly;
 
             var root = new GameObject("Terrain");
             var terrain = root.AddComponent<TerrainRenderer>();
