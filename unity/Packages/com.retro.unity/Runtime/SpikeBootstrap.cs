@@ -13,7 +13,7 @@ namespace Retro.Unity
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void AutoCreate()
         {
-            if (Object.FindFirstObjectByType<TerrainRenderer>() != null) return;
+            if (Object.FindAnyObjectByType<TerrainRenderer>() != null) return;
             Create();
         }
 
@@ -29,7 +29,7 @@ namespace Retro.Unity
             FlyCamera fly = cam.GetComponent<FlyCamera>();
             if (fly == null) fly = cam.gameObject.AddComponent<FlyCamera>();
 
-            if (Object.FindFirstObjectByType<Light>() == null)
+            if (Object.FindAnyObjectByType<Light>() == null)
             {
                 var sun = new GameObject("Sun").AddComponent<Light>();
                 sun.type = LightType.Directional;

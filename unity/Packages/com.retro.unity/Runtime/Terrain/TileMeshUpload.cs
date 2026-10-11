@@ -83,13 +83,20 @@ namespace Retro.Unity
             mesh.SetVertexBufferData(tile.LandAttrs, 0, 0, tile.LandAttrs.Length, 2, Quiet);
 
             mesh.SetIndexBufferParams(count, IndexFormat.UInt32);
-            using (var indices = new NativeArray<int>(count, Allocator.Temp, NativeArrayOptions.UninitializedMemory))
+            // Not a `using` declaration: C# forbids writing through a using-declared struct.
+            var indices = new NativeArray<int>(count, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+            try
             {
                 for (int i = 0; i < count; i++) indices[i] = i;
                 mesh.SetIndexBufferData(indices, 0, 0, count, Quiet);
             }
-            mesh.subMeshCount = 1;
-            mesh.SetSubMesh(0, new SubMeshDescriptor(0, count, MeshTopology.Triangles) { bounds = UnitBounds, vertexCount = count }, Quiet);
+            finally
+            {
+                indices.Dispose();
+            }
+            // SetSubMeshes, not subMeshCount: the setter recalculates bounds, which a
+            // non-Float3 position stream cannot do (it warns per tile).
+            mesh.SetSubMeshes(new[] { new SubMeshDescriptor(0, count, MeshTopology.Triangles) { bounds = UnitBounds, vertexCount = count } }, Quiet);
             mesh.bounds = UnitBounds;
             mesh.UploadMeshData(true);
             return mesh;
@@ -108,12 +115,13 @@ namespace Retro.Unity
             int indexCount = tile.WaterIndices.Length;
             mesh.SetIndexBufferParams(indexCount, IndexFormat.UInt16);
             mesh.SetIndexBufferData(tile.WaterIndices, 0, 0, indexCount, Quiet);
-            mesh.subMeshCount = 2;
+            var groups = new SubMeshDescriptor[2];
             for (int tone = 0; tone < 2; tone++)
             {
                 int start = tile.WaterGroups[tone][0], n = tile.WaterGroups[tone][1];
-                mesh.SetSubMesh(tone, new SubMeshDescriptor(start, n, MeshTopology.Triangles) { bounds = UnitBounds, vertexCount = count }, Quiet);
+                groups[tone] = new SubMeshDescriptor(start, n, MeshTopology.Triangles) { bounds = UnitBounds, vertexCount = count };
             }
+            mesh.SetSubMeshes(groups, Quiet);
             mesh.bounds = UnitBounds;
             mesh.UploadMeshData(true);
             return mesh;
