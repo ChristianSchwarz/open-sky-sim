@@ -14,39 +14,32 @@ import { MatSlideToggleChange, MatSlideToggleModule } from '@angular/material/sl
 import { MatSliderModule } from '@angular/material/slider';
 import { MatTabsModule } from '@angular/material/tabs';
 import { map } from 'rxjs';
-import { SpawnMode } from '../../config/settingsStorage';
 import { AudioSystem } from '../../audio/audioSystem';
-import { ConfigService, RENDER_SCALES } from '../../config/configService';
+import { ConfigService } from '../../config/configService';
 import { loadSettings, updateSettings } from '../../config/settingsStorage';
 import { JoystickControlDevice } from '../../input/devices/joystickControlDevice';
 import {
-    KeyboardControlAction, KeyboardControlDevice, KeyboardControlLayoutId, KeyboardControlLayouts,
-    KeyboardPitchStickMode,
+    KeyboardControlDevice, KeyboardControlLayoutId, KeyboardPitchStickMode,
 } from '../../input/devices/keyboardControlDevice';
 import type { SpawnPanel } from '../../osd/spawnPanel';
 import type { SpawnDestination } from '../../state/spawnSearch';
-import {
-    COLOUR_ADJUST_GROUPS, COLOUR_HUE_MAX_DEG, COLOUR_TWEAK_MAX, COLOUR_TWEAK_MIN, ColourAdjustGroup, ColourTweak,
-    defaultColourAdjust,
-} from '../../scene/materials/shaders/colourAdjust';
-import { formatSunTime } from '../../scene/materials/shaders/sun';
+import { ColourAdjustGroup } from '../../scene/materials/shaders/colourAdjust';
 import { clearCameraRouteFromLocation } from '../../state/cameraRoute';
-import { AiPilotModels, FlightModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
+import { AiPilotModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
 import { PLAY_ORIGIN } from '../../state/worldLayout';
-import {
-    DETAIL_DISTANCE_OFF, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
-    LEAF_REFINE_DISTANCE_SCALE_MAX, LEAF_REFINE_DISTANCE_SCALE_MIN,
-    TERRAIN_DETAIL_DISTANCE_MAX_M, TERRAIN_DETAIL_DISTANCE_MIN_M, TERRAIN_TRIANGLE_BUDGET_MAX,
-    TERRAIN_TRIANGLE_BUDGET_MIN, TERRAIN_VISIBLE_ZOOM_MAX, TERRAIN_VISIBLE_ZOOM_MIN,
-} from '../../terrain/lod';
 import { DEFAULT_TERRAIN_URL, loadTerrainManifest } from '../../terrain/manifest';
-import { homeArea, terrainAreas } from '../../terrain/playArea';
+import { terrainAreas } from '../../terrain/playArea';
+import {
+    AI_PILOT_MODEL_OPTIONS, COLOUR_CHANNEL_OPTIONS, COLOUR_GROUP_OPTIONS, ColourChannelOption, DATA_SOURCES,
+    FLIGHT_MODEL_OPTIONS, HelpEntry, KEYBOARD_LAYOUT_OPTIONS, LICENCE_URLS, Option, PITCH_STICK_MODE_OPTIONS,
+    RENDER_SCALE_OPTIONS, ROADS_OPTIONS, SETTINGS_TEXT, SLIDERS, SPAWN_ACTIONS, SPAWN_HELP, SYSTEMS_HELP,
+    SettingsActions, SettingsTab, TABS, TERRAIN_COLOUR_OPTIONS, TERRAIN_SHADING_OPTIONS, UNIT_SYSTEM_OPTIONS,
+    VIEWS_HELP, areaOptions, colourSliderValue, daytimeLabel, flightHelp, joystickHelp, landuseReachLabel,
+    spawnButtonLabel, terrainDetailKm, terrainDetailLabel, triangleBudgetLabel,
+} from './settingsModel';
 import { TerrainImporter } from './terrain/terrainImporter';
 
-export type SettingsTab = 'Flight' | 'Graphics' | 'Colours' | 'World' | 'Simulation' | 'General' | 'Help' | 'About';
-
-/** In display order. */
-const TABS: SettingsTab[] = ['Flight', 'Graphics', 'Colours', 'World', 'Simulation', 'General', 'Help', 'About'];
+export type { SettingsTab } from './settingsModel';
 
 /**
  * Below this viewport width the eight tab links do not fit the dialog, and the
@@ -69,333 +62,6 @@ export interface SettingsDialogData {
     terrainImport: boolean;
 }
 
-/** The Flight tab's spawn buttons, in display order, with the key that also starts each. */
-const SPAWN_ACTIONS: { mode: SpawnMode; label: string; key: string }[] = [
-    { mode: 'approach', label: 'Approach', key: '1' },
-    { mode: 'runway', label: 'Runway', key: '2' },
-    { mode: 'headon', label: 'Head-on', key: '3' },
-    { mode: 'carrier', label: 'Carrier land', key: '4' },
-    { mode: 'carrierTakeoff', label: 'Carrier TO', key: '5' },
-    { mode: 'carrierBarricade', label: 'Carrier barricade', key: '8' },
-    { mode: 'highAlt', label: '10 km', key: '6' },
-    { mode: 'space', label: 'Space', key: '7' },
-    { mode: 'closeWing', label: 'Wingtip', key: '9' },
-];
-
-/** A row of the Help tab: the keys, then what they do. */
-interface HelpEntry {
-    keys: string[];
-    action: string;
-}
-
-const SYSTEMS_HELP: HelpEntry[] = [
-    { keys: ['G'], action: 'Landing gear' },
-    { keys: ['F'], action: 'Flaps' },
-    { keys: ['L'], action: 'FCS limiters (AoA/g) on/off' },
-    { keys: ['1', '2', '3'], action: 'FCS limiter strategy (soft / predictive / smooth; FM2 only)' },
-    { keys: ['T'], action: 'Select target' },
-    { keys: ['I'], action: 'Target night view' },
-    { keys: ['H'], action: 'Tailhook' },
-    { keys: ['U'], action: 'Cycle HUD focus' },
-    { keys: ['F9'], action: 'Import or delete terrain areas (opens the World tab)' },
-    { keys: ['F10'], action: 'Import aircraft mod (.zip)' },
-];
-
-const SPAWN_HELP: HelpEntry[] = [
-    { keys: ['Esc'], action: 'Open spawn menu' },
-    { keys: ['1'], action: 'Approach spawn' },
-    { keys: ['2'], action: 'Runway spawn' },
-    { keys: ['3'], action: 'Head-on spawn' },
-    { keys: ['4'], action: 'Carrier landing spawn' },
-    { keys: ['5'], action: 'Carrier takeoff spawn' },
-    { keys: ['6'], action: 'High-altitude spawn (10 km)' },
-    { keys: ['7'], action: 'Space spawn (400 km)' },
-    { keys: ['8'], action: 'Carrier barricade spawn (50 m astern of the ramp, net rigged, flying solo)' },
-];
-
-const VIEWS_HELP: HelpEntry[] = [
-    { keys: ['N'], action: 'Day/night' },
-    { keys: ['F1'], action: 'Cockpit (press again with a target to toggle padlock)' },
-    { keys: ['F2'], action: 'Exterior back/front' },
-    { keys: ['F3'], action: 'Exterior left/right' },
-    { keys: ['F6'], action: 'Exterior back/front of AI plane (looks at player)' },
-    { keys: ['F12'], action: 'Aircraft showcase (black background, orbit with numpad)' },
-    { keys: ['F4'], action: 'Replay the flight so far (Space pause, arrows seek and speed, or move the camera in the Free view; F4/Esc exit)' },
-    { keys: ['4'], action: 'To/from target' },
-    { keys: ['Num 4', 'Num 6', 'Num 8', 'Num 2'], action: 'Move camera around aircraft' },
-    { keys: ['Num 5'], action: 'Recenter camera' },
-    { keys: ['Num *', 'Num /'], action: 'Zoom in / out (F1: padlock target, F2: lock/unlock on enemy)' },
-];
-
-/** A dataset the world is built from, as the About tab credits it. */
-interface DataSource {
-    /** The dataset, as its publisher names it. */
-    name: string;
-    /** Where or what it covers, when that is narrower than its group. */
-    scope?: string;
-    /** The attribution its licence asks for. */
-    credit: string;
-    /** Where the credit links to, when the publisher asks for a link. */
-    creditUrl?: string;
-    /** A key of LICENCE_URLS where the licence has a canonical text. */
-    licence: string;
-}
-
-interface DataSourceGroup {
-    title: string;
-    /** What in the game the group's data ends up as. */
-    feeds: string;
-    sources: DataSource[];
-}
-
-const LICENCE_URLS: Record<string, string> = {
-    'ODbL 1.0': 'https://opendatacommons.org/licenses/odbl/1-0/',
-    'CC BY 4.0': 'https://creativecommons.org/licenses/by/4.0/',
-    'CC BY-NC-SA 4.0': 'https://creativecommons.org/licenses/by-nc-sa/4.0/',
-    'dl-de/by-2-0': 'https://www.govdata.de/dl-de/by-2-0',
-    'dl-de/zero-2-0': 'https://www.govdata.de/dl-de/zero-2-0',
-};
-
-const BAVARIA_CREDIT = 'Datenquelle: Bayerische Vermessungsverwaltung – www.geodaten.bayern.de';
-
-/**
- * Every dataset the terrain bake reads, grouped by what it feeds. The sources
- * and licences are the ones the bake tools name: tools/fetch_planet_dem.py,
- * prep_global_dem.py, prep_global_imagery.py, fetch_cover_sources.py, the
- * Source classes of measure_lidar.py and measure_buildings.py, and the
- * OpenStreetMap bakes. A new source there belongs here too.
- */
-const DATA_SOURCES: DataSourceGroup[] = [
-    {
-        title: 'Terrain heights',
-        feeds: 'The shape of the ground, from the whole planet down to the detailed areas.',
-        sources: [
-            {
-                name: 'FABDEM (Forest And Buildings removed Copernicus DEM)', scope: 'Detailed areas, 30 m',
-                credit: 'University of Bristol', licence: 'CC BY-NC-SA 4.0',
-            },
-            {
-                name: 'Copernicus DEM GLO-30', scope: 'Detailed areas, 30 m; the model FABDEM corrects',
-                credit: '© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved',
-                licence: 'Copernicus DEM licence',
-            },
-            {
-                name: 'ETOPO 2022, 60 arc-second', scope: 'The whole planet, 1.85 km',
-                credit: 'NOAA National Centers for Environmental Information', licence: 'Public domain',
-            },
-        ],
-    },
-    {
-        title: 'Road and railway earthworks',
-        feeds: 'Embankments, cuttings and bridge ends, measured along each road and railway in lidar terrain models.',
-        sources: [
-            { name: 'DGM1', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
-            {
-                name: 'ALS DTM 1 m (2025)', scope: 'Austria',
-                credit: 'BEV – Bundesamt für Eich- und Vermessungswesen', licence: 'CC BY 4.0',
-            },
-            { name: 'swissALTI3D', scope: 'Switzerland', credit: '© Data: swisstopo', licence: 'swisstopo OGD' },
-            {
-                name: 'DGM1', scope: 'Niedersachsen',
-                credit: 'LGLN – Landesamt für Geoinformation und Landesvermessung Niedersachsen', licence: 'CC BY 4.0',
-            },
-            {
-                name: 'DGM1', scope: 'Baden-Württemberg',
-                credit: 'LGL – Landesamt für Geoinformation und Landentwicklung Baden-Württemberg', licence: 'dl-de/by-2-0',
-            },
-            {
-                name: 'DGM1', scope: 'Brandenburg and Berlin',
-                credit: 'LGB – Landesvermessung und Geobasisinformation Brandenburg; Berlin: Geoportal Berlin',
-                licence: 'dl-de/by-2-0',
-            },
-            {
-                name: 'DGM1', scope: 'Hessen',
-                credit: 'HVBG – Hessische Verwaltung für Bodenmanagement und Geoinformation', licence: 'dl-de/zero-2-0',
-            },
-            { name: 'DGM1', scope: 'Nordrhein-Westfalen', credit: 'Geobasis NRW', licence: 'dl-de/zero-2-0' },
-            {
-                name: 'DGM1', scope: 'Rheinland-Pfalz',
-                credit: 'LVermGeo RLP – Landesamt für Vermessung und Geobasisinformation Rheinland-Pfalz',
-                licence: 'dl-de/by-2-0',
-            },
-            {
-                name: 'DGM1', scope: 'Mecklenburg-Vorpommern',
-                credit: 'LAiV MV – Landesamt für innere Verwaltung Mecklenburg-Vorpommern', licence: 'CC BY 4.0',
-            },
-            {
-                name: 'DGM1 2020–2025', scope: 'Thüringen',
-                credit: 'TLBG – Thüringer Landesamt für Bodenmanagement und Geoinformation', licence: 'dl-de/by-2-0',
-            },
-            { name: 'MDT 5 m', scope: 'Canary Islands', credit: 'IGN – Instituto Geográfico Nacional', licence: 'CC BY 4.0' },
-        ],
-    },
-    {
-        title: 'Land cover',
-        feeds: 'The colour of the ground: land-cover classes, true-colour imagery, and the planet seen from far off.',
-        sources: [
-            {
-                name: 'ESA WorldCover 2021 v200', scope: 'Land-cover classes, 10 m',
-                credit: '© ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium',
-                licence: 'CC BY 4.0',
-            },
-            {
-                name: 'Sentinel-2 L2A true colour', scope: 'Imagery and Hybrid terrain colours; roof colours of larger buildings outside the orthophoto areas',
-                credit: 'Contains modified Copernicus Sentinel data', licence: 'Copernicus Sentinel data terms',
-            },
-            {
-                name: 'Blue Marble Next Generation', scope: 'The whole planet, 500 m',
-                credit: 'NASA Earth Observatory', licence: 'Public domain',
-            },
-        ],
-    },
-    {
-        title: 'Roads, buildings and map features',
-        feeds: 'Coastlines, lakes and rivers, land use, roads, railways, bridges, airfields and buildings, and the place search on the Flight tab.',
-        sources: [
-            {
-                name: 'OpenStreetMap', credit: '© OpenStreetMap contributors',
-                creditUrl: 'https://www.openstreetmap.org/copyright', licence: 'ODbL 1.0',
-            },
-        ],
-    },
-    {
-        title: 'Buildings',
-        feeds: 'Roof colours measured in aerial photos (with the Imagery and Hybrid terrain colours), building '
-            + 'heights and ridges fitted to a surface model, and official roof shapes and heights - plus the '
-            + 'buildings only the official models have.',
-        sources: [
-            { name: 'DOP40 digital orthophotos, 40 cm', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
-            {
-                name: 'DOP20 digital orthophotos, 20 cm', scope: 'Brandenburg, Berlin',
-                credit: '© GeoBasis-DE/LGB; © Geoportal Berlin (data changed)', licence: 'dl-de/by-2-0',
-            },
-            { name: 'DOM20 digital surface model, 20 cm', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
-            { name: 'DGM1 digital terrain model, 1 m (ground under the buildings)', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
-            { name: 'LoD2 3D building models', scope: 'Bavaria', credit: BAVARIA_CREDIT, licence: 'CC BY 4.0' },
-            {
-                name: 'bDOM digital surface model, 20 cm, over DGM1, 1 m', scope: 'Brandenburg',
-                credit: '© GeoBasis-DE/LGB (data changed)', licence: 'dl-de/by-2-0',
-            },
-            {
-                name: 'LoD2 3D building models', scope: 'Brandenburg',
-                credit: '© GeoBasis-DE/LGB (data changed)', licence: 'dl-de/by-2-0',
-            },
-            { name: 'LoD2 3D building models', scope: 'Berlin', credit: 'Geoportal Berlin', licence: 'dl-de/zero-2-0' },
-        ],
-    },
-];
-
-function formatControlKey(key: string): string {
-    switch (key) {
-        case 'arrowup': return '↑';
-        case 'arrowdown': return '↓';
-        case 'arrowleft': return '←';
-        case 'arrowright': return '→';
-        case 'numpadadd': return 'Num+';
-        case 'numpadsubtract': return 'Num-';
-        default: return key.toUpperCase();
-    }
-}
-
-/** "Logitech Extreme 3D (Vendor: 046d Product: c215)" reads as "Logitech Extreme 3D". */
-function joystickName(id: string): string {
-    const bracket = id.lastIndexOf('(');
-    return bracket !== -1 ? id.substring(0, bracket - 1) : id;
-}
-
-interface Option<T> {
-    value: T;
-    label: string;
-}
-
-const TERRAIN_COLOUR_OPTIONS: Option<TerrainColours>[] = [
-    { value: TerrainColours.LANDCOVER, label: 'Landcover (palette tones)' },
-    { value: TerrainColours.SWATCH, label: 'Swatches (quantised imagery)' },
-    { value: TerrainColours.HYBRID, label: 'Hybrid (palette hue, real shading)' },
-    { value: TerrainColours.IMAGERY, label: 'Imagery (true colour)' },
-];
-
-const ROADS_OPTIONS: Option<RoadsMode>[] = [
-    { value: RoadsMode.ALL, label: 'All roads' },
-    { value: RoadsMode.MAJOR, label: 'Major roads only' },
-    { value: RoadsMode.OFF, label: 'Off' },
-];
-
-const TERRAIN_SHADING_OPTIONS: Option<TerrainShading>[] = [
-    { value: TerrainShading.FACETED, label: 'Faceted (flat)' },
-    { value: TerrainShading.SMOOTH, label: 'Smooth (blended)' },
-];
-
-const COLOUR_GROUP_OPTIONS: { key: ColourAdjustGroup; label: string }[] = [
-    { key: 'trees', label: 'Trees and shrubs' },
-    { key: 'terrain', label: 'Terrain' },
-    { key: 'water', label: 'Water' },
-    { key: 'sky', label: 'Sky' },
-];
-
-/**
- * One slider per channel. `scale` turns the stored value into what the slider
- * and its label show: percent for saturation and brightness, degrees as they
- * are for hue.
- */
-const COLOUR_CHANNEL_OPTIONS: {
-    key: keyof ColourTweak; label: string; min: number; max: number; step: number; scale: number; unit: string;
-}[] = [
-    {
-        key: 'hue', label: 'Hue', min: -COLOUR_HUE_MAX_DEG, max: COLOUR_HUE_MAX_DEG, step: 5, scale: 1, unit: '°',
-    },
-    {
-        key: 'saturation', label: 'Saturation', min: COLOUR_TWEAK_MIN * 100, max: COLOUR_TWEAK_MAX * 100,
-        step: 5, scale: 100, unit: '%',
-    },
-    {
-        key: 'brightness', label: 'Brightness', min: COLOUR_TWEAK_MIN * 100, max: COLOUR_TWEAK_MAX * 100,
-        step: 5, scale: 100, unit: '%',
-    },
-];
-
-type ColourChannelOption = typeof COLOUR_CHANNEL_OPTIONS[number];
-
-const FLIGHT_MODEL_OPTIONS: Option<string>[] = [
-    { value: FlightModels.FM2, label: 'FM2 (Rigid body)' },
-    { value: FlightModels.FM3, label: 'FM3 (Physical, post-stall)' },
-    { value: FlightModels.DEBUG, label: 'Debug (Free-fly)' },
-];
-
-const AI_PILOT_MODEL_OPTIONS: Option<AiPilotModels>[] = [
-    { value: AiPilotModels.CLASSIC, label: 'Classic BFM' },
-    { value: AiPilotModels.SHAW, label: 'Shaw (Fighter Combat)' },
-    { value: AiPilotModels.AGGRESSIVE, label: 'Aggressive (Berserker)' },
-    { value: AiPilotModels.ACE, label: 'Ace (vertical fight + post-stall)' },
-];
-
-const UNIT_SYSTEM_OPTIONS: Option<UnitSystems>[] = [
-    { value: UnitSystems.METRIC, label: 'Metric (m, km/h)' },
-    { value: UnitSystems.IMPERIAL, label: 'Imperial (ft, kt)' },
-];
-
-const KEYBOARD_LAYOUT_OPTIONS: Option<KeyboardControlLayoutId>[] = [
-    { value: KeyboardControlLayoutId.QWERTY, label: 'QWERTY' },
-    { value: KeyboardControlLayoutId.QWERTZ, label: 'QWERTZ' },
-    { value: KeyboardControlLayoutId.AZERTY, label: 'AZERTY' },
-    { value: KeyboardControlLayoutId.DVORAK, label: 'Dvorak' },
-    { value: KeyboardControlLayoutId.ARROWS, label: 'Arrows' },
-];
-
-const PITCH_STICK_MODE_OPTIONS: Option<KeyboardPitchStickMode>[] = [
-    { value: KeyboardPitchStickMode.LAYOUT_DEFAULT, label: 'Layout default' },
-    { value: KeyboardPitchStickMode.HOLD, label: 'Hold: full while pressed' },
-];
-
-/**
- * The terrain detail slider is in kilometres and the setting is in metres,
- * because kilometres are what the label has to read and metres are what every
- * distance in the LOD is already in. The top step is off —
- * `DETAIL_DISTANCE_OFF` — rather than a very large number, so "off" is exact
- * instead of merely far.
- */
-const DETAIL_OFF_KM = TERRAIN_DETAIL_DISTANCE_MAX_M / 1000;
-
 /** The tab the player last looked at, so reopening lands back on it. */
 let lastTab: SettingsTab = 'Flight';
 
@@ -408,6 +74,8 @@ function sliderValue(event: Event): number {
  * owns, and on Material components only for outer layout (width, flex,
  * margin). Material's own look is changed only through its documented
  * `--mat-*` tokens, never by reaching into its internal classes.
+ *
+ * What it says and does lives in settingsModel.ts; this is the layout.
  */
 @Component({
     selector: 'rfs-settings-dialog',
@@ -420,12 +88,12 @@ function sliderValue(event: Event): number {
     // view; the dialog sits on its own opaque surface and wants neither.
     host: { class: 'block font-normal [text-shadow:none]' },
     template: `
-<h2 mat-dialog-title>Settings</h2>
+<h2 mat-dialog-title>{{ text.title }}</h2>
 
 <div class="px-6">
     @if (narrow()) {
         <mat-form-field class="w-full" subscriptSizing="dynamic">
-            <mat-label>Section</mat-label>
+            <mat-label>{{ text.sectionPicker }}</mat-label>
             <mat-select [value]="tab()" (selectionChange)="selectTab($event.value)">
                 @for (name of tabs; track name) {
                     <mat-option [value]="name">{{ name }}</mat-option>
@@ -454,7 +122,7 @@ function sliderValue(event: Event): number {
                          other fields and the buttons leave, and scrolls itself. -->
                     <div class="flex h-full flex-col gap-4 overflow-hidden">
                         <section class="flex min-h-0 flex-1 flex-col">
-                            <h3 class="m-0 mb-1 text-base font-medium">Aircraft</h3>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.aircraft.title }}</h3>
                             <mat-selection-list #aircraftList [multiple]="false" class="min-h-0 flex-1 overflow-y-auto"
                                     (selectionChange)="spawnMenu.selectModel($event.options[0].value)">
                                 @for (label of spawn().aircraft; track $index) {
@@ -466,7 +134,7 @@ function sliderValue(event: Event): number {
                         </section>
                         @if (spawn().liveries.length > 1) {
                             <mat-form-field class="w-full" subscriptSizing="dynamic">
-                                <mat-label>Livery</mat-label>
+                                <mat-label>{{ text.livery.label }}</mat-label>
                                 <mat-select [value]="spawn().liveryIndex" (selectionChange)="spawnMenu.selectLivery($event.value)">
                                     @for (label of spawn().liveries; track $index) {
                                         <mat-option [value]="$index">{{ label }}</mat-option>
@@ -477,23 +145,23 @@ function sliderValue(event: Event): number {
                         <div class="flex items-start gap-2">
                             <div class="min-w-0 flex-1">
                                 <mat-form-field class="w-full" subscriptSizing="dynamic">
-                                    <mat-label>Find an airfield or place</mat-label>
+                                    <mat-label>{{ text.search.label }}</mat-label>
                                     <input matInput type="search" autocomplete="off" [value]="searchQuery()"
-                                        placeholder="ICAO, name, town, or lat, lon"
+                                        [placeholder]="text.search.placeholder"
                                         [matAutocomplete]="destinations"
                                         (input)="onSearchInput($any($event.target).value)"
                                         (keydown.enter)="onSearchEnter($event)">
-                                    <mat-hint>Airfields match as you type; Enter also looks up places.</mat-hint>
+                                    <mat-hint>{{ text.search.hint }}</mat-hint>
                                 </mat-form-field>
                             </div>
                             <button mat-stroked-button type="button" class="mt-2"
                                 [disabled]="searchQuery().trim() === '' || placeStatus() === 'searching'"
-                                (click)="searchPlaces()">Search</button>
+                                (click)="searchPlaces()">{{ text.search.button }}</button>
                         </div>
                         <mat-autocomplete #destinations="matAutocomplete" [displayWith]="clearOnPick"
                                 (optionSelected)="goTo($event.option.value)">
                             @if (quickResults().length > 0) {
-                                <mat-optgroup label="Airfields">
+                                <mat-optgroup [label]="text.search.airfieldsGroup">
                                     @for (d of quickResults(); track $index) {
                                         <mat-option [value]="d" [disabled]="d.area === undefined">
                                             <span class="flex flex-col py-1 leading-tight">
@@ -505,7 +173,7 @@ function sliderValue(event: Event): number {
                                 </mat-optgroup>
                             }
                             @if (searchQuery().trim() !== '') {
-                                <mat-optgroup label="Places">
+                                <mat-optgroup [label]="text.search.placesGroup">
                                     @for (d of placeResults(); track $index) {
                                         <mat-option [value]="d" [disabled]="d.area === undefined">
                                             <span class="flex flex-col py-1 leading-tight">
@@ -515,17 +183,17 @@ function sliderValue(event: Event): number {
                                         </mat-option>
                                     }
                                     @switch (placeStatus()) {
-                                        @case ('idle') { <mat-option disabled>Press Enter to look up places</mat-option> }
-                                        @case ('searching') { <mat-option disabled>Searching…</mat-option> }
-                                        @case ('none') { <mat-option disabled>No places found</mat-option> }
-                                        @case ('error') { <mat-option disabled>Place search failed, check the connection</mat-option> }
+                                        @case ('idle') { <mat-option disabled>{{ text.search.idle }}</mat-option> }
+                                        @case ('searching') { <mat-option disabled>{{ text.search.searching }}</mat-option> }
+                                        @case ('none') { <mat-option disabled>{{ text.search.none }}</mat-option> }
+                                        @case ('error') { <mat-option disabled>{{ text.search.error }}</mat-option> }
                                     }
                                 </mat-optgroup>
                             }
                         </mat-autocomplete>
                         @if (spawn().airfields.length > 0) {
                             <mat-form-field class="w-full" subscriptSizing="dynamic">
-                                <mat-label>Airfield</mat-label>
+                                <mat-label>{{ text.airfield.label }}</mat-label>
                                 <mat-select [value]="spawn().airfieldIndex" (selectionChange)="spawnMenu.selectAirfield($event.value)">
                                     @for (label of spawn().airfields; track $index) {
                                         <mat-option [value]="$index">{{ label }}</mat-option>
@@ -534,11 +202,11 @@ function sliderValue(event: Event): number {
                             </mat-form-field>
                         }
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Start</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.start.title }}</h3>
                             <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
                                 @for (action of spawnActions; track action.mode) {
                                     <button mat-flat-button type="button" (click)="spawnMenu.spawn(action.mode)">
-                                        {{ action.label }} ({{ action.key }})
+                                        {{ spawnButtonLabel(action) }}
                                     </button>
                                 }
                             </div>
@@ -548,17 +216,11 @@ function sliderValue(event: Event): number {
                 @case ('Graphics') {
                     <div class="flex flex-col gap-6">
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Render scale</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Draws the 3D view at this fraction of the screen and stretches it to
-                                full size; the HUD and cockpit displays stay sharp on top. Lower it
-                                if the frame rate is short on a large screen. 100% is off and draws
-                                at native size, supersampled for anti-aliasing where the resolution
-                                affords it unless that is switched off here.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.renderScale.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.renderScale.help }}</p>
                             <div class="flex flex-wrap items-center gap-6">
                                 <mat-form-field class="w-48" subscriptSizing="dynamic">
-                                    <mat-label>3D resolution</mat-label>
+                                    <mat-label>{{ text.renderScale.select }}</mat-label>
                                     <mat-select [value]="renderScale()" (selectionChange)="setRenderScale($event.value)">
                                         @for (option of renderScales; track option.value) {
                                             <mat-option [value]="option.value">{{ option.label }}</mat-option>
@@ -567,21 +229,16 @@ function sliderValue(event: Event): number {
                                 </mat-form-field>
                                 <mat-slide-toggle [checked]="supersampling()" [disabled]="renderScale() < 1"
                                     (change)="setSupersampling($event)">
-                                    Supersampling (SSAA) at 100%
+                                    {{ text.renderScale.supersampling }}
                                 </mat-slide-toggle>
                             </div>
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Terrain detail distance</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                How far out terrain keeps full detail. Past it the far field is drawn
-                                coarser, which is where most of the triangles above the horizon go —
-                                lower this if the frame rate is short. The ground you are flying over
-                                is never affected. Rightmost is off.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.terrainDetail.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.terrainDetail.help }}</p>
                             <div class="flex items-center gap-4">
-                                <mat-slider class="flex-1" [min]="detailMinKm" [max]="detailMaxKm" [step]="2">
+                                <mat-slider class="flex-1" [min]="sliders.terrainDetailKm.min" [max]="sliders.terrainDetailKm.max" [step]="sliders.terrainDetailKm.step">
                                     <input matSliderThumb [value]="terrainDetailKm()" (input)="setTerrainDetail($event)">
                                 </mat-slider>
                                 <output class="w-16 text-right tabular-nums">{{ terrainDetailLabel() }}</output>
@@ -589,30 +246,21 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Land-use detail reach</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Only the finest terrain tiles carry the exact field, wood and town
-                                outlines. This brings those tiles in that many times further out
-                                than the terrain detail alone would, at the cost of more triangles
-                                around the aircraft. 1x is no bias.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.landuseReach.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.landuseReach.help }}</p>
                             <div class="flex items-center gap-4">
-                                <mat-slider class="flex-1" [min]="reachMin" [max]="reachMax" [step]="0.5">
+                                <mat-slider class="flex-1" [min]="sliders.landuseReach.min" [max]="sliders.landuseReach.max" [step]="sliders.landuseReach.step">
                                     <input matSliderThumb [value]="landuseReach()" (input)="setLanduseReach($event)">
                                 </mat-slider>
-                                <output class="w-16 text-right tabular-nums">{{ landuseReach().toFixed(2) }}x</output>
+                                <output class="w-16 text-right tabular-nums">{{ landuseReachLabel(landuseReach()) }}</output>
                             </div>
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Finest terrain level</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                The deepest zoom level of terrain tiles drawn. Each level down halves
-                                the tile resolution and drops the land-use outlines the finer tiles
-                                carry, for fewer triangles and fewer tile fetches. 12 is full detail.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.visibleZoom.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.visibleZoom.help }}</p>
                             <div class="flex items-center gap-4">
-                                <mat-slider class="flex-1" [min]="visibleZoomMin" [max]="visibleZoomMax" [step]="1">
+                                <mat-slider class="flex-1" [min]="sliders.visibleZoom.min" [max]="sliders.visibleZoom.max" [step]="sliders.visibleZoom.step">
                                     <input matSliderThumb [value]="visibleZoom()" (input)="setVisibleZoom($event)">
                                 </mat-slider>
                                 <output class="w-16 text-right tabular-nums">z{{ visibleZoom() }}</output>
@@ -620,15 +268,10 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Land-use region size</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                How large a field, wood or town has to be on screen before it is
-                                drawn, in pixels across. Big regions show from far away and small
-                                ones fill in as you close; lower brings the small ones in from
-                                further out, higher keeps the distance cleaner.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.landuseReveal.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.landuseReveal.help }}</p>
                             <div class="flex items-center gap-4">
-                                <mat-slider class="flex-1" [min]="revealMin" [max]="revealMax" [step]="1">
+                                <mat-slider class="flex-1" [min]="sliders.landuseRevealPx.min" [max]="sliders.landuseRevealPx.max" [step]="sliders.landuseRevealPx.step">
                                     <input matSliderThumb [value]="landuseReveal()" (input)="setLanduseReveal($event)">
                                 </mat-slider>
                                 <output class="w-16 text-right tabular-nums">{{ landuseReveal() }} px</output>
@@ -636,16 +279,10 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Terrain triangle cap</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Ceiling on terrain triangles drawn per frame. When the view asks for
-                                more, the farthest tiles are folded into coarser ones until it fits,
-                                so a low cap shows as a coarser far field rather than coarser ground
-                                nearby. Raise it if the distance looks blocky; lower it if the frame
-                                rate is short.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.triangleBudget.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.triangleBudget.help }}</p>
                             <div class="flex items-center gap-4">
-                                <mat-slider class="flex-1" [min]="triangleMinK" [max]="triangleMaxK" [step]="100">
+                                <mat-slider class="flex-1" [min]="sliders.triangleBudgetK.min" [max]="sliders.triangleBudgetK.max" [step]="sliders.triangleBudgetK.step">
                                     <input matSliderThumb [value]="triangleBudgetK()" (input)="setTriangleBudget($event)">
                                 </mat-slider>
                                 <output class="w-16 text-right tabular-nums">{{ triangleBudgetLabel() }}</output>
@@ -653,41 +290,25 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Far tile textures</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Distant ground is drawn as large facets, one colour each. With this
-                                on, those facets are painted with an image of the fields, woods and
-                                towns the detailed tiles hold, so the far view keeps its detail
-                                instead of switching it on as you close. Off shows the plain facets.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.farTileTextures.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.farTileTextures.help }}</p>
                             <mat-slide-toggle [checked]="farTileTextures()" (change)="setFarTileTextures($event)">
-                                Paint far tiles from the detailed ground
+                                {{ text.farTileTextures.toggle }}
                             </mat-slide-toggle>
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Buildings</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Houses and other buildings from OpenStreetMap, with their roofs, where
-                                the terrain was baked with them. Far off only the larger ones are
-                                drawn, and a busy view thins them out to hold the frame rate. Where
-                                roofs were measured in aerial photos they show their real colour with
-                                the Imagery and Hybrid terrain colours.
-                            </p>
-                            <p class="m-0 mb-2 text-xs opacity-60">Data sources and licences: see the About tab.</p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.buildings.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.buildings.help }}</p>
+                            <p class="m-0 mb-2 text-xs opacity-60">{{ text.buildings.note }}</p>
                             <mat-slide-toggle [checked]="buildings()" (change)="setBuildings($event)">
-                                Draw buildings
+                                {{ text.buildings.toggle }}
                             </mat-slide-toggle>
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Roads</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Roads are drawn as lines over the ground where the terrain was baked
-                                with them. Major keeps motorways and main roads, the ones you can
-                                see from altitude, and drops the streets, which are most of the
-                                cost over a city.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.roads.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.roads.help }}</p>
                             <mat-radio-group class="grid grid-cols-1 sm:grid-cols-3"
                                 [value]="roads()" (change)="setRoads($event.value)">
                                 @for (option of roadsOptions; track option.value) {
@@ -697,11 +318,8 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Terrain colour</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Every facet is baked with both a landcover class and a satellite colour;
-                                this picks which one paints it.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.terrainColour.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.terrainColour.help }}</p>
                             <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
                                 [value]="terrainColour()" (change)="setTerrainColour($event.value)">
                                 @for (option of terrainColours; track option.value) {
@@ -711,43 +329,34 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Land-use colour</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                In Hybrid colour, how much of a field, wood or town is its land type's
-                                colour, and how much the terrain colour sampled from imagery.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.landuseBlend.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.landuseBlend.help }}</p>
                             <div class="flex items-center gap-4">
-                                <span class="text-sm opacity-70">Sampled</span>
-                                <mat-slider class="flex-1" [min]="0" [max]="100" [step]="5">
+                                <span class="text-sm opacity-70">{{ text.landuseBlend.minLabel }}</span>
+                                <mat-slider class="flex-1" [min]="sliders.landuseBlendPercent.min" [max]="sliders.landuseBlendPercent.max" [step]="sliders.landuseBlendPercent.step">
                                     <input matSliderThumb [value]="landuseBlend()" (input)="setLanduseBlend($event)">
                                 </mat-slider>
-                                <span class="text-sm opacity-70">Land type</span>
+                                <span class="text-sm opacity-70">{{ text.landuseBlend.maxLabel }}</span>
                                 <output class="w-16 text-right tabular-nums">{{ landuseBlend() }}%</output>
                             </div>
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Tree density</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                How many trees are placed in each wood, as a multiplier on the default
-                                spacing - 0 turns trees off. Re-grows forest already loaded, so it
-                                takes a moment to catch up over a large area.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.treeDensity.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.treeDensity.help }}</p>
                             <div class="flex items-center gap-4">
-                                <span class="text-sm opacity-70">0x</span>
-                                <mat-slider class="flex-1" [min]="0" [max]="20" [step]="1">
+                                <span class="text-sm opacity-70">{{ text.treeDensity.minLabel }}</span>
+                                <mat-slider class="flex-1" [min]="sliders.treeDensity.min" [max]="sliders.treeDensity.max" [step]="sliders.treeDensity.step">
                                     <input matSliderThumb [value]="treeDensity()" (input)="setTreeDensity($event)">
                                 </mat-slider>
-                                <span class="text-sm opacity-70">20x</span>
+                                <span class="text-sm opacity-70">{{ text.treeDensity.maxLabel }}</span>
                                 <output class="w-16 text-right tabular-nums">{{ treeDensity() }}x</output>
                             </div>
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Terrain shading</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Flat colour per facet, or smoothly blended across neighbouring facets.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.terrainShading.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.terrainShading.help }}</p>
                             <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
                                 [value]="terrainShading()" (change)="setTerrainShading($event.value)">
                                 @for (option of terrainShadings; track option.value) {
@@ -760,12 +369,7 @@ function sliderValue(event: Event): number {
 
                 @case ('Colours') {
                     <div class="flex flex-col gap-6">
-                        <p class="m-0 text-sm opacity-70">
-                            Hue, saturation and brightness of the trees and shrubs, the ground, water
-                            and the sky, on top of whichever terrain colour is picked. 0° and 100% are
-                            the look as drawn; 0% saturation is grey, and hue turns every colour round
-                            the colour wheel by that many degrees.
-                        </p>
+                        <p class="m-0 text-sm opacity-70">{{ text.colours.help }}</p>
                         @for (group of colourGroups; track group.key) {
                             <section>
                                 <h3 class="m-0 mb-1 text-base font-medium">{{ group.label }}</h3>
@@ -782,7 +386,7 @@ function sliderValue(event: Event): number {
                             </section>
                         }
                         <div>
-                            <button mat-button type="button" (click)="resetColourAdjust()">Reset colours</button>
+                            <button mat-button type="button" (click)="resetColourAdjust()">{{ text.colours.reset }}</button>
                         </div>
                     </div>
                 }
@@ -791,16 +395,12 @@ function sliderValue(event: Event): number {
                     <div class="flex flex-col gap-6">
                         @if (areas().length > 1) {
                             <section>
-                                <h3 class="m-0 mb-1 text-base font-medium">Area</h3>
-                                <p class="m-0 mb-2 text-sm opacity-70">
-                                    Where in the world to fly. Areas other than the home one are terrain
-                                    only — no airbase, no carrier — so you start airborne over the middle
-                                    of them. Changing this reloads the sim.
-                                </p>
+                                <h3 class="m-0 mb-1 text-base font-medium">{{ text.area.title }}</h3>
+                                <p class="m-0 mb-2 text-sm opacity-70">{{ text.area.help }}</p>
                                 <div class="flex flex-wrap items-center gap-4">
                                     <div class="min-w-40 flex-1">
                                         <mat-form-field class="w-full" subscriptSizing="dynamic">
-                                            <mat-label>Area</mat-label>
+                                            <mat-label>{{ text.area.select }}</mat-label>
                                             <mat-select [value]="area()" (selectionChange)="area.set($event.value)">
                                                 @for (option of areas(); track option.value) {
                                                     <mat-option [value]="option.value">{{ option.label }}</mat-option>
@@ -809,26 +409,21 @@ function sliderValue(event: Event): number {
                                         </mat-form-field>
                                     </div>
                                     <button mat-flat-button type="button"
-                                        [disabled]="area() === initialArea()" (click)="flyToArea()">Fly here</button>
+                                        [disabled]="area() === initialArea()" (click)="flyToArea()">{{ text.area.button }}</button>
                                 </div>
                             </section>
                         }
 
                         @if (terrainImport) {
                             <section>
-                                <h3 class="m-0 mb-1 text-base font-medium">Import terrain</h3>
-                                <p class="m-0 mb-2 text-sm opacity-70">
-                                    Bake a new area into the terrain, or delete one. Runs on the dev server
-                                    and carries on if this dialog is closed.
-                                </p>
+                                <h3 class="m-0 mb-1 text-base font-medium">{{ text.importTerrain.title }}</h3>
+                                <p class="m-0 mb-2 text-sm opacity-70">{{ text.importTerrain.help }}</p>
                                 <rfs-terrain-importer />
                             </section>
                         }
 
                         @if (areasLoaded() && areas().length < 2 && !terrainImport) {
-                            <p class="m-0 text-sm opacity-70">
-                                Only one terrain area is baked, so there is nothing to choose between.
-                            </p>
+                            <p class="m-0 text-sm opacity-70">{{ text.singleArea }}</p>
                         }
                     </div>
                 }
@@ -836,13 +431,10 @@ function sliderValue(event: Event): number {
                 @case ('Simulation') {
                     <div class="flex flex-col gap-6">
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Time of day</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">
-                                Local solar time. Moves the sun, so sky, terrain and aircraft silhouettes follow
-                                it. Sunrise 06:00, sunset 18:00. N flips between afternoon and midnight.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.daytime.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.daytime.help }}</p>
                             <div class="flex items-center gap-4">
-                                <mat-slider class="flex-1" [min]="0" [max]="23.75" [step]="0.25">
+                                <mat-slider class="flex-1" [min]="sliders.daytimeHours.min" [max]="sliders.daytimeHours.max" [step]="sliders.daytimeHours.step">
                                     <input matSliderThumb [value]="daytime()" (input)="setDaytime($event)">
                                 </mat-slider>
                                 <output class="w-16 text-right tabular-nums">{{ daytimeLabel() }}</output>
@@ -850,7 +442,7 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Flight model</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.flightModel.title }}</h3>
                             <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
                                 [value]="flightModel()" (change)="setFlightModel($event.value)">
                                 @for (option of flightModels; track option.value) {
@@ -860,8 +452,8 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">AI pilot model</h3>
-                            <p class="m-0 mb-2 text-sm opacity-70">Applies on the next merge / opponent spawn.</p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.aiPilotModel.title }}</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">{{ text.aiPilotModel.help }}</p>
                             <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
                                 [value]="aiPilotModel()" (change)="setAiPilotModel($event.value)">
                                 @for (option of aiPilotModels; track option.value) {
@@ -875,9 +467,9 @@ function sliderValue(event: Event): number {
                 @case ('General') {
                     <div class="flex flex-col gap-6">
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Volume</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.volume.title }}</h3>
                             <div class="flex items-center gap-4">
-                                <mat-slider class="flex-1" [min]="0" [max]="100" [step]="1">
+                                <mat-slider class="flex-1" [min]="sliders.volumePercent.min" [max]="sliders.volumePercent.max" [step]="sliders.volumePercent.step">
                                     <input matSliderThumb [value]="volume()" (input)="setVolume($event)">
                                 </mat-slider>
                                 <output class="w-16 text-right tabular-nums">{{ volume() }}%</output>
@@ -885,7 +477,7 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Units</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.units.title }}</h3>
                             <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
                                 [value]="unitSystem()" (change)="setUnitSystem($event.value)">
                                 @for (option of unitSystems; track option.value) {
@@ -895,7 +487,7 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Keyboard layout</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.keyboardLayout.title }}</h3>
                             <mat-radio-group class="grid grid-cols-2 sm:grid-cols-3"
                                 [value]="keyboardLayout()" (change)="setKeyboardLayout($event.value)">
                                 @for (option of keyboardLayouts; track option.value) {
@@ -905,7 +497,7 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Pitch stick</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.pitchStick.title }}</h3>
                             <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
                                 [value]="pitchStickMode()" (change)="setPitchStickMode($event.value)">
                                 @for (option of pitchStickModes; track option.value) {
@@ -919,33 +511,33 @@ function sliderValue(event: Event): number {
                 @case ('Help') {
                     <div class="flex flex-col gap-6">
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Keyboard</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.help.keyboard }}</h3>
                             <ng-container *ngTemplateOutlet="helpList; context: { $implicit: flightHelp() }" />
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Joystick</h3>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.help.joystick }}</h3>
                             @if (joystick(); as joystick) {
                                 <p class="m-0 mb-2 text-sm opacity-70">{{ joystick.name }}</p>
                                 <ng-container *ngTemplateOutlet="helpList; context: { $implicit: joystick.axes }" />
                             } @else {
-                                <p class="m-0 text-sm opacity-70">No device detected</p>
+                                <p class="m-0 text-sm opacity-70">{{ text.help.noJoystick }}</p>
                             }
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Systems</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.help.systems }}</h3>
                             <ng-container *ngTemplateOutlet="helpList; context: { $implicit: systemsHelp }" />
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Spawn menu</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.help.spawnMenu }}</h3>
                             <ng-container *ngTemplateOutlet="helpList; context: { $implicit: spawnHelp }" />
-                            <p class="m-0 mt-2 text-sm opacity-70">Aircraft list: pick from the combobox in the spawn menu.</p>
+                            <p class="m-0 mt-2 text-sm opacity-70">{{ text.help.spawnMenuNote }}</p>
                         </section>
 
                         <section>
-                            <h3 class="m-0 mb-2 text-base font-medium">Views</h3>
+                            <h3 class="m-0 mb-2 text-base font-medium">{{ text.help.views }}</h3>
                             <ng-container *ngTemplateOutlet="helpList; context: { $implicit: viewsHelp }" />
                         </section>
                     </div>
@@ -954,12 +546,8 @@ function sliderValue(event: Event): number {
                 @case ('About') {
                     <div class="flex flex-col gap-6">
                         <section>
-                            <h3 class="m-0 mb-1 text-base font-medium">Data sources</h3>
-                            <p class="m-0 text-sm opacity-70">
-                                The world is built from open data. Each source is clipped, resampled,
-                                measured and combined with the others when the terrain is baked, so
-                                none of it appears as published, and no publisher endorses this game.
-                            </p>
+                            <h3 class="m-0 mb-1 text-base font-medium">{{ text.about.title }}</h3>
+                            <p class="m-0 text-sm opacity-70">{{ text.about.help }}</p>
                         </section>
 
                         @for (group of dataSources; track group.title) {
@@ -1014,17 +602,26 @@ function sliderValue(event: Event): number {
 </ng-template>
 
 <mat-dialog-actions align="end">
-    <button mat-button type="button" mat-dialog-close>Close</button>
+    <button mat-button type="button" mat-dialog-close>{{ text.close }}</button>
 </mat-dialog-actions>
 `,
 })
 export class SettingsDialog {
     private readonly data = inject<SettingsDialogData>(MAT_DIALOG_DATA);
     private readonly config = this.data.config;
+    private readonly actions = new SettingsActions(this.config, {
+        setMasterVolume: volume => this.data.audio.setMasterVolume(volume),
+        setKeyboardLayout: layout => this.data.keyboardInput.setKeyboardLayout(layout),
+        setKeyboardPitchStickMode: mode => this.data.keyboardInput.setKeyboardPitchStickMode(mode),
+    });
 
+    readonly text = SETTINGS_TEXT;
+    readonly sliders = SLIDERS;
     readonly tabs = TABS;
     readonly spawnMenu = this.data.spawnMenu;
     readonly spawnActions = SPAWN_ACTIONS;
+    readonly spawnButtonLabel = spawnButtonLabel;
+    readonly landuseReachLabel = landuseReachLabel;
     readonly spawn = signal(this.spawnMenu.getState());
 
     readonly searchQuery = signal('');
@@ -1050,9 +647,6 @@ export class SettingsDialog {
     readonly keyboardLayouts = KEYBOARD_LAYOUT_OPTIONS;
     readonly pitchStickModes = PITCH_STICK_MODE_OPTIONS;
 
-    readonly detailMinKm = TERRAIN_DETAIL_DISTANCE_MIN_M / 1000;
-    readonly detailMaxKm = DETAIL_OFF_KM + 2;
-
     readonly terrainImport = this.data.terrainImport;
     readonly tab = signal<SettingsTab>(this.data.initialTab ?? lastTab);
     readonly terrainColour = signal(this.config.terrainColour.getActive());
@@ -1071,50 +665,27 @@ export class SettingsDialog {
     readonly volume = signal(Math.round(loadSettings().volume * 100));
 
     readonly daytime = signal(this.config.daytime.getActive());
-    readonly daytimeLabel = computed(() => formatSunTime(this.daytime()));
+    readonly daytimeLabel = computed(() => daytimeLabel(this.daytime()));
 
     /** Metres, or `DETAIL_DISTANCE_OFF`. */
     readonly terrainDetail = signal(this.config.terrainDetail.getActive());
-    readonly terrainDetailKm = computed(() => {
-        const m = this.terrainDetail();
-        return Number.isFinite(m) ? m / 1000 : this.detailMaxKm;
-    });
-    readonly terrainDetailLabel = computed(() => {
-        const m = this.terrainDetail();
-        return Number.isFinite(m) ? `${Math.round(m / 1000)} km` : 'Off';
-    });
+    readonly terrainDetailKm = computed(() => terrainDetailKm(this.terrainDetail()));
+    readonly terrainDetailLabel = computed(() => terrainDetailLabel(this.terrainDetail()));
 
-    readonly reachMin = LEAF_REFINE_DISTANCE_SCALE_MIN;
-    readonly reachMax = LEAF_REFINE_DISTANCE_SCALE_MAX;
     readonly landuseReach = signal(this.config.landuseReach.getActive());
-
-    readonly visibleZoomMin = TERRAIN_VISIBLE_ZOOM_MIN;
-    readonly visibleZoomMax = TERRAIN_VISIBLE_ZOOM_MAX;
     readonly visibleZoom = signal(this.config.visibleZoom.getActive());
-
-    readonly revealMin = LANDUSE_REVEAL_MIN_PX_MIN;
-    readonly revealMax = LANDUSE_REVEAL_MIN_PX_MAX;
     readonly landuseReveal = signal(this.config.landuseReveal.getActive());
-
-    readonly triangleMinK = TERRAIN_TRIANGLE_BUDGET_MIN / 1000;
-    readonly triangleMaxK = TERRAIN_TRIANGLE_BUDGET_MAX / 1000;
     readonly triangleBudget = signal(this.config.triangleBudget.getActive());
 
     readonly farTileTextures = signal(this.config.farTileTextures.getActive());
     readonly buildings = signal(this.config.buildings.getActive());
     readonly roadsOptions = ROADS_OPTIONS;
     readonly roads = signal(this.config.roads.getActive());
-    readonly renderScales: Option<number>[] = RENDER_SCALES.map(scale => ({
-        value: scale,
-        label: scale >= 1 ? '100% (off)' : `${Math.round(scale * 100)}%`,
-    }));
+    readonly renderScales: Option<number>[] = RENDER_SCALE_OPTIONS;
     readonly renderScale = signal(this.config.renderScale.getActive());
     readonly supersampling = signal(this.config.supersampling.getActive());
     readonly triangleBudgetK = computed(() => this.triangleBudget() / 1000);
-    readonly triangleBudgetLabel = computed(() => {
-        const n = this.triangleBudget();
-        return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : `${Math.round(n / 1000)}K`;
-    });
+    readonly triangleBudgetLabel = computed(() => triangleBudgetLabel(this.triangleBudget()));
 
     readonly areas = signal<Option<string>[]>([]);
     readonly area = signal('');
@@ -1129,19 +700,7 @@ export class SettingsDialog {
     readonly licenceUrls = LICENCE_URLS;
 
     /** Flight control keys, relabelled whenever the keyboard layout changes. */
-    readonly flightHelp = computed<HelpEntry[]>(() => {
-        const layout = KeyboardControlLayouts.get(this.keyboardLayout());
-        if (!layout) {
-            return [];
-        }
-        const keys = (...actions: KeyboardControlAction[]) => actions.map(a => formatControlKey(layout[a]));
-        return [
-            { keys: keys(KeyboardControlAction.PITCH_NEG, KeyboardControlAction.PITCH_POS), action: 'Pitch' },
-            { keys: keys(KeyboardControlAction.ROLL_NEG, KeyboardControlAction.ROLL_POS), action: 'Roll' },
-            { keys: keys(KeyboardControlAction.YAW_NEG, KeyboardControlAction.YAW_POS), action: 'Yaw' },
-            { keys: keys(KeyboardControlAction.THROTTLE_POS, KeyboardControlAction.THROTTLE_NEG), action: 'Throttle' },
-        ];
-    });
+    readonly flightHelp = computed<HelpEntry[]>(() => flightHelp(this.keyboardLayout()));
 
     readonly joystick = signal(this.readJoystick());
 
@@ -1164,157 +723,118 @@ export class SettingsDialog {
     }
 
     setTerrainDetail(event: Event) {
-        const km = sliderValue(event);
-        this.config.terrainDetail.setActive(km > DETAIL_OFF_KM ? DETAIL_DISTANCE_OFF : km * 1000);
+        this.actions.setTerrainDetail(sliderValue(event));
         this.terrainDetail.set(this.config.terrainDetail.getActive());
     }
 
     setTerrainColour(mode: TerrainColours) {
-        this.config.terrainColour.setActive(mode);
-        updateSettings({ terrainColour: mode });
+        this.actions.setTerrainColour(mode);
         this.terrainColour.set(mode);
     }
 
     setTerrainShading(mode: TerrainShading) {
-        this.config.terrainShading.setActive(mode);
-        updateSettings({ terrainShading: mode });
+        this.actions.setTerrainShading(mode);
         this.terrainShading.set(mode);
     }
 
     setLanduseReach(event: Event) {
-        this.config.landuseReach.setActive(sliderValue(event));
-        const scale = this.config.landuseReach.getActive();
-        updateSettings({ landuseReach: scale });
-        this.landuseReach.set(scale);
+        this.actions.setLanduseReach(sliderValue(event));
+        this.landuseReach.set(this.config.landuseReach.getActive());
     }
 
     setVisibleZoom(event: Event) {
-        this.config.visibleZoom.setActive(sliderValue(event));
-        const zoom = this.config.visibleZoom.getActive();
-        updateSettings({ visibleZoom: zoom });
-        this.visibleZoom.set(zoom);
+        this.actions.setVisibleZoom(sliderValue(event));
+        this.visibleZoom.set(this.config.visibleZoom.getActive());
     }
 
     setLanduseReveal(event: Event) {
-        this.config.landuseReveal.setActive(sliderValue(event));
-        const px = this.config.landuseReveal.getActive();
-        updateSettings({ landuseRevealPx: px });
-        this.landuseReveal.set(px);
+        this.actions.setLanduseReveal(sliderValue(event));
+        this.landuseReveal.set(this.config.landuseReveal.getActive());
     }
 
     setFarTileTextures(event: MatSlideToggleChange) {
-        this.config.farTileTextures.setActive(event.checked);
-        updateSettings({ farTileTextures: event.checked });
+        this.actions.setFarTileTextures(event.checked);
         this.farTileTextures.set(event.checked);
     }
 
     setBuildings(event: MatSlideToggleChange) {
-        this.config.buildings.setActive(event.checked);
-        updateSettings({ buildings: event.checked });
+        this.actions.setBuildings(event.checked);
         this.buildings.set(event.checked);
     }
 
     setRoads(mode: RoadsMode) {
-        this.config.roads.setActive(mode);
-        updateSettings({ roads: mode });
+        this.actions.setRoads(mode);
         this.roads.set(mode);
     }
 
     setRenderScale(scale: number) {
-        this.config.renderScale.setActive(scale);
-        updateSettings({ renderScale: scale });
+        this.actions.setRenderScale(scale);
         this.renderScale.set(scale);
     }
 
     setSupersampling(event: MatSlideToggleChange) {
-        this.config.supersampling.setActive(event.checked);
-        updateSettings({ supersampling: event.checked });
+        this.actions.setSupersampling(event.checked);
         this.supersampling.set(event.checked);
     }
 
     setTriangleBudget(event: Event) {
-        this.config.triangleBudget.setActive(sliderValue(event) * 1000);
-        const n = this.config.triangleBudget.getActive();
-        updateSettings({ terrainTriangleBudget: n });
-        this.triangleBudget.set(n);
+        this.actions.setTriangleBudget(sliderValue(event));
+        this.triangleBudget.set(this.config.triangleBudget.getActive());
     }
 
     setLanduseBlend(event: Event) {
-        const percent = Math.round(sliderValue(event));
-        this.config.landuseBlend.setActive(percent / 100);
-        updateSettings({ landuseBlend: percent / 100 });
-        this.landuseBlend.set(percent);
+        this.landuseBlend.set(this.actions.setLanduseBlend(sliderValue(event)));
     }
 
     setTreeDensity(event: Event) {
-        const multiplier = Math.round(sliderValue(event));
-        this.config.treeDensity.setActive(multiplier);
-        updateSettings({ treeDensity: multiplier });
-        this.treeDensity.set(multiplier);
+        this.treeDensity.set(this.actions.setTreeDensity(sliderValue(event)));
     }
 
     colourSliderValue(group: ColourAdjustGroup, channel: ColourChannelOption): number {
-        return Math.round(this.colourAdjust()[group][channel.key] * channel.scale);
+        return colourSliderValue(this.colourAdjust(), group, channel);
     }
 
     setColourTweak(group: ColourAdjustGroup, channel: ColourChannelOption, event: Event) {
-        const value = Math.round(sliderValue(event)) / channel.scale;
-        this.config.colourAdjust.setTweak(group, { ...this.colourAdjust()[group], [channel.key]: value });
-        this.saveColourAdjust();
+        this.actions.setColourTweak(this.colourAdjust(), group, channel, sliderValue(event));
+        this.colourAdjust.set(this.config.colourAdjust.getActive());
     }
 
     resetColourAdjust() {
-        const defaults = defaultColourAdjust();
-        for (const group of COLOUR_ADJUST_GROUPS) {
-            this.config.colourAdjust.setTweak(group, defaults[group]);
-        }
-        this.saveColourAdjust();
-    }
-
-    private saveColourAdjust() {
-        const adjust = this.config.colourAdjust.getActive();
-        updateSettings({ colourAdjust: adjust });
-        this.colourAdjust.set(adjust);
+        this.actions.resetColourAdjust();
+        this.colourAdjust.set(this.config.colourAdjust.getActive());
     }
 
     setDaytime(event: Event) {
-        this.config.daytime.setActive(sliderValue(event));
+        this.actions.setDaytime(sliderValue(event));
         this.daytime.set(this.config.daytime.getActive());
     }
 
     setFlightModel(id: string) {
-        this.config.flightModels.setActive(id);
-        updateSettings({ flightModel: id });
+        this.actions.setFlightModel(id);
         this.flightModel.set(id);
     }
 
     setAiPilotModel(model: AiPilotModels) {
-        this.config.aiPilotModels.setActive(model);
-        updateSettings({ aiPilotModel: model });
+        this.actions.setAiPilotModel(model);
         this.aiPilotModel.set(model);
     }
 
     setUnitSystem(system: UnitSystems) {
-        this.config.unitSystem.setActive(system);
+        this.actions.setUnitSystem(system);
         this.unitSystem.set(system);
     }
 
     setVolume(event: Event) {
-        const percent = Math.round(sliderValue(event));
-        this.data.audio.setMasterVolume(percent / 100);
-        updateSettings({ volume: percent / 100 });
-        this.volume.set(percent);
+        this.volume.set(this.actions.setVolume(sliderValue(event)));
     }
 
     setKeyboardLayout(layout: KeyboardControlLayoutId) {
-        this.data.keyboardInput.setKeyboardLayout(layout);
-        updateSettings({ keyboardLayout: layout });
+        this.actions.setKeyboardLayout(layout);
         this.keyboardLayout.set(layout);
     }
 
     setPitchStickMode(mode: KeyboardPitchStickMode) {
-        this.data.keyboardInput.setKeyboardPitchStickMode(mode);
-        updateSettings({ keyboardPitchStickMode: mode });
+        this.actions.setPitchStickMode(mode);
         this.pitchStickMode.set(mode);
     }
 
@@ -1382,18 +902,7 @@ export class SettingsDialog {
         if (!device.isConnected()) {
             return undefined;
         }
-        const axes = [
-            { axis: 1, action: 'Pitch' },
-            { axis: 0, action: 'Roll' },
-            { axis: 3, action: 'Yaw' },
-            { axis: 2, action: 'Throttle' },
-        ];
-        return {
-            name: joystickName(device.getDeviceId()),
-            axes: axes
-                .filter(({ axis }) => axis < device.getAxisCount())
-                .map(({ axis, action }) => ({ keys: [`Axis ${axis}`], action })),
-        };
+        return joystickHelp(device.getDeviceId(), device.getAxisCount());
     }
 
     /**
@@ -1404,18 +913,10 @@ export class SettingsDialog {
      */
     private loadAreas() {
         loadTerrainManifest(DEFAULT_TERRAIN_URL).then(manifest => {
-            const areas = terrainAreas(manifest);
-            const home = homeArea(areas, PLAY_ORIGIN);
-            const saved = loadSettings().terrainArea;
-            const selected = areas.some(a => a.name === saved)
-                ? saved
-                : (home?.name ?? areas[0]?.name ?? '');
+            const { options, selected } = areaOptions(terrainAreas(manifest), PLAY_ORIGIN, loadSettings().terrainArea);
             this.area.set(selected);
             this.initialArea.set(selected);
-            this.areas.set(areas.map(area => ({
-                value: area.name,
-                label: home !== undefined && area.name === home.name ? `${area.name} (home)` : area.name,
-            })));
+            this.areas.set(options);
         }).catch(() => {
             // No manifest, no picker: the section is simply not shown.
         }).finally(() => this.areasLoaded.set(true));

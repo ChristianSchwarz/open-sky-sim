@@ -107,7 +107,9 @@ import {
 } from './staticModelViews';
 import { SpawnMenuEntity } from '../scene/entities/overlay/spawnMenu';
 import {
-    fadeOutBootProgress, hideCountdown, setBootProgress, setBootStreaming, showCountdown,
+    BOOT_STAGES, BOOT_TERRAIN_RANGE, RESPAWN_STAGE, STREAM_GO_SHOWN_MS, StreamBar, countdownTexts,
+    fadeOutBootProgress, hideCountdown, setBootProgress, setBootStreaming, showCountdown, streamingLabel,
+    terrainBootStage,
 } from '../osd/bootProgress';
 import { SpawnPanel } from '../osd/spawnPanel';
 import { AircraftRegistry, buildF22Def, groupAircraftByModel } from './aircraftRegistry';
@@ -157,16 +159,6 @@ const WING_ROOT_SMOULDER_S = 80;
 /** Loose cloud deck: base altitude and per-puff undulation, well under HIGH_ALTITUDE_M. */
 /** Altitude at which the atmosphere shell starts to fade in over the sky dome. */
 const ATMOSPHERE_SHELL_FADE_IN_M = 30_000;
-/** How long the terrain backlog must stay empty before the boot blur lifts; see Game.holdUntilStreamed. */
-const STREAM_SETTLE_MS = 600;
-/** The boot blur lifts after this even if streaming never goes quiet (a failing tile, a slow link). */
-const STREAM_HOLD_MAX_MS = 20_000;
-/** Seconds counted down, still paused, once streaming has settled; "Go" follows. */
-const STREAM_COUNTDOWN_FROM = 3;
-/** How long "Go" stays up over the running flight. */
-const STREAM_GO_SHOWN_MS = 800;
-/** Fastest the streaming bar may advance (fraction of full per second), so it sweeps rather than jumps. */
-const STREAM_BAR_RATE_PER_S = 0.5;
 /** Scratch for {@link Game.updateAtmosphereShell}. */
 const SHELL_CENTRE = new THREE.Vector3();
 const SHELL_AXIS = new THREE.Vector3();
@@ -903,18 +895,18 @@ export class Game {
     }
 
     async setup() {
-        setBootProgress(5, 'Initializing renderer...');
+        setBootProgress(BOOT_STAGES.renderer.percent, BOOT_STAGES.renderer.label);
 
         this.renderer.setPalette(this.getPalette());
         this.materials.setPalette(this.getPalette());
         this.setupControls();
-        setBootProgress(15, 'Loading aircraft packs...');
+        setBootProgress(BOOT_STAGES.aircraftPacks.percent, BOOT_STAGES.aircraftPacks.label);
         await this.loadPersistedPacks();
         const settings = loadSettings();
-        setBootProgress(25, 'Building scene...');
+        setBootProgress(BOOT_STAGES.scene.percent, BOOT_STAGES.scene.label);
         await this.setupScene(settings.spawnMode);
         this.selectAircraftById(settings.aircraftId, 'f22');
-        setBootProgress(90, 'Loading aircraft...');
+        setBootProgress(BOOT_STAGES.aircraft.percent, BOOT_STAGES.aircraft.label);
         // beginFlight's spawn overwrites this.cameraRoute with the spawn's
         // own pose (see syncSpawnCameraUrl), so the URL's route has to be
         // captured before that call to still know whether to boot into it.
@@ -930,8 +922,8 @@ export class Game {
         if (urlCameraRoute) {
             this.enterFixedCamera(urlCameraRoute);
         }
-        await this.waitForRequiredTerrain(90, 99);
-        setBootProgress(100, 'Ready');
+        await this.waitForRequiredTerrain(BOOT_TERRAIN_RANGE.min, BOOT_TERRAIN_RANGE.max);
+        setBootProgress(BOOT_STAGES.ready.percent, BOOT_STAGES.ready.label);
         window.addEventListener('resize', () => this.onViewportResize());
     }
 
@@ -1493,43 +1485,19 @@ export class Game {
         this.kernelRunning = true;
         const wasPaused = !this.player.controlsEnabled;
         this.player.setSimulationPaused(true);
-        setBootStreaming(0, 'Streaming terrain... 0%');
-        const start = performance.now();
-        let idleSince: number | undefined;
-        // The backlog grows as the LOD pass finds more to want, so a plain
-        // backlog/peak ratio jumps back and forth. Count what drained instead,
-        // never let the bar go backwards, and move it at a capped rate so it
-        // reads as a steady sweep.
-        let prevBacklog = 0;
-        let drained = 0;
-        let shown = 0;
-        let lastTick = start;
+        setBootStreaming(0, streamingLabel(0));
+        const bar = new StreamBar(performance.now());
         await new Promise<void>(resolve => {
             const tick = () => {
                 if (token !== this.streamHoldToken) {
                     resolve();
                     return;
                 }
-                const now = performance.now();
-                const backlog = this.planetTerrain.streamingBacklog;
-                drained += Math.max(0, prevBacklog - backlog);
-                prevBacklog = backlog;
-                const target = backlog > 0 ? drained / (drained + backlog) : 1;
-                const step = STREAM_BAR_RATE_PER_S * (now - lastTick) / 1000;
-                lastTick = now;
-                shown = Math.min(Math.max(shown, target), shown + step);
+                const done = bar.tick(performance.now(), this.planetTerrain.streamingBacklog);
                 // The label reads off the same smoothed value as the bar: the
                 // raw backlog count rises and falls as the LOD pass finds work.
-                setBootStreaming(100 * shown, `Streaming terrain... ${Math.floor(100 * shown)}%`);
-                if (backlog > 0) {
-                    idleSince = undefined;
-                } else {
-                    idleSince ??= now;
-                }
-                // Let the bar finish its sweep before clearing, so it never
-                // vanishes at 70%.
-                const settled = idleSince !== undefined && now - idleSince >= STREAM_SETTLE_MS && shown >= 1;
-                if (settled || now - start >= STREAM_HOLD_MAX_MS) {
+                setBootStreaming(100 * bar.shown, streamingLabel(bar.shown));
+                if (done) {
                     resolve();
                     return;
                 }
@@ -1544,14 +1512,15 @@ export class Game {
         // The blur clears over the first second of a "get ready" count,
         // still paused; the flight starts on "Go".
         fadeOutBootProgress();
-        for (let n = STREAM_COUNTDOWN_FROM; n > 0; n--) {
-            showCountdown(String(n));
+        const counts = countdownTexts();
+        for (const text of counts.slice(0, -1)) {
+            showCountdown(text);
             await new Promise(r => setTimeout(r, 1000));
             if (token !== this.streamHoldToken) {
                 return;
             }
         }
-        showCountdown('Go');
+        showCountdown(counts[counts.length - 1]);
         setTimeout(() => {
             if (token === this.streamHoldToken) {
                 hideCountdown();
@@ -1566,12 +1535,8 @@ export class Game {
     }
 
     private reportTerrainBootProgress(meshed: number, total: number, min: number, max: number): void {
-        const frac = total > 0 ? meshed / total : 1;
-        const pct = min + (max - min) * frac;
-        const label = total > 0
-            ? `Loading terrain (${meshed}/${total})...`
-            : 'Loading terrain...';
-        setBootProgress(pct, label);
+        const stage = terrainBootStage(meshed, total, min, max);
+        setBootProgress(stage.percent, stage.label);
     }
 
     private async waitForRequiredTerrain(min: number, max: number): Promise<void> {
@@ -3626,7 +3591,7 @@ export class Game {
             // the aircraft jump and the terrain around it fill in.
             this.streamHeld = true;
             hideCountdown();
-            setBootStreaming(0, 'Loading terrain...');
+            setBootStreaming(RESPAWN_STAGE.percent, RESPAWN_STAGE.label);
         }
         // Held until the terrain under the spawn is in (see below); the menu
         // already paused it, the boot path has not.
@@ -4381,7 +4346,7 @@ export class Game {
         );
         this.scene.add(this.cirrusField);
 
-        setBootProgress(35, 'Loading terrain...');
+        setBootProgress(BOOT_STAGES.terrain.percent, BOOT_STAGES.terrain.label);
         this.planetTerrain = new TerrainEntity({
             manifest,
             manifestUrl: DEFAULT_TERRAIN_URL,
@@ -4405,7 +4370,7 @@ export class Game {
         this.planetTerrain.setLodCamera(this.playerCamera.main);
         this.scene.add(this.planetTerrain);
         const center = this.spawnCenterEnu(spawn);
-        setBootProgress(45, 'Loading terrain tiles...');
+        setBootProgress(BOOT_STAGES.terrainTiles.percent, BOOT_STAGES.terrainTiles.label);
         // The airbase flatten pad is baked into both the mesh and the height
         // field, so there is no pad to lock here any more — that DEM sample and
         // the re-mesh it forced were the slowest step in the old boot.
@@ -4414,26 +4379,26 @@ export class Game {
             const at = this.cameraRouteWorld(this.cameraRoute);
             await this.preloadTerrainAroundPlane(at.x, at.z, 'highAlt');
         }
-        setBootProgress(50, 'Building terrain meshes...');
+        setBootProgress(BOOT_STAGES.terrainMeshes.percent, BOOT_STAGES.terrainMeshes.label);
         // The airbase furniture goes around whichever runway this session is
         // based at, turned to its heading — see airbaseAt.
         // Airfields first: the runway this session is based at decides where
         // the spawns are, which way the ILS points, and where the hangars and
         // the ramp go — so it has to be chosen before any of that is placed.
-        setBootProgress(60, 'Loading airfields...');
+        setBootProgress(BOOT_STAGES.airfields.percent, BOOT_STAGES.airfields.label);
         this.surfacePads.clear();
         this.sceneryMeshes.length = 0;
         this.stagedSceneryMeshes.length = 0;
         await this.addOsmAirfields(this.scene);
 
-        setBootProgress(68, 'Loading airbase...');
+        setBootProgress(BOOT_STAGES.airbase.percent, BOOT_STAGES.airbase.label);
         await this.addAirBase(this.scene, this.models);
 
         // The rest is the Canaries scenario rather than the airfield — a
         // refinery, a SAM site and a warehouse at fixed offsets chosen for that
         // island. Somewhere else they would land on whatever happened to be
         // there.
-        setBootProgress(75, 'Loading scenery...');
+        setBootProgress(BOOT_STAGES.scenery.percent, BOOT_STAGES.scenery.label);
         if (this.playArea.isHome) {
             await this.addRefinery(this.scene, this.models);
 

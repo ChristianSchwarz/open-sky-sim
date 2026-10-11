@@ -1,6 +1,7 @@
 /** Terrain manifest v4, written by tools/bake_planet_mesh.ts. */
 
 import { LonLatBounds } from './tiling';
+import { bootstrapBakeStage } from '../osd/bootProgress';
 
 interface MeshStreamManifest {
     /** Path template, e.g. `{z}/{x}/{y}.ptm`. */
@@ -276,11 +277,8 @@ async function waitForBootstrapBake(
             }
             return false;
         }
-        const count = Math.max(1, s.stepCount ?? 1);
-        const overall = (((s.stepIndex ?? 0) + (s.percent ?? 0) / 100) / count) * 100;
-        onBake(Math.min(99, overall),
-            `No terrain yet - baking ${s.name} (step ${(s.stepIndex ?? 0) + 1}/${count}: ${s.step}). `
-            + 'This runs once and can take a while.');
+        const stage = bootstrapBakeStage(s.name, s.step, s.stepIndex, s.stepCount, s.percent);
+        onBake(stage.percent, stage.label);
         await new Promise(r => setTimeout(r, 1000));
     }
 }
