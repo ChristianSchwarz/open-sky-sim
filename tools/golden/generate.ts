@@ -31,6 +31,7 @@ import { selectVegetationTiles, vegetationSuite } from './suites/vegetation';
 import { skySuite } from './suites/sky';
 import { cloudsSuite } from './suites/clouds';
 import { carrierSuite } from './suites/carrier';
+import { cockpitSuite } from './suites/cockpit';
 
 export const GOLDEN_ROOT = path.resolve(__dirname, '../../tests/golden');
 /** The baked tree tiles are selected from; GOLDEN_TERRAIN_ROOT points a worktree (which has none) at a checkout's. */
@@ -65,6 +66,7 @@ const SUITES: SuiteDef[] = [
     { name: 'sky', run: () => skySuite() },
     { name: 'clouds', run: () => cloudsSuite() },
     { name: 'carrier', run: () => carrierSuite() },
+    { name: 'cockpit', run: () => cockpitSuite() },
 ];
 
 export interface GenerateResult {
