@@ -80,6 +80,7 @@ namespace Retro.Unity
             var sky = new GameObject("Sky").AddComponent<SkyRenderer>();
             sky.sun = sun;
             sky.viewer = fly;
+            sky.gameObject.AddComponent<CloudRenderer>().viewer = fly;
 
             var root = new GameObject("Terrain");
             var terrain = root.AddComponent<TerrainRenderer>();

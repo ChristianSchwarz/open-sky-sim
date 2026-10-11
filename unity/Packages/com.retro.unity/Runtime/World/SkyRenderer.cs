@@ -29,6 +29,7 @@ namespace Retro.Unity
         public float nightMix;
         public string clock;
 
+        private static readonly int SunTintId = Shader.PropertyToID("_RetroSunTint");
         private float appliedHours = float.NaN;
         private SkyDomeGeometry domeGeometry;
         private SunGlareGeometry glareGeometry;
@@ -102,6 +103,8 @@ namespace Retro.Unity
                 sun.intensity = 1;
                 sun.shadowStrength = (float)state.ShadowStrength;
             }
+            // The sun's own colour, for rims and glints (shaders/sun.ts uSunTint).
+            Shader.SetGlobalVector(SunTintId, (Vector4)Linear(state.Tint));
             RenderSettings.ambientMode = AmbientMode.Flat;
             RenderSettings.ambientLight = Linear(state.Ambient).gamma;
 
