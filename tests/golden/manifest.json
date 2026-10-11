@@ -1,5 +1,5 @@
 {
   "generator": "tools/golden/generate.ts",
-  "files": ["ai_pilots.json", "aircraft.json", "aircraft_fx.json", "airfields.json", "buildings.json", "canvas_painter.json", "carrier.json", "clouds.json", "cockpit.json", "codecs.json", "combat_sim.json", "dogfight_geometry.json", "flight_configs.json", "flight_models.json", "geodesy.json", "heights.json", "hud.json", "roads.json", "settings.json", "sky.json", "terrain_lod.json", "tiling.json", "vegetation.json"],
+  "files": ["ai_pilots.json", "aircraft.json", "aircraft_fx.json", "airfields.json", "buildings.json", "canvas_painter.json", "carrier.json", "clouds.json", "cockpit.json", "codecs.json", "combat_sim.json", "dogfight_geometry.json", "flight_configs.json", "flight_models.json", "geodesy.json", "heights.json", "hud.json", "roads.json", "settings.json", "sky.json", "terrain_lod.json", "tiling.json", "vegetation.json", "wreck.json"],
   "assets": []
 }
