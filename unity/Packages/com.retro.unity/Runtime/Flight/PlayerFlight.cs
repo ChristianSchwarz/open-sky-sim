@@ -59,8 +59,10 @@ namespace Retro.Unity
         public double fovDeg = 50;
         public bool showHud = true;
 
-        /// <summary>aircraftRegistry.ts default: x right, y up, z forward.</summary>
-        public Vector3 cockpitOffset = new Vector3(0, 1.0f, 8.0f);
+        [Tooltip("Which aircraft: 'f22' or a pack id from dist/assets (see Catalogue).")]
+        public string aircraftId = "f22";
+        [Tooltip("N on the web: Auto follows the swing-wing schedule.")]
+        public WingSweepMode wingSweepMode = WingSweepMode.Auto;
 
         private CombatSim sim;
         private DemHeightField heightField;
@@ -80,9 +82,21 @@ namespace Retro.Unity
         private List<SceneRunway> runways = new List<SceneRunway>();
         private SceneRunway startRunway;
         private SimFlightModelKind appliedModel;
+        private List<AircraftCatalogue.Entry> catalogue;
+        private System.Threading.Tasks.Task<List<AircraftCatalogue.Entry>> catalogueTask;
+        private AircraftCatalogue.Entry current;
+        private double sweepUnit;
+
+        /// <summary>The flyable aircraft found at boot: the F-22 and every pack.</summary>
+        public IReadOnlyList<AircraftCatalogue.Entry> Catalogue => catalogue;
+        public FlyableAircraftDef CurrentDef => current?.Def;
         // game.ts RUNWAY_SPAWN_INSET_M and AIRFIELD_SURFACE_EPS_M.
         private const double RunwaySpawnInsetM = 120;
         private const double AirfieldSurfaceEpsM = 1.5;
+        /// <summary>game.ts SURFACE_PAD_FEATHER_M.</summary>
+        private const double SurfacePadFeatherM = 15;
+        /// <summary>Every runway's pavement as solid ground (game.ts addRunwayPad).</summary>
+        private readonly List<Retro.Sim.SurfacePadCollider> runwayPads = new List<Retro.Sim.SurfacePadCollider>();
         /// <summary>Airfields this far from the frame origin count as the play area's.</summary>
         private const double AirfieldReachM = 150000;
         // player.ts device animations: progress units and their durations (s).
@@ -111,9 +125,17 @@ namespace Retro.Unity
             if (flightModel != appliedModel)
             {
                 // The Settings flight-model switch: same airframe, other model, state carried over.
-                sim.SetAircraftConfig(PlayerId, config, flightModel);
+                sim.SetAircraftConfig(PlayerId, config, flightModel, current.Def.CollisionMesh);
                 appliedModel = flightModel;
             }
+            if (catalogueTask != null && catalogueTask.IsCompleted)
+            {
+                // The packs, read off the main thread at boot: the F-22 flies meanwhile.
+                if (catalogueTask.IsFaulted) Debug.LogException(catalogueTask.Exception);
+                else catalogue = catalogueTask.Result;
+                catalogueTask = null;
+            }
+            if (aircraftId != current.Def.Id && catalogueTask == null) SwapAircraft();
             if (flightView != FlightView.Free)
             {
                 ForwardKeys();
@@ -143,7 +165,14 @@ namespace Retro.Unity
             if (heightField == null) return false;
 
             sim = new CombatSim(heightField);
-            config = Fm2Defaults.Default();
+            string assetsDir = System.IO.Path.GetDirectoryName(terrain.Root);
+            catalogue = new List<AircraftCatalogue.Entry> { new AircraftCatalogue.Entry { Def = AircraftDefs.F22(), Files = new DirectoryFiles(assetsDir) } };
+            catalogueTask = System.Threading.Tasks.Task.Run(() => AircraftCatalogue.Load(assetsDir));
+            current = catalogue[0];
+            // The spawn menu's pick, kept between sessions like the web game's setting.
+            string saved = PlayerPrefs.GetString(AircraftPref, "");
+            if (aircraftId == "f22" && saved.Length > 0) aircraftId = saved;
+            config = AircraftDefs.FlightConfigWithArrestorHook(current.Def);
             string airfieldsPath = System.IO.Path.Combine(terrain.Root, "airfields.json");
             List<Airfield> airfields = AirfieldsJson.Near(
                 System.IO.File.Exists(airfieldsPath) ? AirfieldsJson.Parse(System.IO.File.ReadAllText(airfieldsPath)).Items : new List<Airfield>(),
@@ -152,9 +181,18 @@ namespace Retro.Unity
             startRunway = ActiveAirfield.PickStartRunway(runways, preferIcao);
             // The ground is the DEM with the airfield pads through the height field; the
             // runways go in for the AI pilots, as serializeSceneWorld sends them.
-            var world = new SerializedWorld();
+            var world = new SerializedWorld { SurfacePads = runwayPads };
             foreach (SceneRunway r in runways)
             {
+                // The gear rests on the pavement that is drawn (AIRFIELD_SURFACE_EPS_M over the
+                // pad-flattened DEM), from the same three sampled points the pavement uses.
+                runwayPads.Add(new Retro.Sim.SurfacePadCollider
+                {
+                    CenterX = r.Center.X, CenterZ = r.Center.Z, Heading = r.Heading,
+                    HalfLength = r.HalfLength, HalfWidth = r.HalfWidth,
+                    SurfaceY = r.Center.Y, BaseY = r.Center.Y - AirfieldSurfaceEpsM,
+                    Feather = SurfacePadFeatherM, Slope = r.Slope,
+                });
                 world.Runways.Add(new SerializedRunway
                 {
                     Center = new[] { r.Center.X, r.Center.Y, r.Center.Z },
@@ -180,6 +218,7 @@ namespace Retro.Unity
                     MuzzleVelocity = 1000, RoundsPerSecond = 20, Damage = 8, Ammo = 2400,
                     MuzzleOffset = new double[] { 0, 0, 9 }, Spread = 0.003,
                 },
+                Collision = current.Def.CollisionMesh,
                 Spawn = spawn,
                 Enabled = true,
             });
@@ -190,7 +229,7 @@ namespace Retro.Unity
             chaseFront = new ExteriorFrontBehindCameraUpdater(this, pose, ExteriorViewHeading.Front);
             crashedCamera = new CrashedCameraUpdater(this, pose);
             airframe = BuildAirframe();
-            model = new AircraftModel(AircraftVisualDef.F22(), System.IO.Path.GetDirectoryName(terrain.Root), "Player aircraft");
+            model = new AircraftModel(current.Def, current.Files, "Player aircraft");
             SnapDevices();
             airframeMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
             airframeMaterial.SetColor("_BaseColor", new Color(0.55f, 0.58f, 0.6f));
@@ -199,6 +238,38 @@ namespace Retro.Unity
                 + (startOnRunway && startRunway != null ? $"{startRunway.Icao} {startRunway.Name} {startRunway.Ref}" : $"airborne at {spawnLat}, {spawnLon}")
                 + $"; ground tiles fine {heightField.FineResident}, coarse {heightField.CoarseResident}");
             return true;
+        }
+
+        /// <summary>PlayerPrefs key of the selected aircraft id.</summary>
+        public const string AircraftPref = "retro.aircraft";
+
+        private AircraftCatalogue.Entry Pick(string id)
+        {
+            foreach (AircraftCatalogue.Entry e in catalogue)
+            {
+                if (e.Def.Id == id || (e.Def.PackId != null && e.Def.PackId == id)) return e;
+            }
+            Debug.LogWarning($"Retro flight: no aircraft '{id}', flying the F-22");
+            return catalogue[0];
+        }
+
+        /// <summary>
+        /// game.ts applySelectedAircraft: another airframe, same flight state; its
+        /// hook, collision mesh and cockpit go to the sim, its model replaces this one.
+        /// </summary>
+        private void SwapAircraft()
+        {
+            AircraftCatalogue.Entry next = Pick(aircraftId);
+            aircraftId = next.Def.Id;
+            if (next == current) return;
+            current = next;
+            config = AircraftDefs.FlightConfigWithArrestorHook(current.Def);
+            sim.SetAircraftConfig(PlayerId, config, flightModel, current.Def.CollisionMesh);
+            model?.Destroy();
+            model = new AircraftModel(current.Def, current.Files, "Player aircraft");
+            sweepUnit = 0;
+            PlayerPrefs.SetString(AircraftPref, current.Def.Id);
+            Debug.Log($"Retro flight: now flying {current.Def.Name}");
         }
 
         private SimAircraftSpawn MakeSpawn() =>
@@ -214,7 +285,13 @@ namespace Retro.Unity
             Vec3d p = r.Center - fwd * (r.HalfLength - RunwaySpawnInsetM);
             heightField.Focus(new[] { p });
             heightField.WaitIdle(TimeSpan.FromSeconds(5));
-            p.Y = heightField.HeightAtWorld(p.X, p.Z) + Fm2AircraftConfig.GroundRestHeight(config);
+            // game.ts runwaySpawnPosition: the def's own gear rest height, else PLANE_DISTANCE_TO_GROUND.
+            double gearY = current.Def.Flight != null
+                ? Fm2AircraftConfig.GroundRestHeight(current.Def.Flight)
+                : SimConstants.PlaneDistanceToGround;
+            // groundHeightAt: the DEM, or the runway pavement over it.
+            double ground = Math.Max(heightField.HeightAtWorld(p.X, p.Z), Retro.Sim.SurfacePads.SampleSurfacePadYMax(p.X, p.Z, runwayPads));
+            p.Y = ground + gearY;
             // A scene heading of 0 faces +Z, which is the body's nose.
             Quatd q = Quatd.FromAxisAngle(new Vec3d(0, 1, 0), r.Heading);
             return new SimAircraftSpawn
@@ -298,7 +375,7 @@ namespace Retro.Unity
 
         public Vec3d GetDisplayPosition() => aircraft.GetPosition();
         public Quatd GetDisplayQuaternion() => aircraft.GetQuaternion();
-        public Vec3d GetCockpitOffset() => new Vec3d(cockpitOffset.x, cockpitOffset.y, cockpitOffset.z);
+        public Vec3d GetCockpitOffset() => current.Def.CockpitOffset;
         public Vec3d GetDisplayWorldDirection() => SceneAxes.Forward.Rotate(aircraft.GetQuaternion());
         public Vec3d GetDisplayWorldUp() => SceneAxes.Up.Rotate(aircraft.GetQuaternion());
         public Vec3d GetDisplayWorldRight() => SceneAxes.Right.Rotate(aircraft.GetQuaternion());
@@ -437,6 +514,11 @@ namespace Retro.Unity
             gearUnit = Toward(gearUnit, aircraft.IsGearDeployed(), GearAnimS, dt);
             flapsUnit = Toward(flapsUnit, aircraft.IsFlapsExtended(), FlapsAnimS, dt);
             airbrakesUnit = Toward(airbrakesUnit, aircraft.IsAirbrakesExtended(), AirbrakesAnimS, dt);
+            if (current.Def.SwingWings != null)
+            {
+                double target = WingSweep.Target(wingSweepMode, aircraft.GetAirspeed(), current.Def.SwingWings);
+                sweepUnit = WingSweep.Step(sweepUnit, target, dt, current.Def.SwingWings);
+            }
             bool visible = !(flightView == FlightView.Cockpit && !aircraft.IsCrashed());
             if (model != null && model.Loaded)
             {
@@ -452,6 +534,8 @@ namespace Retro.Unity
                     FlapsUnit = flapsUnit,
                     AirbrakesUnit = airbrakesUnit,
                     GearUnit = gearUnit,
+                    SweepUnit = sweepUnit,
+                    AngleOfAttack = aircraft.GetAngleOfAttack(),
                     Still = aircraft.IsCrashed(),
                 });
                 return;

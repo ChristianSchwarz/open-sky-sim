@@ -68,7 +68,7 @@ namespace Retro.Sim
         private const double ArrestorMaxDecelMps2 = 4.0 * 9.80665;
 
         /// <summary>Hook assembly sits this far above the belly line it was authored at.</summary>
-        private const double TailhookMountUpM = 0.7;
+        public const double TailhookMountUpM = 0.7;
 
         /// <summary>afterburnerCones.ts DEFAULT_ENGINE_NOZZLES.</summary>
         public static readonly double[][] DefaultEngineNozzles =

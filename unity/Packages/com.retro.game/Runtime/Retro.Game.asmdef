@@ -3,7 +3,8 @@
     "rootNamespace": "Retro.Game",
     "references": [
         "Retro.Core",
-        "Retro.TerrainData"
+        "Retro.TerrainData",
+        "Retro.Sim"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

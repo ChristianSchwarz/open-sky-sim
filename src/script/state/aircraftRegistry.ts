@@ -60,7 +60,7 @@ export function buildF22Def(): FlyableAircraftDef {
 }
 
 /** Raw shape of a packed `manifest.json` (subset the sim consumes). */
-interface AircraftManifest {
+export interface AircraftManifest {
     id?: string;
     name?: string;
     displayName?: string;
@@ -94,7 +94,7 @@ interface AircraftManifest {
     flight?: Fm2AircraftConfig | null;
 }
 
-function rewriteManifestForPack(id: string, manifest: AircraftManifest): AircraftManifest {
+export function rewriteManifestForPack(id: string, manifest: AircraftManifest): AircraftManifest {
     // Packs store assets by basename. Tolerate legacy manifests that still list
     // import-relative paths (e.g. tools/mods/imports/…_collision.gltf).
     const packEntry = (path: string) => path.replace(/\\/g, '/').split('/').pop() ?? path;
@@ -161,7 +161,7 @@ export function groupAircraftByModel(defs: FlyableAircraftDef[]): AircraftModelG
     return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
-function manifestToDef(id: string, m: AircraftManifest): FlyableAircraftDef {
+export function manifestToDef(id: string, m: AircraftManifest): FlyableAircraftDef {
     return {
         id: m.id ?? id,
         name: m.displayName ?? m.name ?? id,

@@ -6,6 +6,7 @@
   "description": "Engine-free game state ported from the TypeScript game: airfields and spawn search, camera routes, the active airfield, carrier berth, flight recorder, world re-base and the camera updaters. Original right-handed scene axes (x east, y up, z south); three.js camera conventions (a camera looks down its -Z).",
   "dependencies": {
     "com.retro.core": "0.1.0",
-    "com.retro.terrain-data": "0.1.0"
+    "com.retro.terrain-data": "0.1.0",
+    "com.retro.sim": "0.1.0"
   }
 }

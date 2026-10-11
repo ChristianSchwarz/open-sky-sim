@@ -1,8 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Retro.Core;
+using Retro.Game;
 using UnityEngine;
 #if RETRO_GLTFAST
 using GLTFast;
@@ -10,54 +11,6 @@ using GLTFast;
 
 namespace Retro.Unity
 {
-    /// <summary>A hinge-pivoted control surface (aircraftDef.ts ControlSurfaceConfig).</summary>
-    public sealed class SurfaceDef
-    {
-        public string Role;
-        public string Model;
-        /// <summary>Hinge pivot in the body frame (three.js axes: +X port, +Y up, +Z nose), m.</summary>
-        public Vec3d Pivot;
-        public Vec3d Axis;
-        public string Control;
-        public double Sign;
-        public double RangeRad;
-    }
-
-    /// <summary>The drawn parts of a flyable aircraft (aircraftRegistry.ts FlyableAircraftDef, visual half).</summary>
-    public sealed class AircraftVisualDef
-    {
-        public string Body;
-        public string Gear;
-        public bool GearAnimated;
-        public List<SurfaceDef> Surfaces = new List<SurfaceDef>();
-
-        private const double HingeRange = Math.PI / 6;
-
-        /// <summary>aircraftRegistry.ts buildF22Def.</summary>
-        public static AircraftVisualDef F22() => new AircraftVisualDef
-        {
-            Body = "f22.glb",
-            Gear = "f22_landinggear.glb",
-            GearAnimated = true,
-            Surfaces =
-            {
-                S("flaperonLeft", "f22_flaperon_left.glb", 4.5, -0.21, -3, 1.681781, -0.152682, 0.57654, "flaperonLeft"),
-                S("flaperonRight", "f22_flaperon_right.glb", -4.5, -0.21, -3, -1.681781, -0.152682, 0.57654, "flaperonRight"),
-                S("elevatorLeft", "f22_elevator_left.glb", 0, 0, -6, 1, 0, 0, "stabilatorLeft"),
-                S("elevatorRight", "f22_elevator_right.glb", 0, 0, -6, 1, 0, 0, "stabilatorRight"),
-                S("rudderLeft", "f22_rudder_left.glb", 2.34, 1.8, -4.05, 0.383502, 0.802989, 0.456217, "yaw"),
-                S("rudderRight", "f22_rudder_right.glb", -2.34, 1.8, -4.05, -0.383502, 0.802989, 0.456217, "yaw"),
-            },
-        };
-
-        private static SurfaceDef S(string role, string model, double px, double py, double pz,
-            double ax, double ay, double az, string control) => new SurfaceDef
-        {
-            Role = role, Model = model, Pivot = new Vec3d(px, py, pz), Axis = new Vec3d(ax, ay, az),
-            Control = control, Sign = 1, RangeRad = HingeRange,
-        };
-    }
-
     /// <summary>What drives the articulated parts this frame (player.ts surfaceValue inputs).</summary>
     public struct AircraftPoseInputs
     {
@@ -70,16 +23,25 @@ namespace Retro.Unity
         public double AirbrakesUnit;
         /// <summary>0 retracted .. 1 extended: the gear clip's playback position.</summary>
         public double GearUnit;
+        /// <summary>0 spread .. 1 swept (wingSweep.ts).</summary>
+        public double SweepUnit;
+        public double AngleOfAttack;
         /// <summary>Surfaces rest (crashed, showcase).</summary>
         public bool Still;
     }
 
     /// <summary>
-    /// The aircraft's glTF parts loaded with glTFast and posed each frame from
-    /// the sim, camera-relative. glTFast turns glTF's right-handed axes into
-    /// Unity's by negating x; with the scene's z mirror on top, the two
-    /// reflections make a half turn about +Y, so every part is placed with
-    /// rotation ToUnity(q) * 180 deg about Y and no mirrored matrix.
+    /// An aircraft's glTF parts loaded with glTFast and posed each frame from
+    /// the sim, camera-relative: body, gear (its retract clips held at the gear
+    /// position), and the hinged surfaces, swing wings carrying theirs.
+    ///
+    /// Materials follow the models' contract (models.ts): a glTF material
+    /// named for a PaletteCategory takes that palette colour, `#rrggbb` is a
+    /// literal colour, GLASS the canopy tint, COLLISION is never drawn.
+    ///
+    /// glTFast turns glTF's right-handed axes into Unity's by negating x; with
+    /// the scene's z mirror on top, the two reflections make a half turn about
+    /// +Y, so every part is placed with rotation ToUnity(q) * 180 deg about Y.
     /// </summary>
     public sealed class AircraftModel
     {
@@ -87,42 +49,61 @@ namespace Retro.Unity
         private const double FlapsExtendedAngle = Math.PI / 5;
         private const double RollVisTaileron = 0.6;
         private const double RollVisAileron = 0.15;
+        private const double SlatAoaOnsetRad = 10 * Math.PI / 180;
+        private const double SlatAoaFullRad = 18 * Math.PI / 180;
+        // models.ts
+        private const string GlassColor = "#333333";
 
         private static readonly Quaternion HalfTurnY = Quaternion.Euler(0, 180, 0);
+        private static readonly Regex RawColor = new Regex("^#[0-9a-fA-F]{6}$");
+        private static readonly Dictionary<string, Material> RemappedMaterials = new Dictionary<string, Material>();
 
-        private readonly AircraftVisualDef def;
+        private readonly FlyableAircraftDef def;
+        private readonly IAircraftFiles files;
         private readonly Transform root;
         private Transform body;
         private Transform gear;
         private readonly List<Animation> gearAnimations = new List<Animation>();
         private readonly Transform[] surfaces;
+        private readonly int[] parentIndex;
+        private readonly double[] deflections;
 
         public bool Loaded { get; private set; }
         public string Error { get; private set; }
+        public FlyableAircraftDef Def => def;
 
-        public AircraftModel(AircraftVisualDef def, string assetsDir, string name = "Aircraft")
+        public AircraftModel(FlyableAircraftDef def, IAircraftFiles files, string name = "Aircraft")
         {
             this.def = def;
+            this.files = files;
             root = new GameObject(name).transform;
             surfaces = new Transform[def.Surfaces.Count];
-            _ = LoadAll(assetsDir);
+            parentIndex = new int[def.Surfaces.Count];
+            deflections = new double[def.Surfaces.Count];
+            for (int i = 0; i < def.Surfaces.Count; i++)
+            {
+                string parent = def.Surfaces[i].SweepParent;
+                parentIndex[i] = parent == null ? -1 : def.Surfaces.FindIndex(o => o.Role == parent);
+            }
+            _ = LoadAll();
         }
 
-        private async Task LoadAll(string dir)
+        private async Task LoadAll()
         {
             try
             {
-                body = await LoadPart(Path.Combine(dir, def.Body), "body");
-                if (def.Gear != null)
+                body = await LoadPart(def.Body, "body");
+                if (def.Gear != null && root != null)
                 {
-                    gear = await LoadPart(Path.Combine(dir, def.Gear), "gear");
+                    gear = await LoadPart(def.Gear, "gear");
                     if (gear != null) gearAnimations.AddRange(gear.GetComponentsInChildren<Animation>(true));
                 }
                 for (int i = 0; i < def.Surfaces.Count && root != null; i++)
                 {
-                    surfaces[i] = await LoadPart(Path.Combine(dir, def.Surfaces[i].Model), def.Surfaces[i].Role);
+                    surfaces[i] = await LoadPart(def.Surfaces[i].Model, def.Surfaces[i].Role);
                 }
                 Loaded = body != null;
+                if (!Loaded && Error == null) Error = $"{def.Id}: no body";
             }
             catch (Exception e)
             {
@@ -131,15 +112,23 @@ namespace Retro.Unity
             }
         }
 
-        private async Task<Transform> LoadPart(string path, string name)
+        private async Task<Transform> LoadPart(string file, string name)
         {
 #if RETRO_GLTFAST
+            if (!files.TryRead(file, out byte[] data))
+            {
+                Debug.LogError($"Retro aircraft: {file} not in {files.Label}");
+                return null;
+            }
             var part = new GameObject(name).transform;
             part.SetParent(root, false);
-            // Uninterrupted: a handful of small parts at boot, and the default agent is a
+            // Uninterrupted: a handful of small parts, and the default agent is a
             // DontDestroyOnLoad object that errors when a load outlives play mode.
-            var gltf = new GltfImport(deferAgent: new UninterruptedDeferAgent());
-            bool ok = await gltf.LoadFile(path, new Uri(Path.GetFullPath(path)));
+            var gltf = new GltfImport(new FilesDownloadProvider(files), new UninterruptedDeferAgent());
+            var uri = new Uri("https://aircraft.invalid/" + Uri.EscapeDataString(file));
+            bool ok = file.EndsWith(".glb", StringComparison.OrdinalIgnoreCase)
+                ? await gltf.Load(data, uri)
+                : await gltf.LoadGltfJson(System.Text.Encoding.UTF8.GetString(data), uri);
             // A load can outlive its owner (play mode stopped, model destroyed): then it must
             // not instantiate, or the parts land in the edit-mode scene with dead materials.
             if (root == null || part == null || !Application.isPlaying)
@@ -148,12 +137,13 @@ namespace Retro.Unity
                 gltf.Dispose();
                 return null;
             }
-            if (!ok || !await gltf.InstantiateMainSceneAsync(part))
+            if (!ok || !await gltf.InstantiateSceneAsync(part, NearestScene(gltf)))
             {
-                Debug.LogError($"Retro aircraft: could not load {path}");
+                Debug.LogError($"Retro aircraft: could not load {file} from {files.Label}");
                 UnityEngine.Object.Destroy(part.gameObject);
                 return null;
             }
+            Remap(part);
             return part;
 #else
             await Task.CompletedTask;
@@ -162,9 +152,67 @@ namespace Retro.Unity
 #endif
         }
 
+#if RETRO_GLTFAST
+        /// <summary>models.ts sortingFn: scenes ordered by the digit their name starts with; the first is LOD 0.</summary>
+        private static int NearestScene(GltfImport gltf)
+        {
+            int best = 0, bestDigit = int.MaxValue;
+            for (int i = 0; i < gltf.SceneCount; i++)
+            {
+                string n = gltf.GetSceneName(i) ?? "";
+                int digit = n.Length > 0 && char.IsDigit(n[0]) ? n[0] - '0' : int.MaxValue - 1;
+                if (digit < bestDigit)
+                {
+                    bestDigit = digit;
+                    best = i;
+                }
+            }
+            return best;
+        }
+#endif
+
+        /// <summary>The glTF material names as the model contract reads them.</summary>
+        private static void Remap(Transform part)
+        {
+            foreach (Renderer r in part.GetComponentsInChildren<Renderer>(true))
+            {
+                Material[] mats = r.sharedMaterials;
+                bool collision = false;
+                for (int i = 0; i < mats.Length; i++)
+                {
+                    string name = mats[i] != null ? mats[i].name : "";
+                    if (name == "COLLISION") collision = true;
+                    mats[i] = Remapped(name);
+                }
+                r.sharedMaterials = mats;
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                // Kept in the graph for debugging, never drawn.
+                if (collision) r.enabled = false;
+            }
+        }
+
+        private static Material Remapped(string name)
+        {
+            if (RemappedMaterials.TryGetValue(name, out Material m) && m != null) return m;
+            string hex;
+            if (name == "GLASS" || name == "#d1f7ff") hex = GlassColor;
+            else if (RawColor.IsMatch(name)) hex = name;
+            else
+            {
+                PaletteCategory category = Enum.TryParse(name, out PaletteCategory c) ? c : PaletteCategory.VEHICLE_PLANE_GREY;
+                hex = Palettes.HdNoon.Color(category);
+            }
+            m = new Material(Shader.Find("Retro/SceneryLit")) { name = "aircraft " + name };
+            m.SetColor("_Color", TerrainColours.FromHex(hex));
+            // glTFast already rewinds for Unity: these faces are front faces as they come.
+            m.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Back);
+            RemappedMaterials[name] = m;
+            return m;
+        }
+
         public void SetVisible(bool visible)
         {
-            if (root.gameObject.activeSelf != visible) root.gameObject.SetActive(visible);
+            if (root != null && root.gameObject.activeSelf != visible) root.gameObject.SetActive(visible);
         }
 
         /// <summary>Place every part for this frame: aircraft pose in scene axes, camera position for the floating origin.</summary>
@@ -176,23 +224,29 @@ namespace Retro.Unity
             body.SetPositionAndRotation(bodyPosition, bodyRotation);
             if (gear != null)
             {
-                bool show = def.GearAnimated || inputs.GearUnit > 0;
-                gear.gameObject.SetActive(show);
+                gear.gameObject.SetActive(def.GearAnimated || inputs.GearUnit > 0);
                 gear.SetPositionAndRotation(bodyPosition, bodyRotation);
-                SampleGear(inputs.GearUnit);
+                if (def.GearAnimated) SampleGear(inputs.GearUnit);
+            }
+            for (int i = 0; i < surfaces.Length; i++)
+            {
+                deflections[i] = inputs.Still ? 0 : SurfaceValue(def.Surfaces[i], inputs) * def.Surfaces[i].RangeRad;
             }
             for (int i = 0; i < surfaces.Length; i++)
             {
                 if (surfaces[i] == null) continue;
-                SurfaceDef s = def.Surfaces[i];
-                double deflection = inputs.Still ? 0 : SurfaceValue(s, inputs) * s.RangeRad;
-                // wingSweep.ts poseSurface (no sweep parents on the F-22).
-                Quatd hinge = Quatd.FromAxisAngle(s.Axis.Normalized(), deflection);
-                Quatd q = quaternion * hinge;
-                Vec3d p = s.Pivot.Rotate(quaternion) + position;
+                SurfaceHinge? parent = parentIndex[i] >= 0 ? Hinge(parentIndex[i]) : (SurfaceHinge?)null;
+                var (p, q) = WingSweep.PoseSurface(Hinge(i), parent, position, quaternion);
                 surfaces[i].SetPositionAndRotation(SceneFrame.ToUnity(p - camera), SceneFrame.ToUnity(q) * HalfTurnY);
             }
         }
+
+        private SurfaceHinge Hinge(int i) => new SurfaceHinge
+        {
+            Pivot = def.Surfaces[i].Pivot,
+            Axis = def.Surfaces[i].Axis,
+            Deflection = deflections[i],
+        };
 
         /// <summary>The gear clips held at a playback position (LODHelper.setPlaybackPosition).</summary>
         private void SampleGear(double unit)
@@ -213,7 +267,7 @@ namespace Retro.Unity
         }
 
         /// <summary>player.ts surfaceValue.</summary>
-        private static double SurfaceValue(SurfaceDef s, in AircraftPoseInputs i)
+        private static double SurfaceValue(ControlSurfaceDef s, in AircraftPoseInputs i)
         {
             double roll = Math.Abs(i.RollDemand) > Math.Abs(i.CommandedAileron) ? i.RollDemand : i.CommandedAileron;
             double pitch = i.CommandedElevator;
@@ -223,7 +277,16 @@ namespace Retro.Unity
                 case "roll": return s.Sign * roll;
                 case "yaw": return s.Sign * i.CommandedRudder;
                 case "flaps": return s.Sign * i.FlapsUnit;
+                case "slats":
+                {
+                    double aoa = Math.Abs(i.AngleOfAttack);
+                    double aoaDeploy = aoa <= SlatAoaOnsetRad
+                        ? 0
+                        : Math.Max(0, Math.Min(1, (aoa - SlatAoaOnsetRad) / (SlatAoaFullRad - SlatAoaOnsetRad)));
+                    return s.Sign * Math.Max(i.FlapsUnit, aoaDeploy);
+                }
                 case "airbrake": return s.Sign * i.AirbrakesUnit;
+                case "sweep": return s.Sign * i.SweepUnit;
                 case "flaperonLeft":
                     return i.FlapsUnit * -FlapsExtendedAngle - (1.0 - i.FlapsUnit * 0.5) * RollVisAileron * roll;
                 case "flaperonRight":

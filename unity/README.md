@@ -24,6 +24,9 @@ The C# port of the game (see `docs/unity-port-plan.md`).
    `TerrainRenderer` yet. To start elsewhere in the baked pyramid, set the
    PlayerPref `retro.spawn` to `"lat,lon"` before pressing Play (read once). The F-22 is read from `assets/*.glb` with glTFast
    (`com.unity.cloud.gltfast`); `PlayerFlight.flightModel` switches FM2/FM3.
+   `PlayerFlight.aircraftId` picks any of the mod packs in `dist/assets`
+   (`npm run build` makes them) and switches in flight; the choice is kept in
+   the PlayerPref `retro.aircraft`.
 3. Flying uses the web game's keys (the sim reads them itself): arrows for
    pitch and roll, X/Y yaw, numpad +/- throttle, G gear, F flaps, B airbrakes,
    A autopilot, Space gun. F1 cockpit, F2 chase back/front, R respawn.

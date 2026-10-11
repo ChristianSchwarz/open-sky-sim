@@ -23,6 +23,7 @@ import { quadtreeSuite } from './suites/quadtree';
 import { heightsSuite } from './suites/heights';
 import { combatSimSuite } from './suites/combatSim';
 import { airfieldsSuite } from './suites/airfields';
+import { aircraftSuite } from './suites/aircraft';
 import { buildingsSuite } from './suites/buildings';
 import { copyRoadTiles, roadsSuite } from './suites/roads';
 import { selectVegetationTiles, vegetationSuite } from './suites/vegetation';
@@ -52,6 +53,7 @@ const SUITES: SuiteDef[] = [
     { name: 'heights', run: ctx => heightsSuite(ctx) },
     { name: 'combatSim', run: () => combatSimSuite() },
     { name: 'airfields', run: ctx => airfieldsSuite(ctx) },
+    { name: 'aircraft', run: ctx => aircraftSuite(ctx) },
     { name: 'buildings', run: ctx => buildingsSuite(ctx) },
     { name: 'roads', run: ctx => roadsSuite(ctx) },
     { name: 'vegetation', run: ctx => vegetationSuite(ctx) },
