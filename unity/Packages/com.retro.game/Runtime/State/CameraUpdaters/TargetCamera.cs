@@ -84,7 +84,7 @@ namespace Retro.Game
         /// netstandard2.1 has no Math.Log2, and Math.Log(x, 2) is off by an ulp
         /// at exact powers of two, which is exactly where the floor turns.
         /// </summary>
-        private static double FloorNegLog2(double x)
+        internal static double FloorNegLog2(double x)
         {
             if (double.IsNaN(x) || x < 0) return double.NaN;
             if (x == 0) return double.PositiveInfinity;
