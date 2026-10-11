@@ -34,7 +34,11 @@ namespace Retro.Terrain
         public Quatd FrameFix;
         /// <summary>Drawn as a dissolving parent under its leaves.</summary>
         public bool Under;
+        /// <summary>The leaf dissolve's switch distance (0 = opaque) and when its time ramp started.</summary>
         public double FadeM;
+        public double FadeFromMs;
+        /// <summary>How far an under-parent is pushed back (geometricErrorM * LOD_DEPTH_PUSH_SCALE), metres.</summary>
+        public double PushM;
     }
 
     /// <summary>Per-frame view parameters for <see cref="TerrainSession.Update"/>.</summary>
@@ -181,6 +185,8 @@ namespace Retro.Terrain
                     FrameFix = FrameFix,
                     Under = n.Under,
                     FadeM = n.FadeM,
+                    FadeFromMs = n.FadeFromMs,
+                    PushM = n.Under ? tile.GeometricErrorM * Lod.LodDepthPushScale : 0,
                 });
             }
         }

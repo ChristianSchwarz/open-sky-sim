@@ -25,7 +25,7 @@ namespace Retro.Unity
             if (material == null)
             {
                 material = new Material(Shader.Find("Retro/SeaSurface"));
-                material.SetColor("_Color", new Color(0.05f, 0.16f, 0.30f));
+                material.SetColor("_Color", TerrainColours.FromHex(TerrainColours.WaterHex));
             }
             grid = BuildGrid(96, 3_000_000f);
         }

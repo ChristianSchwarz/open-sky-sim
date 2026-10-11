@@ -152,12 +152,12 @@ namespace Retro.Unity
             if (waterDeepMaterial == null)
             {
                 waterDeepMaterial = new Material(Shader.Find("Retro/TerrainWater"));
-                waterDeepMaterial.SetColor("_Color", new Color(0.05f, 0.16f, 0.30f));
+                waterDeepMaterial.SetColor("_Color", TerrainColours.FromHex(TerrainColours.WaterHex));
             }
             if (waterShallowMaterial == null)
             {
                 waterShallowMaterial = new Material(Shader.Find("Retro/TerrainWater"));
-                waterShallowMaterial.SetColor("_Color", new Color(0.10f, 0.30f, 0.40f));
+                waterShallowMaterial.SetColor("_Color", TerrainColours.FromHex(TerrainColours.ShallowWaterHex));
             }
         }
 
@@ -220,10 +220,21 @@ namespace Retro.Unity
             }
         }
 
+        private static readonly int LodFadeMId = Shader.PropertyToID("_LodFadeM");
+        private static readonly int LodFadeCapId = Shader.PropertyToID("_LodFadeCap");
+        private static readonly int DepthPushId = Shader.PropertyToID("_DepthPush");
+        private static readonly int LodUnderId = Shader.PropertyToID("_LodUnder");
+        private MaterialPropertyBlock lodProps;
+
         private void Draw()
         {
             Vec3d cam = viewer.ScenePosition;
-            var landParams = new RenderParams(landMaterial) { shadowCastingMode = ShadowCastingMode.Off, receiveShadows = true };
+            double nowMs = clock.Elapsed.TotalMilliseconds;
+            if (lodProps == null) lodProps = new MaterialPropertyBlock();
+            var landParams = new RenderParams(landMaterial)
+            {
+                shadowCastingMode = ShadowCastingMode.Off, receiveShadows = true, matProps = lodProps,
+            };
             var deepParams = new RenderParams(waterDeepMaterial) { shadowCastingMode = ShadowCastingMode.Off };
             var shallowParams = new RenderParams(waterShallowMaterial) { shadowCastingMode = ShadowCastingMode.Off };
             drawnTiles = 0;
@@ -231,12 +242,19 @@ namespace Retro.Unity
             foreach (DrawTile d in session.DrawList)
             {
                 if (!gpu.TryGetValue(d.Key, out TileGpuMeshes m)) continue;
-                // Under-parents of the leaf dissolve are skipped in the spike (no
-                // dither cross-fade yet); their leaves are drawn opaque.
-                if (d.Under) continue;
                 Matrix4x4 matrix = SceneFrame.TileMatrix(d.Origin, cam, d.FrameFix, d.Tile.QuantScale * TileMeshUpload.SNorm16Max);
-                if (m.Land != null) Graphics.RenderMesh(landParams, m.Land, 0, matrix);
-                if (m.Water != null)
+                if (m.Land != null)
+                {
+                    // The leaf dissolve, per draw (tileBeforeRender in terrainEntity.ts). The
+                    // property block's values are copied when the draw is queued.
+                    lodProps.SetFloat(LodFadeMId, (float)d.FadeM);
+                    lodProps.SetFloat(LodFadeCapId, d.FadeM > 0 ? Mathf.Min(1f, (float)((nowMs - d.FadeFromMs) / Lod.LodFadeMs)) : 1f);
+                    lodProps.SetFloat(DepthPushId, (float)d.PushM);
+                    lodProps.SetFloat(LodUnderId, d.PushM > 0 ? 1f : 0f);
+                    Graphics.RenderMesh(landParams, m.Land, 0, matrix);
+                }
+                // An under-parent's water is not drawn: its leaves' water covers the same sea.
+                if (m.Water != null && !d.Under)
                 {
                     if (d.Tile.WaterGroups[0][1] > 0) Graphics.RenderMesh(deepParams, m.Water, 0, matrix);
                     if (d.Tile.WaterGroups[1][1] > 0) Graphics.RenderMesh(shallowParams, m.Water, 1, matrix);

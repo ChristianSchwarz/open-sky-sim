@@ -27,6 +27,9 @@ namespace Retro.Unity
         /// <summary>terrainEntity.ts HYBRID_SHADE_STEPS / HYBRID_SHADE_RANGE.</summary>
         public const float HybridShadeSteps = 5;
         public const float HybridShadeRange = 0.35f;
+        /// <summary>hd-noon.ts TERRAIN_WATER / TERRAIN_SHALLOW_WATER (sRGB; Unity linearises colour properties).</summary>
+        public const string WaterHex = "#16355e";
+        public const string ShallowWaterHex = "#153c6a";
         /// <summary>tones.ts LANDUSE_BLEND_DEFAULT.</summary>
         public const float LanduseBlendDefault = 0.5f;
 

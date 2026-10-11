@@ -1,10 +1,11 @@
-// Baked terrain land for URP (M2 spike).
+// Baked terrain land for URP.
 //
 // Vertex streams are the PTM wire formats: POSITION SNorm16x4 (xyz, pad; the
 // object matrix carries quantScale * 32767 and the z mirror into Unity axes),
 // NORMAL SNorm8x4 (xyz, pad), COLOR UNorm8x4 (sRGB rgb, TerrainClass / 255).
 // Colour from the four modes of terrainCover.ts (TerrainCover.hlsl); faceted
-// Lambert from the URP main light plus SH ambient and URP fog.
+// light from the URP main light (N.L^2.2) plus SH ambient and URP fog; the
+// leaf dissolve of terrainVP/FP.ts (TerrainLod.hlsl) in both passes.
 Shader "Retro/TerrainLand"
 {
     Properties
@@ -21,6 +22,8 @@ Shader "Retro/TerrainLand"
         CBUFFER_START(UnityPerMaterial)
             half _Brightness;
         CBUFFER_END
+
+        #include "TerrainLod.hlsl"
         ENDHLSL
 
         Pass
@@ -52,15 +55,21 @@ Shader "Retro/TerrainLand"
                 nointerpolation float3 normalWS : TEXCOORD1;
                 nointerpolation half3 albedo : TEXCOORD2;
                 half fog : TEXCOORD3;
+                // x: reveal (1 = opaque), y: camera height over the facet plane, z: height over camera.
+                float3 lod : TEXCOORD4;
             };
 
             Varyings vert(Attributes v)
             {
                 Varyings o;
+                // World space is camera-relative (the camera sits at the origin).
                 float3 positionWS = TransformObjectToWorld(v.positionOS.xyz);
+                float3 normalWS = TransformObjectToWorldNormal(v.normalOS.xyz);
+                o.lod = RetroLodVertex(positionWS, normalWS);
+                positionWS = RetroDepthPush(positionWS);
                 o.positionWS = positionWS;
                 o.positionCS = TransformWorldToHClip(positionWS);
-                o.normalWS = TransformObjectToWorldNormal(v.normalOS.xyz);
+                o.normalWS = normalWS;
                 // The colour mode decides per vertex (constant over a facet); land-use
                 // size reveal is not wired yet, so every region shows fully.
                 o.albedo = RetroFacetColor(v.color.rgb, v.color.a * 255.0, 1.0);
@@ -68,8 +77,9 @@ Shader "Retro/TerrainLand"
                 return o;
             }
 
-            half4 frag(Varyings i, bool frontFace : SV_IsFrontFace) : SV_Target
+            half4 frag(Varyings i) : SV_Target
             {
+                RetroLodClip(i.lod, i.positionCS.xy);
                 float3 n = normalize(i.normalWS);
                 Light sun = GetMainLight(TransformWorldToShadowCoord(i.positionWS));
                 // terrainVP.ts: N.L raised to SHADOW_CONTRAST_POWER (2.2) so slope relief reads
@@ -95,13 +105,30 @@ Shader "Retro/TerrainLand"
             #pragma vertex vert
             #pragma fragment frag
 
-            float4 vert(float4 positionOS : POSITION) : SV_POSITION
+            struct Attributes
             {
-                return TransformObjectToHClip(positionOS.xyz);
+                float4 positionOS : POSITION;
+                float4 normalOS : NORMAL;
+            };
+
+            struct Varyings
+            {
+                float4 positionCS : SV_POSITION;
+                float3 lod : TEXCOORD0;
+            };
+
+            Varyings vert(Attributes v)
+            {
+                Varyings o;
+                float3 positionWS = TransformObjectToWorld(v.positionOS.xyz);
+                o.lod = RetroLodVertex(positionWS, TransformObjectToWorldNormal(v.normalOS.xyz));
+                o.positionCS = TransformWorldToHClip(RetroDepthPush(positionWS));
+                return o;
             }
 
-            half frag() : SV_Target
+            half frag(Varyings i) : SV_Target
             {
+                RetroLodClip(i.lod, i.positionCS.xy);
                 return 0;
             }
             ENDHLSL
