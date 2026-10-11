@@ -8,6 +8,10 @@ Shader "Retro/SceneryLit"
         _Color ("Color", Color) = (0.66, 0.66, 0.66, 1)
         // Front by default: see the pass. Off for double-sided parts (bridges).
         [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull", Float) = 1
+        // A hull below the sea it floats on (materials.ts clipBelowY): Unity world y, camera-relative.
+        _ClipBelowY ("Clip below world y", Float) = -1000000000
+        // 1 for glTFast meshes, wound for Unity already: their Unity front faces are the front.
+        [Toggle] _GltfWinding ("glTF winding", Float) = 0
     }
     SubShader
     {
@@ -17,6 +21,8 @@ Shader "Retro/SceneryLit"
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
         CBUFFER_START(UnityPerMaterial)
             half4 _Color;
+            float _ClipBelowY;
+            float _GltfWinding;
         CBUFFER_END
         ENDHLSL
 
@@ -65,7 +71,9 @@ Shader "Retro/SceneryLit"
             {
                 // Seen from the side Unity calls front (the scene's back, under the z
                 // mirror), a double-sided part is lit by its other face's normal.
-                float3 n = normalize(i.normalWS) * (front ? -1 : 1);
+                if (i.positionWS.y < _ClipBelowY) discard;
+                // A glTF mesh comes wound for Unity, so there the front is the front.
+                float3 n = normalize(i.normalWS) * ((front != (_GltfWinding > 0.5)) ? -1 : 1);
                 Light sun = GetMainLight(TransformWorldToShadowCoord(i.positionWS));
                 half3 c = _Color.rgb * (sun.color * saturate(dot(n, sun.direction)) * sun.shadowAttenuation + SampleSH(n));
                 return half4(MixFog(c, i.fog), 1);

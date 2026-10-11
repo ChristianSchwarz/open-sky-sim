@@ -20,6 +20,8 @@ namespace Retro.Unity
         Free,
         /// <summary>F6: behind (or, pressed again, ahead of) the opponent, looking at the player.</summary>
         AiChase,
+        /// <summary>F3: over the carrier stern, looking at the player.</summary>
+        CarrierStern,
     }
 
     /// <summary>
@@ -30,8 +32,8 @@ namespace Retro.Unity
     /// Keys go to the sim as KeyboardEvent.key names (the sim owns the
     /// keyboard and gamepad handling, as in the TS), so flaps, gear, brakes,
     /// autopilot and the layouts all behave as on the web. Views use the
-    /// ported camera updaters: F1 cockpit, F2 chase back/front, F6 the
-    /// opponent, F10 free camera. R restarts the flight; Ctrl+1..9 starts one
+    /// ported camera updaters: F1 cockpit, F2 chase back/front, F3 over the
+    /// carrier stern, F6 the opponent, F10 free camera. R restarts the flight; Ctrl+1..9 starts one
     /// in that spawn mode (the spawn menu's digits). Each flight brings the
     /// opponent and the wingman (<see cref="Combat"/>).
     /// </summary>
@@ -84,6 +86,10 @@ namespace Retro.Unity
         private AiExteriorCameraUpdater aiChase;
         private ExteriorViewHeading aiChaseHeading = ExteriorViewHeading.Back;
         private TracerRenderer tracers;
+        private Carrier carrier;
+        private CarrierFx carrierFx;
+        private readonly Tailhook tailhook = new Tailhook();
+        private CarrierOverSternCameraUpdater carrierCamera;
         private Fm2AircraftConfig config;
         private List<SceneRunway> runways = new List<SceneRunway>();
         private SceneRunway startRunway;
@@ -147,6 +153,9 @@ namespace Retro.Unity
             // combatSimClient.tick: a long stall becomes one 50 ms step; steps are at most 1/30 s.
             double delta = Time.deltaTime;
             if (delta > 0.1) delta = 0.05;
+            // advanceCarrier then syncCarrierSystems, before the sim steps.
+            carrier.Advance(delta);
+            carrier.Sync(sim);
             while (delta > 1e-6)
             {
                 double step = Math.Min(delta, 1.0 / 30);
@@ -163,38 +172,32 @@ namespace Retro.Unity
         private bool TryBoot()
         {
             if (terrain == null || view == null || terrain.Session == null) return false;
-            heightField = terrain.CreateHeightField();
-            if (heightField == null) return false;
+            if (heightField == null)
+            {
+                heightField = terrain.CreateHeightField();
+                if (heightField == null) return false;
+            }
+            if (carrier == null) BootWorld();
+            // game.ts awaits kuz.glb before setupCombat: the deck goes to the sim with the world.
+            if (!carrier.Settled) return false;
 
             sim = new CombatSim(heightField);
-            string assetsDir = System.IO.Path.GetDirectoryName(terrain.Root);
-            catalogue = new List<AircraftCatalogue.Entry> { new AircraftCatalogue.Entry { Def = AircraftDefs.F22(), Files = new DirectoryFiles(assetsDir) } };
-            catalogueTask = System.Threading.Tasks.Task.Run(() => AircraftCatalogue.Load(assetsDir));
-            current = catalogue[0];
-            // The spawn menu's pick, kept between sessions like the web game's setting.
-            string saved = PlayerPrefs.GetString(AircraftPref, "");
-            if (aircraftId == "f22" && saved.Length > 0) aircraftId = saved;
-            config = AircraftDefs.FlightConfigWithArrestorHook(current.Def);
-            string airfieldsPath = System.IO.Path.Combine(terrain.Root, "airfields.json");
-            List<Airfield> airfields = AirfieldsJson.Near(
-                System.IO.File.Exists(airfieldsPath) ? AirfieldsJson.Parse(System.IO.File.ReadAllText(airfieldsPath)).Items : new List<Airfield>(),
-                heightField.Basis, AirfieldReachM);
-            runways = ActiveAirfield.SceneRunwaysOf(airfields, heightField.Basis, AirfieldSurfaceEpsM);
-            startRunway = ActiveAirfield.PickStartRunway(runways, preferIcao);
-            // The ground is the DEM with the airfield pads through the height field; the
-            // runways go in for the AI pilots, as serializeSceneWorld sends them.
-            var world = new SerializedWorld { SurfacePads = runwayPads };
+            var world = new SerializedWorld
+            {
+                SurfacePads = runwayPads,
+                CarrierMeshes = new List<SerializedCarrierMesh>(),
+                ArrestorCables = new List<SerializedArrestorCables> { Carrier.Serialize(carrier.CableField()) },
+            };
+            if (carrier.Deck != null)
+            {
+                world.CarrierMeshes.Add(new SerializedCarrierMesh
+                {
+                    OriginX = carrier.Deck.OriginX, OriginY = carrier.Deck.OriginY, OriginZ = carrier.Deck.OriginZ,
+                    Triangles = carrier.Deck.Triangles, Aabb = carrier.Deck.Aabb,
+                });
+            }
             foreach (SceneRunway r in runways)
             {
-                // The gear rests on the pavement that is drawn (AIRFIELD_SURFACE_EPS_M over the
-                // pad-flattened DEM), from the same three sampled points the pavement uses.
-                runwayPads.Add(new Retro.Sim.SurfacePadCollider
-                {
-                    CenterX = r.Center.X, CenterZ = r.Center.Z, Heading = r.Heading,
-                    HalfLength = r.HalfLength, HalfWidth = r.HalfWidth,
-                    SurfaceY = r.Center.Y, BaseY = r.Center.Y - AirfieldSurfaceEpsM,
-                    Feather = SurfacePadFeatherM, Slope = r.Slope,
-                });
                 world.Runways.Add(new SerializedRunway
                 {
                     Center = new[] { r.Center.X, r.Center.Y, r.Center.Z },
@@ -230,8 +233,11 @@ namespace Retro.Unity
             chaseBack = new ExteriorFrontBehindCameraUpdater(this, pose, ExteriorViewHeading.Back);
             chaseFront = new ExteriorFrontBehindCameraUpdater(this, pose, ExteriorViewHeading.Front);
             crashedCamera = new CrashedCameraUpdater(this, pose);
+            carrierCamera = new CarrierOverSternCameraUpdater(this, pose, carrier);
             airframeView.Load(current.Def, current.Files);
             airframeView.Snap(aircraft);
+            tailhook.Configure(current.Def);
+            carrierFx = new CarrierFx(carrier, GroundAt);
             // setupCombat: the opponent and the wingman, parked until the flight begins.
             combat = new Combat(sim, PlayerId, current.Def, current.Files, config, flightModel, aircraft.GetPosition(), 0);
             aiChase = new AiExteriorCameraUpdater(this, pose, new SimChaseTarget(sim, Combat.OpponentId(0)), aiChaseHeading);
@@ -241,6 +247,45 @@ namespace Retro.Unity
                 + (startRunway != null ? $"{startRunway.Icao} {startRunway.Name} {startRunway.Ref}" : $"at {spawnLat}, {spawnLon}")
                 + $"; ground tiles fine {heightField.FineResident}, coarse {heightField.CoarseResident}");
             return true;
+        }
+
+        /// <summary>
+        /// The world before the sim: the aircraft catalogue, the airfields near the origin
+        /// and their runway pads, the start runway, and the carrier berthed near it.
+        /// </summary>
+        private void BootWorld()
+        {
+            string assetsDir = System.IO.Path.GetDirectoryName(terrain.Root);
+            catalogue = new List<AircraftCatalogue.Entry> { new AircraftCatalogue.Entry { Def = AircraftDefs.F22(), Files = new DirectoryFiles(assetsDir) } };
+            catalogueTask = System.Threading.Tasks.Task.Run(() => AircraftCatalogue.Load(assetsDir));
+            current = catalogue[0];
+            // The spawn menu's pick, kept between sessions like the web game's setting.
+            string saved = PlayerPrefs.GetString(AircraftPref, "");
+            if (aircraftId == "f22" && saved.Length > 0) aircraftId = saved;
+            config = AircraftDefs.FlightConfigWithArrestorHook(current.Def);
+            string airfieldsPath = System.IO.Path.Combine(terrain.Root, "airfields.json");
+            List<Airfield> airfields = AirfieldsJson.Near(
+                System.IO.File.Exists(airfieldsPath) ? AirfieldsJson.Parse(System.IO.File.ReadAllText(airfieldsPath)).Items : new List<Airfield>(),
+                heightField.Basis, AirfieldReachM);
+            runways = ActiveAirfield.SceneRunwaysOf(airfields, heightField.Basis, AirfieldSurfaceEpsM);
+            startRunway = ActiveAirfield.PickStartRunway(runways, preferIcao);
+            // The ground is the DEM with the airfield pads through the height field; the
+            // runways go in for the AI pilots, as serializeSceneWorld sends them.
+            foreach (SceneRunway r in runways)
+            {
+                // The gear rests on the pavement that is drawn (AIRFIELD_SURFACE_EPS_M over the
+                // pad-flattened DEM), from the same three sampled points the pavement uses.
+                runwayPads.Add(new Retro.Sim.SurfacePadCollider
+                {
+                    CenterX = r.Center.X, CenterZ = r.Center.Z, Heading = r.Heading,
+                    HalfLength = r.HalfLength, HalfWidth = r.HalfWidth,
+                    SurfaceY = r.Center.Y, BaseY = r.Center.Y - AirfieldSurfaceEpsM,
+                    Feather = SurfacePadFeatherM, Slope = r.Slope,
+                });
+            }
+            carrier = new Carrier(heightField, startRunway,
+                (x, z) => Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads) != double.NegativeInfinity,
+                new DirectoryFiles(assetsDir));
         }
 
         /// <summary>PlayerPrefs key of the selected aircraft id.</summary>
@@ -269,6 +314,7 @@ namespace Retro.Unity
             config = AircraftDefs.FlightConfigWithArrestorHook(current.Def);
             sim.SetAircraftConfig(PlayerId, config, flightModel, current.Def.CollisionMesh);
             airframeView.Load(current.Def, current.Files);
+            tailhook.Configure(current.Def);
             combat.SetAircraft(current.Def, current.Files, config, flightModel);
             PlayerPrefs.SetString(AircraftPref, current.Def.Id);
             Debug.Log($"Retro flight: now flying {current.Def.Name}");
@@ -285,11 +331,13 @@ namespace Retro.Unity
         private SimAircraftSpawn MakeSpawn()
         {
             SpawnMode mode = spawnMode;
-            if (mode == SpawnMode.Carrier || mode == SpawnMode.CarrierTakeoff)
+            if (mode == SpawnMode.Carrier) return carrier.ApproachSpawn(Combat.ApproachSpeedMps);
+            if (mode == SpawnMode.CarrierTakeoff)
             {
-                // No carrier in the world yet: the nearest thing is the land approach.
-                Debug.LogWarning($"Retro flight: {mode} needs the carrier, starting on approach");
-                mode = SpawnMode.Approach;
+                double gearY = current.Def.Flight != null
+                    ? Fm2AircraftConfig.GroundRestHeight(current.Def.Flight)
+                    : SimConstants.PlaneDistanceToGround;
+                return carrier.TakeoffSpawn(gearY, GroundAt);
             }
             if (mode == SpawnMode.Location || startRunway == null) return AirborneSpawn();
             SceneRunway r = startRunway;
@@ -346,7 +394,8 @@ namespace Retro.Unity
                 heightField.Focus(new[] { new Vec3d(x, 0, z) });
                 heightField.WaitIdle(TimeSpan.FromSeconds(5));
             }
-            return Math.Max(heightField.HeightAtWorld(x, z), Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads));
+            return Math.Max(Math.Max(heightField.HeightAtWorld(x, z), Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, runwayPads)),
+                carrier.DeckYAt(x, z));
         }
 
         private double GroundAt(double x, double z) => GroundAt(x, z, false);
@@ -423,6 +472,7 @@ namespace Retro.Unity
             sim.GetPlayerInput(PlayerId)?.SyncThrottle(spawn.Throttle);
             sim.SyncEffectiveThrottle(PlayerId, spawn.Throttle);
             airframeView.Snap(aircraft);
+            tailhook.Snap(aircraft);
         }
 
         // --- Camera --------------------------------------------------------------------
@@ -443,6 +493,7 @@ namespace Retro.Unity
                 case FlightView.Cockpit: cockpitCamera.Update(delta); break;
                 case FlightView.ChaseBack: chaseBack.Update(delta); break;
                 case FlightView.ChaseFront: chaseFront.Update(delta); break;
+                case FlightView.CarrierStern: carrierCamera.Update(delta); break;
                 case FlightView.AiChase:
                     if (combat.Opponent != null && combat.Opponent.Enabled) aiChase.Update(delta);
                     else chaseBack.Update(delta);
@@ -475,6 +526,7 @@ namespace Retro.Unity
             FlightView before = flightView;
             if (k.f1Key.wasPressedThisFrame) flightView = FlightView.Cockpit;
             if (k.f2Key.wasPressedThisFrame) flightView = flightView == FlightView.ChaseBack ? FlightView.ChaseFront : FlightView.ChaseBack;
+            if (k.f3Key.wasPressedThisFrame) flightView = FlightView.CarrierStern;
             if (k.f6Key.wasPressedThisFrame)
             {
                 // aiExteriorCameraUpdater.ts: F6 again swaps behind and ahead of the opponent.
@@ -608,7 +660,10 @@ namespace Retro.Unity
         private void DrawAirframe()
         {
             bool visible = !(flightView == FlightView.Cockpit && !aircraft.IsCrashed());
+            carrier.Draw(view.ScenePosition);
             airframeView.Draw(aircraft, view.ScenePosition, Time.deltaTime, visible, wingSweepMode);
+            if (visible) tailhook.Draw(aircraft, carrier.Pose, view.ScenePosition, Time.deltaTime);
+            carrierFx.Draw(aircraft, tailhook.HingeBody, view.ScenePosition, Time.deltaTime);
             combat.Draw(view.ScenePosition, Time.deltaTime);
             tracers.Draw(sim, view.ScenePosition, view.UnityCamera);
         }
@@ -643,6 +698,9 @@ namespace Retro.Unity
         {
             airframeView.Destroy();
             combat?.Destroy();
+            carrier?.Destroy();
+            carrierFx?.Dispose();
+            tailhook.Dispose();
             tracers?.Dispose();
         }
     }

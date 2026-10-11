@@ -85,6 +85,34 @@ namespace Retro.Core
             }
         }
 
+        /// <summary>three.js setFromUnitVectors(vFrom, vTo): the shortest turn taking one unit vector to the other.</summary>
+        public static Quatd FromUnitVectors(Vec3d vFrom, Vec3d vTo)
+        {
+            double r = Vec3d.Dot(vFrom, vTo) + 1;
+            double x, y, z, w;
+            if (r < 1e-8)
+            {
+                // Opposite vectors: any perpendicular axis.
+                r = 0;
+                if (Math.Abs(vFrom.X) > Math.Abs(vFrom.Z))
+                {
+                    x = -vFrom.Y; y = vFrom.X; z = 0; w = r;
+                }
+                else
+                {
+                    x = 0; y = -vFrom.Z; z = vFrom.Y; w = r;
+                }
+            }
+            else
+            {
+                x = vFrom.Y * vTo.Z - vFrom.Z * vTo.Y;
+                y = vFrom.Z * vTo.X - vFrom.X * vTo.Z;
+                z = vFrom.X * vTo.Y - vFrom.Y * vTo.X;
+                w = r;
+            }
+            return new Quatd(x, y, z, w).Normalized();
+        }
+
         /// <summary>three.js slerpQuaternions(a, b, t): shortest arc, normalised lerp below ~1.8 degrees.</summary>
         public static Quatd Slerp(Quatd a, Quatd b, double t)
         {

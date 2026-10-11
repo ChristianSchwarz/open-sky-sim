@@ -114,14 +114,32 @@ namespace Retro.Unity
 
         private async Task<Transform> LoadPart(string file, string name)
         {
+            Transform part = await LoadGltf(files, file, root, name);
+            if (part == null)
+            {
+#if !RETRO_GLTFAST
+                Error = "glTFast (com.unity.cloud.gltfast) is not installed";
+#endif
+                return null;
+            }
+            Remap(part);
+            return part;
+        }
+
+        /// <summary>
+        /// One glTF from a pack (or the assets folder), its nearest LOD scene instantiated
+        /// under a new child of `parent`; null when it cannot be read or `parent` died first.
+        /// </summary>
+        public static async Task<Transform> LoadGltf(IAircraftFiles files, string file, Transform parent, string name)
+        {
 #if RETRO_GLTFAST
             if (!files.TryRead(file, out byte[] data))
             {
-                Debug.LogError($"Retro aircraft: {file} not in {files.Label}");
+                Debug.LogError($"Retro: {file} not in {files.Label}");
                 return null;
             }
             var part = new GameObject(name).transform;
-            part.SetParent(root, false);
+            part.SetParent(parent, false);
             // Uninterrupted: a handful of small parts, and the default agent is a
             // DontDestroyOnLoad object that errors when a load outlives play mode.
             var gltf = new GltfImport(new FilesDownloadProvider(files), new UninterruptedDeferAgent());
@@ -131,7 +149,7 @@ namespace Retro.Unity
                 : await gltf.LoadGltfJson(System.Text.Encoding.UTF8.GetString(data), uri);
             // A load can outlive its owner (play mode stopped, model destroyed): then it must
             // not instantiate, or the parts land in the edit-mode scene with dead materials.
-            if (root == null || part == null || !Application.isPlaying)
+            if (parent == null || part == null || !Application.isPlaying)
             {
                 if (part != null) UnityEngine.Object.Destroy(part.gameObject);
                 gltf.Dispose();
@@ -139,15 +157,13 @@ namespace Retro.Unity
             }
             if (!ok || !await gltf.InstantiateSceneAsync(part, NearestScene(gltf)))
             {
-                Debug.LogError($"Retro aircraft: could not load {file} from {files.Label}");
+                Debug.LogError($"Retro: could not load {file} from {files.Label}");
                 UnityEngine.Object.Destroy(part.gameObject);
                 return null;
             }
-            Remap(part);
             return part;
 #else
             await Task.CompletedTask;
-            Error = "glTFast (com.unity.cloud.gltfast) is not installed";
             return null;
 #endif
         }
@@ -235,6 +251,7 @@ namespace Retro.Unity
             }
             // glTFast already rewinds for Unity: these faces are front faces as they come.
             m.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Back);
+            m.SetFloat("_GltfWinding", 1);
             RemappedMaterials[name] = m;
             return m;
         }

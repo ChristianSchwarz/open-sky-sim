@@ -81,7 +81,7 @@ namespace Retro.Sim
         public static readonly double[] DefaultArrestorHookBody = { 0, -1.7 + TailhookMountUpM, -4.85 };
 
         /// <summary>Hinge sits this far above the tip in body Y (m).</summary>
-        private const double ArrestorHookHingeUpM = 0.75;
+        public const double ArrestorHookHingeUpM = 0.75;
         /// <summary>Hinge sits this far forward of the tip in body +Z (m).</summary>
         public const double ArrestorHookHingeFwdM = 1.0;
 
