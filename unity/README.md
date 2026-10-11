@@ -10,7 +10,8 @@ The C# port of the game (see `docs/unity-port-plan.md`).
   `SeaSurface`, `FlyCamera` (double-precision floating origin), `SceneFrame`
   (the only place scene axes become Unity axes), the URP shaders, and
   `Flight/` (`PlayerFlight` drives the ported `CombatSim`; `DemHeightField`
-  is its collision surface).
+  is its collision surface) and `World/` (airfields, roads and rails,
+  bridges, buildings, trees, each streamed per drawn tile).
 - `RetroFlight/`: the Unity project (Unity 6, Universal 3D template). Its
   `Packages/manifest.json` references the packages above as `file:../../Packages/...`.
 
@@ -20,7 +21,8 @@ The C# port of the game (see `docs/unity-port-plan.md`).
 2. Press Play in any scene: `SpikeBootstrap` creates the camera, a sun, the
    terrain, the sea and the player's aircraft (on the nearest base runway;
    `PlayerFlight.startOnRunway` off starts airborne) when the scene has no
-   `TerrainRenderer` yet. The F-22 is read from `assets/*.glb` with glTFast
+   `TerrainRenderer` yet. To start elsewhere in the baked pyramid, set the
+   PlayerPref `retro.spawn` to `"lat,lon"` before pressing Play (read once). The F-22 is read from `assets/*.glb` with glTFast
    (`com.unity.cloud.gltfast`); `PlayerFlight.flightModel` switches FM2/FM3.
 3. Flying uses the web game's keys (the sim reads them itself): arrows for
    pitch and roll, X/Y yaw, numpad +/- throttle, G gear, F flaps, B airbrakes,
