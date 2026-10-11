@@ -118,7 +118,7 @@ namespace Retro.Unity
                     gear = await LoadPart(Path.Combine(dir, def.Gear), "gear");
                     if (gear != null) gearAnimations.AddRange(gear.GetComponentsInChildren<Animation>(true));
                 }
-                for (int i = 0; i < def.Surfaces.Count; i++)
+                for (int i = 0; i < def.Surfaces.Count && root != null; i++)
                 {
                     surfaces[i] = await LoadPart(Path.Combine(dir, def.Surfaces[i].Model), def.Surfaces[i].Role);
                 }
@@ -139,7 +139,16 @@ namespace Retro.Unity
             // Uninterrupted: a handful of small parts at boot, and the default agent is a
             // DontDestroyOnLoad object that errors when a load outlives play mode.
             var gltf = new GltfImport(deferAgent: new UninterruptedDeferAgent());
-            if (!await gltf.LoadFile(path, new Uri(Path.GetFullPath(path))) || !await gltf.InstantiateMainSceneAsync(part))
+            bool ok = await gltf.LoadFile(path, new Uri(Path.GetFullPath(path)));
+            // A load can outlive its owner (play mode stopped, model destroyed): then it must
+            // not instantiate, or the parts land in the edit-mode scene with dead materials.
+            if (root == null || part == null || !Application.isPlaying)
+            {
+                if (part != null) UnityEngine.Object.Destroy(part.gameObject);
+                gltf.Dispose();
+                return null;
+            }
+            if (!ok || !await gltf.InstantiateMainSceneAsync(part))
             {
                 Debug.LogError($"Retro aircraft: could not load {path}");
                 UnityEngine.Object.Destroy(part.gameObject);

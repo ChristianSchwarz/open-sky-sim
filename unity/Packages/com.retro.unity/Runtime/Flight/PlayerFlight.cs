@@ -102,6 +102,12 @@ namespace Retro.Unity
             if (sim == null && !TryBoot()) return;
 
             ReadViewKeys();
+            // However the view became Free (key, inspector, script), the camera is the free one's.
+            if (flightView == FlightView.Free && view.External)
+            {
+                ReleaseAllKeys();
+                view.ReleasePose();
+            }
             if (flightModel != appliedModel)
             {
                 // The Settings flight-model switch: same airframe, other model, state carried over.
@@ -138,8 +144,10 @@ namespace Retro.Unity
 
             sim = new CombatSim(heightField);
             config = Fm2Defaults.Default();
-            List<Airfield> airfields = AirfieldsReader.Near(
-                AirfieldsReader.Read(System.IO.Path.Combine(terrain.Root, "airfields.json")), heightField.Basis, AirfieldReachM);
+            string airfieldsPath = System.IO.Path.Combine(terrain.Root, "airfields.json");
+            List<Airfield> airfields = AirfieldsJson.Near(
+                System.IO.File.Exists(airfieldsPath) ? AirfieldsJson.Parse(System.IO.File.ReadAllText(airfieldsPath)).Items : new List<Airfield>(),
+                heightField.Basis, AirfieldReachM);
             runways = ActiveAirfield.SceneRunwaysOf(airfields, heightField.Basis, AirfieldSurfaceEpsM);
             startRunway = ActiveAirfield.PickStartRunway(runways, preferIcao);
             // The ground is the DEM with the airfield pads through the height field; the

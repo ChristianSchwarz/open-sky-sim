@@ -53,6 +53,12 @@ namespace Retro.Unity
             var player = new GameObject("Player").AddComponent<PlayerFlight>();
             player.terrain = terrain;
             player.view = fly;
+
+            // M5: the world on top of the terrain.
+            var airfields = root.AddComponent<AirfieldRenderer>();
+            airfields.terrain = terrain;
+            airfields.viewer = fly;
+            airfields.player = player;
             return terrain;
         }
     }
