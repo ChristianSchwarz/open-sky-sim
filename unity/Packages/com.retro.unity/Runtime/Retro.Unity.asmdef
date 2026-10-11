@@ -6,7 +6,8 @@
         "Retro.TerrainData",
         "Retro.Sim",
         "Retro.Game",
-        "Unity.InputSystem"
+        "Unity.InputSystem",
+        "glTFast"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -20,6 +21,11 @@
             "name": "com.unity.inputsystem",
             "expression": "1.0.0",
             "define": "RETRO_INPUT_SYSTEM"
+        },
+        {
+            "name": "com.unity.cloud.gltfast",
+            "expression": "6.0.0",
+            "define": "RETRO_GLTFAST"
         }
     ],
     "noEngineReferences": false

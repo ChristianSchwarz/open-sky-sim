@@ -18,8 +18,10 @@ The C# port of the game (see `docs/unity-port-plan.md`).
 
 1. Open `unity/RetroFlight` in Unity 6.
 2. Press Play in any scene: `SpikeBootstrap` creates the camera, a sun, the
-   terrain, the sea and the player's aircraft (airborne over Gran Canaria)
-   when the scene has no `TerrainRenderer` yet.
+   terrain, the sea and the player's aircraft (on the nearest base runway;
+   `PlayerFlight.startOnRunway` off starts airborne) when the scene has no
+   `TerrainRenderer` yet. The F-22 is read from `assets/*.glb` with glTFast
+   (`com.unity.cloud.gltfast`); `PlayerFlight.flightModel` switches FM2/FM3.
 3. Flying uses the web game's keys (the sim reads them itself): arrows for
    pitch and roll, X/Y yaw, numpad +/- throttle, G gear, F flaps, B airbrakes,
    A autopilot, Space gun. F1 cockpit, F2 chase back/front, R respawn.

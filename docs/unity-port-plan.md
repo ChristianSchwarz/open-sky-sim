@@ -21,7 +21,7 @@ runtime, rendering, sim/AI, UI/input). Nothing in the repo was changed to produc
 | H AI pilots (4 models) | Done, all 34 closed-loop traces bit-identical (V8-exact trig in `JsTrig`) | `.../sim/Runtime/Ai` |
 | O game state: spawn search, camera routes, runway pick, carrier site, recorder, re-base, all camera modes | Done, 74 tests ported from TS plus oracle checks | `unity/Packages/com.retro.game` |
 | M2 terrain spike | Done: Gran Canaria on screen in Unity 6 / URP, handedness and floating origin verified | `unity/Packages/com.retro.unity`, `docs/unity-spike/` |
-| M4 fly (first cut) | FM2 on the ported `CombatSim` over a streamed DEM height field; keys and gamepad go to the sim; F1 cockpit, F2 chase, crash orbit; crash on fine terrain verified. Open: runway spawn and landing, FM3 switch, glTF airframe with animated surfaces, respawn resetting the latched arrow stick | `unity/Packages/com.retro.unity/Runtime/Flight` |
+| M4 fly | The ported `CombatSim` over a streamed DEM height field with airfield pads; start on the nearest base runway (airfields.json, `PickStartRunway`) or airborne; FM2/FM3 switch; keys and gamepad go to the sim; F-22 glTF parts via glTFast with hinged surfaces and the gear clip; F1 cockpit, F2 chase, crash orbit. Verified: takeoff from GCLP 03L, crash on fine terrain, FM3 swap in flight. Open: runway/airfield geometry is not drawn yet (M5), landing not yet flown by script, no HUD (M8) | `unity/Packages/com.retro.unity/Runtime/Flight` |
 | I-P (mods, sky, HUD, UI, wreck) | Not started | |
 
 `cd dotnet && dotnet test Retro.slnx` runs every C# golden test without Unity (202 tests). All trig goes through `Retro.Core.JsTrig`, a port of V8's fdlibm, so closed-loop traces stay bit-identical to the browser.

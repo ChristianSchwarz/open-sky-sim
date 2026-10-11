@@ -40,6 +40,10 @@ namespace Retro.Unity
         public FlyCamera view;
 
         [Header("Spawn")]
+        [Tooltip("Lined up on the nearest base runway (game.ts runwaySpawnPosition); off: airborne at the point below.")]
+        public bool startOnRunway = true;
+        [Tooltip("ICAO (or name) of the airfield to start at; empty picks the nearest base.")]
+        public string preferIcao = "";
         public double spawnLat = 27.75;
         public double spawnLon = -15.6;
         [Tooltip("Metres above the ellipsoid; raised to clear the ground if needed.")]
@@ -71,8 +75,25 @@ namespace Retro.Unity
         private double gamepadThrottle;
         private Mesh airframe;
         private Material airframeMaterial;
+        private AircraftModel model;
+        private Fm2AircraftConfig config;
+        private List<SceneRunway> runways = new List<SceneRunway>();
+        private SceneRunway startRunway;
+        private SimFlightModelKind appliedModel;
+        // game.ts RUNWAY_SPAWN_INSET_M and AIRFIELD_SURFACE_EPS_M.
+        private const double RunwaySpawnInsetM = 120;
+        private const double AirfieldSurfaceEpsM = 1.5;
+        /// <summary>Airfields this far from the frame origin count as the play area's.</summary>
+        private const double AirfieldReachM = 150000;
+        // player.ts device animations: progress units and their durations (s).
+        private double gearUnit, flapsUnit, airbrakesUnit;
+        private const double GearAnimS = 3, FlapsAnimS = 2, AirbrakesAnimS = 1.5;
+
+        /// <summary>The last keys forwarded to the sim, newest last ("+key" down, "-key" up), for debugging input.</summary>
+        public readonly Queue<string> KeyLog = new Queue<string>();
 
         public CombatSim Sim => sim;
+        public SceneRunway StartRunway => startRunway;
         public SimAircraft Aircraft => aircraft;
         public DemHeightField HeightField => heightField;
 
@@ -81,6 +102,12 @@ namespace Retro.Unity
             if (sim == null && !TryBoot()) return;
 
             ReadViewKeys();
+            if (flightModel != appliedModel)
+            {
+                // The Settings flight-model switch: same airframe, other model, state carried over.
+                sim.SetAircraftConfig(PlayerId, config, flightModel);
+                appliedModel = flightModel;
+            }
             if (flightView != FlightView.Free)
             {
                 ForwardKeys();
@@ -110,16 +137,32 @@ namespace Retro.Unity
             if (heightField == null) return false;
 
             sim = new CombatSim(heightField);
-            // An empty static world: the ground is the DEM (plus pads) through the height field.
-            sim.SetWorld(new SerializedWorld());
+            config = Fm2Defaults.Default();
+            List<Airfield> airfields = AirfieldsReader.Near(
+                AirfieldsReader.Read(System.IO.Path.Combine(terrain.Root, "airfields.json")), heightField.Basis, AirfieldReachM);
+            runways = ActiveAirfield.SceneRunwaysOf(airfields, heightField.Basis, AirfieldSurfaceEpsM);
+            startRunway = ActiveAirfield.PickStartRunway(runways, preferIcao);
+            // The ground is the DEM with the airfield pads through the height field; the
+            // runways go in for the AI pilots, as serializeSceneWorld sends them.
+            var world = new SerializedWorld();
+            foreach (SceneRunway r in runways)
+            {
+                world.Runways.Add(new SerializedRunway
+                {
+                    Center = new[] { r.Center.X, r.Center.Y, r.Center.Z },
+                    Heading = r.Heading, HalfLength = r.HalfLength, HalfWidth = r.HalfWidth,
+                });
+            }
+            sim.SetWorld(world);
             sim.SetKeyboardLayout(keyboardLayout);
+            SimAircraftSpawn spawn = MakeSpawn();
             sim.AddAircraft(new SimAircraftDesc
             {
                 Id = PlayerId,
                 Faction = Faction.PLAYER,
                 Control = SimControlMode.External,
                 Model = flightModel,
-                AircraftConfig = Fm2Defaults.Default(),
+                AircraftConfig = config,
                 PilotOptions = new AiPilotOptions { CruiseAltitude = 3000, CruiseSpeed = 220, HardDeck = 150 },
                 // game.ts PLAYER_HIT_RADIUS_M and PLAYER_GUN.
                 HitRadius = 10,
@@ -129,24 +172,56 @@ namespace Retro.Unity
                     MuzzleVelocity = 1000, RoundsPerSecond = 20, Damage = 8, Ammo = 2400,
                     MuzzleOffset = new double[] { 0, 0, 9 }, Spread = 0.003,
                 },
-                Spawn = MakeSpawn(),
+                Spawn = spawn,
                 Enabled = true,
             });
             aircraft = sim.GetAircraft(PlayerId);
+            appliedModel = flightModel;
             cockpitCamera = new CockpitFrontCameraUpdater(this, pose);
             chaseBack = new ExteriorFrontBehindCameraUpdater(this, pose, ExteriorViewHeading.Back);
             chaseFront = new ExteriorFrontBehindCameraUpdater(this, pose, ExteriorViewHeading.Front);
             crashedCamera = new CrashedCameraUpdater(this, pose);
             airframe = BuildAirframe();
+            model = new AircraftModel(AircraftVisualDef.F22(), System.IO.Path.GetDirectoryName(terrain.Root), "Player aircraft");
+            SnapDevices();
             airframeMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
             airframeMaterial.SetColor("_BaseColor", new Color(0.55f, 0.58f, 0.6f));
             airframeMaterial.SetFloat("_Smoothness", 0.35f);
-            Debug.Log($"Retro flight: {flightModel} at {spawnLat}, {spawnLon}, ground tiles fine {heightField.FineResident}, coarse {heightField.CoarseResident}");
+            Debug.Log($"Retro flight: {flightModel}, {runways.Count} runways near, start "
+                + (startOnRunway && startRunway != null ? $"{startRunway.Icao} {startRunway.Name} {startRunway.Ref}" : $"airborne at {spawnLat}, {spawnLon}")
+                + $"; ground tiles fine {heightField.FineResident}, coarse {heightField.CoarseResident}");
             return true;
         }
 
+        private SimAircraftSpawn MakeSpawn() =>
+            startOnRunway && startRunway != null ? RunwaySpawn(startRunway) : AirborneSpawn();
+
+        /// <summary>
+        /// game.ts runwaySpawnPosition: on the axis, RUNWAY_SPAWN_INSET_M in from the
+        /// threshold with the roll-out ahead, wheels on the ground, engine idle.
+        /// </summary>
+        private SimAircraftSpawn RunwaySpawn(SceneRunway r)
+        {
+            Vec3d fwd = ActiveAirfield.HeadingForward(r.Heading);
+            Vec3d p = r.Center - fwd * (r.HalfLength - RunwaySpawnInsetM);
+            heightField.Focus(new[] { p });
+            heightField.WaitIdle(TimeSpan.FromSeconds(5));
+            p.Y = heightField.HeightAtWorld(p.X, p.Z) + Fm2AircraftConfig.GroundRestHeight(config);
+            // A scene heading of 0 faces +Z, which is the body's nose.
+            Quatd q = Quatd.FromAxisAngle(new Vec3d(0, 1, 0), r.Heading);
+            return new SimAircraftSpawn
+            {
+                Position = new[] { p.X, p.Y, p.Z },
+                Quaternion = new[] { q.X, q.Y, q.Z, q.W },
+                Velocity = new double[] { 0, 0, 0 },
+                Landed = true,
+                Throttle = 0,
+                Airborne = false,
+            };
+        }
+
         /// <summary>Airborne at the spawn point, level, at speed; at least 300 m over the ground.</summary>
-        private SimAircraftSpawn MakeSpawn()
+        private SimAircraftSpawn AirborneSpawn()
         {
             Vec3d p = Geodesy.GeodeticToWorld(heightField.Basis, spawnLat, spawnLon, spawnAltitude);
             heightField.Focus(new[] { p });
@@ -170,10 +245,26 @@ namespace Retro.Unity
         public void Respawn()
         {
             if (sim == null) return;
-            sim.Respawn(PlayerId, MakeSpawn());
-            sim.GetPlayerInput(PlayerId)?.SyncThrottle(spawnThrottle);
-            sim.SyncEffectiveThrottle(PlayerId, spawnThrottle);
+            SimAircraftSpawn spawn = MakeSpawn();
+            ReleaseAllKeys();
+            // A fresh start: the arrows layout's latched stick goes back to centre.
+            sim.InputBlur(PlayerId);
+            sim.Respawn(PlayerId, spawn);
+            sim.GetPlayerInput(PlayerId)?.SyncThrottle(spawn.Throttle);
+            sim.SyncEffectiveThrottle(PlayerId, spawn.Throttle);
+            SnapDevices();
         }
+
+        /// <summary>Gear, flaps and airbrakes shown where the sim has them, without the transit.</summary>
+        private void SnapDevices()
+        {
+            gearUnit = aircraft.IsGearDeployed() ? 1 : 0;
+            flapsUnit = aircraft.IsFlapsExtended() ? 1 : 0;
+            airbrakesUnit = aircraft.IsAirbrakesExtended() ? 1 : 0;
+        }
+
+        private static double Toward(double unit, bool target, double durationS, double dt) =>
+            Math.Max(0, Math.Min(1, unit + (target ? dt : -dt) / durationS));
 
         // --- Camera --------------------------------------------------------------------
 
@@ -246,15 +337,23 @@ namespace Retro.Unity
                     string js = JsKey(key);
                     if (js == null) continue;
                     heldKeys[code] = js;
+                    LogKey("+" + js);
                     sim.KeyDown(PlayerId, js, false);
                 }
                 else if (key.wasReleasedThisFrame && heldKeys.TryGetValue(code, out string js))
                 {
                     heldKeys.Remove(code);
+                    LogKey("-" + js);
                     sim.KeyUp(PlayerId, js);
                 }
             }
 #endif
+        }
+
+        private void LogKey(string entry)
+        {
+            KeyLog.Enqueue($"{Time.frameCount}:{entry}");
+            while (KeyLog.Count > 16) KeyLog.Dequeue();
         }
 
         private void ReleaseAllKeys()
@@ -326,7 +425,31 @@ namespace Retro.Unity
 
         private void DrawAirframe()
         {
-            if ((flightView == FlightView.Cockpit && !aircraft.IsCrashed()) || airframe == null) return;
+            double dt = Time.deltaTime;
+            gearUnit = Toward(gearUnit, aircraft.IsGearDeployed(), GearAnimS, dt);
+            flapsUnit = Toward(flapsUnit, aircraft.IsFlapsExtended(), FlapsAnimS, dt);
+            airbrakesUnit = Toward(airbrakesUnit, aircraft.IsAirbrakesExtended(), AirbrakesAnimS, dt);
+            bool visible = !(flightView == FlightView.Cockpit && !aircraft.IsCrashed());
+            if (model != null && model.Loaded)
+            {
+                model.SetVisible(visible);
+                if (!visible) return;
+                FlightModel fm = aircraft.Model;
+                model.Pose(aircraft.GetPosition(), aircraft.GetQuaternion(), view.ScenePosition, new AircraftPoseInputs
+                {
+                    CommandedElevator = fm.CommandedElevator,
+                    CommandedAileron = fm.CommandedAileron,
+                    CommandedRudder = fm.CommandedRudder,
+                    RollDemand = aircraft.GetRollInput(),
+                    FlapsUnit = flapsUnit,
+                    AirbrakesUnit = airbrakesUnit,
+                    GearUnit = gearUnit,
+                    Still = aircraft.IsCrashed(),
+                });
+                return;
+            }
+            // The stand-in until (or unless) the glTF parts load.
+            if (!visible || airframe == null) return;
             Matrix4x4 m = SceneFrame.TileMatrix(aircraft.GetPosition(), view.ScenePosition, aircraft.GetQuaternion(), 1);
             var rp = new RenderParams(airframeMaterial) { shadowCastingMode = ShadowCastingMode.Off, receiveShadows = false };
             Graphics.RenderMesh(rp, airframe, 0, m);
@@ -388,7 +511,7 @@ namespace Retro.Unity
             double heading = (Math.Atan2(f.X, -f.Z) * 180 / Math.PI + 360) % 360;
             string text =
                 $"IAS {aircraft.GetAirspeed() * 1.94384:0} kt   ALT {alt * 3.28084:0} ft   AGL {agl:0} m   HDG {heading:000}\n" +
-                $"THR {aircraft.GetThrottle() * 100:0}%{(aircraft.GetAfterburner() ? " AB" : "")}   G {aircraft.GetLoadFactorG():0.0}   AOA {aircraft.GetAngleOfAttack() * 180 / Math.PI:0.0}\n" +
+                $"THR {aircraft.GetThrottle() * 100:0}%   G {aircraft.GetLoadFactorG():0.0}   AOA {aircraft.GetAngleOfAttack() * 180 / Math.PI:0.0}\n" +
                 $"{(aircraft.IsLanded() ? "LANDED  " : "")}{(aircraft.IsCrashed() ? "CRASHED (R to respawn)  " : "")}{(aircraft.Control == SimControlMode.Ai ? "AUTOPILOT  " : "")}" +
                 $"view {flightView}   ground tiles {heightField.FineResident}+{heightField.FineInFlight} ({heightField.TierAtWorld(p.X, p.Z)})";
             GUI.Label(new Rect(12, 8, 1200, 80), text, hudStyle);
@@ -397,6 +520,11 @@ namespace Retro.Unity
         private void OnDisable()
         {
             if (sim != null) ReleaseAllKeys();
+        }
+
+        private void OnDestroy()
+        {
+            model?.Destroy();
         }
     }
 }
