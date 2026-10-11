@@ -12,7 +12,11 @@ npm test                       # includes tools/golden/golden.test.ts
 node --import tsx tools/golden/generate.ts --select-tiles   # re-pick tile files from assets/terrain
 node --import tsx tools/golden/generate.ts --only geodesy,tiling
 node --import tsx tools/golden/generate.ts --select-road-tiles  # re-copy only tiles/roads/
+node --import tsx tools/golden/generate.ts --select-vegetation --only vegetation   # re-copy its two leaves
+node --import tsx tools/golden/bakeAtlases.ts   # tree/stone atlas PNGs for Unity (not a fixture)
 ```
+
+In a worktree without `assets/terrain`, set `GOLDEN_TERRAIN_ROOT` to a checkout's for `--select-*`.
 
 ## Rules
 
@@ -53,6 +57,7 @@ array's raw little-endian bytes and `head` is the first few elements.
 | `buildings.json` | three `ShapeUtils`/earcut, `terrain/{buildingRoofs,buildingMeshes,buildingExclusion,buildingTones}.ts` | 34 triangulation cases (concave, holes, closed rings, self-intersecting, z-order hashed, an empty hole that throws), roof planes, 52 roof/wall shapes, the 3 PBH tiles extruded whole by the real `BuildingMeshes` (hashes + sampled triangles), tree exclusion points, 3 x 90 budget frames with a scripted clock, tone tables |
 | `roads.json` + `tiles/roads/` | `terrain/{roadStrokes,roadLod,roadExclusion,bridgeMeshes}.ts` | 6 .ptr and 4 .pbr tiles (Gran Canaria z8/z10/z12, DACH z12 with rails, switch zones, deck track, crossing furniture): stroke split by kind, far road levels in order and lazily out of order, the trees' road mask at 4800 probes, bridge role split, furniture boxes, bounding spheres |
 | `flight_configs.json` | `physics/fm2/fm2AircraftConfig.ts`, `physics/fm3/f16Airframe.ts` | The exact config numbers the traces used |
+| `vegetation.json` + `tiles/vegetation/` | `terrain/{treeBillboards,stones,roadExclusion,buildingExclusion,airfieldExclusion,surfaceExclusion}.ts`, `railBed.ts` (bed mask), `terrainEntity.ts` (attachTrees) | Two z12 leaves (GCLP; a forest near Garmisch, drawn from a far play origin): five masks on 5,500 points each, tree and clutter scatter at three densities plus unmasked, the 4x4 cells with shuffled slots and their float32 instance arrays, bounding spheres, `treeInstancesToDraw` on 300 cases |
 
 ## Not covered yet (later milestones)
 

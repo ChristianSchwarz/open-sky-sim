@@ -6,6 +6,7 @@
  *   node --import tsx tools/golden/generate.ts --select-tiles   also re-pick tile fixtures from assets/terrain
  *   node --import tsx tools/golden/generate.ts --only geodesy,tiling
  *   node --import tsx tools/golden/generate.ts --select-road-tiles  re-copy only the roads suite's tiles
+ *   node --import tsx tools/golden/generate.ts --select-vegetation --only vegetation
  *
  * See tools/golden/README.md for the fixture format and what each suite covers.
  */
@@ -24,9 +25,11 @@ import { combatSimSuite } from './suites/combatSim';
 import { airfieldsSuite } from './suites/airfields';
 import { buildingsSuite } from './suites/buildings';
 import { copyRoadTiles, roadsSuite } from './suites/roads';
+import { selectVegetationTiles, vegetationSuite } from './suites/vegetation';
 
 export const GOLDEN_ROOT = path.resolve(__dirname, '../../tests/golden');
-const TERRAIN_ROOT = path.resolve(__dirname, '../../assets/terrain');
+/** The baked tree tiles are selected from; GOLDEN_TERRAIN_ROOT points a worktree (which has none) at a checkout's. */
+const TERRAIN_ROOT = process.env.GOLDEN_TERRAIN_ROOT ?? path.resolve(__dirname, '../../assets/terrain');
 
 interface SuiteDef {
     name: string;
@@ -51,6 +54,7 @@ const SUITES: SuiteDef[] = [
     { name: 'airfields', run: ctx => airfieldsSuite(ctx) },
     { name: 'buildings', run: ctx => buildingsSuite(ctx) },
     { name: 'roads', run: ctx => roadsSuite(ctx) },
+    { name: 'vegetation', run: ctx => vegetationSuite(ctx) },
 ];
 
 export interface GenerateResult {
@@ -93,6 +97,11 @@ function main(): void {
         if (check) throw new Error('--select-road-tiles cannot be combined with --check');
         const n = copyRoadTiles({ goldenRoot: GOLDEN_ROOT, terrainRoot: TERRAIN_ROOT });
         console.log(`copied ${n} road tile fixtures from ${TERRAIN_ROOT}`);
+    }
+    if (selectNew || args.includes('--select-vegetation')) {
+        if (check) throw new Error('--select-vegetation cannot be combined with --check');
+        const n = selectVegetationTiles({ goldenRoot: GOLDEN_ROOT, terrainRoot: TERRAIN_ROOT });
+        console.log(`selected ${n} vegetation fixtures from ${TERRAIN_ROOT}`);
     }
 
     const { files, assets } = generateAll(only);
