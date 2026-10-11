@@ -241,5 +241,10 @@ public class AircraftFxTests
         double x = fx.WingtipTrails.LeftTip.X;
         for (int c = 0; c < 4; c++) Assert.Equal(x, corners[c * 3], 4);
         Assert.Equal(2 * WingtipTrails.SegmentWidth, Math.Abs(corners[1] - corners[4]), 4);
+        for (int k = 0; k < s.DrawnCount; k++)
+        {
+            Assert.Equal((float)s.Midpoints[k].X, s.Matrices[k * 16 + 12]);
+            Assert.Equal((float)s.Midpoints[k].Z, s.Matrices[k * 16 + 14]);
+        }
     }
 }

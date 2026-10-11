@@ -23,6 +23,13 @@ namespace Retro.Game
         /// </summary>
         public readonly float[] Matrices = new float[WingtipTrails.SegmentCount * 16];
 
+        /// <summary>
+        /// Per drawn segment its centre in double (the matrix translation before the
+        /// float32 cast), for camera-relative placement: subtract the camera in double,
+        /// then replace the matrix's elements 12..14.
+        /// </summary>
+        public readonly Vec3d[] Midpoints = new Vec3d[WingtipTrails.SegmentCount];
+
         /// <summary>Per drawn segment its <c>ditherLevel</c> (opacity, 0.05 oldest to 0.9 newest), float32.</summary>
         public readonly float[] Levels = new float[WingtipTrails.SegmentCount];
 
@@ -115,6 +122,7 @@ namespace Retro.Game
                     right.Y, dir.Y, up.Y,
                     right.Z, dir.Z, up.Z));
                 Compose(Matrices, drawn * 16, mid, q, WingtipTrails.SegmentWidth * 2, length, 1);
+                Midpoints[drawn] = mid;
                 Levels[drawn] = (float)WingtipTrails.SegmentDither(i);
                 drawn++;
             }
