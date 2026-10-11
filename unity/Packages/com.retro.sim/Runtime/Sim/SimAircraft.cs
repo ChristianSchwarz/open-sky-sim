@@ -310,6 +310,7 @@ namespace Retro.Sim
         /// <summary>The roll input applied this step (+right), for drawing the surfaces.</summary>
         public double GetRollInput() => inRoll;
         public double GetPitchInput() => inPitch;
+        public double GetYawInput() => inYaw;
         public bool IsWheelBrakesApplied() => inBrakes;
         public bool IsFlapsExtended() => inFlaps;
         public bool IsAirbrakesExtended() => inAirbrakes;

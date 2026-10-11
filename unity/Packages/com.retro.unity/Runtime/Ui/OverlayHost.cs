@@ -84,8 +84,10 @@ namespace Retro.Unity
     /// <summary>
     /// The 2D overlay (game.ts's HD overlay layers): one canvas the size of the
     /// screen, painted every frame through the ported
-    /// <see cref="CanvasCommandPainter"/> - the cockpit MFDs, attitude ball,
-    /// device stack and moving map in the cockpit view - and drawn by an
+    /// <see cref="CanvasCommandPainter"/> in the web game's scene order - in
+    /// the cockpit view the HUD, then the cockpit MFDs, attitude ball, device
+    /// stack and moving map over it; in the exterior views the exterior data
+    /// readout; the perf readout (F9) last - and drawn by an
     /// <see cref="OverlayCanvas"/> over the 3D view. The target camera's
     /// texture sits under the canvas at MFD2, where the cockpit clears it.
     /// </summary>
@@ -111,6 +113,18 @@ namespace Retro.Unity
         private readonly Dictionary<string, Texture2D> atlases = new Dictionary<string, Texture2D>();
         private readonly CockpitInputs inputs = new CockpitInputs();
         private CockpitFrame frame;
+        private readonly Hud hud = new Hud();
+        private readonly ExteriorData exterior = new ExteriorData();
+        private readonly PerfHud perf = new PerfHud();
+        private readonly HudInputs hudInputs = new HudInputs();
+        private CloudRenderer clouds;
+
+        /// <summary>U on the web: DISABLED, PARTIAL, FULL, round again.</summary>
+        public HudFocusMode focusMode = HudFocusMode.Disabled;
+        public UnitSystem units = UnitSystem.Metric;
+        /// <summary>F9: the perf readout.</summary>
+        public bool perfHud;
+        public TextEffect textEffect = TextEffect.None;
 
         /// <summary>The M key: the tactical MFD's map page.</summary>
         public void ToggleMovingMap() => cockpit?.SetMovingMapEnabled(!cockpit.MovingMapEnabled);
@@ -167,6 +181,16 @@ namespace Retro.Unity
             UnityEngine.InputSystem.Keyboard k = UnityEngine.InputSystem.Keyboard.current;
             // game.ts KeyM: the tactical MFD's map page.
             if (k != null && k.mKey.wasPressedThisFrame && flight != null && !flight.menuOpen) ToggleMovingMap();
+            if (k != null && k.uKey.wasPressedThisFrame && flight != null && !flight.menuOpen) focusMode = (HudFocusMode)(((int)focusMode + 1) % 3);
+            if (k != null && k.f9Key.wasPressedThisFrame) perfHud = !perfHud;
+#endif
+            // The STALL blink and the frame-time averages run on the sim's clock.
+            if (flight != null && !flight.menuOpen)
+            {
+                hud.Update(Time.deltaTime);
+                perf.Update(Time.deltaTime);
+            }
+#if RETRO_INPUT_SYSTEM
 #endif
         }
 
@@ -182,7 +206,13 @@ namespace Retro.Unity
             }
             painter.BeginFrame();
             painter.Clear();
+            Palette palette = ScenePalette.Current;
+            OverlayUtils.BeginOverlayFrame(painter, w, h, textEffect, palette);
             bool cockpitView = flight.flightView == FlightView.Cockpit && !flight.Aircraft.IsCrashed() && !flight.menuOpen;
+            bool exteriorView = !cockpitView && !flight.menuOpen && flight.flightView != FlightView.Free;
+            FillHudInputs();
+            if (cockpitView) hud.Render2D(w, h, hudInputs, HudView(w, h), palette, painter);
+            if (exteriorView) exterior.Render2D(w, h, hudInputs, palette, painter);
             Texture target = null;
             if (cockpitView)
             {
@@ -200,12 +230,81 @@ namespace Retro.Unity
                     targetImage.style.height = (float)frame.Mfd2.Size;
                 }
             }
+            if (perfHud) perf.Render2D(w, h, PerfStats(), palette, painter);
             targetImage.image = target;
             targetImage.style.display = target != null ? DisplayStyle.Flex : DisplayStyle.None;
             canvas.SetCommands(painter.Commands);
             commands = painter.Commands.Count;
             primitives = canvas.PrimitiveCount;
         }
+
+        /// <summary>The view camera as the HUD projects with it: three.js convention, looking down -Z.</summary>
+        private HudCamera HudView(int w, int h)
+        {
+            Camera cam = viewer.UnityCamera;
+            return HudCamera.Perspective(viewer.ScenePosition, viewer.SceneOrientation, cam.fieldOfView, (double)w / h,
+                cam.nearClipPlane, cam.farClipPlane);
+        }
+
+        /// <summary>What hud.ts and exteriorData.ts read from the player, its flight model and the target.</summary>
+        private void FillHudInputs()
+        {
+            SimAircraft a = flight.Aircraft;
+            FlightModel fm = a.Model;
+            Vec3d p = a.GetPosition();
+            hudInputs.Units = units;
+            hudInputs.FocusMode = focusMode;
+            hudInputs.FlightModelFm3 = flight.flightModel == SimFlightModelKind.Fm3;
+            hudInputs.Position = p;
+            hudInputs.Quaternion = a.GetQuaternion();
+            hudInputs.Velocity = a.GetVelocity();
+            hudInputs.AltitudeM = flight.HeightField.GeodeticAltitudeAtWorld(p.X, p.Y, p.Z);
+            hudInputs.StallStatus = a.GetStallStatus();
+            hudInputs.AngleOfAttackRad = a.GetAngleOfAttack();
+            hudInputs.LoadFactorG = a.GetLoadFactorG();
+            hudInputs.IsLanded = a.IsLanded();
+            hudInputs.AutopilotEnabled = a.Control == SimControlMode.Ai;
+            hudInputs.HasGun = a.Gun != null;
+            hudInputs.GunAmmo = a.Gun != null ? (int)a.Gun.AmmoRemaining : 0;
+            hudInputs.HealthFraction = a.MaxHealth > 0 ? a.Health / a.MaxHealth : 1;
+            hudInputs.PitchInput = a.GetPitchInput();
+            hudInputs.RollInput = a.GetRollInput();
+            hudInputs.YawInput = a.GetYawInput();
+            hudInputs.ElevatorLimitHigh = fm.ElevatorCommandLimitHigh;
+            hudInputs.ElevatorLimitLow = fm.ElevatorCommandLimitLow;
+            hudInputs.Throttle = a.GetThrottle();
+            hudInputs.ThrottleHudText = fm.ThrottleHudText;
+            hudInputs.FcsLimitersEnabled = fm.IsLimitersEnabled;
+            hudInputs.FcsPitchLimiterMode = (int)fm.PitchLimiterMode;
+            WeaponsTarget t = flight.WeaponsTarget;
+            hudInputs.Target = t == null ? null : new HudTarget
+            {
+                Position = t.Position,
+                LocalCenter = t.LocalCenter,
+                TargetType = t.TargetType,
+                TargetLocation = t.TargetLocation,
+                Airborne = t.Airborne,
+            };
+            hudInputs.NowMs = Time.realtimeSinceStartupAsDouble * 1000;
+            if (clouds == null) clouds = FindAnyObjectByType<CloudRenderer>();
+            hudInputs.TerrainTriangles = terrain.drawnTriangles;
+            hudInputs.CloudTriangles = clouds != null ? clouds.triangles : 0;
+            hudInputs.SceneTriangles = hudInputs.TerrainTriangles + hudInputs.CloudTriangles;
+        }
+
+        /// <summary>The perf readout's sections this frontend can fill.</summary>
+        private PerfStats PerfStats() => new PerfStats
+        {
+            Terrain = new PerfTerrainStats
+            {
+                Drawn = terrain.drawnTiles,
+                Triangles = terrain.drawnTriangles,
+                DetailScale = 1,
+                TriangleBudgetHit = terrain.triangleBudgetHit,
+                Queued = terrain.pendingLoads,
+                CacheBytes = (long)(terrain.residentMb * 1024 * 1024),
+            },
+        };
 
         private static CockpitDeviceState Device(double unit, bool commanded) =>
             commanded
