@@ -21,11 +21,11 @@ namespace Retro.Unity
     ///
     /// Wired: time of day, flight model, AI pilot model, units, terrain colour
     /// mode and land-use blend, terrain detail distance, land-use reach,
-    /// triangle budget, buildings, roads, render scale, keyboard layout and
-    /// pitch-stick mode, volume, and the aircraft and spawn mode kept between
-    /// sessions. Not yet acted on in Unity (stored and shown only): smooth
-    /// shading, tree density, colour adjust, far-tile textures, visible zoom,
-    /// land-use reveal, supersampling.
+    /// triangle budget, finest terrain level, tree density, buildings, roads,
+    /// render scale, keyboard layout and pitch-stick mode, volume, and the
+    /// aircraft and spawn mode kept between sessions. Not yet acted on in Unity
+    /// (stored and shown only): smooth shading, colour adjust, far-tile
+    /// textures, land-use reveal, supersampling.
     /// </summary>
     [DefaultExecutionOrder(-300)]
     public sealed class SettingsBridge : MonoBehaviour, ISettingsDevices
@@ -36,6 +36,7 @@ namespace Retro.Unity
         public OverlayHost overlay;
         public RoadRenderer roads;
         public BuildingRenderer buildings;
+        public VegetationRenderer vegetation;
         public MenuDialog menu;
 
         private SettingsStorage storage;
@@ -71,6 +72,8 @@ namespace Retro.Unity
             config.TerrainDetail.AddChangeListener(_ => ApplyTerrain());
             config.LanduseReach.AddChangeListener(_ => ApplyTerrain());
             config.TriangleBudget.AddChangeListener(_ => ApplyTerrain());
+            config.VisibleZoom.AddChangeListener(_ => ApplyTerrain());
+            config.TreeDensity.AddChangeListener(_ => ApplyLayers());
             config.Buildings.AddChangeListener(_ => ApplyLayers());
             config.Roads.AddChangeListener(_ => ApplyLayers());
             config.RenderScale.AddChangeListener(_ => ApplyRenderScale());
@@ -176,12 +179,14 @@ namespace Retro.Unity
             terrain.detailDistanceKm = double.IsInfinity(detail) ? 1e6f : (float)(detail / 1000);
             terrain.leafScale = (float)config.LanduseReach.Active;
             terrain.triangleBudget = (int)config.TriangleBudget.Active;
+            terrain.visibleZoom = (int)config.VisibleZoom.Active;
         }
 
         private void ApplyLayers()
         {
             if (buildings != null) buildings.buildingsEnabled = config.Buildings.Active;
             if (roads != null) roads.mode = config.Roads.Active;
+            if (vegetation != null) vegetation.densityMultiplier = (float)config.TreeDensity.Active;
         }
 
         private void ApplyRenderScale()

@@ -141,6 +141,8 @@ namespace Retro.Unity
         public float uploadBudgetMs = 4;
         [Tooltip("TERRAIN_TRIANGLE_BUDGET: far tiles fold into coarser ones to fit.")]
         public int triangleBudget = Lod.TerrainTriangleBudget;
+        [Tooltip("The finest zoom level drawn (Graphics: finest terrain level); 12 is full detail.")]
+        public int visibleZoom = Lod.TerrainVisibleZoomMax;
 
         [Header("Stats (read only)")]
         public int drawnTiles;
@@ -297,6 +299,7 @@ namespace Retro.Unity
                     DetailScale = detailScale,
                     DetailDistanceM = detailDistanceKm * 1000,
                     LeafScale = leafScale,
+                    VisibleZoomCap = visibleZoom,
                     NowMs = clock.Elapsed.TotalMilliseconds,
                 });
             }

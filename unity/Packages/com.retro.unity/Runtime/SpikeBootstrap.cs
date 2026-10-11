@@ -85,6 +85,13 @@ namespace Retro.Unity
                 sun.type = LightType.Directional;
             }
             sun.shadows = LightShadows.Hard; // aircraft shadows (they replace the planform silhouettes)
+            // A bias of its own: the asset's 0.1 / 0.5 left acne on large flat-shaded hulls (the carrier island)
+            // over a 1500 m shadow distance on a 2048 map.
+            UniversalAdditionalLightData lightData = sun.GetComponent<UniversalAdditionalLightData>();
+            if (lightData == null) lightData = sun.gameObject.AddComponent<UniversalAdditionalLightData>();
+            lightData.usePipelineSettings = false;
+            sun.shadowBias = 1f;
+            sun.shadowNormalBias = 1f;
             ConfigurePostProcessing(cam);
             // The sim keeps flying with the window in the background (and the editor unfocused).
             Application.runInBackground = true;
@@ -163,6 +170,7 @@ namespace Retro.Unity
             settings.overlay = overlay;
             settings.roads = roads;
             settings.buildings = buildings;
+            settings.vegetation = vegetation;
             settings.menu = menu;
             settings.Init();
             var boot = new GameObject("Boot").AddComponent<BootOverlay>();
