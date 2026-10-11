@@ -1,30 +1,13 @@
 import { SpawnMode } from '../config/settingsStorage';
 import { AircraftModelGroup } from '../state/aircraftRegistry';
-import {
-    AirfieldEntry, SpawnDestination, airfieldDestination, coordinateDestination, parseCoordinates,
-    searchAirfields, searchPlaces,
-} from '../state/spawnSearch';
+import { AirfieldEntry, SpawnDestination, searchPlaces } from '../state/spawnSearch';
 import type { TerrainArea } from '../terrain/manifest';
 import { closeSettingsDialog, openSettingsDialog, registerSpawnMenu } from '../ui/settings/settingsLauncher';
+import {
+    AirfieldChoice, SpawnMenuState, aircraftMenu, airfieldMenu, quickSearch,
+} from '../ui/settings/settingsModel';
 
-/** One airfield the player can be based at. */
-export interface AirfieldChoice {
-    icao: string;
-    name: string;
-    /** Designators of its longest runway. */
-    ref: string;
-    lengthM: number;
-}
-
-/** What the settings dialog's Flight tab shows: labels plus the selected index of each list. */
-export interface SpawnMenuState {
-    aircraft: string[];
-    aircraftIndex: number;
-    liveries: string[];
-    liveryIndex: number;
-    airfields: string[];
-    airfieldIndex: number;
-}
+export type { AirfieldChoice, SpawnMenuState } from '../ui/settings/settingsModel';
 
 /**
  * The spawn menu: aircraft, livery and airfield choices plus the spawn
@@ -95,15 +78,7 @@ export class SpawnPanel {
      * and airfields of every baked area.
      */
     quickSearch(query: string): SpawnDestination[] {
-        const out: SpawnDestination[] = [];
-        const coords = parseCoordinates(query);
-        if (coords !== undefined) {
-            out.push(coordinateDestination(coords.lat, coords.lon, this.searchAreas, this.currentArea));
-        }
-        for (const entry of searchAirfields(this.searchEntries, query)) {
-            out.push(airfieldDestination(entry, this.currentArea));
-        }
-        return out;
+        return quickSearch(query, this.searchEntries, this.searchAreas, this.currentArea);
     }
 
     /** Places by name, from the geocoder; only on an explicit search. */
@@ -131,26 +106,11 @@ export class SpawnPanel {
      */
     setAirfields(choices: AirfieldChoice[], selectedIcao: string | undefined): void {
         this.airfieldChoices = choices;
-        const index = choices.findIndex(c => (c.icao || c.name) === selectedIcao);
-        this.update({
-            airfields: choices.map(choice => {
-                const id = choice.icao ? `${choice.icao} — ` : '';
-                return `${id}${choice.name} (${choice.ref}, ${Math.round(choice.lengthM)} m)`;
-            }),
-            airfieldIndex: index >= 0 ? index : 0,
-        });
+        this.update(airfieldMenu(choices, selectedIcao));
     }
 
     setSelection(groups: AircraftModelGroup[], modelIndex: number, liveryIndex: number): void {
-        const aircraftIndex = Math.min(modelIndex, Math.max(0, groups.length - 1));
-        const liveries = (groups[aircraftIndex]?.variants ?? [])
-            .map(variant => variant.liveryName ?? variant.name);
-        this.update({
-            aircraft: groups.map(group => group.label),
-            aircraftIndex,
-            liveries,
-            liveryIndex: Math.min(liveryIndex, Math.max(0, liveries.length - 1)),
-        });
+        this.update(aircraftMenu(groups, modelIndex, liveryIndex));
     }
 
     /** Open the settings dialog on the Flight tab. */

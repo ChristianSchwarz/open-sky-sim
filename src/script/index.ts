@@ -9,7 +9,7 @@ import { Kernel } from './core/kernel';
 import { HD_FPS_CAP, H_RES, V_RES } from './defs';
 import { JoystickControlDevice } from './input/devices/joystickControlDevice';
 import { KeyboardControlDevice } from './input/devices/keyboardControlDevice';
-import { setBootProgress } from './osd/bootProgress';
+import { BOOT_STAGES, bootFailedStage, setBootProgress } from './osd/bootProgress';
 import { setupOSD } from './osd/osdPanel';
 import { CombatSimClient } from './physics/sim/combatSimClient';
 import { SimProxyFlightModel } from './physics/model/simProxyFlightModel';
@@ -140,13 +140,14 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
 }
 
 window.addEventListener("load", () => {
-    setBootProgress(0, 'Loading...');
+    setBootProgress(BOOT_STAGES.start.percent, BOOT_STAGES.start.label);
     void setup().then(([kernel, config, keyboardInput, joystickInput, game, audio]) => {
         kernel.start();
         setupOSD(config, keyboardInput, joystickInput, audio);
         void game.holdUntilStreamed();
     }).catch((err) => {
-        setBootProgress(100, `Load failed: ${err instanceof Error ? err.message : String(err)}`);
+        const failed = bootFailedStage(err instanceof Error ? err.message : String(err));
+        setBootProgress(failed.percent, failed.label);
         console.error(err);
     });
 });
