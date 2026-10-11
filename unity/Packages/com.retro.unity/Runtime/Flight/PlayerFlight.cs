@@ -22,6 +22,10 @@ namespace Retro.Unity
         AiChase,
         /// <summary>F3: over the carrier stern, looking at the player.</summary>
         CarrierStern,
+        /// <summary>Beside the aircraft, its left side (the replay bar's Left).</summary>
+        Left,
+        /// <summary>Beside the aircraft, its right side (the replay bar's Right).</summary>
+        Right,
     }
 
     /// <summary>
@@ -33,7 +37,7 @@ namespace Retro.Unity
     /// keyboard and gamepad handling, as in the TS), so flaps, gear, brakes,
     /// autopilot and the layouts all behave as on the web. Views use the
     /// ported camera updaters: F1 cockpit, F2 chase back/front, F3 over the
-    /// carrier stern, F6 the opponent, F10 free camera. R restarts the flight; Ctrl+1..9 starts one
+    /// carrier stern, F6 the opponent, F10 free camera, F4 the replay. R restarts the flight; Ctrl+1..9 starts one
     /// in that spawn mode (the spawn menu's digits). Each flight brings the
     /// opponent and the wingman (<see cref="Combat"/>).
     /// </summary>
@@ -79,6 +83,9 @@ namespace Retro.Unity
         private SimAircraft aircraft;
         private readonly CameraPose pose = new CameraPose();
         private CockpitFrontCameraUpdater cockpitCamera;
+        private ExteriorSideCameraUpdater sideLeft;
+        private ExteriorSideCameraUpdater sideRight;
+        private EngineAudio engineAudio;
         private ExteriorFrontBehindCameraUpdater chaseBack;
         private ExteriorFrontBehindCameraUpdater chaseFront;
         private CrashedCameraUpdater crashedCamera;
@@ -144,6 +151,28 @@ namespace Retro.Unity
         public SimAircraft Aircraft => aircraft;
         public DemHeightField HeightField => heightField;
 
+        // --- Replay (game.ts recorder, replayPlayer, toggleReplay) ------------------------
+
+        /// <summary>The recorder runs for the whole flight (30 Hz, the last ten minutes); F4 plays it back.</summary>
+        public readonly FlightRecorder Recorder = new FlightRecorder();
+        private ReplayPlayer replayPlayer;
+        private readonly ReplayPose recordPose = ReplayPose.New();
+        private readonly ReplayPose replayPose = ReplayPose.New();
+        // game.ts REPLAY_POST_CRASH_S: seconds of wreckage still recorded after the crash.
+        private const double ReplayPostCrashS = 6;
+        private double postCrashRecorded;
+        // Recorder time of the crash: before it, the replay shows the airframe (the web hides it all replay long).
+        private double crashRecordTime = double.PositiveInfinity;
+        private int escapeTakenFrame = -1;
+
+        /// <summary>Watching the flight back: the world holds still and only the recorded aircraft moves.</summary>
+        public bool Replaying { get; private set; }
+
+        public ReplayPlayer ReplayPlayer => replayPlayer ??= new ReplayPlayer(Recorder);
+
+        /// <summary>Esc left the replay this frame (the menu leaves it alone).</summary>
+        public bool EscapeTaken => escapeTakenFrame == Time.frameCount;
+
         private void Update()
         {
             if (sim == null && !TryBoot()) return;
@@ -169,6 +198,16 @@ namespace Retro.Unity
                 catalogueTask = null;
             }
             if (aircraftId != current.Def.Id && catalogueTask == null) SwapAircraft();
+            if (Replaying && !menuOpen && !held)
+            {
+                // The world holds still; only the recorded aircraft moves.
+                ReplayPlayer.Advance(Time.deltaTime);
+                Recorder.Sample(ReplayPlayer.Time, replayPose);
+                airframeView.ReplayPose = replayPose;
+                PlaceCamera(Time.deltaTime);
+                DrawAirframe();
+                return;
+            }
             if (menuOpen || held)
             {
                 // pauseForMenu: no steps, no keys; the camera and the drawing carry on.
@@ -201,7 +240,11 @@ namespace Retro.Unity
             wrecks.Update(Time.deltaTime);
             // transitionFromPlayerToCrashed: the wreck's own smoke column.
             if (aircraft.IsCrashed() && !wasCrashed) combatFx.Smoke.EnsureCrashPlume(PlayerId);
+            if (aircraft.IsCrashed() && !wasCrashed) crashRecordTime = Recorder.EndTime;
             wasCrashed = aircraft.IsCrashed();
+            RecordFlightFrame(Time.deltaTime);
+            engineAudio.Exterior = flightView != FlightView.Cockpit;
+            engineAudio.Update(aircraft);
             Vec3d pos = aircraft.GetPosition();
             heightField.Focus(new[] { pos, pos.AddScaled(aircraft.GetVelocity(), 5) });
             PlaceCamera(Time.deltaTime);
@@ -270,6 +313,11 @@ namespace Retro.Unity
             aircraft = sim.GetAircraft(PlayerId);
             appliedModel = flightModel;
             cockpitCamera = new CockpitFrontCameraUpdater(this, pose);
+            sideLeft = new ExteriorSideCameraUpdater(this, pose, ExteriorViewSide.Left);
+            sideRight = new ExteriorSideCameraUpdater(this, pose, ExteriorViewSide.Right);
+            // assets/terrain's parent.
+            string assets = System.IO.Path.GetDirectoryName(terrain.Root.TrimEnd('/', '\\'));
+            engineAudio = new EngineAudio(transform, assets);
             chaseBack = new ExteriorFrontBehindCameraUpdater(this, pose, ExteriorViewHeading.Back);
             chaseFront = new ExteriorFrontBehindCameraUpdater(this, pose, ExteriorViewHeading.Front);
             crashedCamera = new CrashedCameraUpdater(this, pose);
@@ -557,6 +605,10 @@ namespace Retro.Unity
         /// <summary>The player to a spawn, with a clean stick and devices shown where the sim has them.</summary>
         private void Place(SimAircraftSpawn spawn)
         {
+            StopReplay();
+            Recorder.Clear();
+            postCrashRecorded = 0;
+            crashRecordTime = double.PositiveInfinity;
             ReleaseAllKeys();
             // A fresh start: the arrows layout's latched stick goes back to centre.
             sim.InputBlur(PlayerId);
@@ -626,8 +678,9 @@ namespace Retro.Unity
         {
             if (flightView == FlightView.Free) return;
             pose.Up = new Vec3d(0, 1, 0);
-            // game.ts PlayerViewState.CRASHED: every view gives way to the orbit round the wreck.
-            if (aircraft.IsCrashed())
+            // game.ts PlayerViewState.CRASHED: every view gives way to the orbit round the wreck
+            // (not in the replay, whose views follow the recorded aircraft).
+            if (aircraft.IsCrashed() && !Replaying)
             {
                 crashedCamera.Update(delta);
                 view.SetPose(pose.Position, pose.Quaternion, fovDeg);
@@ -639,6 +692,8 @@ namespace Retro.Unity
                 case FlightView.ChaseBack: chaseBack.Update(delta); break;
                 case FlightView.ChaseFront: chaseFront.Update(delta); break;
                 case FlightView.CarrierStern: carrierCamera.Update(delta); break;
+                case FlightView.Left: sideLeft.Update(delta); break;
+                case FlightView.Right: sideRight.Update(delta); break;
                 case FlightView.AiChase:
                     if (combat.Opponent != null && combat.Opponent.Enabled) aiChase.Update(delta);
                     else chaseBack.Update(delta);
@@ -647,12 +702,13 @@ namespace Retro.Unity
             view.SetPose(pose.Position, pose.Quaternion, fovDeg);
         }
 
-        public Vec3d GetDisplayPosition() => aircraft.GetPosition();
-        public Quatd GetDisplayQuaternion() => aircraft.GetQuaternion();
+        // updateDisplayTransform: the replay's recorded pose while it plays.
+        public Vec3d GetDisplayPosition() => Replaying ? replayPose.Position : aircraft.GetPosition();
+        public Quatd GetDisplayQuaternion() => Replaying ? replayPose.Quaternion : aircraft.GetQuaternion();
         public Vec3d GetCockpitOffset() => current.Def.CockpitOffset;
-        public Vec3d GetDisplayWorldDirection() => SceneAxes.Forward.Rotate(aircraft.GetQuaternion());
-        public Vec3d GetDisplayWorldUp() => SceneAxes.Up.Rotate(aircraft.GetQuaternion());
-        public Vec3d GetDisplayWorldRight() => SceneAxes.Right.Rotate(aircraft.GetQuaternion());
+        public Vec3d GetDisplayWorldDirection() => SceneAxes.Forward.Rotate(GetDisplayQuaternion());
+        public Vec3d GetDisplayWorldUp() => SceneAxes.Up.Rotate(GetDisplayQuaternion());
+        public Vec3d GetDisplayWorldRight() => SceneAxes.Right.Rotate(GetDisplayQuaternion());
         public WeaponsTarget WeaponsTarget => combat?.Target();
 
         /// <summary>The weapons target with the telemetry the target MFD shows.</summary>
@@ -705,6 +761,8 @@ namespace Retro.Unity
                     if (m.HasValue && k[Key.Digit1 + (d - 1)].wasPressedThisFrame) BeginFlight(m.Value);
                 }
             }
+            if (k.f4Key.wasPressedThisFrame) ToggleReplay();
+            if (Replaying) ReadReplayKeys(k);
             if (k.f10Key.wasPressedThisFrame) flightView = flightView == FlightView.Free ? FlightView.ChaseBack : FlightView.Free;
             if (k.rKey.wasPressedThisFrame && flightView != FlightView.Free) BeginFlight(spawnMode);
             if (before != flightView && flightView == FlightView.Free)
@@ -822,6 +880,11 @@ namespace Retro.Unity
             bool visible = !(flightView == FlightView.Cockpit && !aircraft.IsCrashed());
             carrier.Draw(view.ScenePosition);
             bool wrecked = wrecks.Track(PlayerId, aircraft, airframeView);
+            if (Replaying && ReplayPlayer.Time < crashRecordTime)
+            {
+                wrecked = false;
+                visible = flightView != FlightView.Cockpit;
+            }
             airframeView.Draw(aircraft, view.ScenePosition, Time.deltaTime, visible, wingSweepMode, wrecked);
             wrecks.Draw(view.ScenePosition);
             if (visible && !wrecked) tailhook.Draw(aircraft, carrier.Pose, view.ScenePosition, Time.deltaTime);
@@ -830,6 +893,89 @@ namespace Retro.Unity
             combat.Draw(view.ScenePosition, Time.deltaTime, wrecks);
             tracers.Draw(sim, view.ScenePosition, view.UnityCamera);
         }
+
+        // --- Replay ----------------------------------------------------------------------
+
+        /// <summary>recordFlightFrame: the pose every frame of the flight, and six seconds of the wreck after a crash.</summary>
+        private void RecordFlightFrame(double delta)
+        {
+            if (aircraft.IsCrashed())
+            {
+                postCrashRecorded += delta;
+                if (postCrashRecorded > ReplayPostCrashS) return;
+            }
+            else
+            {
+                postCrashRecorded = 0;
+            }
+            recordPose.Position = aircraft.GetPosition();
+            recordPose.Quaternion = aircraft.GetQuaternion();
+            recordPose.Velocity = aircraft.GetVelocity();
+            recordPose.Devices.Throttle = aircraft.GetThrottle();
+            Recorder.Record(delta, recordPose);
+        }
+
+        /// <summary>F4: watch the flight so far (up to the last ten minutes) from the replay camera.</summary>
+        public void ToggleReplay()
+        {
+            if (Replaying)
+            {
+                StopReplay();
+                return;
+            }
+            if (sim == null || menuOpen || held || Recorder.Length < 2) return;
+            Replaying = true;
+            // setSimulationPaused: the sim holds and its keys are let go.
+            ReleaseAllKeys();
+            ReplayPlayer.Start();
+            Recorder.Sample(ReplayPlayer.Time, replayPose);
+            if (flightView == FlightView.Cockpit || flightView == FlightView.AiChase) flightView = FlightView.ChaseBack;
+        }
+
+        public void StopReplay()
+        {
+            if (!Replaying) return;
+            Replaying = false;
+            airframeView.ReplayPose = null;
+        }
+
+        /// <summary>The replay bar's view buttons (setReplayView).</summary>
+        public void SetReplayView(FlightView v)
+        {
+            if (v == FlightView.Free && flightView != FlightView.Free)
+            {
+                // Free camera: starts where the current one is, then flies on its own.
+                view.ReleasePose();
+            }
+            flightView = v;
+        }
+
+#if RETRO_INPUT_SYSTEM
+        /// <summary>handleReplayKey: Space pauses, , . seek, [ ] speed, arrows the same outside the free view, Home restarts, Esc leaves.</summary>
+        private void ReadReplayKeys(Keyboard k)
+        {
+            ReplayPlayer r = ReplayPlayer;
+            if (k.spaceKey.wasPressedThisFrame) r.Paused = !r.Paused;
+            if (k.commaKey.wasPressedThisFrame) r.Seek(-5);
+            if (k.periodKey.wasPressedThisFrame) r.Seek(5);
+            if (k.rightBracketKey.wasPressedThisFrame) r.ChangeSpeed(1);
+            if (k.leftBracketKey.wasPressedThisFrame) r.ChangeSpeed(-1);
+            if (flightView != FlightView.Free)
+            {
+                // The arrows move the camera in the free view only.
+                if (k.leftArrowKey.wasPressedThisFrame) r.Seek(-5);
+                if (k.rightArrowKey.wasPressedThisFrame) r.Seek(5);
+                if (k.upArrowKey.wasPressedThisFrame) r.ChangeSpeed(1);
+                if (k.downArrowKey.wasPressedThisFrame) r.ChangeSpeed(-1);
+            }
+            if (k.homeKey.wasPressedThisFrame) r.Start();
+            if (k.escapeKey.wasPressedThisFrame)
+            {
+                StopReplay();
+                escapeTakenFrame = Time.frameCount;
+            }
+        }
+#endif
 
         // --- HUD (debug readout until the HUD is ported) --------------------------------
 
@@ -865,6 +1011,7 @@ namespace Retro.Unity
             carrierFx?.Dispose();
             combatFx?.Dispose();
             wrecks?.Dispose();
+            engineAudio?.Dispose();
             tailhook.Dispose();
             tracers?.Dispose();
         }

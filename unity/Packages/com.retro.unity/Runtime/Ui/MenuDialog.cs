@@ -209,7 +209,8 @@ namespace Retro.Unity
 #if RETRO_INPUT_SYSTEM
             Keyboard k = Keyboard.current;
             if (k == null) return;
-            if (k.escapeKey.wasPressedThisFrame) SetOpen(!open);
+            // Esc that left the replay this frame is not also the menu's.
+            if (k.escapeKey.wasPressedThisFrame && (flight == null || !flight.EscapeTaken)) SetOpen(!open);
             // The start buttons' digits, while nothing is being typed.
             if (open && (search == null || search.focusController?.focusedElement != search))
             {

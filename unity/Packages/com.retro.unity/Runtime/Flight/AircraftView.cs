@@ -29,6 +29,9 @@ namespace Retro.Unity
 
         /// <summary>Damage from hard impacts it survived (player.ts / aiAircraft.ts damage).</summary>
         public readonly AirframeDamage Damage = new AirframeDamage();
+
+        /// <summary>player.ts setReplayPose: a recorded pose to draw at instead of the sim's; null is the live one.</summary>
+        public ReplayPose ReplayPose;
         private List<WreckMeshData> rootData;
         private List<(Mesh Mesh, Material Material)> rootMeshes;
         private double damageLowestHealth = double.PositiveInfinity;
@@ -81,6 +84,9 @@ namespace Retro.Unity
                 model?.SetVisible(false);
                 return;
             }
+            Vec3d position = ReplayPose != null ? ReplayPose.Position : aircraft.GetPosition();
+            Quatd quaternion = ReplayPose != null ? ReplayPose.Quaternion : aircraft.GetQuaternion();
+            Vec3d velocity = ReplayPose != null ? ReplayPose.Velocity : aircraft.GetVelocity();
             gearUnit = Toward(gearUnit, aircraft.IsGearDeployed(), GearAnimS, dt);
             flapsUnit = Toward(flapsUnit, aircraft.IsFlapsExtended(), FlapsAnimS, dt);
             airbrakesUnit = Toward(airbrakesUnit, aircraft.IsAirbrakesExtended(), AirbrakesAnimS, dt);
@@ -95,7 +101,7 @@ namespace Retro.Unity
                 if (visible)
                 {
                     FlightModel fm = aircraft.Model;
-                    model.Pose(aircraft.GetPosition(), aircraft.GetQuaternion(), camera, new AircraftPoseInputs
+                    model.Pose(position, quaternion, camera, new AircraftPoseInputs
                     {
                         CommandedElevator = fm.CommandedElevator,
                         CommandedAileron = fm.CommandedAileron,
@@ -108,7 +114,7 @@ namespace Retro.Unity
                         AngleOfAttack = aircraft.GetAngleOfAttack(),
                         Still = aircraft.IsCrashed(),
                     }, Damage);
-                    DrawRoot(aircraft, camera);
+                    DrawRoot(position, quaternion, camera);
                 }
             }
             fx.BindTips(model);
@@ -116,9 +122,9 @@ namespace Retro.Unity
             {
                 ThrottleLever = aircraft.GetThrottle(),
                 AbDetents = aircraft.Model.UseAfterburnerThrottleDetents,
-                Position = aircraft.GetPosition(),
-                Quaternion = aircraft.GetQuaternion(),
-                Velocity = aircraft.GetVelocity(),
+                Position = position,
+                Quaternion = quaternion,
+                Velocity = velocity,
                 WingSweep = sweepUnit,
             }, camera);
         }
@@ -155,7 +161,7 @@ namespace Retro.Unity
         }
 
         /// <summary>The bent and torn airframe in place of the whole one, at the aircraft's pose.</summary>
-        private void DrawRoot(SimAircraft aircraft, Vec3d camera)
+        private void DrawRoot(Vec3d position, Quatd quaternion, Vec3d camera)
         {
             if (!Damage.Active) return;
             if (!ReferenceEquals(rootData, Damage.Root))
@@ -164,7 +170,7 @@ namespace Retro.Unity
                 rootData = Damage.Root;
                 rootMeshes = WreckView.BuildMeshes(rootData);
             }
-            Matrix4x4 m = SceneFrame.TileMatrix(aircraft.GetPosition(), camera, aircraft.GetQuaternion(), 1);
+            Matrix4x4 m = SceneFrame.TileMatrix(position, camera, quaternion, 1);
             foreach ((Mesh mesh, Material mat) in rootMeshes)
             {
                 if (mat == null) continue;

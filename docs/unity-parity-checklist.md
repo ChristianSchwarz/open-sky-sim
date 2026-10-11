@@ -24,14 +24,13 @@ Rows, not settings or keys: one row can cover several.
 | Sky and FX | 8 | 2 | 5 |
 | Aircraft | 3 | 1 | 2 |
 | HUD and cockpit | 8 | 3 | 3 |
-| Settings | 8 | 3 | 3 |
-| Input, views, replay, audio | 4 | 3 | 6 |
+| Settings | 9 | 2 | 3 |
+| Input, views, replay, audio | 6 | 3 | 4 |
 | Boot and spawn | 3 | 1 | 1 |
-| **Total** | **57** | **16** | **33** |
+| **Total** | **60** | **15** | **31** |
 
 What is missing most visibly, in suggested order:
-1. **Engine audio**: there is no sound at all, so the volume setting does nothing.
-2. **Replay (F4)**: the flight recorder is ported, but nothing records and there is no replay bar.
+1. ~~Engine audio~~ and ~~replay (F4)~~: done since the checklist was written (see the Input table).
 3. **Building and scenery colliders, and the glTF scenery**: the control tower, refinery, SAM radar and hangar. Aircraft fly through buildings.
 4. **Target cycling (T)**: without it the target is always the opponent, so the ILS and approach aids never appear.
 5. **Settings that are only stored**: smooth shading, colour adjust, far-tile textures, land-use reveal and supersampling.
@@ -158,9 +157,9 @@ What is missing most visibly, in suggested order:
 | daytime, flightModel, aiPilotModel | done | live; AI model on the next spawn, as on the web |
 | units, keyboardLayout | done | |
 | keyboardPitchStickMode | done | the saved mode was lost at boot (applied before the sim existed); fixed with this checklist |
-| volume | partial | sets `AudioListener.volume`, but there is no audio |
+| volume | done | `AudioListener.volume` over the engine sound |
 | About credits | done | `SettingsTabView.cs` |
-| Help key table | partial | lists keys Unity lacks (T, I, V, 4, Tab, F4, F8, F12); joystick always "No device detected" (`Host.Joystick` never set) |
+| Help key table | partial | lists keys Unity lacks (T, I, V, 4, Tab, F8, F12); joystick always "No device detected" (`Host.Joystick` never set) |
 
 ## Input, views, replay, audio
 
@@ -175,9 +174,9 @@ What is missing most visibly, in suggested order:
 | M map, U HUD focus | done | |
 | T target, I night view, V vectors, 4 target view, Tab debris | missing | |
 | Numpad orbit, `/` `*` zoom, Numpad5, NumpadEnter | missing | only Num+/- (throttle) |
-| F4 replay, recorder (30 Hz, 600 s), replay keys, replay bar | missing | `G/State/FlightRecorder.cs` ported, unused |
+| F4 replay, recorder (30 Hz, 600 s), replay keys, replay bar | done | `U/Flight/PlayerFlight.cs` records every frame (6 s past a crash), F4 freezes the world and plays the recorded pose; Space , . [ ] arrows Home Esc; `U/Ui/ReplayBar.cs` (scrubber, buttons, speed, Cockpit/Behind/Front/Left/Right/Free/Tower views). One deliberate difference: before the crash point the airframe is drawn (the web hides it the whole replay once the wreck exists). The bar is a flat shade, not the web's gradient. Recorded devices (gear etc.) are not replayed, as on the web |
 | F8 wireframe, F12 showcase, land-cover tooltip, mod-status line | missing | |
-| Engine audio (two loops swapped by view, rate/gain by throttle, stop on crash) | missing | no AudioSource in the Unity layer |
+| Engine audio (two loops swapped by view, rate/gain by throttle, stop on crash) | done | `U/Flight/EngineAudio.cs`; pitch 0.96 / gain 0.73 at audio level 0.23 checked against the formula; cockpit/exterior swap and crash silence checked |
 | Start camera pose argument (web `?@lat,lng,altA,hdgH,tiltT`) | missing | `G/State/CameraRoute.cs` ported; no command-line parsing |
 
 ## Boot and spawn

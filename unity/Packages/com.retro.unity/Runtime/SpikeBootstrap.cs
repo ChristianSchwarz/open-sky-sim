@@ -162,6 +162,8 @@ namespace Retro.Unity
             overlay.terrain = terrain;
             overlay.viewer = fly;
             overlay.targetView = targetView;
+            // F4: the replay bar.
+            new GameObject("Replay bar").AddComponent<ReplayBar>().flight = player;
             // The stored settings, applied before anything above boots.
             var settings = menu.gameObject.AddComponent<SettingsBridge>();
             settings.flight = player;
