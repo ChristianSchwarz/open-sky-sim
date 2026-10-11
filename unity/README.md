@@ -30,7 +30,10 @@ The C# port of the game (see `docs/unity-port-plan.md`).
    the PlayerPref `retro.aircraft`.
 3. Flying uses the web game's keys (the sim reads them itself): arrows for
    pitch and roll, X/Y yaw, numpad +/- throttle, G gear, F flaps, B airbrakes,
-   A autopilot, Space gun. F1 cockpit, F2 chase back/front, R respawn.
+   A autopilot, Space gun, H tailhook. F1 cockpit (again: padlock the target), F2 chase
+   back/front, F3 over the carrier stern, F6 behind the opponent, R restarts the flight,
+   Ctrl+1..9 starts one in the spawn menu mode (1 approach, 2 runway, 3 head-on, 4 carrier
+   approach, 5 carrier deck, 6 10 km, 7 space, 9 wingtip).
    N toggles night and 14:00; `SkyRenderer.hours` on the `Sky` object sets any hour.
 4. F10 toggles the free camera: WASD to move, Q/E down/up, hold the right
    mouse button to look, wheel for speed, Shift for 10x. Tile and memory
