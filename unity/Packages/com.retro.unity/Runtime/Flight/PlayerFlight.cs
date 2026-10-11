@@ -78,6 +78,7 @@ namespace Retro.Unity
         private Mesh airframe;
         private Material airframeMaterial;
         private AircraftModel model;
+        private readonly AircraftFxRenderer fx = new AircraftFxRenderer();
         private Fm2AircraftConfig config;
         private List<SceneRunway> runways = new List<SceneRunway>();
         private SceneRunway startRunway;
@@ -156,6 +157,7 @@ namespace Retro.Unity
             heightField.Focus(new[] { pos, pos.AddScaled(aircraft.GetVelocity(), 5) });
             PlaceCamera(Time.deltaTime);
             DrawAirframe();
+            DrawFx();
         }
 
         private bool TryBoot()
@@ -230,6 +232,7 @@ namespace Retro.Unity
             crashedCamera = new CrashedCameraUpdater(this, pose);
             airframe = BuildAirframe();
             model = new AircraftModel(current.Def, current.Files, "Player aircraft");
+            fx.Configure(current.Def);
             SnapDevices();
             airframeMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
             airframeMaterial.SetColor("_BaseColor", new Color(0.55f, 0.58f, 0.6f));
@@ -267,6 +270,7 @@ namespace Retro.Unity
             sim.SetAircraftConfig(PlayerId, config, flightModel, current.Def.CollisionMesh);
             model?.Destroy();
             model = new AircraftModel(current.Def, current.Files, "Player aircraft");
+            fx.Configure(current.Def);
             sweepUnit = 0;
             PlayerPrefs.SetString(AircraftPref, current.Def.Id);
             Debug.Log($"Retro flight: now flying {current.Def.Name}");
@@ -338,6 +342,7 @@ namespace Retro.Unity
             sim.GetPlayerInput(PlayerId)?.SyncThrottle(spawn.Throttle);
             sim.SyncEffectiveThrottle(PlayerId, spawn.Throttle);
             SnapDevices();
+            fx.Fx.ResetTrails();
         }
 
         /// <summary>Gear, flaps and airbrakes shown where the sim has them, without the transit.</summary>
@@ -547,6 +552,21 @@ namespace Retro.Unity
             Graphics.RenderMesh(rp, airframe, 0, m);
         }
 
+        /// <summary>Afterburner plumes and wingtip trails (aircraftFx.ts), on the airframe's display pose.</summary>
+        private void DrawFx()
+        {
+            fx.BindTips(model);
+            fx.Draw(new AircraftFxInput
+            {
+                ThrottleLever = aircraft.GetThrottle(),
+                AbDetents = aircraft.Model.UseAfterburnerThrottleDetents,
+                Position = aircraft.GetPosition(),
+                Quaternion = aircraft.GetQuaternion(),
+                Velocity = aircraft.GetVelocity(),
+                WingSweep = sweepUnit,
+            }, view.ScenePosition);
+        }
+
         /// <summary>A stand-in airframe in body axes (+Z nose, +Y up, +X port), ~15 m long, until the glTF models are ported.</summary>
         private static Mesh BuildAirframe()
         {
@@ -617,6 +637,7 @@ namespace Retro.Unity
         private void OnDestroy()
         {
             model?.Destroy();
+            fx.Dispose();
         }
     }
 }

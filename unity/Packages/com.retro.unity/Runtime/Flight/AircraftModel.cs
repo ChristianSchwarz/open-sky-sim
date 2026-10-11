@@ -172,6 +172,33 @@ namespace Retro.Unity
 #endif
 
         /// <summary>The glTF material names as the model contract reads them.</summary>
+        /// <summary>
+        /// The drawn body meshes' vertices in the scene body frame (+X left wing, +Y up,
+        /// +Z forward), xyz triples, for wingtip origins (aircraftFx.ts bindWingtipOrigins).
+        /// glTFast negated x on import, so it is negated back. Empty until the body loads.
+        /// </summary>
+        public float[] BodyPositions()
+        {
+            if (body == null) return Array.Empty<float>();
+            var xyz = new List<float>();
+            var vertices = new List<Vector3>();
+            foreach (MeshFilter mf in body.GetComponentsInChildren<MeshFilter>(true))
+            {
+                Renderer r = mf.GetComponent<Renderer>();
+                if (mf.sharedMesh == null || r == null || !r.enabled) continue;
+                Matrix4x4 toBody = body.worldToLocalMatrix * mf.transform.localToWorldMatrix;
+                mf.sharedMesh.GetVertices(vertices);
+                foreach (Vector3 v in vertices)
+                {
+                    Vector3 p = toBody.MultiplyPoint3x4(v);
+                    xyz.Add(-p.x);
+                    xyz.Add(p.y);
+                    xyz.Add(p.z);
+                }
+            }
+            return xyz.ToArray();
+        }
+
         private static void Remap(Transform part)
         {
             foreach (Renderer r in part.GetComponentsInChildren<Renderer>(true))
