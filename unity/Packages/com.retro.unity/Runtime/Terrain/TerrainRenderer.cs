@@ -93,6 +93,10 @@ namespace Retro.Unity
         [Tooltip("Folder with manifest.json, index_mesh.bin and {z}/{x}/{y}.ptm. Empty: find assets/terrain above the project.")]
         public string terrainRoot = "";
 
+        [Tooltip("Play origin (the scene frame's tangent point); NaN keeps the bake's enuOrigin.")]
+        public double originLat = double.NaN;
+        public double originLon = double.NaN;
+
         [Tooltip("The view this terrain follows (position and orientation in double precision).")]
         public FlyCamera viewer;
 
@@ -160,7 +164,10 @@ namespace Retro.Unity
                 LevelGeometricErrorM = manifest.mesh.levelGeometricErrorM,
                 MaxZoom = manifest.mesh.maxZoom,
                 BakeLat = manifest.enuOrigin.lat, BakeLon = manifest.enuOrigin.lon, BakeHeight = manifest.enuOrigin.height,
-                OriginLat = manifest.enuOrigin.lat, OriginLon = manifest.enuOrigin.lon, OriginHeight = manifest.enuOrigin.height,
+                // The play area's origin: anywhere in the pyramid, the bake frame stays the bake's.
+                OriginLat = double.IsNaN(originLat) ? manifest.enuOrigin.lat : originLat,
+                OriginLon = double.IsNaN(originLon) ? manifest.enuOrigin.lon : originLon,
+                OriginHeight = double.IsNaN(originLat) ? manifest.enuOrigin.height : 0,
             });
             session.IsUploaded = k => gpu.ContainsKey(k);
             session.Meshes.Loaded += (k, t) => uploadQueue.Enqueue((k, t));

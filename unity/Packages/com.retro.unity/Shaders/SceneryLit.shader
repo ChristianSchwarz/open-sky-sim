@@ -6,6 +6,8 @@ Shader "Retro/SceneryLit"
     Properties
     {
         _Color ("Color", Color) = (0.66, 0.66, 0.66, 1)
+        // Front by default: see the pass. Off for double-sided parts (bridges).
+        [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull", Float) = 1
     }
     SubShader
     {
@@ -25,7 +27,7 @@ Shader "Retro/SceneryLit"
             // Front faces are counter-clockwise in the right-handed scene axes; the z
             // mirror in the object matrix turns them clockwise-from-behind, and
             // Graphics.RenderMesh does not flip winding for a mirrored matrix.
-            Cull Front
+            Cull [_Cull]
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -55,9 +57,11 @@ Shader "Retro/SceneryLit"
                 return o;
             }
 
-            half4 frag(Varyings i) : SV_Target
+            half4 frag(Varyings i, bool front : SV_IsFrontFace) : SV_Target
             {
-                float3 n = normalize(i.normalWS);
+                // Seen from the side Unity calls front (the scene's back, under the z
+                // mirror), a double-sided part is lit by its other face's normal.
+                float3 n = normalize(i.normalWS) * (front ? -1 : 1);
                 Light sun = GetMainLight();
                 half3 c = _Color.rgb * (sun.color * saturate(dot(n, sun.direction)) + SampleSH(n));
                 return half4(MixFog(c, i.fog), 1);
@@ -71,6 +75,7 @@ Shader "Retro/SceneryLit"
             Tags { "LightMode" = "DepthOnly" }
             ZWrite On
             ColorMask R
+            Cull [_Cull]
 
             HLSLPROGRAM
             #pragma vertex vert

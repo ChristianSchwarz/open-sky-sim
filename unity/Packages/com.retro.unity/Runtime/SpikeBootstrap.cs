@@ -17,6 +17,19 @@ namespace Retro.Unity
             Create();
         }
 
+        /// <summary>PlayerPrefs key holding a one-shot spawn point, "lat,lon".</summary>
+        public const string SpawnPref = "retro.spawn";
+
+        private static bool TryParseSpawn(string s, out double lat, out double lon)
+        {
+            lat = lon = double.NaN;
+            string[] parts = (s ?? "").Split(',');
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            return parts.Length == 2
+                && double.TryParse(parts[0], System.Globalization.NumberStyles.Float, inv, out lat)
+                && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, inv, out lon);
+        }
+
         public static TerrainRenderer Create()
         {
             Camera cam = Camera.main;
@@ -46,6 +59,19 @@ namespace Retro.Unity
             var root = new GameObject("Terrain");
             var terrain = root.AddComponent<TerrainRenderer>();
             terrain.viewer = fly;
+
+            // A spawn picked elsewhere ("lat,lon"), read once like the web game's
+            // sessionStorage reload: the play area centres on it and the aircraft
+            // starts on the nearest base runway there.
+            string spawn = PlayerPrefs.GetString(SpawnPref, "");
+            PlayerPrefs.DeleteKey(SpawnPref);
+            if (TryParseSpawn(spawn, out double lat, out double lon))
+            {
+                terrain.originLat = lat;
+                terrain.originLon = lon;
+                fly.startLat = lat;
+                fly.startLon = lon;
+            }
             var sea = root.AddComponent<SeaSurface>();
             sea.viewer = fly;
 
@@ -65,6 +91,10 @@ namespace Retro.Unity
             var buildings = root.AddComponent<BuildingRenderer>();
             buildings.terrain = terrain;
             buildings.viewer = fly;
+            var bridges = root.AddComponent<BridgeRenderer>();
+            bridges.terrain = terrain;
+            bridges.viewer = fly;
+            bridges.roads = roads;
             var vegetation = root.AddComponent<VegetationRenderer>();
             vegetation.terrain = terrain;
             vegetation.viewer = fly;

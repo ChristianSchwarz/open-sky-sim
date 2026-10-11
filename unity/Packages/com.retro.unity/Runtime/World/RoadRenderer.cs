@@ -65,6 +65,9 @@ namespace Retro.Unity
         private readonly Queue<(TileRoads Tile, int Kind, int Level)> levelQueue = new Queue<(TileRoads, int, int)>();
         private readonly HashSet<(TileRoads, int, int)> queuedLevels = new HashSet<(TileRoads, int, int)>();
         private Material[] materials;
+        /// <summary>The sleeper and rail passes over a rail bed (also the bridge decks' track).</summary>
+        internal Material SleeperMaterial, RailMaterial;
+        internal Material RailBedMaterial => materials != null ? materials[2] : null;
         private Vec3d earthCentre;
         private readonly Stopwatch clock = new Stopwatch();
         private readonly Palette palette = Palettes.HdNoon;
@@ -95,6 +98,12 @@ namespace Retro.Unity
                 materials[i] = new Material(shader) { name = "roads " + Kinds[i], renderQueue = 2001 };
                 materials[i].SetColor("_Color", TerrainColours.FromHex(palette.Color(tones[i])));
             }
+            // A railway's bed cuts out its switch zones and crossings; its sleepers go on after
+            // every bed and its rails after every sleeper (RAIL_TOP_RENDER_ORDER).
+            materials[2].EnableKeyword("_RAIL");
+            materials[2].SetFloat("_Rail", 1);
+            SleeperMaterial = RailPass(shader, materials[2], 1, 2002);
+            RailMaterial = RailPass(shader, materials[2], 2, 2003);
             earthCentre = Geodesy.SceneFromEnu(Geodesy.EcefToEnu(terrain.Session.Basis, new Vec3d(0, 0, 0)));
             return true;
         }
@@ -111,6 +120,7 @@ namespace Retro.Unity
             Vec3d cam = viewer.ScenePosition;
             Camera unityCam = viewer.UnityCamera;
             double pixelAngle = RoadStrokes.PixelAngle(unityCam.fieldOfView, unityCam.pixelHeight);
+            double trackReach = RoadStrokes.TrackDetailReachM(unityCam.fieldOfView, unityCam.aspect, unityCam.pixelHeight);
             IReadOnlyList<DrawTile> draw = terrain.Session.DrawList;
 
             // Stream the sidecars of what is drawn, nearest first.
@@ -140,12 +150,21 @@ namespace Retro.Unity
                 }
                 double nearM = Math.Max(0, (d.Origin - cam).Length - Tiling.ApproxEdgeMetres(d.Key) * 0.75);
                 int level = RoadLod.LevelFor(nearM * pixelAngle);
-                DrawTileRoads(t, d, cam, level);
+                DrawTileRoads(t, d, cam, level, nearM <= trackReach);
             }
             BuildPendingLevels();
             residentTiles = cache.Count;
             uploadedTiles = gpu.Count;
             pendingLevels = levelQueue.Count;
+        }
+
+        private static Material RailPass(Shader shader, Material bed, int pass, int queue)
+        {
+            var m = new Material(bed) { name = pass == 1 ? "rail sleepers" : "rail heads", renderQueue = queue };
+            m.SetFloat("_RailPass", pass);
+            m.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
+            m.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
+            return m;
         }
 
         private TileRoads Upload(PtrTile ptr, DrawTile d)
@@ -168,7 +187,8 @@ namespace Retro.Unity
             return t;
         }
 
-        private static Mesh BuildVertexMesh(PtrTile ptr)
+        /// <summary>A stroke sidecar's vertices in their wire formats (also the bridge decks' track).</summary>
+        internal static Mesh BuildVertexMesh(PtrTile ptr)
         {
             int n = ptr.HalfWidths.Length;
             var layout = new[]
@@ -263,7 +283,7 @@ namespace Retro.Unity
             }
         }
 
-        private void DrawTileRoads(TileRoads t, DrawTile d, Vec3d cam, int level)
+        private void DrawTileRoads(TileRoads t, DrawTile d, Vec3d cam, int level, bool trackDetail)
         {
             double scale = t.Cpu.GroupScale * t.TileQuantScale * TileMeshUpload.SNorm16Max;
             Matrix4x4 matrix = SceneFrame.TileMatrix(d.Origin, cam, d.FrameFix, scale);
@@ -280,6 +300,12 @@ namespace Retro.Unity
                 Graphics.RenderMesh(rp, t.Mesh, sub, matrix);
                 drawnTriangles += list.Length / 3;
                 any = true;
+                // The sleeper and rail passes always draw the full list, and only where they can show.
+                if (Kinds[k] == StrokeKind.Rail && trackDetail && t.Submesh.TryGetValue(levels.Get(0), out int full))
+                {
+                    Graphics.RenderMesh(new RenderParams(SleeperMaterial) { shadowCastingMode = ShadowCastingMode.Off }, t.Mesh, full, matrix);
+                    Graphics.RenderMesh(new RenderParams(RailMaterial) { shadowCastingMode = ShadowCastingMode.Off }, t.Mesh, full, matrix);
+                }
             }
             if (any) drawnTiles++;
         }
@@ -311,6 +337,8 @@ namespace Retro.Unity
             foreach (TileRoads t in gpu.Values) Destroy(t.Mesh);
             gpu.Clear();
             if (materials != null) foreach (Material m in materials) Destroy(m);
+            if (SleeperMaterial != null) Destroy(SleeperMaterial);
+            if (RailMaterial != null) Destroy(RailMaterial);
         }
     }
 }
