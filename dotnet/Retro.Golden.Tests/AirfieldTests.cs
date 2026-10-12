@@ -101,6 +101,8 @@ public class AirfieldTests
 
             JsonElement r = c.GetProperty("result");
             m.Close($"{name} origin", V3(r.GetProperty("origin")), g.Origin, 1e-12);
+            // The target's position without building the geometry: the same point exactly.
+            m.Close($"{name} OriginOf", V3(r.GetProperty("origin")), AirfieldGeometryBuilder.OriginOf(airfield, basis).Value, 0);
             m.Close($"{name} maxSize", Num(r, "maxSize"), g.MaxSize, 0);
             var levels = r.GetProperty("levels").EnumerateArray().ToList();
             m.Equal($"{name} levels", levels.Count, g.Levels.Length);

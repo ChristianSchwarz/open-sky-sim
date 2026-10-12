@@ -38,6 +38,7 @@ namespace Retro.Unity
             public List<SimPad> Pads;
             public List<BuildingObstacle> Obstacles;
             public string Airfield;
+            public Airfield Source;
             public int Skipped;
         }
 
@@ -47,7 +48,6 @@ namespace Retro.Unity
             this.heightField = heightField;
             foreach (Airfield a in area)
             {
-                if (a.Buildings.Count == 0) continue;
                 // buildAirfield: around the primary runway when there is one.
                 Vec3d at = Geodesy.GeodeticToWorld(basis, a.Lat, a.Lon, 0);
                 foreach (SceneRunway r in runways)
@@ -84,8 +84,11 @@ namespace Retro.Unity
             var all = new List<Built>();
             foreach (var (a, at) in Due(x, z))
             {
-                heightField.Focus(new[] { at });
-                heightField.WaitIdle(TimeSpan.FromSeconds(5));
+                if (a.Buildings.Count > 0)
+                {
+                    heightField.Focus(new[] { at });
+                    heightField.WaitIdle(TimeSpan.FromSeconds(5));
+                }
                 all.Add(Build(a, null));
             }
             return all;
@@ -112,6 +115,8 @@ namespace Retro.Unity
             List<(Airfield, Vec3d)> due = Due(aircraft.X, aircraft.Z);
             if (due.Count == 0) return null;
             var (next, nextAt) = due[0];
+            // Nothing to stand on the ground: built straight away.
+            if (next.Buildings.Count == 0) return Build(next, under);
             built.Add(next);
             pending = (next, nextAt, now);
             heightField.HoldFocus(this, nextAt, GroundRadiusM);
@@ -121,7 +126,11 @@ namespace Retro.Unity
         private Built Build(Airfield a, Func<SimPad, bool> under)
         {
             built.Add(a);
-            var result = new Built { Pads = new List<SimPad>(), Obstacles = new List<BuildingObstacle>(), Airfield = string.IsNullOrEmpty(a.Icao) ? a.Name : a.Icao };
+            var result = new Built
+            {
+                Pads = new List<SimPad>(), Obstacles = new List<BuildingObstacle>(),
+                Airfield = string.IsNullOrEmpty(a.Icao) ? a.Name : a.Icao, Source = a,
+            };
             foreach (AirfieldBuilding b in a.Buildings)
             {
                 var c = AirbaseLayout.BuildingCollider(b, basis, heightField.HeightAtWorld);

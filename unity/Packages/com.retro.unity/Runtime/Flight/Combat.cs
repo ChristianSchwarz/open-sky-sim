@@ -135,11 +135,11 @@ namespace Retro.Unity
         /// The weapons target as the target MFD reads it (aiAircraft.ts WeaponsTarget getters):
         /// speed, load factor, health, the pilot's stick and throttle, the manoeuvre it flies.
         /// </summary>
-        public CockpitTarget CockpitTarget()
+        public CockpitTarget CockpitTarget(string id)
         {
-            WeaponsTarget t = Target();
+            WeaponsTarget t = Target(id);
             if (t == null) return null;
-            SimAircraft o = Opponent;
+            SimAircraft o = sim.GetAircraft(id);
             return new CockpitTarget
             {
                 Position = t.Position,
@@ -159,15 +159,14 @@ namespace Retro.Unity
         }
 
         /// <summary>
-        /// The player's weapons target (beginFlight's setWeaponsTarget(aiOpponent)): the
-        /// primary opponent while it is in the sky. Its size is the airframe's largest
-        /// extent, from the collision box.
+        /// An AI aircraft as a weapons target (aiAircraft.ts WeaponsTarget): null while it is
+        /// parked. Its size is the airframe's largest extent, from the collision box.
         /// </summary>
-        public WeaponsTarget Target()
+        public WeaponsTarget Target(string id)
         {
-            SimAircraft o = Opponent;
+            SimAircraft o = sim.GetAircraft(id);
             if (o == null || !o.Enabled) return null;
-            AircraftView view = ViewOf(OpponentId(0));
+            AircraftView view = ViewOf(id);
             double size = 15;
             if (view?.Def?.CollisionMesh != null)
             {

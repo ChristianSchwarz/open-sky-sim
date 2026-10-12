@@ -114,6 +114,7 @@ namespace Retro.Unity
         private PtxMapSource mapSource;
         private readonly Dictionary<string, Texture2D> atlases = new Dictionary<string, Texture2D>();
         private readonly CockpitInputs inputs = new CockpitInputs();
+        private readonly List<CockpitTarget> contacts = new List<CockpitTarget>();
         private CockpitFrame frame;
         private readonly Hud hud = new Hud();
         private readonly ExteriorData exterior = new ExteriorData();
@@ -292,6 +293,7 @@ namespace Retro.Unity
                 TargetType = t.TargetType,
                 TargetLocation = t.TargetLocation,
                 Airborne = t.Airborne,
+                ApproachRunway = t.ApproachRunway,
             };
             hudInputs.NowMs = Time.realtimeSinceStartupAsDouble * 1000;
             if (clouds == null) clouds = FindAnyObjectByType<CloudRenderer>();
@@ -332,8 +334,9 @@ namespace Retro.Unity
             inputs.Tailhook = Device(flight.HookUnit, a.IsHookDeployed());
             inputs.WheelBrakesApplied = a.IsWheelBrakesApplied();
             inputs.BarricadeStatus = null;
-            inputs.Target = flight.CockpitTarget();
-            inputs.Contacts = inputs.Target != null ? new[] { inputs.Target } : Array.Empty<CockpitTarget>();
+            // Every designatable target on the scope, the designated one picked out.
+            inputs.Target = flight.CockpitContacts(contacts);
+            inputs.Contacts = contacts;
             Camera cam = viewer.UnityCamera;
             inputs.MainCamera.Fov = cam.fieldOfView;
             inputs.MainCamera.Aspect = cam.aspect;

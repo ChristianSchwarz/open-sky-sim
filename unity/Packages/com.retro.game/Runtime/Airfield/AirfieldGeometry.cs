@@ -248,6 +248,25 @@ namespace Retro.Game
         }
 
         /// <summary>
+        /// Where <see cref="Build"/> puts an airfield (its <see cref="AirfieldGeometry.Origin"/>, the
+        /// GroundTargetEntity's position): the primary runway's centre on the airfield plane.
+        /// Null for one with no runway.
+        /// </summary>
+        public static Vec3d? OriginOf(Airfield airfield, EnuBasis basis)
+        {
+            AirfieldRunway primary = Airfields.PrimaryRunway(airfield);
+            if (primary == null) return null;
+            (double E, double N) ToEnu(double lat, double lon)
+            {
+                Enu enu = Geodesy.EcefToEnu(basis, Geodesy.GeodeticToEcef(lat, lon, 0));
+                return (enu.E, enu.N);
+            }
+            var planeCentre = ToEnu(primary.Lat, primary.Lon);
+            // At the plane's own centre the gradient term is zero.
+            return SceneAt(basis, planeCentre.E, planeCentre.N, airfield.Plane.HeightMsl);
+        }
+
+        /// <summary>
         /// Build one airfield; null for one with no runway. `groundElevationAt`
         /// (ellipsoidal height of the real ground at an ENU point) drapes the
         /// taxiways, aprons and buildings; without it they lie on the plane.

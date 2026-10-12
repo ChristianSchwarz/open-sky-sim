@@ -49,6 +49,8 @@ namespace Retro.Unity
         /// <summary>The model has loaded (or failed to) and the deck collider is known.</summary>
         public bool Settled { get; private set; }
         public Retro.Sim.CarrierMeshCollider Deck { get; private set; }
+        /// <summary>The carrier as a weapons target (GroundTargetEntity 'Carrier'), sized once the hull has loaded.</summary>
+        public readonly WeaponsTargets.Entry Target;
         public Vec3d Position => position;
         public Quatd Quaternion => quaternion;
         public Vec3d Velocity => velocity;
@@ -76,6 +78,7 @@ namespace Retro.Unity
             position = new Vec3d(site.X, ArrestorCables.ArrestorCarrierOrigin.Y + seaY + HullRaiseM, site.Z);
             clipY = seaY + 0.05;
             root = new GameObject("Carrier").transform;
+            Target = new WeaponsTargets.Entry { Type = "Carrier", Location = "Stosneehar", Position = () => this.position };
             Load(files);
         }
 
@@ -87,6 +90,7 @@ namespace Retro.Unity
                 if (model != null)
                 {
                     Deck = CarrierDeck.CreateCarrierMeshCollider(position.X, position.Y, position.Z, BakeCollision(model));
+                    (Target.LocalCenter, Target.MaxSize) = Airbase.ModelBounds(model);
                     Paint(model);
                 }
             }

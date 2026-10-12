@@ -27,13 +27,6 @@ namespace Retro.Unity
     {
         private static readonly UnityEngine.Quaternion HalfTurnY = UnityEngine.Quaternion.Euler(0, 180, 0);
 
-        /// <summary>A weapons target among the scenery (GroundTargetEntity): its type, its place, where it stands.</summary>
-        public sealed class GroundTarget
-        {
-            public string Type, Location;
-            public Vec3d Position;
-        }
-
         private sealed class Piece
         {
             public string File;
@@ -41,6 +34,8 @@ namespace Retro.Unity
             public double Heading;
             public bool Solid;
             public Transform Instance;
+            /// <summary>The weapons target this piece is (GroundTargetEntity), sized from its model.</summary>
+            public WeaponsTargets.Entry Target;
         }
 
         private readonly BaseFrame frame;
@@ -58,7 +53,10 @@ namespace Retro.Unity
         public readonly List<SkiJumpCollider> SkiJumps = new List<SkiJumpCollider>();
         /// <summary>The glTF pieces' colliders, once their models have loaded (activateSceneryColliders).</summary>
         public readonly List<CarrierMeshCollider> SceneryMeshes = new List<CarrierMeshCollider>();
-        public readonly List<GroundTarget> Targets = new List<GroundTarget>();
+        /// <summary>The authored runway, a target where the bake found no real one (GroundTargetEntity 'Airbase').</summary>
+        public WeaponsTargets.Entry RunwayTarget { get; private set; }
+        /// <summary>The Canaries scenario's targets, at home: the refinery, the SAM radar, the warehouse.</summary>
+        public readonly List<WeaponsTargets.Entry> Targets = new List<WeaponsTargets.Entry>();
         /// <summary>Every model loaded (or failed): the colliders are final.</summary>
         public bool Settled { get; private set; }
 
@@ -112,7 +110,10 @@ namespace Retro.Unity
             {
                 // The authored strip at the ENU origin, only where the bake found no real runway.
                 double y = AirbaseLayout.GroundMaxUnder(groundAt, 0, 0, 80, 900);
-                pieces.Add(new Piece { File = "runway01.gltf", Position = new Vec3d(0, y + AirbaseLayout.ScenerySurfaceEpsM, 0), Heading = 0 });
+                var runway = new Piece { File = "runway01.gltf", Position = new Vec3d(0, y + AirbaseLayout.ScenerySurfaceEpsM, 0), Heading = 0 };
+                Vec3d at = runway.Position;
+                runway.Target = RunwayTarget = new WeaponsTargets.Entry { Type = "Airbase", Location = "Stosneehar", Position = () => at };
+                pieces.Add(runway);
                 Add(pads, new SimPad
                 {
                     CenterX = 0, CenterZ = 0, Heading = AirbaseLayout.PlayerStartingHeading,
@@ -181,7 +182,10 @@ namespace Retro.Unity
 
         private void Target(string type, string location)
         {
-            Targets.Add(new GroundTarget { Type = type, Location = location, Position = pieces[pieces.Count - 1].Position });
+            Piece p = pieces[pieces.Count - 1];
+            Vec3d at = p.Position;
+            p.Target = new WeaponsTargets.Entry { Type = type, Location = location, Position = () => at };
+            Targets.Add(p.Target);
         }
 
         private async void Load(IAircraftFiles files)
@@ -200,6 +204,13 @@ namespace Retro.Unity
                         templates[p.File] = template;
                     }
                     if (template == null || root == null) continue;
+                    if (p.Target != null)
+                    {
+                        // GroundTargetEntity maxSize and localCenter: the model's box.
+                        (Vec3d centre, double size) = ModelBounds(template);
+                        p.Target.LocalCenter = centre;
+                        p.Target.MaxSize = size;
+                    }
                     p.Instance = UnityEngine.Object.Instantiate(template, root);
                     p.Instance.name = p.File;
                     p.Instance.gameObject.SetActive(true);
@@ -222,6 +233,33 @@ namespace Retro.Unity
             {
                 Settled = true;
             }
+        }
+
+        /// <summary>
+        /// models.ts maxSize and center: the box round a model's drawn vertices, in the model
+        /// frame (glTFast negated x, so it is negated back).
+        /// </summary>
+        public static (Vec3d Center, double MaxSize) ModelBounds(Transform model)
+        {
+            var min = new Vec3d(double.PositiveInfinity, double.PositiveInfinity, double.PositiveInfinity);
+            var max = new Vec3d(double.NegativeInfinity, double.NegativeInfinity, double.NegativeInfinity);
+            var vertices = new List<Vector3>();
+            foreach (MeshFilter mf in model.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (mf.sharedMesh == null) continue;
+                Matrix4x4 toModel = model.worldToLocalMatrix * mf.transform.localToWorldMatrix;
+                mf.sharedMesh.GetVertices(vertices);
+                foreach (Vector3 v in vertices)
+                {
+                    Vector3 p = toModel.MultiplyPoint3x4(v);
+                    var s = new Vec3d(-p.x, p.y, p.z);
+                    min = new Vec3d(Math.Min(min.X, s.X), Math.Min(min.Y, s.Y), Math.Min(min.Z, s.Z));
+                    max = new Vec3d(Math.Max(max.X, s.X), Math.Max(max.Y, s.Y), Math.Max(max.Z, s.Z));
+                }
+            }
+            if (double.IsInfinity(min.X)) return (Vec3d.Zero, 0);
+            Vec3d size = max - min;
+            return ((min + max) * 0.5, Math.Max(size.X, Math.Max(size.Y, size.Z)));
         }
 
         /// <summary>The apron squares (lib:pavement) and the ski jump (lib:skiJump), as scene-wound meshes.</summary>

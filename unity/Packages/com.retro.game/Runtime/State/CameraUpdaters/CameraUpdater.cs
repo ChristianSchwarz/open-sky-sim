@@ -31,6 +31,8 @@ namespace Retro.Game
         public string TargetLocation = "";
         /// <summary>True for airborne targets (enemy aircraft), false for fixed ground targets.</summary>
         public bool Airborne;
+        /// <summary>The runway the ILS guides down, on an airfield target; null for the legacy one.</summary>
+        public ApproachRunway ApproachRunway;
     }
 
     /// <summary>

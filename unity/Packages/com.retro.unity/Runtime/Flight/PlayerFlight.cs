@@ -134,8 +134,13 @@ namespace Retro.Unity
         /// <summary>The solid pads changed (an airfield's buildings streamed in): trees keep off them.</summary>
         public event Action<IReadOnlyList<Retro.Sim.SurfacePadCollider>> SurfacePadsChanged;
 
-        /// <summary>The scenery's weapons targets (the refinery, the SAM site, the warehouse at home).</summary>
-        public IReadOnlyList<Airbase.GroundTarget> GroundTargets => airbase?.Targets;
+        /// <summary>The weapons target and the candidates T steps through.</summary>
+        private readonly WeaponsTargets targets = new WeaponsTargets();
+        private readonly List<WeaponsTargets.Entry> contactEntries = new List<WeaponsTargets.Entry>();
+        private readonly Dictionary<WeaponsTargets.Entry, CockpitTarget> groundCockpit = new Dictionary<WeaponsTargets.Entry, CockpitTarget>();
+
+        /// <summary>The designated target's entry (null for none).</summary>
+        public WeaponsTargets.Entry TargetEntry => targets.Current;
         /// <summary>Airfields this far from the frame origin count as the play area's.</summary>
         private const double AirfieldReachM = 150000;
 
@@ -356,6 +361,7 @@ namespace Retro.Unity
             aiChase = new AiExteriorCameraUpdater(this, pose, new SimChaseTarget(sim, Combat.OpponentId(0)), aiChaseHeading);
             tracers = new TracerRenderer();
             combat.Begin(spawnMode, GroundAt);
+            TargetOpponent();
             FlightBegan?.Invoke();
             Debug.Log($"Retro flight: {flightModel}, {runways.Count} runways near, start {spawnMode} "
                 + (startRunway != null ? $"{startRunway.Icao} {startRunway.Name} {startRunway.Ref}" : $"at {spawnLat}, {spawnLon}")
@@ -402,6 +408,7 @@ namespace Retro.Unity
             Vec3d startAt = startRunway?.Center ?? Vec3d.Zero;
             foreach (AirfieldColliders.Built b in airfieldColliders.BuildNear(startAt.X, startAt.Z))
             {
+                AddAirfieldTarget(b.Source);
                 surfacePads.AddRange(b.Pads);
                 buildingObstacles.AddRange(b.Obstacles);
             }
@@ -415,11 +422,41 @@ namespace Retro.Unity
             }
             airbase = new Airbase(AirbaseLayout.FrameOf(home), home != null, realAprons, IsHomeArea());
             airbase.AddPads(GroundAtBoot, surfacePads);
+            if (airbase.RunwayTarget != null) targets.AddGround(airbase.RunwayTarget);
             carrier = new Carrier(heightField, startRunway,
                 (x, z) => Retro.Sim.SurfacePads.SampleSurfacePadYMax(x, z, surfacePads) != double.NegativeInfinity,
                 new DirectoryFiles(assetsDir));
+            targets.AddGround(carrier.Target);
             airbase.Place(GroundAtBoot, new DirectoryFiles(assetsDir));
+            foreach (WeaponsTargets.Entry t in airbase.Targets) targets.AddGround(t);
             SurfacePadsChanged?.Invoke(surfacePads);
+        }
+
+        /// <summary>
+        /// buildAirfield's GroundTargetEntity: an airfield with a runway is a target named for it,
+        /// standing at its primary runway's centre, the size of its longest runway; that runway
+        /// is what the ILS guides down.
+        /// </summary>
+        private void AddAirfieldTarget(Airfield a)
+        {
+            Vec3d? origin = AirfieldGeometryBuilder.OriginOf(a, heightField.Basis);
+            if (!origin.HasValue) return;
+            Vec3d at = origin.Value;
+            double maxSize = 0;
+            foreach (AirfieldRunway r in a.Runways) maxSize = Math.Max(maxSize, r.LengthM);
+            ApproachRunway approach = null;
+            foreach (SceneRunway r in runways)
+            {
+                if (r.Primary && r.Icao == a.Icao && r.Name == a.Name)
+                {
+                    approach = new ApproachRunway { Center = r.Center, Heading = r.Heading, HalfLength = r.HalfLength };
+                }
+            }
+            targets.AddGround(new WeaponsTargets.Entry
+            {
+                Type = "Airbase", Location = string.IsNullOrEmpty(a.Icao) ? a.Name : a.Icao,
+                Position = () => at, MaxSize = Math.Max(maxSize, 1), Runway = approach,
+            });
         }
 
         /// <summary>The OSM buildings' cylinders before setupCombat stands them on the ground.</summary>
@@ -462,8 +499,10 @@ namespace Retro.Unity
         private void StreamAirfieldColliders()
         {
             AirfieldColliders.Built? got = airfieldColliders.Stream(aircraft.GetPosition(), AircraftUnder);
-            if (!got.HasValue || got.Value.Pads.Count == 0) return;
+            if (!got.HasValue) return;
             AirfieldColliders.Built b = got.Value;
+            AddAirfieldTarget(b.Source);
+            if (b.Pads.Count == 0) return;
             var added = new List<Obstacle>();
             surfacePads.AddRange(b.Pads);
             foreach (BuildingObstacle o in b.Obstacles) added.Add(MakeObstacle(o.X, o.Z, o.Radius, o.Height));
@@ -657,6 +696,7 @@ namespace Retro.Unity
             SimAircraftSpawn spawn = Airborne(p, LocationSpawnHeading, ApproachThrottle);
             Place(spawn);
             combat.Begin(SpawnMode.Approach, GroundAt);
+            TargetOpponent();
             FlightBegan?.Invoke();
         }
 
@@ -689,6 +729,7 @@ namespace Retro.Unity
             startAtLocation = false;
             Respawn();
             combat.Begin(mode, GroundAt);
+            TargetOpponent();
             FlightBegan?.Invoke();
         }
 
@@ -755,6 +796,8 @@ namespace Retro.Unity
         {
             StopReplay();
             Recorder.Clear();
+            // PlayerEntity.respawn: no target until the flight picks one.
+            targets.Clear();
             postCrashRecorded = 0;
             crashRecordTime = double.PositiveInfinity;
             ReleaseAllKeys();
@@ -857,10 +900,67 @@ namespace Retro.Unity
         public Vec3d GetDisplayWorldDirection() => SceneAxes.Forward.Rotate(GetDisplayQuaternion());
         public Vec3d GetDisplayWorldUp() => SceneAxes.Up.Rotate(GetDisplayQuaternion());
         public Vec3d GetDisplayWorldRight() => SceneAxes.Right.Rotate(GetDisplayQuaternion());
-        public WeaponsTarget WeaponsTarget => combat?.Target();
+        public WeaponsTarget WeaponsTarget
+        {
+            get
+            {
+                WeaponsTargets.Entry e = targets.Current;
+                if (e == null) return null;
+                return e.SimId != null ? combat?.Target(e.SimId) : WeaponsTargets.Ground(e);
+            }
+        }
+
+        /// <summary>T (player.ts pickTarget): the next target, while flying (not crashed, not in the replay).</summary>
+        public void CycleTarget()
+        {
+            if (sim == null || Replaying || aircraft.IsCrashed()) return;
+            targets.Cycle(sim);
+        }
+
+        /// <summary>beginFlight's setWeaponsTarget(aiOpponent): when it is in the sky.</summary>
+        private void TargetOpponent()
+        {
+            SimAircraft o = combat.Opponent;
+            targets.SetAircraft(o != null && o.Enabled ? Combat.OpponentId(0) : null);
+        }
+
+        private CockpitTarget CockpitOf(WeaponsTargets.Entry e)
+        {
+            if (e.SimId != null) return combat?.CockpitTarget(e.SimId);
+            if (!groundCockpit.TryGetValue(e, out CockpitTarget c))
+            {
+                c = WeaponsTargets.GroundCockpit(e);
+                groundCockpit[e] = c;
+            }
+            // The carrier steams on; its size arrives with its model.
+            c.Position = e.Position();
+            c.LocalCenter = e.LocalCenter;
+            c.MaxSize = e.MaxSize;
+            return c;
+        }
+
+        /// <summary>
+        /// The tactical scope's contacts (collectWeaponsTargets) into `into`, and the designated
+        /// target among them (the same object, which is how the scope picks it out).
+        /// </summary>
+        public CockpitTarget CockpitContacts(List<CockpitTarget> into)
+        {
+            into.Clear();
+            if (sim == null) return null;
+            CockpitTarget selected = null;
+            foreach (WeaponsTargets.Entry e in targets.Collect(sim, contactEntries))
+            {
+                CockpitTarget c = CockpitOf(e);
+                if (c == null) continue;
+                into.Add(c);
+                if (e == targets.Current) selected = c;
+            }
+            if (selected == null && targets.Current != null) selected = CockpitOf(targets.Current);
+            return selected;
+        }
 
         /// <summary>The weapons target with the telemetry the target MFD shows.</summary>
-        public CockpitTarget CockpitTarget() => combat?.CockpitTarget();
+        public CockpitTarget CockpitTarget() => targets.Current != null ? CockpitOf(targets.Current) : null;
 
         /// <summary>Gear, flaps and airbrakes through their transits (for the device labels).</summary>
         public (double Gear, double Flaps, double Airbrakes) DeviceUnits => airframeView.Units;
@@ -910,6 +1010,7 @@ namespace Retro.Unity
                 }
             }
             if (k.f4Key.wasPressedThisFrame) ToggleReplay();
+            if (k.tKey.wasPressedThisFrame) CycleTarget();
             if (Replaying) ReadReplayKeys(k);
             if (k.f10Key.wasPressedThisFrame) flightView = flightView == FlightView.Free ? FlightView.ChaseBack : FlightView.Free;
             if (k.rKey.wasPressedThisFrame && flightView != FlightView.Free) BeginFlight(spawnMode);
