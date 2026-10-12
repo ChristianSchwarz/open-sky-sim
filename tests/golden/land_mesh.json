@@ -1,0 +1,574 @@
+{
+  "source": "src/script/terrain/tileMesh.ts (leanEdgeNormals, regionSizes, buildSmoothLandGeometry)",
+  "notes": ["Per checked-in .ptm with land: lean a copy of landNormals, regionSizes over the land soup, then the smooth weld over the leaned normals with those sizes.", "Hashes are FNV-1a over raw little-endian bytes; smooth.indices are widened to Uint32 before hashing."],
+  "tiles": [
+    {
+      "file": "tiles/ptm/0_1_0.ptm",
+      "quantScale": 305.75885009765625,
+      "vertexCount": 1044,
+      "groundVertices": 0,
+      "inputPositions": {
+        "type": "Int16Array",
+        "length": 3132,
+        "fnv1a32": "2705e36c",
+        "head": [-15380, 23095, -6314, -15356, 23124, -6243]
+      },
+      "inputNormals": {
+        "type": "Int8Array",
+        "length": 4176,
+        "fnv1a32": "14e4282a",
+        "head": [29, 111, -54, 0, 29, 111]
+      },
+      "inputAttrs": {
+        "type": "Uint8Array",
+        "length": 4176,
+        "fnv1a32": "ce910949",
+        "head": [42, 63, 32, 3, 42, 63]
+      },
+      "leanedNormals": {
+        "type": "Int8Array",
+        "length": 4176,
+        "fnv1a32": "65d656d3",
+        "head": [29, 111, -54, 0, 29, 111, -54, 0]
+      },
+      "regionSizes": {
+        "type": "Uint16Array",
+        "length": 1044,
+        "fnv1a32": "3a2fa7e5",
+        "head": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      },
+      "nonZeroSizes": 0,
+      "smooth": {
+        "vertexCount": 231,
+        "indexCount": 1044,
+        "positions": {
+          "type": "Int16Array",
+          "length": 693,
+          "fnv1a32": "8e6bfd4b",
+          "head": [-15380, 23095, -6314, -15356, 23124, -6243, -15456, 23159, -6225]
+        },
+        "normals": {
+          "type": "Int8Array",
+          "length": 924,
+          "fnv1a32": "7a3d6b0d",
+          "head": [119, 17, -41, 0, 29, 111, -54, 0]
+        },
+        "attrs": {
+          "type": "Uint8Array",
+          "length": 924,
+          "fnv1a32": "8e28a36c",
+          "head": [42, 63, 32, 3, 51, 71, 36, 3]
+        },
+        "sizes": {
+          "type": "Uint16Array",
+          "length": 231,
+          "fnv1a32": "caaee13d",
+          "head": [0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "indices": {
+          "type": "Uint32Array",
+          "length": 1044,
+          "fnv1a32": "ca741ee1",
+          "head": [0, 1, 2, 3, 1, 0, 2, 1, 4, 5, 6, 7]
+        }
+      }
+    },
+    {
+      "file": "tiles/ptm/10_935_352.ptm",
+      "quantScale": 0.2976982295513153,
+      "vertexCount": 20409,
+      "groundVertices": 18978,
+      "inputPositions": {
+        "type": "Int16Array",
+        "length": 61227,
+        "fnv1a32": "3db0b1c6",
+        "head": [-28957, -2610, -32767, -28504, -2663, -32766]
+      },
+      "inputNormals": {
+        "type": "Int8Array",
+        "length": 81636,
+        "fnv1a32": "d541a108",
+        "head": [14, 117, -48, 0, 14, 117]
+      },
+      "inputAttrs": {
+        "type": "Uint8Array",
+        "length": 81636,
+        "fnv1a32": "8beee05b",
+        "head": [105, 112, 73, 13, 104, 111]
+      },
+      "leanedNormals": {
+        "type": "Int8Array",
+        "length": 81636,
+        "fnv1a32": "0da513da",
+        "head": [14, 117, -48, 0, 14, 117, -48, 0]
+      },
+      "regionSizes": {
+        "type": "Uint16Array",
+        "length": 20409,
+        "fnv1a32": "9dcecd7e",
+        "head": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      },
+      "nonZeroSizes": 1431,
+      "smooth": {
+        "vertexCount": 4186,
+        "indexCount": 20409,
+        "positions": {
+          "type": "Int16Array",
+          "length": 12558,
+          "fnv1a32": "f205a20a",
+          "head": [-28957, -2610, -32767, -28504, -2663, -32766, -28506, -2454, -32255]
+        },
+        "normals": {
+          "type": "Int8Array",
+          "length": 16744,
+          "fnv1a32": "3c865c60",
+          "head": [0, 121, -37, 0, 21, 122, -30, 0]
+        },
+        "attrs": {
+          "type": "Uint8Array",
+          "length": 16744,
+          "fnv1a32": "80ab58ec",
+          "head": [105, 112, 73, 13, 104, 111, 73, 13]
+        },
+        "sizes": {
+          "type": "Uint16Array",
+          "length": 4186,
+          "fnv1a32": "b45aafc2",
+          "head": [0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "indices": {
+          "type": "Uint32Array",
+          "length": 20409,
+          "fnv1a32": "2a580a9c",
+          "head": [0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2]
+        }
+      }
+    },
+    {
+      "file": "tiles/ptm/11_1870_705.ptm",
+      "quantScale": 0.14890021085739136,
+      "vertexCount": 19812,
+      "groundVertices": 17268,
+      "inputPositions": {
+        "type": "Int16Array",
+        "length": 59436,
+        "fnv1a32": "c7eeb18d",
+        "head": [-28967, -953, -32767, -28060, -778, -32765]
+      },
+      "inputNormals": {
+        "type": "Int8Array",
+        "length": 79248,
+        "fnv1a32": "6a55a6ba",
+        "head": [-24, 125, 3, 0, -24, 125]
+      },
+      "inputAttrs": {
+        "type": "Uint8Array",
+        "length": 79248,
+        "fnv1a32": "54b21a25",
+        "head": [95, 106, 65, 13, 95, 106]
+      },
+      "leanedNormals": {
+        "type": "Int8Array",
+        "length": 79248,
+        "fnv1a32": "3535680f",
+        "head": [-24, 125, 3, 0, -24, 125, 3, 0]
+      },
+      "regionSizes": {
+        "type": "Uint16Array",
+        "length": 19812,
+        "fnv1a32": "99cdb47e",
+        "head": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      },
+      "nonZeroSizes": 2544,
+      "smooth": {
+        "vertexCount": 4145,
+        "indexCount": 19812,
+        "positions": {
+          "type": "Int16Array",
+          "length": 12435,
+          "fnv1a32": "cc65f9ec",
+          "head": [-28967, -953, -32767, -28060, -778, -32765, -28061, -791, -32254]
+        },
+        "normals": {
+          "type": "Int8Array",
+          "length": 16580,
+          "fnv1a32": "d2dbf035",
+          "head": [-38, 120, 19, 0, -17, 126, -5, 0]
+        },
+        "attrs": {
+          "type": "Uint8Array",
+          "length": 16580,
+          "fnv1a32": "55ac5ba1",
+          "head": [95, 106, 65, 13, 95, 106, 65, 13]
+        },
+        "sizes": {
+          "type": "Uint16Array",
+          "length": 4145,
+          "fnv1a32": "7bcf4b27",
+          "head": [0, 0, 0, 0, 0, 0, 0, 72]
+        },
+        "indices": {
+          "type": "Uint32Array",
+          "length": 19812,
+          "fnv1a32": "bd37a626",
+          "head": [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5]
+        }
+      }
+    },
+    {
+      "file": "tiles/ptm/12_3741_1411.ptm",
+      "quantScale": 0.07443754374980927,
+      "vertexCount": 71751,
+      "groundVertices": 40203,
+      "inputPositions": {
+        "type": "Int16Array",
+        "length": 215253,
+        "fnv1a32": "5fad7a98",
+        "head": [-28986, -2591, -32767, -28532, -2394, -32766]
+      },
+      "inputNormals": {
+        "type": "Int8Array",
+        "length": 287004,
+        "fnv1a32": "467438f1",
+        "head": [-49, 112, 34, 0, -49, 112]
+      },
+      "inputAttrs": {
+        "type": "Uint8Array",
+        "length": 287004,
+        "fnv1a32": "3096233c",
+        "head": [86, 99, 61, 13, 86, 99]
+      },
+      "leanedNormals": {
+        "type": "Int8Array",
+        "length": 287004,
+        "fnv1a32": "b45fb113",
+        "head": [-49, 112, 34, 0, -49, 112, 34, 0]
+      },
+      "regionSizes": {
+        "type": "Uint16Array",
+        "length": 71751,
+        "fnv1a32": "5e2f771e",
+        "head": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      },
+      "nonZeroSizes": 31548,
+      "smooth": {
+        "vertexCount": 13615,
+        "indexCount": 71751,
+        "positions": {
+          "type": "Int16Array",
+          "length": 40845,
+          "fnv1a32": "83fae663",
+          "head": [-28986, -2591, -32767, -28532, -2394, -32766, -28533, -2547, -32255]
+        },
+        "normals": {
+          "type": "Int8Array",
+          "length": 54460,
+          "fnv1a32": "aad08210",
+          "head": [-44, 115, 30, 0, -45, 110, 45, 0]
+        },
+        "attrs": {
+          "type": "Uint8Array",
+          "length": 54460,
+          "fnv1a32": "1f4dc9d0",
+          "head": [86, 99, 61, 13, 86, 99, 61, 13]
+        },
+        "sizes": {
+          "type": "Uint16Array",
+          "length": 13615,
+          "fnv1a32": "f8ff7ab1",
+          "head": [0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "indices": {
+          "type": "Uint32Array",
+          "length": 71751,
+          "fnv1a32": "e38f5970",
+          "head": [0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2]
+        }
+      }
+    },
+    {
+      "file": "tiles/ptm/12_4359_952.ptm",
+      "quantScale": 0.08060243725776672,
+      "vertexCount": 61926,
+      "groundVertices": 17646,
+      "inputPositions": {
+        "type": "Int16Array",
+        "length": 185778,
+        "fnv1a32": "4be593b9",
+        "head": [-12400, -93, -10045, -9896, 149, -7459]
+      },
+      "inputNormals": {
+        "type": "Int8Array",
+        "length": 247704,
+        "fnv1a32": "bbf13e10",
+        "head": [39, 111, -48, 0, 39, 111]
+      },
+      "inputAttrs": {
+        "type": "Uint8Array",
+        "length": 247704,
+        "fnv1a32": "951cfd2f",
+        "head": [103, 100, 81, 13, 103, 99]
+      },
+      "leanedNormals": {
+        "type": "Int8Array",
+        "length": 247704,
+        "fnv1a32": "b351e035",
+        "head": [39, 111, -48, 0, 39, 111, -48, 0]
+      },
+      "regionSizes": {
+        "type": "Uint16Array",
+        "length": 61926,
+        "fnv1a32": "d24428d6",
+        "head": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      },
+      "nonZeroSizes": 44280,
+      "smooth": {
+        "vertexCount": 14959,
+        "indexCount": 61926,
+        "positions": {
+          "type": "Int16Array",
+          "length": 44877,
+          "fnv1a32": "2dafd5f1",
+          "head": [-12400, -93, -10045, -9896, 149, -7459, -9942, 202, -7375]
+        },
+        "normals": {
+          "type": "Int8Array",
+          "length": 59836,
+          "fnv1a32": "3215141b",
+          "head": [38, 111, -48, 0, 38, 111, -47, 0]
+        },
+        "attrs": {
+          "type": "Uint8Array",
+          "length": 59836,
+          "fnv1a32": "9c5a1482",
+          "head": [103, 100, 81, 13, 103, 99, 81, 13]
+        },
+        "sizes": {
+          "type": "Uint16Array",
+          "length": 14959,
+          "fnv1a32": "46c6e5b6",
+          "head": [0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "indices": {
+          "type": "Uint32Array",
+          "length": 61926,
+          "fnv1a32": "71e894de",
+          "head": [0, 1, 2, 0, 2, 3, 0, 4, 1, 3, 2, 5]
+        }
+      }
+    },
+    {
+      "file": "tiles/ptm/12_4400_852.ptm",
+      "quantScale": 0.07828281074762344,
+      "vertexCount": 12969,
+      "groundVertices": 12969,
+      "inputPositions": {
+        "type": "Int16Array",
+        "length": 38907,
+        "fnv1a32": "4260d0f0",
+        "head": [-25534, -3815, -23418, -24623, -4263, -23650]
+      },
+      "inputNormals": {
+        "type": "Int8Array",
+        "length": 51876,
+        "fnv1a32": "921460b7",
+        "head": [38, 107, -58, 0, 38, 107]
+      },
+      "inputAttrs": {
+        "type": "Uint8Array",
+        "length": 51876,
+        "fnv1a32": "a30d6468",
+        "head": [86, 86, 69, 13, 86, 86]
+      },
+      "leanedNormals": {
+        "type": "Int8Array",
+        "length": 51876,
+        "fnv1a32": "921460b7",
+        "head": [38, 107, -58, 0, 38, 107, -58, 0]
+      },
+      "regionSizes": {
+        "type": "Uint16Array",
+        "length": 12969,
+        "fnv1a32": "25981e0d",
+        "head": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      },
+      "nonZeroSizes": 0,
+      "smooth": {
+        "vertexCount": 3157,
+        "indexCount": 12969,
+        "positions": {
+          "type": "Int16Array",
+          "length": 9471,
+          "fnv1a32": "633b7697",
+          "head": [-25534, -3815, -23418, -24623, -4263, -23650, -23091, -4349, -22809]
+        },
+        "normals": {
+          "type": "Int8Array",
+          "length": 12628,
+          "fnv1a32": "03824492",
+          "head": [38, 106, -58, 0, 38, 107, -57, 0]
+        },
+        "attrs": {
+          "type": "Uint8Array",
+          "length": 12628,
+          "fnv1a32": "6d5edb46",
+          "head": [86, 86, 69, 13, 86, 86, 69, 13]
+        },
+        "sizes": {
+          "type": "Uint16Array",
+          "length": 3157,
+          "fnv1a32": "f1b9a8ed",
+          "head": [0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "indices": {
+          "type": "Uint32Array",
+          "length": 12969,
+          "fnv1a32": "2aeb550e",
+          "head": [0, 1, 2, 1, 3, 2, 3, 4, 2, 4, 5, 2]
+        }
+      }
+    },
+    {
+      "file": "tiles/ptm/4_14_5.ptm",
+      "quantScale": 19.55710220336914,
+      "vertexCount": 4188,
+      "groundVertices": 0,
+      "inputPositions": {
+        "type": "Int16Array",
+        "length": 12564,
+        "fnv1a32": "61c3d5ed",
+        "head": [-5436, -245, -3798, -5441, -232, -3578]
+      },
+      "inputNormals": {
+        "type": "Int8Array",
+        "length": 16752,
+        "fnv1a32": "15eeddfa",
+        "head": [-26, 124, -8, 0, -26, 124]
+      },
+      "inputAttrs": {
+        "type": "Uint8Array",
+        "length": 16752,
+        "fnv1a32": "d643d225",
+        "head": [130, 103, 65, 2, 130, 103]
+      },
+      "leanedNormals": {
+        "type": "Int8Array",
+        "length": 16752,
+        "fnv1a32": "a40f110b",
+        "head": [-26, 124, -8, 0, -26, 124, -8, 0]
+      },
+      "regionSizes": {
+        "type": "Uint16Array",
+        "length": 4188,
+        "fnv1a32": "c9552525",
+        "head": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      },
+      "nonZeroSizes": 0,
+      "smooth": {
+        "vertexCount": 1163,
+        "indexCount": 4188,
+        "positions": {
+          "type": "Int16Array",
+          "length": 3489,
+          "fnv1a32": "f25140d3",
+          "head": [-5436, -245, -3798, -5441, -232, -3578, -5499, -245, -3579]
+        },
+        "normals": {
+          "type": "Int8Array",
+          "length": 4652,
+          "fnv1a32": "8ff73597",
+          "head": [6, 88, 92, 0, -30, 123, 5, 0]
+        },
+        "attrs": {
+          "type": "Uint8Array",
+          "length": 4652,
+          "fnv1a32": "3402ff55",
+          "head": [130, 103, 65, 2, 130, 103, 65, 2]
+        },
+        "sizes": {
+          "type": "Uint16Array",
+          "length": 1163,
+          "fnv1a32": "a0535cdd",
+          "head": [0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "indices": {
+          "type": "Uint32Array",
+          "length": 4188,
+          "fnv1a32": "8ac6c2dc",
+          "head": [0, 1, 2, 3, 4, 5, 6, 1, 0, 2, 1, 7]
+        }
+      }
+    },
+    {
+      "file": "tiles/ptm/8_233_88.ptm",
+      "quantScale": 1.1943016052246094,
+      "vertexCount": 22767,
+      "groundVertices": 0,
+      "inputPositions": {
+        "type": "Int16Array",
+        "length": 68301,
+        "fnv1a32": "026c4e33",
+        "head": [83, -743, -22355, 82, -765, -21920]
+      },
+      "inputNormals": {
+        "type": "Int8Array",
+        "length": 91068,
+        "fnv1a32": "6a262b27",
+        "head": [-1, 127, 7, 0, -1, 127]
+      },
+      "inputAttrs": {
+        "type": "Uint8Array",
+        "length": 91068,
+        "fnv1a32": "4d90e3ae",
+        "head": [138, 114, 86, 12, 138, 114]
+      },
+      "leanedNormals": {
+        "type": "Int8Array",
+        "length": 91068,
+        "fnv1a32": "1fe2815b",
+        "head": [-1, 127, 7, 0, -1, 127, 7, 0]
+      },
+      "regionSizes": {
+        "type": "Uint16Array",
+        "length": 22767,
+        "fnv1a32": "7d14ea7d",
+        "head": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      },
+      "nonZeroSizes": 0,
+      "smooth": {
+        "vertexCount": 5863,
+        "indexCount": 22767,
+        "positions": {
+          "type": "Int16Array",
+          "length": 17589,
+          "fnv1a32": "e314fa80",
+          "head": [83, -743, -22355, 82, -765, -21920, -43, -766, -21921]
+        },
+        "normals": {
+          "type": "Int8Array",
+          "length": 23452,
+          "fnv1a32": "ac96d289",
+          "head": [50, 76, 88, 0, -11, 126, 6, 0]
+        },
+        "attrs": {
+          "type": "Uint8Array",
+          "length": 23452,
+          "fnv1a32": "6c5e1fa8",
+          "head": [138, 114, 86, 12, 138, 114, 86, 12]
+        },
+        "sizes": {
+          "type": "Uint16Array",
+          "length": 5863,
+          "fnv1a32": "9a5a513d",
+          "head": [0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "indices": {
+          "type": "Uint32Array",
+          "length": 22767,
+          "fnv1a32": "3c8df4bf",
+          "head": [0, 1, 2, 3, 4, 5, 3, 5, 6, 6, 5, 7]
+        }
+      }
+    }
+  ]
+}
