@@ -39,6 +39,7 @@ import { debrisSuite } from './suites/debris';
 import { damageSmokeSuite } from './suites/damageSmoke';
 import { wreckSuite } from './suites/wreck';
 import { landMeshSuite } from './suites/landMesh';
+import { seamStitchSuite } from './suites/seamStitch';
 
 export const GOLDEN_ROOT = path.resolve(__dirname, '../../tests/golden');
 /** The baked tree tiles are selected from; GOLDEN_TERRAIN_ROOT points a worktree (which has none) at a checkout's. */
@@ -81,6 +82,7 @@ const SUITES: SuiteDef[] = [
     { name: 'damageSmoke', run: () => damageSmokeSuite() },
     { name: 'wreck', run: () => wreckSuite() },
     { name: 'landMesh', run: ctx => landMeshSuite(ctx) },
+    { name: 'seamStitch', run: ctx => seamStitchSuite(ctx) },
 ];
 
 export interface GenerateResult {
