@@ -113,7 +113,7 @@ namespace Retro.Unity
                         SweepUnit = sweepUnit,
                         AngleOfAttack = aircraft.GetAngleOfAttack(),
                         Still = aircraft.IsCrashed(),
-                    }, Damage);
+                    }, Damage, LodFor(position, camera));
                     DrawRoot(position, quaternion, camera);
                 }
             }
@@ -127,6 +127,20 @@ namespace Retro.Unity
                 Velocity = velocity,
                 WingSweep = sweepUnit,
             }, camera);
+        }
+
+        /// <summary>
+        /// The screen-size level (player.ts / aiAircraft.ts render3D: getLodLevel at the
+        /// default bias, capped at the body's last level) for the main camera.
+        /// </summary>
+        public int LodFor(Vec3d position, Vec3d camera)
+        {
+            Camera cam = Camera.main;
+            if (cam == null || model == null) return 0;
+            Vec3d d = position - camera;
+            double distance = Math.Sqrt(d.X * d.X + d.Y * d.Y + d.Z * d.Z);
+            int level = ModelLod.GetLodLevel(distance, cam.fieldOfView, cam.aspect, cam.pixelWidth, model.MaxSize);
+            return Math.Min(level, model.LodCount - 1);
         }
 
         /// <summary>The airframe as the wreck field takes it apart, where it was last drawn; null before it has loaded.</summary>

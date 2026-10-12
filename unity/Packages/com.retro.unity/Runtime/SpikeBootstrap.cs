@@ -66,6 +66,27 @@ namespace Retro.Unity
                 && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, inv, out lon);
         }
 
+        /// <summary>
+        /// The page URL's camera route (cameraRoute.ts) as a command-line argument:
+        /// `@45.93,6.87,2500a,150h,85t` as Google Maps writes a 3D view, also after
+        /// `-camera`, or a whole query (`?@...`, `?lat=..&amp;lng=..`). Null when absent or malformed.
+        /// </summary>
+        private static Retro.Game.CameraRoute CommandLineRoute()
+        {
+            string[] args = System.Environment.GetCommandLineArgs();
+            for (int i = 1; i < args.Length; i++)
+            {
+                string a = args[i];
+                if (a == "-camera" && i + 1 < args.Length) a = args[i + 1];
+                else if (!a.StartsWith("@") && !a.StartsWith("?")) continue;
+                string search = a.StartsWith("@") ? "?" + a : a;
+                Retro.Game.CameraRoute route = Retro.Game.CameraRoutes.ParseCameraRoute(search);
+                if (route != null) return route;
+                Debug.LogWarning($"Retro: could not read a camera from \"{a}\"");
+            }
+            return null;
+        }
+
         public static TerrainRenderer Create()
         {
             Camera cam = Camera.main;
@@ -110,6 +131,7 @@ namespace Retro.Unity
             // starts on the nearest base runway there.
             string spawn = PlayerPrefs.GetString(SpawnPref, "");
             PlayerPrefs.DeleteKey(SpawnPref);
+            Retro.Game.CameraRoute route = CommandLineRoute();
             if (TryParseSpawn(spawn, out double lat, out double lon))
             {
                 terrain.originLat = lat;
@@ -117,13 +139,23 @@ namespace Retro.Unity
                 fly.startLat = lat;
                 fly.startLon = lon;
             }
+            else if (route != null)
+            {
+                // The area round the camera, as the web game boots into the URL's.
+                terrain.originLat = route.Lat;
+                terrain.originLon = route.Lon;
+                fly.startLat = route.Lat;
+                fly.startLon = route.Lon;
+            }
             var sea = root.AddComponent<SeaSurface>();
             sea.viewer = fly;
 
             // M4: the player's aircraft on the ported sim; F10 hands the camera back to free flight.
             var player = new GameObject("Player").AddComponent<PlayerFlight>();
+            sky.player = player;
             player.terrain = terrain;
             player.view = fly;
+            player.startRoute = route;
             var targetView = player.gameObject.AddComponent<TargetCameraView>();
             targetView.flight = player;
             targetView.viewer = fly;

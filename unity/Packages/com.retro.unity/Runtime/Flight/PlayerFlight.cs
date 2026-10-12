@@ -194,6 +194,15 @@ namespace Retro.Unity
         /// <summary>A flight began (boot, a start button, a place): the streaming hold starts.</summary>
         public event Action FlightBegan;
 
+        /// <summary>The command line's camera (cameraRoute.ts), entered once the boot flight has begun.</summary>
+        [NonSerialized] public CameraRoute startRoute;
+
+        /// <summary>
+        /// game.ts FIXED_CAMERA: the free camera nailed to a route with the sim held;
+        /// a spawn from the menu (Esc) leaves it.
+        /// </summary>
+        public bool FixedCamera { get; private set; }
+
         /// <summary>The runway the start buttons use (the base airfield).</summary>
         public SceneRunway BaseRunway => startRunway;
 
@@ -202,6 +211,9 @@ namespace Retro.Unity
         public SceneRunway StartRunway => startRunway;
         public SimAircraft Aircraft => aircraft;
         public DemHeightField HeightField => heightField;
+
+        /// <summary>True while the F12 showcase owns the view (the sky keeps its daytime state then).</summary>
+        public bool InShowcase => showcase.Active;
 
         // --- Replay (game.ts recorder, replayPlayer, toggleReplay) ------------------------
 
@@ -224,6 +236,9 @@ namespace Retro.Unity
 
         /// <summary>Esc left the replay this frame (the menu leaves it alone).</summary>
         public bool EscapeTaken => escapeTakenFrame == Time.frameCount;
+
+        // The rendering debugger's wireframe outlives play mode in the editor; every session starts without it.
+        private void Awake() => SetWireframe(false);
 
         private void Update()
         {
@@ -268,7 +283,7 @@ namespace Retro.Unity
                 DrawAirframe();
                 return;
             }
-            if (menuOpen || held)
+            if (menuOpen || held || FixedCamera)
             {
                 // pauseForMenu: no steps, no keys; the camera and the drawing carry on.
                 PlaceCamera(0);
@@ -408,6 +423,11 @@ namespace Retro.Unity
             combat.Begin(spawnMode, GroundAt);
             TargetOpponent();
             FlightBegan?.Invoke();
+            if (startRoute != null)
+            {
+                EnterFixedCamera(startRoute);
+                startRoute = null;
+            }
             Debug.Log($"Retro flight: {flightModel}, {runways.Count} runways near, start {spawnMode} "
                 + (startRunway != null ? $"{startRunway.Icao} {startRunway.Name} {startRunway.Ref}" : $"at {spawnLat}, {spawnLon}")
                 + $"; ground tiles fine {heightField.FineResident}, coarse {heightField.CoarseResident}");
@@ -739,6 +759,7 @@ namespace Retro.Unity
             Vec3d p = Geodesy.GeodeticToWorld(heightField.Basis, lat, lon, 0);
             p.Y = GroundAt(p.X, p.Z, true) + LocationSpawnAglM;
             SimAircraftSpawn spawn = Airborne(p, LocationSpawnHeading, ApproachThrottle);
+            LeaveFixedCamera();
             Place(spawn);
             combat.Begin(SpawnMode.Approach, GroundAt);
             TargetOpponent();
@@ -766,12 +787,40 @@ namespace Retro.Unity
             return true;
         }
 
+        /// <summary>
+        /// game.ts enterFixedCamera: look from the route (metres above the ellipsoid,
+        /// heading from north, pitch up from level) with the sim held; the aircraft
+        /// stays where the boot put it, and the free camera's keys still move the view.
+        /// </summary>
+        public void EnterFixedCamera(CameraRoute route)
+        {
+            if (sim == null || route == null) return;
+            if (showcase.Active) ToggleShowcase();
+            ResetOrbit();
+            FixedCamera = true;
+            flightView = FlightView.Free;
+            ReleaseAllKeys();
+            view.ReleasePose();
+            view.ScenePosition = Geodesy.GeodeticToWorld(heightField.Basis, route.Lat, route.Lon, route.AltM);
+            view.headingDeg = route.HeadingDeg;
+            view.pitchDeg = route.PitchDeg;
+            Debug.Log($"Retro: fixed camera at ({route.Lat}, {route.Lon}) {route.AltM} m, heading {route.HeadingDeg}, pitch {route.PitchDeg}");
+        }
+
+        private void LeaveFixedCamera()
+        {
+            if (!FixedCamera) return;
+            FixedCamera = false;
+            flightView = FlightView.ChaseBack;
+        }
+
         /// <summary>game.ts beginFlight: the player placed for the mode, then the opponent and the wingman.</summary>
         public void BeginFlight(SpawnMode mode)
         {
             if (sim == null) return;
             spawnMode = mode;
             startAtLocation = false;
+            LeaveFixedCamera();
             Respawn();
             combat.Begin(mode, GroundAt);
             TargetOpponent();

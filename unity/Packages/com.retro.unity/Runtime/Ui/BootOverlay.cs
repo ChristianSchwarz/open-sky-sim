@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.UIElements;
 
 namespace Retro.Unity
@@ -11,8 +12,11 @@ namespace Retro.Unity
     /// until the tile backlog has stayed empty for 0.6 s (at most 20 s), the
     /// bar counting what drained and never sweeping faster than half its
     /// length a second; then a 3-2-1 count and "Go", the flight starting on
-    /// "Go". The web game blurs the view behind the pane; UI Toolkit has no
-    /// backdrop blur, so this only dims it.
+    /// "Go". The web game blurs the view behind the pane (backdrop-filter:
+    /// blur(12px), going to 0 with the dim in the count's first second). UI
+    /// Toolkit has no backdrop filter, so for that long the main camera renders
+    /// into a texture, a separable Gaussian runs after it, and the pane shows
+    /// the result in place of the screen (the HUD, under the pane, is not seen).
     /// </summary>
     public sealed class BootOverlay : MonoBehaviour
     {
@@ -25,6 +29,10 @@ namespace Retro.Unity
         private const int CountdownFrom = 3;
         private const float GoShownS = 0.8f;
         private const float BarRatePerS = 0.5f;
+        // style.css: blur(12px) and rgba(0, 0, 0, 0.35), both gone over 1 s.
+        private const float BlurCssPx = 12;
+        private const float DimAlpha = 0.35f;
+        private const float FadeS = 1;
 
         private VisualElement pane, dialog, fill, countdown;
         private Label label, countdownText;
@@ -34,6 +42,11 @@ namespace Retro.Unity
         private int prevBacklog, drained;
         private float shown;
         private bool subscribed;
+        private VisualElement backdrop;
+        private Camera blurred;
+        private RenderTexture sharp, across, blurredTexture;
+        private Material blurX, blurY;
+        private float blurPx;
 
         private void Start()
         {
@@ -53,6 +66,15 @@ namespace Retro.Unity
                 s.backgroundColor = new Color(0, 0, 0, 0.85f);
             });
             root.Add(pane);
+            backdrop = new VisualElement { pickingMode = PickingMode.Ignore };
+            MenuDialog.Style(backdrop, s =>
+            {
+                s.position = Position.Absolute;
+                s.left = s.right = s.top = s.bottom = 0;
+                s.display = DisplayStyle.None;
+            });
+            pane.Add(backdrop);
+            RenderPipelineManager.endCameraRendering += AfterRender;
             dialog = new VisualElement();
             MenuDialog.Style(dialog, s =>
             {
@@ -121,10 +143,88 @@ namespace Retro.Unity
             shown = 0;
             flight.held = true;
             pane.style.display = DisplayStyle.Flex;
-            pane.style.backgroundColor = new Color(0, 0, 0, 0.35f);
+            pane.style.backgroundColor = new Color(0, 0, 0, DimAlpha);
             dialog.style.visibility = Visibility.Visible;
             countdown.style.display = DisplayStyle.None;
             Set(0, "Streaming terrain... 0%");
+            Blur(1);
+        }
+
+        /// <summary>
+        /// The blurred backdrop at `amount` of its full strength (blur and dim
+        /// together); 0 hands the camera back to the screen.
+        /// </summary>
+        private void Blur(float amount)
+        {
+            Camera cam = flight != null && flight.view != null ? flight.view.UnityCamera : null;
+            if (amount <= 0 || cam == null)
+            {
+                if (blurred != null) blurred.targetTexture = null;
+                blurred = null;
+                backdrop.style.display = DisplayStyle.None;
+                return;
+            }
+            int w = Mathf.Max(16, Screen.width), h = Mathf.Max(16, Screen.height);
+            if (sharp == null || sharp.width != w || sharp.height != h)
+            {
+                if (blurred != null) blurred.targetTexture = null;
+                Release();
+                sharp = new RenderTexture(w, h, 24) { name = "streaming backdrop" };
+                across = new RenderTexture(w, h, 0) { name = "streaming backdrop blur x" };
+                blurredTexture = new RenderTexture(w, h, 0) { name = "streaming backdrop blur" };
+                backdrop.style.backgroundImage = Background.FromRenderTexture(blurredTexture);
+            }
+            if (blurX == null)
+            {
+                Shader shader = Shader.Find("Hidden/Retro/BackdropBlur");
+                blurX = new Material(shader);
+                blurY = new Material(shader);
+            }
+            blurred = cam;
+            cam.targetTexture = sharp;
+            // CSS pixels on the web's 1080-line reference.
+            blurPx = BlurCssPx * amount * h / 1080f;
+            blurX.SetVector("_Step", new Vector4(blurPx / 4 / w, 0));
+            blurY.SetVector("_Step", new Vector4(0, blurPx / 4 / h));
+            // The dim, as a tint: black at 0.35 over the image is the image at 0.65.
+            float keep = 1 - DimAlpha * amount;
+            backdrop.style.unityBackgroundImageTintColor = new Color(keep, keep, keep, 1);
+            backdrop.style.display = DisplayStyle.Flex;
+        }
+
+        private void AfterRender(ScriptableRenderContext context, Camera rendered)
+        {
+            if (rendered != blurred || sharp == null) return;
+            var cmd = new CommandBuffer { name = "streaming backdrop blur" };
+            if (blurPx < 0.5f) cmd.Blit(sharp, blurredTexture);
+            else
+            {
+                cmd.Blit(sharp, across, blurX);
+                cmd.Blit(across, blurredTexture, blurY);
+            }
+            context.ExecuteCommandBuffer(cmd);
+            cmd.Release();
+            context.Submit();
+        }
+
+        private void Release()
+        {
+            foreach (RenderTexture t in new[] { sharp, across, blurredTexture })
+            {
+                if (t == null) continue;
+                t.Release();
+                Destroy(t);
+            }
+            sharp = across = blurredTexture = null;
+        }
+
+        private void OnDestroy()
+        {
+            RenderPipelineManager.endCameraRendering -= AfterRender;
+            if (blurred != null) blurred.targetTexture = null;
+            Release();
+            if (blurX != null) Destroy(blurX);
+            if (blurY != null) Destroy(blurY);
         }
 
         /// <summary>What the LOD pass still waits for: terrain tiles and fine ground under the aircraft.</summary>
@@ -157,6 +257,7 @@ namespace Retro.Unity
                     lastTick = now;
                     shown = Mathf.Min(Mathf.Max(shown, target), shown + step);
                     Set(100 * shown, $"Streaming terrain... {Mathf.FloorToInt(100 * shown)}%");
+                    Blur(1);
                     if (backlog > 0) idleSince = -1;
                     else if (idleSince < 0) idleSince = now;
                     bool settled = idleSince >= 0 && now - idleSince >= SettleS && shown >= 1;
@@ -173,7 +274,8 @@ namespace Retro.Unity
                 case Phase.Countdown:
                 {
                     float t = now - countdownStart;
-                    pane.style.backgroundColor = new Color(0, 0, 0, 0.35f * Mathf.Clamp01(1 - t));
+                    pane.style.backgroundColor = new Color(0, 0, 0, DimAlpha * Mathf.Clamp01(1 - t / FadeS));
+                    Blur(Mathf.Clamp01(1 - t / FadeS));
                     int n = CountdownFrom - Mathf.FloorToInt(t);
                     if (n > 0)
                     {

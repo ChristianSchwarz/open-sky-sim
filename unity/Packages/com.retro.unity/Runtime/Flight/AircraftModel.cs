@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Retro.Core;
@@ -62,6 +63,9 @@ namespace Retro.Unity
         private readonly IAircraftFiles files;
         private readonly Transform root;
         private Transform body;
+        // The body's LOD scenes in models.ts order (index = level); null where a scene draws nothing.
+        private Transform[] bodyLevels = Array.Empty<Transform>();
+        private Transform bodyNearest;
         private Transform gear;
         private readonly List<Animation> gearAnimations = new List<Animation>();
         private readonly Transform[] surfaces;
@@ -77,6 +81,12 @@ namespace Retro.Unity
         public bool Loaded { get; private set; }
         public string Error { get; private set; }
         public FlyableAircraftDef Def => def;
+
+        /// <summary>models.ts maxSize: the body's largest bounding-box side, metres (its nearest level).</summary>
+        public double MaxSize { get; private set; }
+
+        /// <summary>The body's LOD levels (model.lod.length); 1 before it loads.</summary>
+        public int LodCount => Math.Max(1, bodyLevels.Length);
 
         public AircraftModel(FlyableAircraftDef def, IAircraftFiles files, string name = "Aircraft")
         {
@@ -100,7 +110,7 @@ namespace Retro.Unity
         {
             try
             {
-                body = await LoadPart(def.Body, "body");
+                body = await LoadBody(def.Body);
                 if (def.Gear != null && root != null)
                 {
                     gear = await LoadPart(def.Gear, "gear");
@@ -118,6 +128,83 @@ namespace Retro.Unity
                 Error = e.Message;
                 Debug.LogException(e);
             }
+        }
+
+        /// <summary>
+        /// The body with every LOD scene the glTF carries, each under its own child
+        /// (player.ts / aiAircraft.ts pick one per frame by screen size), the
+        /// nearest shown until the first pose.
+        /// </summary>
+        private async Task<Transform> LoadBody(string file)
+        {
+            Transform part = null;
+#if RETRO_GLTFAST
+            if (!files.TryRead(file, out byte[] data))
+            {
+                Debug.LogError($"Retro: {file} not in {files.Label}");
+                return null;
+            }
+            part = new GameObject("body").transform;
+            part.SetParent(root, false);
+            var gltf = new GltfImport(new FilesDownloadProvider(files), new UninterruptedDeferAgent());
+            var uri = new Uri("https://aircraft.invalid/" + Uri.EscapeDataString(file));
+            bool ok = file.EndsWith(".glb", StringComparison.OrdinalIgnoreCase)
+                ? await gltf.Load(data, uri)
+                : await gltf.LoadGltfJson(System.Text.Encoding.UTF8.GetString(data), uri);
+            if (root == null || part == null || !Application.isPlaying)
+            {
+                if (part != null) UnityEngine.Object.Destroy(part.gameObject);
+                gltf.Dispose();
+                return null;
+            }
+            int[] order = SceneOrder(gltf);
+            var levels = new Transform[order.Length];
+            for (int l = 0; l < order.Length; l++)
+            {
+                var level = new GameObject("lod" + l).transform;
+                level.SetParent(part, false);
+                if (!ok || !await gltf.InstantiateSceneAsync(level, order[l]) || level.GetComponentInChildren<Renderer>(true) == null)
+                {
+                    UnityEngine.Object.Destroy(level.gameObject);
+                    continue;
+                }
+                levels[l] = level;
+                level.gameObject.SetActive(bodyNearest == null);
+                if (bodyNearest == null) bodyNearest = level;
+            }
+            if (bodyNearest == null)
+            {
+                Debug.LogError($"Retro: could not load {file} from {files.Label}");
+                UnityEngine.Object.Destroy(part.gameObject);
+                return null;
+            }
+            bodyLevels = levels;
+            Remap(part);
+            var bounds = new Bounds();
+            bool any = false;
+            foreach (Renderer r in bodyNearest.GetComponentsInChildren<Renderer>(true))
+            {
+                if (!r.enabled) continue;
+                if (any) bounds.Encapsulate(r.bounds);
+                else bounds = r.bounds;
+                any = true;
+            }
+            MaxSize = any ? Mathf.Max(bounds.size.x, Mathf.Max(bounds.size.y, bounds.size.z)) : 0;
+#else
+            await Task.CompletedTask;
+            Error = "glTFast (com.unity.cloud.gltfast) is not installed";
+#endif
+            return part;
+        }
+
+        /// <summary>resolveLodLevel: the requested level, else the nearest populated one below it.</summary>
+        private Transform BodyLevel(int requested)
+        {
+            for (int l = Math.Min(requested, bodyLevels.Length - 1); l >= 0; l--)
+            {
+                if (bodyLevels[l] != null) return bodyLevels[l];
+            }
+            return bodyNearest;
         }
 
         private async Task<Transform> LoadPart(string file, string name)
@@ -185,22 +272,23 @@ namespace Retro.Unity
         }
 
 #if RETRO_GLTFAST
-        /// <summary>models.ts sortingFn: scenes ordered by the digit their name starts with; the first is LOD 0.</summary>
-        private static int NearestScene(GltfImport gltf)
+        /// <summary>models.ts sortingFn: scene indices ordered by the digit their name starts with (LOD 0 first).</summary>
+        private static int[] SceneOrder(GltfImport gltf)
         {
-            int best = 0, bestDigit = int.MaxValue;
-            for (int i = 0; i < gltf.SceneCount; i++)
+            var order = new int[gltf.SceneCount];
+            var digits = new int[order.Length];
+            for (int i = 0; i < order.Length; i++)
             {
                 string n = gltf.GetSceneName(i) ?? "";
-                int digit = n.Length > 0 && char.IsDigit(n[0]) ? n[0] - '0' : int.MaxValue - 1;
-                if (digit < bestDigit)
-                {
-                    bestDigit = digit;
-                    best = i;
-                }
+                order[i] = i;
+                digits[i] = n.Length > 0 && char.IsDigit(n[0]) ? n[0] - '0' : int.MaxValue - 1;
             }
-            return best;
+            // Stable: equal digits keep their file order.
+            return order.OrderBy(i => digits[i]).ThenBy(i => i).ToArray();
         }
+
+        /// <summary>The LOD 0 scene.</summary>
+        private static int NearestScene(GltfImport gltf) => gltf.SceneCount == 0 ? 0 : SceneOrder(gltf)[0];
 #endif
 
         /// <summary>The glTF material names as the model contract reads them.</summary>
@@ -214,7 +302,7 @@ namespace Retro.Unity
             if (body == null) return Array.Empty<float>();
             var xyz = new List<float>();
             var vertices = new List<Vector3>();
-            foreach (MeshFilter mf in body.GetComponentsInChildren<MeshFilter>(true))
+            foreach (MeshFilter mf in bodyNearest.GetComponentsInChildren<MeshFilter>(true))
             {
                 Renderer r = mf.GetComponent<Renderer>();
                 if (mf.sharedMesh == null || r == null || !r.enabled) continue;
@@ -285,11 +373,23 @@ namespace Retro.Unity
         /// bent body is drawn elsewhere, so the glTF body hides; a ripped part or one taken into the
         /// bent body hides; the rest move with the bend (TransformPart).
         /// </param>
-        public void Pose(Vec3d position, Quatd quaternion, Vec3d camera, in AircraftPoseInputs inputs, AirframeDamage damage = null)
+        /// <param name="lod">
+        /// The screen-size level (getLodLevel, capped at the last): the body draws that
+        /// level's scene; past 0 the gear and the hinged surfaces are not drawn at all.
+        /// </param>
+        public void Pose(Vec3d position, Quatd quaternion, Vec3d camera, in AircraftPoseInputs inputs, AirframeDamage damage = null,
+            int lod = 0)
         {
             if (!Loaded) return;
             bool damaged = damage != null && damage.Active;
             body.gameObject.SetActive(!damaged);
+            Transform level = BodyLevel(lod);
+            for (int l = 0; l < bodyLevels.Length; l++)
+            {
+                Transform t = bodyLevels[l];
+                if (t != null && t.gameObject.activeSelf != (t == level)) t.gameObject.SetActive(t == level);
+            }
+            bool near = lod == 0;
             var unit = new Vec3d(1, 1, 1);
             Quaternion bodyRotation = SceneFrame.ToUnity(quaternion) * HalfTurnY;
             Vector3 bodyPosition = SceneFrame.ToUnity(position - camera);
@@ -300,7 +400,7 @@ namespace Retro.Unity
             {
                 gearDown = def.GearAnimated || inputs.GearUnit > 0;
                 bool gearGone = damaged && (damage.GearInRoot || damage.IsPartRipped(0));
-                gear.gameObject.SetActive((def.GearAnimated || inputs.GearUnit > 0) && !gearGone);
+                gear.gameObject.SetActive((def.GearAnimated || inputs.GearUnit > 0) && !gearGone && near);
                 if (damaged && !gearGone)
                 {
                     Vec3d gp = position;
@@ -328,14 +428,14 @@ namespace Retro.Unity
                 if (damaged)
                 {
                     // Torn off by an earlier impact, or bent into the body: not drawn on its own.
-                    bool gone = damage.IsPartRipped(1 + i) || damage.RootParts.Contains(1 + i);
+                    bool gone = damage.IsPartRipped(1 + i) || damage.RootParts.Contains(1 + i) || !near;
                     surfaces[i].gameObject.SetActive(!gone);
                     if (gone) continue;
                     damage.TransformPart(1 + i, ref p, ref q, position, quaternion, unit);
                 }
-                else if (!surfaces[i].gameObject.activeSelf)
+                else if (surfaces[i].gameObject.activeSelf != near)
                 {
-                    surfaces[i].gameObject.SetActive(true);
+                    surfaces[i].gameObject.SetActive(near);
                 }
                 surfaces[i].SetPositionAndRotation(SceneFrame.ToUnity(p - camera), SceneFrame.ToUnity(q) * HalfTurnY);
             }
@@ -352,7 +452,7 @@ namespace Retro.Unity
             var src = new WreckSource
             {
                 Id = id,
-                Body = WreckModelOf(body),
+                Body = WreckModelOf(bodyNearest),
                 Position = posedPosition,
                 Quaternion = posedQuaternion,
                 Velocity = velocity,

@@ -1,6 +1,6 @@
 # Unity port: parity checklist
 
-Status 2026-10-11, branch `unity-fe`, after M9. Built from the feature inventory in
+Status 2026-10-12, branch `unity-fe`, after M9. Built from the feature inventory in
 `docs/unity-port-plan.md` (workstreams A-P, appendix C) by auditing the Unity layer
 (`unity/Packages/com.retro.unity`) against the web game (`src/script`). Engine-free code that is
 ported and golden-verified but not yet called from the Unity layer counts as **missing** here:
@@ -21,13 +21,13 @@ Rows, not settings or keys: one row can cover several.
 | Simulation | 11 | 2 | 0 |
 | Terrain | 13 | 1 | 0 |
 | World detail | 12 | 0 | 0 |
-| Sky and FX | 9 | 3 | 3 |
-| Aircraft | 4 | 1 | 1 |
+| Sky and FX | 12 | 3 | 0 |
+| Aircraft | 5 | 1 | 0 |
 | HUD and cockpit | 12 | 2 | 0 |
 | Settings | 12 | 2 | 0 |
-| Input, views, replay, audio | 10 | 2 | 1 |
-| Boot and spawn | 3 | 1 | 1 |
-| **Total** | **86** | **14** | **6** |
+| Input, views, replay, audio | 11 | 2 | 0 |
+| Boot and spawn | 4 | 1 | 0 |
+| **Total** | **92** | **14** | **0** |
 
 What is missing most visibly, in suggested order:
 1. ~~Engine audio~~ and ~~replay (F4)~~: done since the checklist was written (see the Input table).
@@ -35,7 +35,9 @@ What is missing most visibly, in suggested order:
 4. ~~Target cycling (T)~~ and the ILS: done since (see HUD and cockpit).
 5. ~~Settings that are only stored~~: done since (see Terrain and Settings).
 6. ~~Terrain~~: seam stitching, far land and rivers done since (see Terrain).
-7. **Space view**: the atmosphere shell and stars are missing, and so is the sun-visibility skyline.
+7. ~~Space view~~: the atmosphere shell, stars and the sun-visibility skyline done since (see Sky and FX).
+9. ~~The rest~~ (aircraft LOD, backdrop blur, the start camera argument) done since; the chip clamp
+   turned out to be off in the web game too. Only **partial** rows remain.
 8. ~~Debug and showcase views~~: done since (see Input, views).
 
 ## Simulation
@@ -99,17 +101,17 @@ What is missing most visibly, in suggested order:
 | Sky dome, palette day/dusk/night blend | done | `U/World/SkyRenderer.cs`; checked at five hours |
 | Sun disc + glare | done | `SkyRenderer.cs` |
 | Clouds + cirrus | done | `CloudRenderer.cs` |
-| Fog | partial | one URP exponential fog at the terrain density; the web's per-category sky/light fog and space fog are not split |
-| Sun-visibility skyline (glare and clouds dim behind terrain) | missing | `SunClock.SunVisibilityFor` ported, never called |
+| Fog | partial | one URP exponential fog at the terrain density, thinned by the atmosphere shell's weight above 30 km (`SPACE_FOG.scale`); the web's per-category sky/light fog is not split |
+| Sun-visibility skyline (clouds dim behind terrain) | done | `U/World/SkyRenderer.cs` `UpdateSunVisibility`: the ground marched along the sun's bearing every 4 frames, `_RetroSunHidden` into `Shaders/CloudSky.shader` (body: direct, rim and ambient; haze: 0.35 + 0.65 v); a 5 deg sun behind a ridge read 0.95 |
 | Night-vision palette (I) | partial | the target camera's image turned to the palette's kind of greyscale (`Shaders/NightVision.shader`): per-camera palettes do not fit Unity's draw submission, so it is an image pass, not hd-nightvision's per-category greys |
-| Atmosphere shell / space view, stars | missing | `Atmosphere`/`SkyModel` ported; spawn mode 7 flies, but against the ordinary sky |
+| Atmosphere shell / space view, stars | done | `Shaders/AtmosphereShell.shader` (atmosphereShellModelBuilder.ts: ray march over scene depth, cloud deck, glint, stars) drawn by `U/World/SkyRenderer.cs` from 30 km; above 100 km no dome, black clear, no cloud fields; seen from 70 and 400 km |
 | Afterburner plumes, wingtip trails | done | `AircraftFxRenderer.cs` |
 | Ship wakes, arrestor cables | done | `CarrierFx.cs` |
 | Tracers | done | wide streak instead of the 1 px point |
 | Smoke, fire, dust, splash, foam, chips, sparks | done | `CombatFxView.cs`, `WreckView.cs` |
 | Scorch and burn marks | done | `CombatFxView.cs` |
 | Aircraft shadows | partial (by choice) | URP shadow maps replace the web's planform silhouettes; nothing beyond the 1500 m shadow distance |
-| Chip minimum-pixel clamp | missing | chips can vanish at range |
+| Chip minimum-pixel clamp | done (nothing to port) | `particlesMeshVP.ts` has the clamp, but no material sets `minPixels` above 0, so the web never applies it either |
 | Wireframe (F8), force vectors (V), debug debris (Tab) | done | F8 is URP's rendering-debugger wireframe (one colour, not the web's per-level hues; URP ignores GL.wireframe; may be stripped from non-development builds); V draws `ForceVectorRenderer` arrows from the model's snapshot (the web's thrust-origin override not ported); Tab bursts chips and a leak from the opponent |
 
 ## Aircraft
@@ -120,7 +122,7 @@ What is missing most visibly, in suggested order:
 | Gear clip, control surfaces, swing wings, tailhook | done | F-14 sweep checked |
 | AI aircraft on packs | done | `Combat.cs` (the player's type) |
 | Liveries | partial | one flat list of pack entries; the model + livery pickers in `G/Settings/SpawnPanel.cs` are not used |
-| LOD by screen width | missing | the nearest LOD scene is always drawn |
+| LOD by screen width | done | `U/Flight/AircraftModel.cs` loads every body LOD scene, `AircraftView.LodFor` picks by `ModelLod.GetLodLevel` (bias 3, 320 px reference) capped at the last; past 0 no gear or surfaces. F-22: lod0 to 300 m, lod2 at 1 km, lod5 at 8 km. The pack aircraft ship one scene |
 | Showcase (F12), part picking and labels | done | `U/Flight/Showcase.cs`: the airframe alone on its own layer, black, no fog, orbited; the part under the mouse named ("Mesh: …", `U/Ui/PointerLabels.cs`), yellow while held; the flight carries on without input, as on the web |
 
 ## HUD and cockpit
@@ -177,7 +179,7 @@ What is missing most visibly, in suggested order:
 | F4 replay, recorder (30 Hz, 600 s), replay keys, replay bar | done | `U/Flight/PlayerFlight.cs` records every frame (6 s past a crash), F4 freezes the world and plays the recorded pose; Space , . [ ] arrows Home Esc; `U/Ui/ReplayBar.cs` (scrubber, buttons, speed, Cockpit/Behind/Front/Left/Right/Free/Tower views). One deliberate difference: before the crash point the airframe is drawn (the web hides it the whole replay once the wreck exists). The bar is a flat shade, not the web's gradient. Recorded devices (gear etc.) are not replayed, as on the web |
 | F8 wireframe, F12 showcase, land-cover tooltip, mod-status line | done | tooltip after 2 s of a resting mouse: DEM ray march, then the top facet of the deepest drawn tile (a hole there is water; the web compares a drawn-land march instead). The mod-status line belongs to the dropped dev-server mod import |
 | Engine audio (two loops swapped by view, rate/gain by throttle, stop on crash) | done | `U/Flight/EngineAudio.cs`; pitch 0.96 / gain 0.73 at audio level 0.23 checked against the formula; cockpit/exterior swap and crash silence checked |
-| Start camera pose argument (web `?@lat,lng,altA,hdgH,tiltT`) | missing | `G/State/CameraRoute.cs` ported; no command-line parsing |
+| Start camera pose argument (web `?@lat,lng,altA,hdgH,tiltT`) | done | command-line `@45.93,6.87,2500a,150h,85t` (or after `-camera`, or a whole `?` query) in `U/SpikeBootstrap.cs`; the area centres on it and `PlayerFlight.EnterFixedCamera` holds the sim with the free camera there; a spawn leaves it. Checked through `EnterFixedCamera`; the argument path has not been run in a build |
 
 ## Boot and spawn
 
@@ -187,7 +189,7 @@ What is missing most visibly, in suggested order:
 | Boot stage labels | partial | only "Loading terrain"; `G/Settings/BootProgress.cs` stages unused |
 | Spawn modes 1-7, 9 (8 dropped with the barricade) | done | Ctrl+digit and the Flight tab |
 | Cross-area picks | done | in-process restart instead of a page reload |
-| Backdrop blur | missing | dimmed pane only |
+| Backdrop blur | done | `U/Ui/BootOverlay.cs`: during the hold the main camera renders to a texture, `Shaders/BackdropBlur.shader` (separable Gaussian, sigma 12 CSS px) runs after it, shown under the 0.35 dim; both go to 0 over the count's first second. The HUD is not seen under it |
 | Dev-server features (F9 importer, F10 mod import, `/api/*`) | dropped | plan section 2 |
 
 ## Performance

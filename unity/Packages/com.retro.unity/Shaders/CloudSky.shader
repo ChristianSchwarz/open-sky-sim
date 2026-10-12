@@ -48,6 +48,9 @@ Shader "Retro/CloudSky"
                 half4 _ColorShade;
             CBUFFER_END
             float3 _RetroSunTint;
+            // How much of the sun's disc the terrain hides from the camera (game.ts
+            // updateSunVisibility, stored inverted so an unset global reads as visible).
+            float _RetroSunHidden;
 
             struct Attributes
             {
@@ -82,13 +85,14 @@ Shader "Retro/CloudSky"
                 float rawNdl = saturate(dot(n, sun.direction));
                 float skyView = lerp(AMBIENT_SKY_FLOOR, 1.0, 0.5 + 0.5 * n.y);
                 float ambientScale = lerp(SHADE_AWAY_AMBIENT, 1.0, rawNdl);
-                half3 ambient = SampleSH(float3(0, 1, 0));
-                half3 light = ambient * skyView * ambientScale + sun.color * rawNdl;
+                float visible = 1.0 - _RetroSunHidden;
+                half3 ambient = lerp(SampleSH(float3(0, 1, 0)), half3(0.3, 0.3, 0.38), 1.0 - visible);
+                half3 light = ambient * skyView * ambientScale + sun.color * (rawNdl * visible);
                 // Rim, only turned from the sun and with the sun behind the cloud.
                 float3 toCamera = normalize(GetCameraPositionWS() - positionWS);
                 float backlit = max(-dot(toCamera, sun.direction), 0.0);
                 float fresnel = pow(1.0 - saturate(dot(n, toCamera)), RIM_POWER);
-                o.light = light + _RetroSunTint * (fresnel * backlit * (1.0 - rawNdl) * RIM_STRENGTH);
+                o.light = light + _RetroSunTint * (fresnel * backlit * (1.0 - rawNdl) * RIM_STRENGTH * visible);
             #endif
                 return o;
             }
@@ -107,7 +111,7 @@ Shader "Retro/CloudSky"
                 float2 screen = i.positionCS.xy;
                 if (i.dither > 0.001 && i.dither + BayerThreshold(screen) < 0.5) discard;
                 bool lit = fmod(floor(screen.x + screen.y), 2.0) > 0.5;
-                half3 c = lit ? _Color.rgb : _ColorShade.rgb;
+                half3 c = (lit ? _Color.rgb : _ColorShade.rgb) * (0.35 + 0.65 * (1.0 - _RetroSunHidden));
             #else
                 half3 c = _Color.rgb * i.light;
             #endif
