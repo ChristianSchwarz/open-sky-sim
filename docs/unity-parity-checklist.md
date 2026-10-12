@@ -21,13 +21,13 @@ Rows, not settings or keys: one row can cover several.
 | Simulation | 11 | 2 | 0 |
 | Terrain | 13 | 1 | 0 |
 | World detail | 12 | 0 | 0 |
-| Sky and FX | 8 | 2 | 5 |
-| Aircraft | 3 | 1 | 2 |
-| HUD and cockpit | 12 | 1 | 1 |
+| Sky and FX | 9 | 3 | 3 |
+| Aircraft | 4 | 1 | 1 |
+| HUD and cockpit | 12 | 2 | 0 |
 | Settings | 12 | 2 | 0 |
-| Input, views, replay, audio | 6 | 3 | 4 |
+| Input, views, replay, audio | 10 | 2 | 1 |
 | Boot and spawn | 3 | 1 | 1 |
-| **Total** | **80** | **13** | **13** |
+| **Total** | **86** | **14** | **6** |
 
 What is missing most visibly, in suggested order:
 1. ~~Engine audio~~ and ~~replay (F4)~~: done since the checklist was written (see the Input table).
@@ -36,7 +36,7 @@ What is missing most visibly, in suggested order:
 5. ~~Settings that are only stored~~: done since (see Terrain and Settings).
 6. ~~Terrain~~: seam stitching, far land and rivers done since (see Terrain).
 7. **Space view**: the atmosphere shell and stars are missing, and so is the sun-visibility skyline.
-8. **Debug and showcase views**: F8 wireframe, V force vectors, Tab debug debris, F12 showcase and the land-cover tooltip.
+8. ~~Debug and showcase views~~: done since (see Input, views).
 
 ## Simulation
 
@@ -101,7 +101,7 @@ What is missing most visibly, in suggested order:
 | Clouds + cirrus | done | `CloudRenderer.cs` |
 | Fog | partial | one URP exponential fog at the terrain density; the web's per-category sky/light fog and space fog are not split |
 | Sun-visibility skyline (glare and clouds dim behind terrain) | missing | `SunClock.SunVisibilityFor` ported, never called |
-| Night-vision palette (I) | missing | `Palettes.HdNightVision` ported, unused |
+| Night-vision palette (I) | partial | the target camera's image turned to the palette's kind of greyscale (`Shaders/NightVision.shader`): per-camera palettes do not fit Unity's draw submission, so it is an image pass, not hd-nightvision's per-category greys |
 | Atmosphere shell / space view, stars | missing | `Atmosphere`/`SkyModel` ported; spawn mode 7 flies, but against the ordinary sky |
 | Afterburner plumes, wingtip trails | done | `AircraftFxRenderer.cs` |
 | Ship wakes, arrestor cables | done | `CarrierFx.cs` |
@@ -110,7 +110,7 @@ What is missing most visibly, in suggested order:
 | Scorch and burn marks | done | `CombatFxView.cs` |
 | Aircraft shadows | partial (by choice) | URP shadow maps replace the web's planform silhouettes; nothing beyond the 1500 m shadow distance |
 | Chip minimum-pixel clamp | missing | chips can vanish at range |
-| Wireframe (F8), force vectors (V), debug debris (Tab) | missing | debug features; `wantForceVectors` ported in the sim |
+| Wireframe (F8), force vectors (V), debug debris (Tab) | done | F8 is URP's rendering-debugger wireframe (one colour, not the web's per-level hues; URP ignores GL.wireframe; may be stripped from non-development builds); V draws `ForceVectorRenderer` arrows from the model's snapshot (the web's thrust-origin override not ported); Tab bursts chips and a leak from the opponent |
 
 ## Aircraft
 
@@ -121,7 +121,7 @@ What is missing most visibly, in suggested order:
 | AI aircraft on packs | done | `Combat.cs` (the player's type) |
 | Liveries | partial | one flat list of pack entries; the model + livery pickers in `G/Settings/SpawnPanel.cs` are not used |
 | LOD by screen width | missing | the nearest LOD scene is always drawn |
-| Showcase (F12), part picking and labels | missing | `ShowcaseCameraUpdater` ported, unwired |
+| Showcase (F12), part picking and labels | done | `U/Flight/Showcase.cs`: the airframe alone on its own layer, black, no fog, orbited; the part under the mouse named ("Mesh: …", `U/Ui/PointerLabels.cs`), yellow while held; the flight carries on without input, as on the web |
 
 ## HUD and cockpit
 
@@ -140,7 +140,7 @@ What is missing most visibly, in suggested order:
 | HUD focus (U) | done | `U/Ui/OverlayHost.cs` |
 | Perf line (F9) | partial | terrain section only; detail scale hard-coded to 1 |
 | Bitmap fonts 3x5, 5x8, 7x11 | done | |
-| Night vision on the target camera (I) | missing | |
+| Night vision on the target camera (I) | partial | see Sky and FX |
 
 ## Settings
 
@@ -159,7 +159,7 @@ What is missing most visibly, in suggested order:
 | keyboardPitchStickMode | done | the saved mode was lost at boot (applied before the sim existed); fixed with this checklist |
 | volume | done | `AudioListener.volume` over the engine sound |
 | About credits | done | `SettingsTabView.cs` |
-| Help key table | partial | lists keys Unity lacks (I, V, 4, Tab, F8, F12); joystick always "No device detected" (`Host.Joystick` never set) |
+| Help key table | partial | joystick always "No device detected" (`Host.Joystick` never set) |
 
 ## Input, views, replay, audio
 
@@ -170,12 +170,12 @@ What is missing most visibly, in suggested order:
 | Menu pauses the sim and takes the keys | partial | N and F9 still act while it is open |
 | Gamepad | partial | Unity `Gamepad` sticks + triggers; generic HID joysticks (web axes 0-3, throttle axis inverted) not read |
 | F1 cockpit / padlock, F2 chase, F3 carrier, F6 AI chase, Esc menu | done | `PlayerFlight.cs` (F10 free camera is Unity-only) |
-| N wing sweep | partial | N toggles day/night only; sweep is the inspector field `wingSweepMode`. On the web one N press does both (noted as probably unintended) |
+| N wing sweep | done | AUTO -> SPREAD -> SWEPT, and the day/night flip on the same key, as on the web |
 | M map, U HUD focus | done | |
-| I night view, V vectors, 4 target view, Tab debris | missing | (T is done, see HUD and cockpit) |
-| Numpad orbit, `/` `*` zoom, Numpad5, NumpadEnter | missing | only Num+/- (throttle) |
+| I night view, V vectors, 4 target view, Tab debris | done | 4 toggles TargetTo / TargetFrom (back to the cockpit when the target goes) |
+| Numpad orbit, `/` `*` zoom, Numpad5, NumpadEnter | done | orbitCameraAroundAircraft after the view's updater; NumpadEnter is the F2 views' enemy lock or the cockpit padlock |
 | F4 replay, recorder (30 Hz, 600 s), replay keys, replay bar | done | `U/Flight/PlayerFlight.cs` records every frame (6 s past a crash), F4 freezes the world and plays the recorded pose; Space , . [ ] arrows Home Esc; `U/Ui/ReplayBar.cs` (scrubber, buttons, speed, Cockpit/Behind/Front/Left/Right/Free/Tower views). One deliberate difference: before the crash point the airframe is drawn (the web hides it the whole replay once the wreck exists). The bar is a flat shade, not the web's gradient. Recorded devices (gear etc.) are not replayed, as on the web |
-| F8 wireframe, F12 showcase, land-cover tooltip, mod-status line | missing | |
+| F8 wireframe, F12 showcase, land-cover tooltip, mod-status line | done | tooltip after 2 s of a resting mouse: DEM ray march, then the top facet of the deepest drawn tile (a hole there is water; the web compares a drawn-land march instead). The mod-status line belongs to the dropped dev-server mod import |
 | Engine audio (two loops swapped by view, rate/gain by throttle, stop on crash) | done | `U/Flight/EngineAudio.cs`; pitch 0.96 / gain 0.73 at audio level 0.23 checked against the formula; cockpit/exterior swap and crash silence checked |
 | Start camera pose argument (web `?@lat,lng,altA,hdgH,tiltT`) | missing | `G/State/CameraRoute.cs` ported; no command-line parsing |
 

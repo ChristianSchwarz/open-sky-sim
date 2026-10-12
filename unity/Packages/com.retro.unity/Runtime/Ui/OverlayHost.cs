@@ -212,7 +212,7 @@ namespace Retro.Unity
             Palette palette = ScenePalette.Current;
             OverlayUtils.BeginOverlayFrame(painter, w, h, textEffect, palette);
             bool cockpitView = flight.flightView == FlightView.Cockpit && !flight.Aircraft.IsCrashed() && !flight.menuOpen;
-            bool exteriorView = !cockpitView && !flight.menuOpen && flight.flightView != FlightView.Free;
+            bool exteriorView = !cockpitView && !flight.menuOpen && flight.flightView != FlightView.Free && flight.flightView != FlightView.Showcase;
             long a0 = GC.GetTotalMemory(false);
             FillHudInputs();
             if (cockpitView) hud.Render2D(w, h, hudInputs, HudView(w, h), palette, painter);

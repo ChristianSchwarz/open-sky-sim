@@ -272,6 +272,8 @@ namespace Retro.Unity
             return m;
         }
 
+        public Transform Root => root;
+
         public void SetVisible(bool visible)
         {
             if (root != null && root.gameObject.activeSelf != visible) root.gameObject.SetActive(visible);

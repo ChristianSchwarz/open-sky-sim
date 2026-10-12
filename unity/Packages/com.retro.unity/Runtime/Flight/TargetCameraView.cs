@@ -1,6 +1,7 @@
 using Retro.Core;
 using Retro.Game;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 
 namespace Retro.Unity
@@ -28,8 +29,11 @@ namespace Retro.Unity
         private readonly CameraPose main = new CameraPose();
         private readonly CameraPose pose = new CameraPose();
 
-        /// <summary>The target view, or null while there is no target.</summary>
-        public Texture Texture => cam != null && cam.enabled ? texture : null;
+        /// <summary>The target view, or null while there is no target (in night vision, its greyscale).</summary>
+        public Texture Texture => cam != null && cam.enabled ? (flight != null && flight.nightVision && night != null ? night : texture) : null;
+
+        private RenderTexture night;
+        private Material nightMaterial;
 
         private void Start()
         {
@@ -41,6 +45,28 @@ namespace Retro.Unity
             data.renderShadows = false;
             Resize(256, 192);
             cam.enabled = false;
+            RenderPipelineManager.endCameraRendering += AfterRender;
+        }
+
+        /// <summary>The I key's night view: the frame just rendered, turned to the night-vision greys.</summary>
+        private void AfterRender(ScriptableRenderContext context, Camera rendered)
+        {
+            if (rendered != cam || flight == null || !flight.nightVision) return;
+            if (nightMaterial == null) nightMaterial = new Material(Shader.Find("Hidden/Retro/NightVision"));
+            if (night == null || night.width != texture.width || night.height != texture.height)
+            {
+                if (night != null)
+                {
+                    night.Release();
+                    Destroy(night);
+                }
+                night = new RenderTexture(texture.width, texture.height, 0) { name = "target camera night", filterMode = FilterMode.Point };
+            }
+            var cmd = new CommandBuffer { name = "night vision" };
+            cmd.Blit(texture, night, nightMaterial);
+            context.ExecuteCommandBuffer(cmd);
+            cmd.Release();
+            context.Submit();
         }
 
         /// <summary>The texture's size: the MFD viewport it is shown in (half resolution on the web).</summary>
@@ -70,7 +96,8 @@ namespace Retro.Unity
             main.Fov = mainCam.fieldOfView;
             main.Aspect = mainCam.aspect;
             zoomFactor = TargetCamera.UpdateTargetCamera(flight, main, pose);
-            cam.enabled = zoomFactor > 0;
+            // The showcase draws the airframe alone: no target display.
+            cam.enabled = zoomFactor > 0 && flight.flightView != FlightView.Showcase;
             if (!cam.enabled) return;
             cam.backgroundColor = mainCam.backgroundColor;
             cam.fieldOfView = (float)pose.Fov;
@@ -82,6 +109,12 @@ namespace Retro.Unity
 
         private void OnDestroy()
         {
+            RenderPipelineManager.endCameraRendering -= AfterRender;
+            if (night != null)
+            {
+                night.Release();
+                Destroy(night);
+            }
             if (texture != null)
             {
                 texture.Release();

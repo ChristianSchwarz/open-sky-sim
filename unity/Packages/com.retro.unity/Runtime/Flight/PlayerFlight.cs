@@ -26,6 +26,12 @@ namespace Retro.Unity
         Left,
         /// <summary>Beside the aircraft, its right side (the replay bar's Right).</summary>
         Right,
+        /// <summary>The 4 key: from the player toward the weapons target.</summary>
+        TargetTo,
+        /// <summary>The 4 key again: from behind the target toward the player.</summary>
+        TargetFrom,
+        /// <summary>F12: the airframe alone on black, orbited, its parts named under the mouse.</summary>
+        Showcase,
     }
 
     /// <summary>
@@ -86,6 +92,33 @@ namespace Retro.Unity
         private ExteriorSideCameraUpdater sideLeft;
         private ExteriorSideCameraUpdater sideRight;
         private EngineAudio engineAudio;
+        private TargetToCameraUpdater targetTo;
+        private TargetFromCameraUpdater targetFrom;
+        private ShowcaseCameraUpdater showcaseCamera;
+
+        // --- Views and debug features (game.ts setupControls) ---------------------------
+
+        /// <summary>The I key: the target camera's night view.</summary>
+        [NonSerialized] public bool nightVision;
+        /// <summary>The V key: the flight model's force arrows on the airframe.</summary>
+        [NonSerialized] public bool forceVectors;
+        /// <summary>F8: everything drawn in wireframe.</summary>
+        [NonSerialized] public bool wireframe;
+        /// <summary>The pointer labels (showcase part name, land-cover tooltip); set by the bootstrap.</summary>
+        public PointerLabels labels;
+        private readonly Showcase showcase = new Showcase();
+        private FlightView viewBeforeShowcase = FlightView.Cockpit;
+        private readonly ReplayPose showcasePose = new ReplayPose { Position = new Vec3d(0, SimConstants.PlaneDistanceToGround, 0) };
+        private readonly ForceVectorRenderer forceVectorRenderer = new ForceVectorRenderer();
+        // Numpad orbit (game.ts viewYaw / viewPitch / viewZoom) and the F2 views' enemy lock.
+        private double viewYaw, viewPitch, viewZoom = 1;
+        private bool exteriorEnemyLock;
+        private const double OrbitRate = Math.PI;
+        private const double OrbitPitchLimit = Math.PI / 2 - 0.05;
+        private const double ZoomRate = 1.5, ZoomMin = 0.3, ZoomMax = 5.0;
+        // The land-cover tooltip: two seconds of a resting mouse, one try per rest.
+        private Vector2 tooltipMouse;
+        private float tooltipMovedAt = -1;
         private ExteriorFrontBehindCameraUpdater chaseBack;
         private ExteriorFrontBehindCameraUpdater chaseFront;
         private CrashedCameraUpdater crashedCamera;
@@ -197,6 +230,14 @@ namespace Retro.Unity
             if (sim == null && !TryBoot()) return;
 
             if (!menuOpen) ReadViewKeys();
+            if (!menuOpen)
+            {
+                UpdateOrbitFromKeys(Time.deltaTime);
+                UpdateShowcasePicking();
+                UpdateCoverTooltip();
+            }
+            // The target views need a target (game.ts falls back to the cockpit when it goes).
+            if ((flightView == FlightView.TargetTo || flightView == FlightView.TargetFrom) && WeaponsTarget == null) flightView = FlightView.Cockpit;
             // However the view became Free (key, inspector, script), the camera is the free one's.
             if (flightView == FlightView.Free && view.External)
             {
@@ -341,6 +382,10 @@ namespace Retro.Unity
             cockpitCamera = new CockpitFrontCameraUpdater(this, pose);
             sideLeft = new ExteriorSideCameraUpdater(this, pose, ExteriorViewSide.Left);
             sideRight = new ExteriorSideCameraUpdater(this, pose, ExteriorViewSide.Right);
+            targetTo = new TargetToCameraUpdater(this, pose);
+            targetFrom = new TargetFromCameraUpdater(this, pose);
+            showcaseCamera = new ShowcaseCameraUpdater(this, pose);
+
             // assets/terrain's parent.
             string assets = System.IO.Path.GetDirectoryName(terrain.Root.TrimEnd('/', '\\'));
             engineAudio = new EngineAudio(transform, assets);
@@ -871,7 +916,7 @@ namespace Retro.Unity
             pose.Up = new Vec3d(0, 1, 0);
             // game.ts PlayerViewState.CRASHED: every view gives way to the orbit round the wreck
             // (not in the replay, whose views follow the recorded aircraft).
-            if (aircraft.IsCrashed() && !Replaying)
+            if (aircraft.IsCrashed() && !Replaying && flightView != FlightView.Showcase)
             {
                 crashedCamera.Update(delta);
                 view.SetPose(pose.Position, pose.Quaternion, fovDeg);
@@ -885,17 +930,218 @@ namespace Retro.Unity
                 case FlightView.CarrierStern: carrierCamera.Update(delta); break;
                 case FlightView.Left: sideLeft.Update(delta); break;
                 case FlightView.Right: sideRight.Update(delta); break;
+                case FlightView.TargetTo: targetTo.Update(delta); break;
+                case FlightView.TargetFrom: targetFrom.Update(delta); break;
+                case FlightView.Showcase: showcaseCamera.Update(delta); break;
                 case FlightView.AiChase:
                     if (combat.Opponent != null && combat.Opponent.Enabled) aiChase.Update(delta);
                     else chaseBack.Update(delta);
                     break;
             }
+            bool padlocked = flightView == FlightView.Cockpit && cockpitCamera.IsPadlock();
+            bool orbited = viewYaw != 0 || viewPitch != 0 || viewZoom != 1;
+            bool f2 = flightView == FlightView.ChaseBack || flightView == FlightView.ChaseFront;
+            if (!padlocked && (flightView != FlightView.AiChase && (exteriorEnemyLock && f2 || orbited)
+                || flightView == FlightView.AiChase && orbited))
+            {
+                OrbitCamera(f2);
+            }
             view.SetPose(pose.Position, pose.Quaternion, fovDeg);
         }
 
+        /// <summary>
+        /// orbitCameraAroundAircraft: the view turned about its subject by the numpad's yaw (about up)
+        /// and pitch (about the horizontal across the offset), its distance scaled by the zoom, then aimed
+        /// back at the subject (the player from the AI chase, the opponent under the F2 enemy lock).
+        /// </summary>
+        private void OrbitCamera(bool f2)
+        {
+            SimAircraft opponent = combat?.Opponent;
+            bool opponentUp = opponent != null && opponent.Enabled;
+            Vec3d pivot = flightView == FlightView.AiChase && opponentUp ? opponent.GetPosition()
+                : flightView == FlightView.CarrierStern ? carrier.Position
+                : GetDisplayPosition();
+            var up = new Vec3d(0, 1, 0);
+            Vec3d offset = (pose.Position - pivot).Rotate(Quatd.FromAxisAngle(up, viewYaw));
+            Vec3d axis = Vec3d.Cross(up, offset);
+            if (axis.LengthSquared > 1e-6) offset = offset.Rotate(Quatd.FromAxisAngle(axis.Normalized(), viewPitch));
+            pose.Position = pivot + offset * viewZoom;
+            pose.Up = up;
+            if (flightView == FlightView.AiChase && opponentUp) pose.LookAt(GetDisplayPosition());
+            else if (exteriorEnemyLock && f2 && opponentUp) pose.LookAt(opponent.GetPosition());
+            else pose.LookAt(pivot);
+        }
+
+        private void ResetOrbit()
+        {
+            viewYaw = 0;
+            viewPitch = 0;
+            viewZoom = 1;
+        }
+
+        /// <summary>updateOrbitFromKeys: the held numpad grid turns the view, / and * zoom it.</summary>
+        private void UpdateOrbitFromKeys(double delta)
+        {
+#if RETRO_INPUT_SYSTEM
+            Keyboard k = Keyboard.current;
+            if (k == null) return;
+            double yaw = 0, pitch = 0, zoom = 0;
+            if (k.numpad4Key.isPressed || k.numpad7Key.isPressed || k.numpad1Key.isPressed) yaw -= 1;
+            if (k.numpad6Key.isPressed || k.numpad9Key.isPressed || k.numpad3Key.isPressed) yaw += 1;
+            if (k.numpad8Key.isPressed || k.numpad7Key.isPressed || k.numpad9Key.isPressed) pitch -= 1;
+            if (k.numpad2Key.isPressed || k.numpad1Key.isPressed || k.numpad3Key.isPressed) pitch += 1;
+            if (k.numpadDivideKey.isPressed) zoom += 1;
+            if (k.numpadMultiplyKey.isPressed) zoom -= 1;
+            viewYaw += yaw * OrbitRate * delta;
+            viewPitch = Math.Max(-OrbitPitchLimit, Math.Min(OrbitPitchLimit, viewPitch + pitch * OrbitRate * delta));
+            if (zoom != 0) viewZoom = Math.Max(ZoomMin, Math.Min(ZoomMax, viewZoom * (1 + zoom * ZoomRate * delta)));
+#endif
+        }
+
+        // --- Showcase (game.ts enterShowcaseView / exitShowcaseView) ----------------------
+
+        /// <summary>F12: into the showcase, or back to the view it was entered from.</summary>
+        public void ToggleShowcase()
+        {
+            if (flightView == FlightView.Showcase) ExitShowcase();
+            else if (!aircraft.IsCrashed()) EnterShowcase();
+        }
+
+        private void EnterShowcase()
+        {
+            if (flightView == FlightView.Free) view.SetPose(view.ScenePosition, view.SceneOrientation, fovDeg);
+            viewBeforeShowcase = flightView;
+            ResetOrbit();
+            exteriorEnemyLock = false;
+            flightView = FlightView.Showcase;
+            // setSimulationPaused: the flight carries on without the player's hands.
+            ReleaseAllKeys();
+            sim.SetInputEnabled(PlayerId, false);
+            airframeView.ReplayPose = showcasePose;
+            showcase.Enter(airframeView.ModelRoot, view.UnityCamera);
+        }
+
+        private void ExitShowcase()
+        {
+            if (flightView != FlightView.Showcase) return;
+            showcase.Exit(view.UnityCamera);
+            if (labels != null) labels.Pick = null;
+            airframeView.ReplayPose = Replaying ? replayPose : null;
+            sim.SetInputEnabled(PlayerId, true);
+            ResetOrbit();
+            flightView = viewBeforeShowcase == FlightView.Showcase ? FlightView.Cockpit : viewBeforeShowcase;
+            if ((flightView == FlightView.TargetTo || flightView == FlightView.TargetFrom) && WeaponsTarget == null) flightView = FlightView.Cockpit;
+        }
+
+        /// <summary>updateShowcasePicking: the part under the mouse, highlighted while the button is held.</summary>
+        private void UpdateShowcasePicking()
+        {
+#if RETRO_INPUT_SYSTEM
+            Mouse mouse = Mouse.current;
+            if (flightView != FlightView.Showcase || mouse == null || labels == null) return;
+            Vector2 at = mouse.position.ReadValue();
+            bool inside = at.x >= 0 && at.y >= 0 && at.x <= Screen.width && at.y <= Screen.height;
+            if (inside)
+            {
+                labels.Pick = showcase.Pick(airframeView.ModelRoot, view.UnityCamera, at, mouse.leftButton.isPressed);
+            }
+            else
+            {
+                // Off the view: no name, and no highlight unless the button is still held.
+                labels.Pick = null;
+                if (!mouse.leftButton.isPressed) showcase.ClearHighlight();
+            }
+#endif
+        }
+
+        // --- F8 wireframe -------------------------------------------------------------------
+
+        /// <summary>
+        /// toggleWireframeDebug: everything drawn as its triangles' edges. URP ignores GL.wireframe,
+        /// so this is its rendering debugger's wireframe mode (one colour, not the web's per-level hues).
+        /// </summary>
+        private void SetWireframe(bool on)
+        {
+            wireframe = on;
+            UnityEngine.Rendering.Universal.UniversalRenderPipelineDebugDisplaySettings.Instance.renderingSettings.wireframeMode =
+                on ? UnityEngine.Rendering.Universal.DebugWireframeMode.Wireframe : UnityEngine.Rendering.Universal.DebugWireframeMode.None;
+        }
+
+        // --- The land-cover tooltip (game.ts updateCoverTooltip) --------------------------
+
+        private static readonly string[] CoverClassNames =
+        {
+            "Unknown", "Forest", "Shrub", "Grass", "Cropland", "Built-up", "Bare ground", "Snow / ice",
+            "Water", "Wetland", "Mangrove", "Moss / lichen", "Sand", "Open ground",
+        };
+
+        /// <summary>
+        /// After two seconds without the mouse moving, the land cover under it, named beside the
+        /// cursor: the view ray marched to the ground, water where the DEM says sea, otherwise the
+        /// class of the facet of the deepest drawn tile there. One try per rest.
+        /// </summary>
+        private void UpdateCoverTooltip()
+        {
+#if RETRO_INPUT_SYSTEM
+            Mouse mouse = Mouse.current;
+            if (mouse == null || labels == null) return;
+            Vector2 at = mouse.position.ReadValue();
+            if ((at - tooltipMouse).sqrMagnitude > 0.25f || tooltipMovedAt < 0)
+            {
+                tooltipMouse = at;
+                tooltipMovedAt = Time.realtimeSinceStartup;
+                labels.Tooltip = null;
+                return;
+            }
+            if (tooltipMovedAt == 0 || Time.realtimeSinceStartup - tooltipMovedAt < 2) return;
+            tooltipMovedAt = 0;
+            if (flightView == FlightView.Showcase || at.x < 0 || at.y < 0 || at.x > Screen.width || at.y > Screen.height) return;
+            string name = CoverNameAt(at);
+            if (name == null) return;
+            labels.Tooltip = name;
+            labels.TooltipAt = new Vector2(at.x, Screen.height - at.y);
+#endif
+        }
+
+        /// <summary>The land cover under a screen point (pixels, y up), or null where no ground answers.</summary>
+        public string CoverNameAt(Vector2 at)
+        {
+            Ray ray = view.UnityCamera.ScreenPointToRay(at);
+            Vec3d origin = view.ScenePosition;
+            Vec3d dir = SceneFrame.ToScene(ray.direction).Normalized();
+            bool Below(double t)
+            {
+                Vec3d p = origin + dir * t;
+                return p.Y < heightField.HeightAtWorld(p.X, p.Z);
+            }
+            double lo = 0, hi = -1;
+            for (double t = 10; t <= 100000; t += Math.Max(10, t * 0.02))
+            {
+                if (Below(t))
+                {
+                    hi = t;
+                    break;
+                }
+                lo = t;
+            }
+            if (hi < 0) return null;
+            for (int i = 0; i < 20; i++)
+            {
+                double mid = (lo + hi) / 2;
+                if (Below(mid)) hi = mid;
+                else lo = mid;
+            }
+            Vec3d hit = origin + dir * hi;
+            // A hole in the drawn land is water (the web: drawn land reached well past the DEM).
+            int cls = terrain.DrawnCoverClassAt(hit);
+            if (cls == -2) cls = 8;
+            if (cls < 0) return null;
+            return cls < CoverClassNames.Length ? CoverClassNames[cls] : "Unknown";
+        }
+
         // updateDisplayTransform: the replay's recorded pose while it plays.
-        public Vec3d GetDisplayPosition() => Replaying ? replayPose.Position : aircraft.GetPosition();
-        public Quatd GetDisplayQuaternion() => Replaying ? replayPose.Quaternion : aircraft.GetQuaternion();
+        public Vec3d GetDisplayPosition() => flightView == FlightView.Showcase ? showcasePose.Position : Replaying ? replayPose.Position : aircraft.GetPosition();
+        public Quatd GetDisplayQuaternion() => flightView == FlightView.Showcase ? showcasePose.Quaternion : Replaying ? replayPose.Quaternion : aircraft.GetQuaternion();
         public Vec3d GetCockpitOffset() => current.Def.CockpitOffset;
         public Vec3d GetDisplayWorldDirection() => SceneAxes.Forward.Rotate(GetDisplayQuaternion());
         public Vec3d GetDisplayWorldUp() => SceneAxes.Up.Rotate(GetDisplayQuaternion());
@@ -1010,10 +1256,52 @@ namespace Retro.Unity
                 }
             }
             if (k.f4Key.wasPressedThisFrame) ToggleReplay();
+            if (k.f12Key.wasPressedThisFrame) ToggleShowcase();
+            // F8: wireframe (game.ts toggleWireframeDebug).
+            if (k.f8Key.wasPressedThisFrame) SetWireframe(!wireframe);
+            bool flying = !aircraft.IsCrashed() && !Replaying && flightView != FlightView.Showcase;
+            if (!k.ctrlKey.isPressed)
+            {
+                // 4: the target views, to and from (setTargetView).
+                if (k.digit4Key.wasPressedThisFrame && WeaponsTarget != null)
+                {
+                    flightView = flightView == FlightView.TargetTo ? FlightView.TargetFrom : FlightView.TargetTo;
+                    ResetOrbit();
+                }
+                // I: the target camera's night view.
+                if (k.iKey.wasPressedThisFrame && flying) nightVision = !nightVision;
+                // V: the force arrows.
+                if (k.vKey.wasPressedThisFrame)
+                {
+                    forceVectors = !forceVectors;
+                    sim.SetForceVectorsRequested(PlayerId, forceVectors);
+                }
+                // N: the swing wings' mode, AUTO -> SPREAD -> SWEPT (the sky flips day and night on the same key).
+                if (k.nKey.wasPressedThisFrame) wingSweepMode = (WingSweepMode)(((int)wingSweepMode + 1) % 3);
+                // Tab: debris and a hit leak from the opponent, for effects debugging.
+                if (k.tabKey.wasPressedThisFrame) DebugEmitDebris();
+            }
+            if (k.numpad5Key.wasPressedThisFrame) ResetOrbit();
+            if (k.numpadEnterKey.wasPressedThisFrame)
+            {
+                if (flightView == FlightView.ChaseBack || flightView == FlightView.ChaseFront) ToggleExteriorEnemyLock();
+                else if (flightView == FlightView.Cockpit && WeaponsTarget != null) cockpitCamera.SetPadlock(!cockpitCamera.IsPadlock());
+            }
+            // Views away from the F2 pair drop the enemy lock; away from the cockpit, the padlock.
+            if (!(flightView == FlightView.ChaseBack || flightView == FlightView.ChaseFront) && exteriorEnemyLock) ToggleExteriorEnemyLock();
             if (k.tKey.wasPressedThisFrame) CycleTarget();
             if (Replaying) ReadReplayKeys(k);
             if (k.f10Key.wasPressedThisFrame) flightView = flightView == FlightView.Free ? FlightView.ChaseBack : FlightView.Free;
             if (k.rKey.wasPressedThisFrame && flightView != FlightView.Free) BeginFlight(spawnMode);
+            // A view key while showcasing leaves the showcase first (leaveShowcaseIfActive).
+            if (before == FlightView.Showcase && flightView != FlightView.Showcase)
+            {
+                FlightView next = flightView;
+                flightView = FlightView.Showcase;
+                ExitShowcase();
+                flightView = next;
+            }
+            if (before != flightView && flightView != FlightView.Showcase) ResetOrbit();
             if (before != flightView && flightView == FlightView.Free)
             {
                 ReleaseAllKeys();
@@ -1142,6 +1430,34 @@ namespace Retro.Unity
             combatFx.Draw(view.ScenePosition, ScenePalette.Current);
             combat.Draw(view.ScenePosition, Time.deltaTime, wrecks);
             tracers.Draw(sim, view.ScenePosition, view.UnityCamera);
+            if (forceVectors && visible && !wrecked)
+            {
+                // combatSim.ts forceVectors: the model's per-part snapshot (FM3 decomposes; FM2 reports what it has).
+                IReadOnlyList<ForceVectorSample> samples = aircraft.Model is Fm3FlightModel f3 ? f3.GetForceVectorSnapshot()
+                    : aircraft.Model is Fm2FlightModel f2 ? f2.GetForceVectorSnapshot() : null;
+                forceVectorRenderer.Draw(samples, GetDisplayPosition(), GetDisplayQuaternion(), view.ScenePosition);
+            }
+        }
+
+        /// <summary>The F2 views' enemy lock (Numpad Enter): aim at the opponent instead of the aircraft.</summary>
+        private void ToggleExteriorEnemyLock()
+        {
+            SimAircraft o = combat?.Opponent;
+            if (!exteriorEnemyLock && (o == null || !o.Enabled)) return;
+            exteriorEnemyLock = !exteriorEnemyLock;
+            ResetOrbit();
+            IChaseTarget target = exteriorEnemyLock ? new SimChaseTarget(sim, Combat.OpponentId(0)) : null;
+            chaseBack.SetLookAtTarget(target);
+            chaseFront.SetLookAtTarget(target);
+        }
+
+        /// <summary>Tab (debugEmitDebris): a burst of chips and a hit leak from the opponent.</summary>
+        private void DebugEmitDebris()
+        {
+            SimAircraft o = combat?.Opponent;
+            if (o == null || !o.Enabled) return;
+            combatFx.Debris.SpawnDebugBurst(o.GetPosition(), o.GetVelocity());
+            combatFx.Smoke.SpawnDebugLeak(Combat.OpponentId(0));
         }
 
         // --- Replay ----------------------------------------------------------------------
@@ -1262,6 +1578,8 @@ namespace Retro.Unity
             combatFx?.Dispose();
             wrecks?.Dispose();
             engineAudio?.Dispose();
+            forceVectorRenderer.Dispose();
+            if (wireframe) SetWireframe(false);
             airbase?.Destroy();
             airfieldColliders?.Release();
             tailhook.Dispose();

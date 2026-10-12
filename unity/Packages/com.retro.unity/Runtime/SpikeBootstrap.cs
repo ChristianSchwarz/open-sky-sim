@@ -165,6 +165,8 @@ namespace Retro.Unity
             overlay.targetView = targetView;
             // F4: the replay bar.
             new GameObject("Replay bar").AddComponent<ReplayBar>().flight = player;
+            // The showcase's part names and the land-cover tooltip.
+            player.labels = new GameObject("Pointer labels").AddComponent<PointerLabels>();
             // The stored settings, applied before anything above boots.
             var settings = menu.gameObject.AddComponent<SettingsBridge>();
             settings.flight = player;

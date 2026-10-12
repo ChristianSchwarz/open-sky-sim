@@ -154,6 +154,9 @@ namespace Retro.Unity
             }
         }
 
+        /// <summary>The airframe's root GameObject (its glTF parts), for the showcase's layer and picking.</summary>
+        public Transform ModelRoot => model?.Root;
+
         /// <summary>Hidden altogether (a parked AI airframe).</summary>
         public void Hide()
         {

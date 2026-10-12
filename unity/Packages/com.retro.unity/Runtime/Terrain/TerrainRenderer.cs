@@ -468,6 +468,54 @@ namespace Retro.Unity
         /// faceted positions' dirty range, the welded positions, and the T-junction fill.
         /// Under-parents neither move nor serve as masters.
         /// </summary>
+        /// <summary>
+        /// drawnCoverAtWorld (tileHeightIndex.ts coverAtWorld): the land-cover class of the top facet
+        /// (fills lie over the ground, skirts hang under it) under a scene point in the deepest drawn
+        /// tile holding it; -2 where that tile's land has a hole there (water is cut out of it), -1
+        /// where no drawn tile holds the point.
+        /// </summary>
+        public int DrawnCoverClassAt(Vec3d p)
+        {
+            if (session == null) return -1;
+            Geodetic g = Geodesy.GeodeticOnSurfaceAtEnu(session.Basis, p.X, -p.Z);
+            DrawTile best = default;
+            int bestZ = -1;
+            foreach (DrawTile d in session.DrawList)
+            {
+                if (d.Under || d.Key.Z <= bestZ) continue;
+                LonLatBounds b = Tiling.Bounds(d.Key);
+                if (g.Lon < b.West || g.Lon > b.East || g.Lat < b.South || g.Lat > b.North) continue;
+                best = d;
+                bestZ = d.Key.Z;
+            }
+            if (bestZ < 0) return -1;
+            // Into the tile's own axes, in its quantisation units.
+            Vec3d local = (p - best.Origin).Rotate(best.FrameFix.Conjugate()) * (1 / best.Tile.QuantScale);
+            short[] pos = best.Tile.LandPositions;
+            byte[] attrs = best.Tile.LandAttrs;
+            int top = -1;
+            double topY = double.NegativeInfinity;
+            for (int t = 0; t + 8 < pos.Length; t += 9)
+            {
+                double ax = pos[t], ay = pos[t + 1], az = pos[t + 2];
+                double bx = pos[t + 3], by = pos[t + 4], bz = pos[t + 5];
+                double cx = pos[t + 6], cy = pos[t + 7], cz = pos[t + 8];
+                double det = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+                if (Math.Abs(det) < 1e-12) continue;
+                double w1 = ((bz - cz) * (local.X - cx) + (cx - bx) * (local.Z - cz)) / det;
+                double w2 = ((cz - az) * (local.X - cx) + (ax - cx) * (local.Z - cz)) / det;
+                double w3 = 1 - w1 - w2;
+                if (w1 < -1e-9 || w2 < -1e-9 || w3 < -1e-9) continue;
+                double y = w1 * ay + w2 * by + w3 * cy;
+                if (y > topY)
+                {
+                    topY = y;
+                    top = t / 9;
+                }
+            }
+            return top < 0 ? -2 : attrs[top * 3 * 4 + 3];
+        }
+
         private void StitchSeams(Vec3d cam)
         {
             drawnStitch.Clear();
