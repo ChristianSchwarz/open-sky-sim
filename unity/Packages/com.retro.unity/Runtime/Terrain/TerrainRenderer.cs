@@ -179,6 +179,8 @@ namespace Retro.Unity
         /// <summary>Far-tile cover textures, when the pyramid ships them.</summary>
         private TerrainCoverTextures covers;
         private Texture2D noCover;
+        /// <summary>The watercourse strokes: RoadStroke at true width (no pixel floor), the deep-water colour.</summary>
+        private Material riverMaterial;
         /// <summary>farTileTextures: paint far tiles with their cover texture.</summary>
         public bool farTileTextures = true;
         private float reconcileTimer;
@@ -476,6 +478,17 @@ namespace Retro.Unity
                         lodProps.SetFloat(HasCoverTexId, 0f);
                     }
                     Graphics.RenderMesh(landParams, m.Land, 0, matrix);
+                }
+                // terrainEntity.ts riverMaterial: after the land and the roads, true width only.
+                if (m.Rivers != null && !d.Under)
+                {
+                    if (riverMaterial == null)
+                    {
+                        riverMaterial = new Material(Shader.Find("Retro/RoadStroke")) { name = "rivers", renderQueue = 2002 };
+                        riverMaterial.SetFloat("_MinHalfPixels", 0);
+                        ScenePalette.Bind(riverMaterial, "_Color", Retro.Game.PaletteCategory.TERRAIN_WATER);
+                    }
+                    Graphics.RenderMesh(new RenderParams(riverMaterial) { shadowCastingMode = ShadowCastingMode.Off, receiveShadows = true }, m.Rivers, 0, matrix);
                 }
                 // An under-parent's water is not drawn: its leaves' water covers the same sea.
                 if (m.Water != null && !d.Under)

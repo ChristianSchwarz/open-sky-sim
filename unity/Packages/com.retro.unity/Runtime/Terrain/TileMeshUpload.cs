@@ -13,12 +13,15 @@ namespace Retro.Unity
         public bool Smooth;
         /// <summary>Submesh 0 deep, 1 shallow; null when the tile has no water.</summary>
         public Mesh Water;
+        /// <summary>The watercourse strokes (riverVP.ts), in RoadStroke's streams; null when none.</summary>
+        public Mesh Rivers;
         public int TriangleCount;
 
         public void Destroy()
         {
             if (Land != null) Object.Destroy(Land);
             if (Water != null) Object.Destroy(Water);
+            if (Rivers != null) Object.Destroy(Rivers);
         }
     }
 
@@ -91,6 +94,7 @@ namespace Retro.Unity
                 result.Water = BuildWater(tile);
                 result.TriangleCount += tile.WaterIndices.Length / 3;
             }
+            if (tile.RiverIndices.Length > 0) result.Rivers = BuildRivers(tile);
             return result;
         }
 
@@ -158,6 +162,50 @@ namespace Retro.Unity
             // SetSubMeshes, not subMeshCount: the setter recalculates bounds, which a
             // non-Float3 position stream cannot do (it warns per tile).
             mesh.SetSubMeshes(new[] { new SubMeshDescriptor(0, count, MeshTopology.Triangles) { bounds = UnitBounds, vertexCount = count } }, Quiet);
+            mesh.bounds = UnitBounds;
+            mesh.UploadMeshData(true);
+            return mesh;
+        }
+
+        /// <summary>
+        /// tileMesh.ts strokeGeometry(PTM_STROKE_KIND_WATER): the centreline doubled, each vertex with
+        /// its unit offset across the flow and half width (dm), in RoadStroke's streams. The stream
+        /// also holds land-use outlines (kind byte in the offset's pad), which the web never draws:
+        /// only the water triangles are indexed. Null when the tile has none.
+        /// </summary>
+        private static Mesh BuildRivers(PtmTile tile)
+        {
+            const sbyte KindWater = 0;
+            ushort[] all = tile.RiverIndices;
+            sbyte[] dirs = tile.RiverDirections;
+            var indices = new System.Collections.Generic.List<int>(all.Length);
+            for (int i = 0; i + 2 < all.Length; i += 3)
+            {
+                if (dirs[all[i] * 4 + 3] != KindWater) continue;
+                indices.Add(all[i]);
+                indices.Add(all[i + 1]);
+                indices.Add(all[i + 2]);
+            }
+            if (indices.Count == 0) return null;
+            int n = tile.RiverHalfWidths.Length;
+            var mesh = new Mesh { name = $"rivers {tile.Id}" };
+            mesh.SetVertexBufferParams(n,
+                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.SNorm16, 4, 0),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.SNorm8, 4, 1),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord1, VertexAttributeFormat.UNorm16, 2, 2),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord2, VertexAttributeFormat.UNorm8, 4, 3));
+            using (NativeArray<short> positions = PadPositions(tile.RiverPositions, n))
+            {
+                mesh.SetVertexBufferData(positions, 0, 0, positions.Length, 0, Quiet);
+            }
+            mesh.SetVertexBufferData(dirs, 0, 0, n * 4, 1, Quiet);
+            var half = new ushort[n * 2];
+            for (int i = 0; i < n; i++) half[i * 2] = tile.RiverHalfWidths[i];
+            mesh.SetVertexBufferData(half, 0, 0, half.Length, 2, Quiet);
+            mesh.SetVertexBufferData(new byte[n * 4], 0, 0, n * 4, 3, Quiet);
+            mesh.SetIndexBufferParams(indices.Count, IndexFormat.UInt32);
+            mesh.SetIndexBufferData(indices, 0, 0, indices.Count, Quiet);
+            mesh.SetSubMeshes(new[] { new SubMeshDescriptor(0, indices.Count, MeshTopology.Triangles) { bounds = UnitBounds, vertexCount = n } }, Quiet);
             mesh.bounds = UnitBounds;
             mesh.UploadMeshData(true);
             return mesh;
