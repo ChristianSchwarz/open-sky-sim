@@ -31,6 +31,7 @@ Shader "Retro/VegetationBillboard"
             #pragma multi_compile_fog
             #pragma target 4.5
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            #include "ColourAdjust.hlsl"
 
             struct Instance
             {
@@ -123,6 +124,8 @@ Shader "Retro/VegetationBillboard"
                 half3 ratio = clamp(inst.shade.rgb / 0.25, 0.3, 2.0);
                 half3 leaf = _Palette.rgb * lerp(1, ratio, 0.5) * inst.shade.a;
                 leaf = max(lerp(Luma(leaf).xxx, leaf, 1.6), 0);
+                // The player's tree sliders, before the light (treeBillboardVP.ts).
+                leaf = RetroAdjustColour(leaf, _AdjTrees);
                 Light sun = GetMainLight();
                 half3 lit = SampleSH(float3(0, 1, 0)) * lerp(0.4, 1.0, 0.5 + 0.5 * n.y)
                     + sun.color * pow(saturate(dot(n, sun.direction)), 1.69);

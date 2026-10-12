@@ -26,6 +26,7 @@ Shader "Retro/SkyDome"
             #pragma vertex vert
             #pragma fragment frag
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "ColourAdjust.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
                 half4 _Color;
@@ -56,7 +57,8 @@ Shader "Retro/SkyDome"
                 cs.z = cs.w * (1 - 1e-6);
             #endif
                 o.positionCS = cs;
-                o.color = _UseVertexColor > 0.5 ? v.color.rgb : _Color.rgb;
+                // The dome takes the player's sky sliders (skyDomeModelBuilder.ts); the disc does not.
+                o.color = _UseVertexColor > 0.5 ? RetroAdjustColour(v.color.rgb, _AdjSky) : _Color.rgb;
                 return o;
             }
 

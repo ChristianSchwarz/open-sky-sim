@@ -19,6 +19,12 @@ float _LodFadeM;     // 0 = no dissolve
 float _LodFadeCap;   // time ramp, 0..1
 float _DepthPush;    // metres; > 0 only for an under-parent
 float _LodUnder;     // 1 for an under-parent
+// Land-use regions by size (lod.ts LANDUSE_REVEAL_MIN_PX): a region shows once the camera
+// is within regionSize * _SizeRevealScale metres (0 turns it off). _LodFills: this tile's
+// regions are fills lifted over the ground (the leaf), dithered away when hidden, rather
+// than votes painted onto it, which are painted as their own sampled colour instead.
+float _SizeRevealScale;
+float _LodFills;
 
 // lodReveal: 0 still the parent, 1 this tile.
 float RetroLodReveal(float d)
@@ -29,6 +35,16 @@ float RetroLodReveal(float d)
     float soft = t * RETRO_LOD_FADE_SOFTNESS;
     float byDistance = 1.0 - smoothstep(t - soft, t + soft, d);
     return min(byDistance, _LodFadeCap);
+}
+
+// terrainVP.ts sizeReveal: 1 fully shown, 0 not at all, with the dissolve's softness. Ground and
+// raster-only tiles carry no size and always show.
+float RetroSizeReveal(float d, float regionSize)
+{
+    if (_SizeRevealScale <= 0.0 || regionSize <= 0.0) return 1.0;
+    float t = regionSize * _SizeRevealScale;
+    float soft = t * RETRO_LOD_FADE_SOFTNESS;
+    return 1.0 - smoothstep(t - soft, t + soft, d);
 }
 
 // Per vertex: reveal, camera height over the facet plane (under-parents only), height over the camera.

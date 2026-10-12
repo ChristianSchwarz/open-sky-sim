@@ -22,10 +22,9 @@ namespace Retro.Unity
     /// Wired: time of day, flight model, AI pilot model, units, terrain colour
     /// mode and land-use blend, terrain detail distance, land-use reach,
     /// triangle budget, finest terrain level, tree density, buildings, roads,
-    /// render scale, keyboard layout and pitch-stick mode, volume, and the
-    /// aircraft and spawn mode kept between sessions. Not yet acted on in Unity
-    /// (stored and shown only): smooth shading, colour adjust, far-tile
-    /// textures, land-use reveal, supersampling.
+    /// render scale and supersampling, smooth shading, land-use reveal,
+    /// far-tile textures, colour adjust, keyboard layout and pitch-stick mode,
+    /// volume, and the aircraft and spawn mode kept between sessions.
     /// </summary>
     [DefaultExecutionOrder(-300)]
     public sealed class SettingsBridge : MonoBehaviour, ISettingsDevices
@@ -73,10 +72,15 @@ namespace Retro.Unity
             config.LanduseReach.AddChangeListener(_ => ApplyTerrain());
             config.TriangleBudget.AddChangeListener(_ => ApplyTerrain());
             config.VisibleZoom.AddChangeListener(_ => ApplyTerrain());
+            config.TerrainShading.AddChangeListener(_ => ApplyTerrain());
+            config.LanduseReveal.AddChangeListener(_ => ApplyTerrain());
+            config.FarTileTextures.AddChangeListener(_ => ApplyTerrain());
             config.TreeDensity.AddChangeListener(_ => ApplyLayers());
             config.Buildings.AddChangeListener(_ => ApplyLayers());
             config.Roads.AddChangeListener(_ => ApplyLayers());
             config.RenderScale.AddChangeListener(_ => ApplyRenderScale());
+            config.Supersampling.AddChangeListener(_ => ApplyRenderScale());
+            config.ColourAdjust.AddChangeListener(_ => ApplyColourAdjust());
         }
 
         private void Start()
@@ -110,6 +114,8 @@ namespace Retro.Unity
 
         private void Update()
         {
+            // onViewportResize: the supersample tapers with the window.
+            if (Screen.width != appliedWidth || Screen.height != appliedHeight) ApplyRenderScale();
             // The N key moves the sun outside the dialog: the setting follows it (and is saved).
             if (sky != null && Math.Abs(sky.hours - config.Daytime.Active) > 1e-6) config.Daytime.SetActive(sky.hours);
             // The aircraft and the start the player last picked, kept like the web's settings.
@@ -137,6 +143,7 @@ namespace Retro.Unity
             ApplyTerrain();
             ApplyLayers();
             ApplyRenderScale();
+            ApplyColourAdjust();
         }
 
         private void ApplyDaytime()
@@ -180,6 +187,9 @@ namespace Retro.Unity
             terrain.leafScale = (float)config.LanduseReach.Active;
             terrain.triangleBudget = (int)config.TriangleBudget.Active;
             terrain.visibleZoom = (int)config.VisibleZoom.Active;
+            terrain.smoothShading = config.TerrainShading.Active == TerrainShading.SMOOTH;
+            terrain.landuseRevealPx = (float)config.LanduseReveal.Active;
+            terrain.farTileTextures = config.FarTileTextures.Active;
         }
 
         private void ApplyLayers()
@@ -189,16 +199,61 @@ namespace Retro.Unity
             if (vegetation != null) vegetation.densityMultiplier = (float)config.TreeDensity.Active;
         }
 
+        private int appliedWidth, appliedHeight;
+
+        private static readonly int AdjTrees = Shader.PropertyToID("_AdjTrees");
+        private static readonly int AdjTerrain = Shader.PropertyToID("_AdjTerrain");
+        private static readonly int AdjSky = Shader.PropertyToID("_AdjSky");
+
+        /// <summary>
+        /// index.ts applyColourAdjust: the trees', terrain's and sky's sliders to their shaders
+        /// (ColourAdjust.hlsl, as offsets from neutral), the water's to its palette colours.
+        /// </summary>
+        private void ApplyColourAdjust()
+        {
+            ColourAdjust adjust = config.ColourAdjust.Active;
+            Vector4 Tweak(ColourTweak t) => new Vector4((float)(t.Saturation - 1), (float)(t.Brightness - 1), (float)(t.Hue * Math.PI / 180), 0);
+            Shader.SetGlobalVector(AdjTrees, Tweak(adjust[ColourAdjustGroup.Trees]));
+            Shader.SetGlobalVector(AdjTerrain, Tweak(adjust[ColourAdjustGroup.Terrain]));
+            Shader.SetGlobalVector(AdjSky, Tweak(adjust[ColourAdjustGroup.Sky]));
+            ScenePalette.SetWaterTweak(adjust[ColourAdjustGroup.Water]);
+        }
+
+        /// <summary>game.ts hdSupersampleScale: 2x up to ~1440p, 1.5x to ~1800p, native above.</summary>
+        public static double HdSupersampleScale(int width, int height)
+        {
+            double megapixels = width * (double)height / 1e6;
+            if (megapixels <= 2.3) return 2;
+            if (megapixels <= 4.5) return 1.5;
+            return 1;
+        }
+
+        /// <summary>
+        /// game.ts updateHdResolution: the main image is drawn at the render scale when it is
+        /// below 1, else at the supersample (URP draws it larger and filters it down to the
+        /// screen); the render scale replaces the supersample rather than multiplying it. The
+        /// terrain measures its detail in those pixels.
+        /// </summary>
         private void ApplyRenderScale()
         {
+            appliedWidth = Screen.width;
+            appliedHeight = Screen.height;
+            double renderScale = config.RenderScale.Active;
+            double supersample = config.Supersampling.Active ? HdSupersampleScale(Screen.width, Screen.height) : 1;
+            double main = renderScale < 1 ? renderScale : supersample;
             if (UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline is UniversalRenderPipelineAsset urp)
             {
-                urp.renderScale = (float)config.RenderScale.Active;
+                urp.renderScale = (float)main;
             }
+            if (terrain != null) terrain.renderScale = (float)main;
         }
 
         private void OnDestroy()
         {
+            // Shader globals outlive play mode in the editor: back to neutral.
+            Shader.SetGlobalVector(AdjTrees, Vector4.zero);
+            Shader.SetGlobalVector(AdjTerrain, Vector4.zero);
+            Shader.SetGlobalVector(AdjSky, Vector4.zero);
             // The URP asset is a project asset: in the editor a runtime change would stick to it.
             if (UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline is UniversalRenderPipelineAsset urp) urp.renderScale = 1;
         }

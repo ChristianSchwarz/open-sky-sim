@@ -55,8 +55,10 @@ float3 RetroNearestSwatch(float3 c)
     return best;
 }
 
+#include "ColourAdjust.hlsl"
+
 // coverColor: sRGB 0..1; coverClass: 0..15; shown: land-use reveal (1 = fully shown).
-float3 RetroFacetColor(float3 coverColor, float coverClass, float shown)
+float3 RetroFacetColorAuthored(float3 coverColor, float coverClass, float shown)
 {
     if (abs(_TerrainMode - RETRO_MODE_IMAGERY) < 0.5)
     {
@@ -85,6 +87,12 @@ float3 RetroFacetColor(float3 coverColor, float coverClass, float shown)
         return lerp(RetroSrgbToLinear(coverColor) * _RawLight.rgb, toned, _LanduseBlend * shown);
     }
     return lerp(RetroSrgbToLinear(coverColor) * _RawLight.rgb, tone, shown);
+}
+
+// The colour every mode picked, leaned on by the player's sliders (terrainCover.ts facetColor).
+float3 RetroFacetColor(float3 coverColor, float coverClass, float shown)
+{
+    return RetroAdjustColour(RetroFacetColorAuthored(coverColor, coverClass, shown), _AdjTerrain);
 }
 
 #endif

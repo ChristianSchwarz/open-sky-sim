@@ -19,22 +19,22 @@ Rows, not settings or keys: one row can cover several.
 | Area | Done | Partial | Missing |
 |---|---|---|---|
 | Simulation | 11 | 2 | 0 |
-| Terrain | 6 | 1 | 7 |
+| Terrain | 10 | 1 | 3 |
 | World detail | 12 | 0 | 0 |
 | Sky and FX | 8 | 2 | 5 |
 | Aircraft | 3 | 1 | 2 |
 | HUD and cockpit | 12 | 1 | 1 |
-| Settings | 9 | 2 | 3 |
+| Settings | 12 | 2 | 0 |
 | Input, views, replay, audio | 6 | 3 | 4 |
 | Boot and spawn | 3 | 1 | 1 |
-| **Total** | **70** | **13** | **23** |
+| **Total** | **77** | **13** | **16** |
 
 What is missing most visibly, in suggested order:
 1. ~~Engine audio~~ and ~~replay (F4)~~: done since the checklist was written (see the Input table).
 3. ~~Building and scenery colliders, and the glTF scenery~~: done since (see World detail).
 4. ~~Target cycling (T)~~ and the ILS: done since (see HUD and cockpit).
-5. **Settings that are only stored**: smooth shading, colour adjust, far-tile textures, land-use reveal and supersampling.
-6. **Terrain**: runtime seam stitching, far land (`.pfl`), far cover textures (`.ptx`), rivers, and the land-use reveal.
+5. ~~Settings that are only stored~~: done since (see Terrain and Settings).
+6. **Terrain**: runtime seam stitching, far land (`.pfl`), rivers.
 7. **Space view**: the atmosphere shell and stars are missing, and so is the sun-visibility skyline.
 8. **Debug and showcase views**: F8 wireframe, V force vectors, Tab debug debris, F12 showcase and the land-cover tooltip.
 
@@ -67,13 +67,13 @@ What is missing most visibly, in suggested order:
 | Skirts | done | baked in the PTM, drawn double-sided |
 | Tile water (deep/shallow) | done | `TerrainRenderer.cs` |
 | Open sea | partial | one camera-centred curved grid (`U/Terrain/SeaSurface.cs`) instead of per-tile `oceanPatch.ts` patches |
-| Land-use size reveal (`landuseRevealPx`) | missing | constants ported; `TerrainLand.shader` hard-codes shown = 1 |
+| Land-use size reveal (`landuseRevealPx`) | done | `TD/Land/LandMesh.cs` RegionSizes (golden `land_mesh.json`, 8 real tiles bit-exact) as a TEXCOORD0 stream; `TerrainLod.hlsl` RetroSizeReveal: leaf fills dissolve, coarser votes take their sampled colour; prepared off the main thread (`LandPrep`). Checked at 1 vs 24 px over GC |
 | Runtime seam stitching | missing | border table decoded (`Ptm.cs`), nothing stitches (web `seamStitch.ts`) |
 | Far land `.pfl` swap + fingerprint guard | missing | codec only (`TD/Codecs/Pfl.cs`) |
-| Far cover textures `.ptx` on terrain | missing | only the moving map reads `.ptx` |
-| Smooth shading | missing | faceted only (`nointerpolation` normals) |
+| Far cover textures `.ptx` on terrain | done | `U/Terrain/TerrainCoverTextures.cs` (own tile cache, point-sampled mip chain from `TD/Codecs/CoverTexture.cs`, coverFrame per tile, 4 tests); leaf textures past 3 km. 98 attached over GC at 6 km; on/off compared on screen |
+| Smooth shading | done | the ported weld (`LandMesh.BuildSmoothLandGeometry`, golden) uploaded indexed, `RETRO_SMOOTH` interpolates colour and normal; a toggle keeps each tile's mesh until its other kind is ready. Edge-normal lean ported too |
 | Rivers (`riverVP`) | missing | river arrays decoded, never drawn |
-| Colour adjust (trees, terrain, water, sky) | missing | `G/Settings/ColourAdjust.cs` ported, never read |
+| Colour adjust (trees, terrain, water, sky) | done | `Shaders/ColourAdjust.hlsl` (the GLSL adjustColour) on the terrain facet colour, tree leaves and sky dome; water on its two palette tones (`ScenePalette.SetWaterTweak`). Checked on screen with extreme values, then restored |
 
 ## World detail
 
@@ -150,9 +150,9 @@ What is missing most visibly, in suggested order:
 | livery | partial | see Aircraft |
 | renderScale, terrainDetailDistanceM, landuseReach, visibleZoom, terrainTriangleBudget | done | `U/Ui/SettingsBridge.cs` |
 | buildings, roads, terrainColour, landuseBlend, treeDensity | done | applied live |
-| supersampling | missing | stored only |
-| farTileTextures, landuseRevealPx, terrainShading | missing | stored only (see Terrain) |
-| Colours tab (hue/sat/brightness x4, reset) | missing | stored only |
+| supersampling | done | URP renderScale = hdSupersampleScale (2x to ~1440p, 1.5x to ~1800p); a render scale below 1 replaces it; the terrain's pixel metric follows |
+| farTileTextures, landuseRevealPx, terrainShading | done | see Terrain |
+| Colours tab (hue/sat/brightness x4, reset) | done | see Terrain |
 | terrainArea "Fly here" | done | scene restart around the area; importer dropped (dev-server only) |
 | daytime, flightModel, aiPilotModel | done | live; AI model on the next spawn, as on the web |
 | units, keyboardLayout | done | |

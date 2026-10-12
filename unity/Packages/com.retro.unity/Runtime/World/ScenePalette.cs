@@ -60,8 +60,38 @@ namespace Retro.Unity
         public static void Bind(Material material, string property, PaletteCategory category) =>
             Bind(material, property, () => Tone(category));
 
-        /// <summary>A category's base colour (sRGB; Unity linearises colour properties).</summary>
-        public static Color Tone(PaletteCategory category) => TerrainColours.FromHex(Current.Color(category));
+        /// <summary>A category's base colour (sRGB; Unity linearises colour properties); water with the player's water sliders.</summary>
+        public static Color Tone(PaletteCategory category) => Water(category, TerrainColours.FromHex(Current.Color(category)));
+
+        /// <summary>
+        /// The player's water hue, saturation and brightness (materials.ts setWaterTweak): water is a
+        /// flat palette colour, so it is adjusted here rather than in a shader.
+        /// </summary>
+        public static ColourTweak WaterTweak { get; private set; } = ColourTweak.Default;
+
+        public static void SetWaterTweak(ColourTweak tweak)
+        {
+            WaterTweak = tweak;
+            Set(Current, RawLight);
+        }
+
+        private static Color Water(PaletteCategory category, Color srgb)
+        {
+            if (category != PaletteCategory.TERRAIN_WATER && category != PaletteCategory.TERRAIN_SHALLOW_WATER) return srgb;
+            if (WaterTweak.Equals(ColourTweak.Default)) return srgb;
+            Color c = srgb.linear;
+            // colourAdjust.ts adjustColourInPlace: Rodrigues turn about the grey axis, then saturation and brightness.
+            double a = WaterTweak.Hue * Math.PI / 180;
+            double cos = Math.Cos(a), sin = Math.Sin(a);
+            const double InvSqrt3 = 0.5773502691896258;
+            double mean = (c.r + c.g + c.b) / 3.0 * (1 - cos);
+            double hr = c.r * cos + (c.b - c.g) * InvSqrt3 * sin + mean;
+            double hg = c.g * cos + (c.r - c.b) * InvSqrt3 * sin + mean;
+            double hb = c.b * cos + (c.g - c.r) * InvSqrt3 * sin + mean;
+            double l = 0.2126 * hr + 0.7152 * hg + 0.0722 * hb;
+            float Channel(double v) => (float)(Math.Max(0, l + (v - l) * WaterTweak.Saturation) * WaterTweak.Brightness);
+            return new Color(Channel(hr), Channel(hg), Channel(hb), srgb.a).gamma;
+        }
 
         public static Color ToneShade(PaletteCategory category) => TerrainColours.FromHex(Current.ColorShade(category));
 

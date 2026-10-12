@@ -33,6 +33,8 @@ namespace Retro.Unity
         public int nearZoom = 10;
         public int minZoom = 4;
         public int maxZoom = 11;
+        /// <summary>The leaves' own sparse textures (their houses from afar); -1 when none.</summary>
+        public int leafZoom = -1;
     }
 
     /// <summary>A manifest area (manifest.ts TerrainArea), degrees.</summary>
@@ -136,6 +138,15 @@ namespace Retro.Unity
         [Range(0, 1)] public float landuseBlend = TerrainColours.LanduseBlendDefault;
 
         [Range(1, 4)] public float detailScale = 1;
+        /// <summary>
+        /// terrainEntity.setRenderScale: the main image's scale (render scale, or the supersample),
+        /// so the screen-space error is measured in the pixels actually drawn.
+        /// </summary>
+        public float renderScale = 1;
+        /// <summary>terrainShading SMOOTH: the welded land mesh, colour and light interpolated.</summary>
+        public bool smoothShading;
+        /// <summary>landuseRevealPx: how many pixels wide a land-use region must be to show.</summary>
+        public float landuseRevealPx = (float)Lod.LanduseRevealMinPx;
         public float detailDistanceKm = 12;
         [Range(1, 10)] public float leafScale = 1.5f;
         public float uploadBudgetMs = 4;
@@ -161,6 +172,15 @@ namespace Retro.Unity
         private int appliedPalette;
         private readonly Dictionary<TileKey, TileGpuMeshes> gpu = new Dictionary<TileKey, TileGpuMeshes>();
         private readonly Queue<(TileKey Key, PtmTile Tile)> uploadQueue = new Queue<(TileKey, PtmTile)>();
+        /// <summary>Land preparing off the main thread (edge lean, region sizes, the SMOOTH weld).</summary>
+        private readonly List<(TileKey Key, PtmTile Tile, System.Threading.Tasks.Task<LandPrep> Prep)> preparing =
+            new List<(TileKey, PtmTile, System.Threading.Tasks.Task<LandPrep>)>();
+        private bool appliedSmooth;
+        /// <summary>Far-tile cover textures, when the pyramid ships them.</summary>
+        private TerrainCoverTextures covers;
+        private Texture2D noCover;
+        /// <summary>farTileTextures: paint far tiles with their cover texture.</summary>
+        public bool farTileTextures = true;
         private float reconcileTimer;
         private readonly Stopwatch clock = Stopwatch.StartNew();
 
@@ -229,8 +249,10 @@ namespace Retro.Unity
                     m.Destroy();
                     gpu.Remove(k);
                 }
+                covers?.Release(k);
             };
             if (viewer != null) viewer.Basis = session.Basis;
+            if (TextureInfo != null) covers = new TerrainCoverTextures(root, TextureInfo, session.BakeBasis);
             EnsureMaterials();
             Debug.Log($"Retro terrain: {root}, max zoom {manifest.mesh.maxZoom}, origin {manifest.enuOrigin.lat}, {manifest.enuOrigin.lon}");
         }
@@ -294,7 +316,7 @@ namespace Retro.Unity
                     Orientation = viewer.SceneOrientation,
                     FovYDeg = cam.fieldOfView,
                     Aspect = cam.aspect,
-                    ScreenHeightPx = cam.pixelHeight,
+                    ScreenHeightPx = cam.pixelHeight * renderScale,
                     Near = cam.nearClipPlane,
                     DetailScale = detailScale,
                     DetailDistanceM = detailDistanceKm * 1000,
@@ -309,6 +331,7 @@ namespace Retro.Unity
             }
             PumpUploads();
             Draw();
+            covers?.Pump();
 
             residentTiles = session.Meshes.Count;
             uploadedTiles = gpu.Count;
@@ -318,15 +341,69 @@ namespace Retro.Unity
             triangleBudgetHit = session.TriangleBudgetHit;
         }
 
+        private void Prepare(TileKey key, PtmTile tile)
+        {
+            bool smooth = smoothShading;
+            preparing.Add((key, tile, System.Threading.Tasks.Task.Run(() => LandPrep.Make(tile, smooth))));
+        }
+
+        /// <summary>
+        /// setTerrainShading: the land material switches now; each resident tile keeps its mesh
+        /// until the other kind has been made for it, then swaps.
+        /// </summary>
+        private void ApplyShading()
+        {
+            appliedSmooth = smoothShading;
+            if (smoothShading) landMaterial.EnableKeyword("RETRO_SMOOTH");
+            else landMaterial.DisableKeyword("RETRO_SMOOTH");
+            foreach (var (key, m) in gpu)
+            {
+                if (m.Land == null || m.Smooth == smoothShading) continue;
+                PtmTile tile = session.Meshes.Peek(key);
+                if (tile != null) Prepare(key, tile);
+            }
+        }
+
         private void PumpUploads()
         {
-            long start = clock.ElapsedTicks;
-            long budget = (long)(uploadBudgetMs / 1000 * Stopwatch.Frequency);
-            while (uploadQueue.Count > 0 && clock.ElapsedTicks - start < budget)
+            if (appliedSmooth != smoothShading) ApplyShading();
+            while (uploadQueue.Count > 0)
             {
                 var (key, tile) = uploadQueue.Dequeue();
                 if (gpu.ContainsKey(key) || !session.Meshes.Has(key)) continue;
-                gpu[key] = TileMeshUpload.Build(tile);
+                Prepare(key, tile);
+            }
+            long start = clock.ElapsedTicks;
+            long budget = (long)(uploadBudgetMs / 1000 * Stopwatch.Frequency);
+            for (int i = 0; i < preparing.Count && clock.ElapsedTicks - start < budget;)
+            {
+                var (key, tile, task) = preparing[i];
+                if (!task.IsCompleted)
+                {
+                    i++;
+                    continue;
+                }
+                preparing.RemoveAt(i);
+                if (!session.Meshes.Has(key)) continue;
+                if (task.IsFaulted)
+                {
+                    Debug.LogException(task.Exception);
+                    continue;
+                }
+                LandPrep prep = task.Result;
+                bool hasLand = tile.LandPositions.Length > 0;
+                // Made for the other shading: make it again for this one.
+                if (hasLand && (prep.Smooth != null) != smoothShading)
+                {
+                    Prepare(key, tile);
+                    continue;
+                }
+                if (gpu.TryGetValue(key, out TileGpuMeshes old))
+                {
+                    if (!hasLand || old.Smooth == smoothShading) continue;
+                    old.Destroy();
+                }
+                gpu[key] = TileMeshUpload.Build(tile, prep);
             }
         }
 
@@ -334,6 +411,14 @@ namespace Retro.Unity
         private static readonly int LodFadeCapId = Shader.PropertyToID("_LodFadeCap");
         private static readonly int DepthPushId = Shader.PropertyToID("_DepthPush");
         private static readonly int LodUnderId = Shader.PropertyToID("_LodUnder");
+        private static readonly int LodFillsId = Shader.PropertyToID("_LodFills");
+        private static readonly int SizeRevealScaleId = Shader.PropertyToID("_SizeRevealScale");
+        private static readonly int CoverTexId = Shader.PropertyToID("_CoverTex");
+        private static readonly int CoverEastId = Shader.PropertyToID("_CoverEast");
+        private static readonly int CoverNorthId = Shader.PropertyToID("_CoverNorth");
+        private static readonly int CoverFromMId = Shader.PropertyToID("_CoverFromM");
+        private static readonly int HasCoverTexId = Shader.PropertyToID("_HasCoverTex");
+        private static readonly int CoverEnabledId = Shader.PropertyToID("_CoverEnabled");
         private MaterialPropertyBlock lodProps;
 
         private void Draw()
@@ -349,6 +434,18 @@ namespace Retro.Unity
             var shallowParams = new RenderParams(waterShallowMaterial) { shadowCastingMode = ShadowCastingMode.Off };
             drawnTiles = 0;
             drawnTriangles = 0;
+            // Land-use regions by size: the pixel threshold in metres of distance per metre of width.
+            Camera cam0 = viewer.UnityCamera;
+            landMaterial.SetFloat(SizeRevealScaleId, (float)Lod.LanduseRevealScale(cam0.pixelHeight, cam0.fieldOfView, landuseRevealPx));
+            landMaterial.SetFloat(CoverEnabledId, farTileTextures ? 1f : 0f);
+            if (covers != null) covers.Enabled = farTileTextures;
+            if (noCover == null)
+            {
+                // What a draw without a texture binds: one texel of no data.
+                noCover = new Texture2D(1, 1, TextureFormat.RGBA32, false, true) { filterMode = FilterMode.Point, name = "no cover" };
+                noCover.SetPixelData(new byte[] { 0, 0, 0, PtxCodec.NoData }, 0);
+                noCover.Apply(false, true);
+            }
             foreach (DrawTile d in session.DrawList)
             {
                 if (!gpu.TryGetValue(d.Key, out TileGpuMeshes m)) continue;
@@ -361,6 +458,23 @@ namespace Retro.Unity
                     lodProps.SetFloat(LodFadeCapId, d.FadeM > 0 ? Mathf.Min(1f, (float)((nowMs - d.FadeFromMs) / Lod.LodFadeMs)) : 1f);
                     lodProps.SetFloat(DepthPushId, (float)d.PushM);
                     lodProps.SetFloat(LodUnderId, d.PushM > 0 ? 1f : 0f);
+                    // tileMesh.ts landuseFills: the leaf's regions are fills, a level up they are votes.
+                    lodProps.SetFloat(LodFillsId, d.Key.Z >= MaxZoom ? 1f : 0f);
+                    // The far cover texture, where this tile has one (nearer tiles asked first).
+                    TerrainCoverTextures.Binding cover = covers?.Get(d.Key, d.Tile.QuantScale, 1.0 / (1.0 + (d.Origin - cam).Length / 1000));
+                    if (cover != null)
+                    {
+                        lodProps.SetTexture(CoverTexId, cover.Texture);
+                        lodProps.SetVector(CoverEastId, cover.East);
+                        lodProps.SetVector(CoverNorthId, cover.North);
+                        lodProps.SetFloat(CoverFromMId, cover.FromM);
+                        lodProps.SetFloat(HasCoverTexId, 1f);
+                    }
+                    else
+                    {
+                        lodProps.SetTexture(CoverTexId, noCover);
+                        lodProps.SetFloat(HasCoverTexId, 0f);
+                    }
                     Graphics.RenderMesh(landParams, m.Land, 0, matrix);
                 }
                 // An under-parent's water is not drawn: its leaves' water covers the same sea.
@@ -378,6 +492,8 @@ namespace Retro.Unity
         {
             foreach (TileGpuMeshes m in gpu.Values) m.Destroy();
             gpu.Clear();
+            covers?.Dispose();
+            if (noCover != null) Destroy(noCover);
         }
     }
 }
