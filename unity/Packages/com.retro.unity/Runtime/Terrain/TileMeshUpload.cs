@@ -15,6 +15,15 @@ namespace Retro.Unity
         public Mesh Water;
         /// <summary>The watercourse strokes (riverVP.ts), in RoadStroke's streams; null when none.</summary>
         public Mesh Rivers;
+        /// <summary>The seam stitcher's T-junction fill (seamStitch.ts), drawn as part of the land; null when none.</summary>
+        public Mesh Fill;
+        /// <summary>
+        /// What the land was built from, to build it again when the stitcher moves it (GPU-only
+        /// meshes cannot be written in part): the region widths, and for SMOOTH the weld.
+        /// </summary>
+        public float[] Sizes;
+        public SmoothLandMesh SmoothSource;
+        public float[] SmoothSizes;
         public int TriangleCount;
 
         public void Destroy()
@@ -22,6 +31,7 @@ namespace Retro.Unity
             if (Land != null) Object.Destroy(Land);
             if (Water != null) Object.Destroy(Water);
             if (Rivers != null) Object.Destroy(Rivers);
+            if (Fill != null) Object.Destroy(Fill);
         }
     }
 
@@ -34,10 +44,12 @@ namespace Retro.Unity
     {
         public sbyte[] Normals;
         public float[] Sizes;
+        public ushort[] RawSizes;
         public SmoothLandMesh Smooth;
         public float[] SmoothSizes;
 
-        public static LandPrep Make(PtmTile tile, bool smooth)
+        /// <param name="live">The land as the seam stitcher left it, for the SMOOTH weld (buildSmoothLandGeometryFromFaceted); null: as baked.</param>
+        public static LandPrep Make(PtmTile tile, bool smooth, short[] live = null)
         {
             var prep = new LandPrep();
             if (tile.LandPositions.Length == 0) return prep;
@@ -45,9 +57,10 @@ namespace Retro.Unity
             LandMesh.LeanEdgeNormals(tile.LandPositions, prep.Normals);
             ushort[] sizes = LandMesh.RegionSizes(tile.LandPositions, tile.LandAttrs, tile.QuantScale);
             prep.Sizes = Floats(sizes);
+            prep.RawSizes = sizes;
             if (smooth)
             {
-                prep.Smooth = LandMesh.BuildSmoothLandGeometry(tile.LandPositions, prep.Normals, tile.LandAttrs, sizes);
+                prep.Smooth = LandMesh.BuildSmoothLandGeometry(live ?? tile.LandPositions, prep.Normals, tile.LandAttrs, sizes);
                 if (prep.Smooth != null) prep.SmoothSizes = Floats(prep.Smooth.OutSizes);
             }
             return prep;
@@ -79,14 +92,20 @@ namespace Retro.Unity
         /// <summary>Object-space bounds: SNorm16 positions live in [-1, 1].</summary>
         private static readonly Bounds UnitBounds = new Bounds(Vector3.zero, Vector3.one * 2);
 
-        public static TileGpuMeshes Build(PtmTile tile, LandPrep prep)
+        /// <param name="live">The faceted land positions to upload (the stitcher's live copy); null: as baked.</param>
+        public static TileGpuMeshes Build(PtmTile tile, LandPrep prep, short[] live = null)
         {
             var result = new TileGpuMeshes();
             int land = tile.LandPositions.Length / 3;
             if (land > 0)
             {
                 result.Smooth = prep.Smooth != null;
-                result.Land = result.Smooth ? BuildSmoothLand(tile, prep) : BuildLand(tile, prep, land);
+                result.Land = result.Smooth
+                    ? BuildSmoothLand(tile, prep)
+                    : MakeSoupLand($"land {tile.Id}", live ?? tile.LandPositions, prep.Normals, tile.LandAttrs, prep.Sizes);
+                result.Sizes = prep.Sizes;
+                result.SmoothSource = prep.Smooth;
+                result.SmoothSizes = prep.SmoothSizes;
                 result.TriangleCount += land / 3;
             }
             if (tile.WaterIndices.Length > 0)
@@ -128,11 +147,14 @@ namespace Retro.Unity
         }
 
         /// <summary>buildSmoothLandGeometry's welded mesh: shared vertices, an index list.</summary>
-        private static Mesh BuildSmoothLand(PtmTile tile, LandPrep prep)
+        private static Mesh BuildSmoothLand(PtmTile tile, LandPrep prep) =>
+            MakeSmoothLand($"land {tile.Id} smooth", prep.Smooth, prep.SmoothSizes);
+
+        /// <summary>A welded land mesh (the near land's, or a far level's) in the land streams.</summary>
+        internal static Mesh MakeSmoothLand(string name, SmoothLandMesh s, float[] sizes)
         {
-            SmoothLandMesh s = prep.Smooth;
-            var mesh = new Mesh { name = $"land {tile.Id} smooth" };
-            LandStreams(mesh, s.VertexCount, s.OutPositions, s.OutNormals, s.OutAttrs, prep.SmoothSizes);
+            var mesh = new Mesh { name = name };
+            LandStreams(mesh, s.VertexCount, s.OutPositions, s.OutNormals, s.OutAttrs, sizes);
             int indexCount = s.Indices.Length;
             mesh.SetIndexBufferParams(indexCount, IndexFormat.UInt32);
             mesh.SetIndexBufferData(s.Indices, 0, 0, indexCount, Quiet);
@@ -142,10 +164,12 @@ namespace Retro.Unity
             return mesh;
         }
 
-        private static Mesh BuildLand(PtmTile tile, LandPrep prep, int count)
+        /// <summary>A faceted land soup (the near land's, or a far level's) with a sequential index.</summary>
+        internal static Mesh MakeSoupLand(string name, short[] xyz, sbyte[] normals, byte[] attrs, float[] sizes)
         {
-            var mesh = new Mesh { name = $"land {tile.Id}" };
-            LandStreams(mesh, count, tile.LandPositions, prep.Normals, tile.LandAttrs, prep.Sizes);
+            int count = xyz.Length / 3;
+            var mesh = new Mesh { name = name };
+            LandStreams(mesh, count, xyz, normals, attrs, sizes);
 
             mesh.SetIndexBufferParams(count, IndexFormat.UInt32);
             // Not a `using` declaration: C# forbids writing through a using-declared struct.

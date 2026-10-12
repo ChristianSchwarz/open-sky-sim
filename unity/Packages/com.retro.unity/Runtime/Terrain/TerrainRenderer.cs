@@ -22,6 +22,14 @@ namespace Retro.Unity
         public FlattenPadJson[] flattenPads;
         public AreaJson[] areas;
         public TerrainManifestTexture texture;
+        public FarLandJson farLand;
+    }
+
+    /// <summary>The manifest's far-land (.pfl) block; zoom -1 when the pyramid has none.</summary>
+    [Serializable]
+    internal sealed class FarLandJson
+    {
+        public int zoom = -1;
     }
 
     /// <summary>The manifest's cover-texture (.ptx) block.</summary>
@@ -178,6 +186,13 @@ namespace Retro.Unity
         private bool appliedSmooth;
         /// <summary>Far-tile cover textures, when the pyramid ships them.</summary>
         private TerrainCoverTextures covers;
+        /// <summary>The leaves' lighter far levels, when the pyramid ships them.</summary>
+        private TerrainFarLand farLand;
+        /// <summary>seamStitch.ts: each resident tile's live land and seam state, for its whole stay.</summary>
+        private readonly Dictionary<TileKey, StitchTile> stitch = new Dictionary<TileKey, StitchTile>();
+        private readonly List<StitchTile> drawnStitch = new List<StitchTile>();
+        /// <summary>Tiles the stitcher moved this frame (stats).</summary>
+        public int stitchedTiles;
         private Texture2D noCover;
         /// <summary>The watercourse strokes: RoadStroke at true width (no pixel floor), the deep-water colour.</summary>
         private Material riverMaterial;
@@ -252,9 +267,13 @@ namespace Retro.Unity
                     gpu.Remove(k);
                 }
                 covers?.Release(k);
+                farLand?.Release(k);
+                // Streamed back in, a tile is as baked again: a fresh seam record.
+                stitch.Remove(k);
             };
             if (viewer != null) viewer.Basis = session.Basis;
             if (TextureInfo != null) covers = new TerrainCoverTextures(root, TextureInfo, session.BakeBasis);
+            if (manifest.farLand != null && manifest.farLand.zoom >= 0) farLand = new TerrainFarLand(root, manifest.farLand.zoom);
             EnsureMaterials();
             Debug.Log($"Retro terrain: {root}, max zoom {manifest.mesh.maxZoom}, origin {manifest.enuOrigin.lat}, {manifest.enuOrigin.lon}");
         }
@@ -334,6 +353,7 @@ namespace Retro.Unity
             PumpUploads();
             Draw();
             covers?.Pump();
+            farLand?.Pump();
 
             residentTiles = session.Meshes.Count;
             uploadedTiles = gpu.Count;
@@ -346,7 +366,9 @@ namespace Retro.Unity
         private void Prepare(TileKey key, PtmTile tile)
         {
             bool smooth = smoothShading;
-            preparing.Add((key, tile, System.Threading.Tasks.Task.Run(() => LandPrep.Make(tile, smooth))));
+            // The SMOOTH weld is built from the land as the stitcher left it.
+            short[] live = smooth && stitch.TryGetValue(key, out StitchTile st) ? (short[])st.Positions.Clone() : null;
+            preparing.Add((key, tile, System.Threading.Tasks.Task.Run(() => LandPrep.Make(tile, smooth, live))));
         }
 
         /// <summary>
@@ -405,7 +427,24 @@ namespace Retro.Unity
                     if (!hasLand || old.Smooth == smoothShading) continue;
                     old.Destroy();
                 }
-                gpu[key] = TileMeshUpload.Build(tile, prep);
+                StitchTile s = null;
+                if (hasLand && !stitch.TryGetValue(key, out s))
+                {
+                    s = new StitchTile
+                    {
+                        Id = key, Border = tile.Border, Scale = tile.QuantScale,
+                        Positions = (short[])tile.LandPositions.Clone(),
+                        Normals = prep.Normals, Attrs = tile.LandAttrs, RegionSizes = prep.RawSizes,
+                    };
+                    stitch[key] = s;
+                }
+                gpu[key] = TileMeshUpload.Build(tile, prep, s?.Positions);
+                if (s != null)
+                {
+                    // The stitcher moves the welded vertices through the weld's index.
+                    s.SmoothPositions = prep.Smooth?.OutPositions;
+                    s.SmoothIndices = prep.Smooth?.Indices;
+                }
             }
         }
 
@@ -422,6 +461,54 @@ namespace Retro.Unity
         private static readonly int HasCoverTexId = Shader.PropertyToID("_HasCoverTex");
         private static readonly int CoverEnabledId = Shader.PropertyToID("_CoverEnabled");
         private MaterialPropertyBlock lodProps;
+
+        /// <summary>
+        /// syncGroup's stitchSeams: every drawn tile's border onto its master neighbour's (the coarser,
+        /// or for two of a level the west or north one), then what moved goes back to the GPU: the
+        /// faceted positions' dirty range, the welded positions, and the T-junction fill.
+        /// Under-parents neither move nor serve as masters.
+        /// </summary>
+        private void StitchSeams(Vec3d cam)
+        {
+            drawnStitch.Clear();
+            foreach (DrawTile d in session.DrawList)
+            {
+                if (d.Under || !gpu.TryGetValue(d.Key, out TileGpuMeshes m) || m.Land == null) continue;
+                if (!stitch.TryGetValue(d.Key, out StitchTile s)) continue;
+                double q = d.Tile.QuantScale;
+                s.Matrix = Mat4d.Compose(d.Origin, d.FrameFix, new Vec3d(q, q, q));
+                drawnStitch.Add(s);
+            }
+            stitchedTiles = SeamStitch.Stitch(drawnStitch);
+            foreach (StitchTile s in drawnStitch)
+            {
+                TileGpuMeshes m = gpu[s.Id];
+                // Moved: the land is built again from its arrays (a GPU-only mesh cannot be written in part,
+                // and a readable copy of every tile costs more than the tiles themselves).
+                if (s.PositionsChanged && !m.Smooth)
+                {
+                    Destroy(m.Land);
+                    m.Land = TileMeshUpload.MakeSoupLand($"land {s.Id}", s.Positions, s.Normals, s.Attrs, m.Sizes);
+                }
+                if (s.SmoothChanged && m.Smooth && m.SmoothSource != null)
+                {
+                    Destroy(m.Land);
+                    m.Land = TileMeshUpload.MakeSmoothLand($"land {s.Id} smooth", m.SmoothSource, m.SmoothSizes);
+                }
+                if (s.FillChanged)
+                {
+                    if (m.Fill != null) Destroy(m.Fill);
+                    m.Fill = null;
+                    SeamFill f = s.Fill;
+                    if (f != null && f.VertexCount > 0)
+                    {
+                        var sizes = new float[f.Sizes.Length];
+                        for (int i = 0; i < sizes.Length; i++) sizes[i] = f.Sizes[i];
+                        m.Fill = TileMeshUpload.MakeSoupLand($"seam fill {s.Id}", f.Positions, f.Normals, f.Attrs, sizes);
+                    }
+                }
+            }
+        }
 
         private void Draw()
         {
@@ -440,6 +527,9 @@ namespace Retro.Unity
             Camera cam0 = viewer.UnityCamera;
             landMaterial.SetFloat(SizeRevealScaleId, (float)Lod.LanduseRevealScale(cam0.pixelHeight, cam0.fieldOfView, landuseRevealPx));
             landMaterial.SetFloat(CoverEnabledId, farTileTextures ? 1f : 0f);
+            // limitTrackDetail: ground metres per pixel per metre of range, in the pixels drawn.
+            double pixelAngle = 2 * Math.Tan(cam0.fieldOfView * Math.PI / 360) / Math.Max(1, cam0.pixelHeight * renderScale);
+            farLand?.BeginFrame();
             if (covers != null) covers.Enabled = farTileTextures;
             if (noCover == null)
             {
@@ -448,6 +538,7 @@ namespace Retro.Unity
                 noCover.SetPixelData(new byte[] { 0, 0, 0, PtxCodec.NoData }, 0);
                 noCover.Apply(false, true);
             }
+            StitchSeams(cam);
             foreach (DrawTile d in session.DrawList)
             {
                 if (!gpu.TryGetValue(d.Key, out TileGpuMeshes m)) continue;
@@ -477,7 +568,19 @@ namespace Retro.Unity
                         lodProps.SetTexture(CoverTexId, noCover);
                         lodProps.SetFloat(HasCoverTexId, 0f);
                     }
-                    Graphics.RenderMesh(landParams, m.Land, 0, matrix);
+                    // Far land: a leaf seen from far enough off draws a lighter baked level instead.
+                    Mesh land = m.Land;
+                    if (farLand != null)
+                    {
+                        // The nearest point of the tile, from its quantised half-extent.
+                        double reach = d.Tile.QuantScale * TileMeshUpload.SNorm16Max * 1.4142135623730951;
+                        double nearM = Math.Max(0, (d.Origin - cam).Length - reach);
+                        stitch.TryGetValue(d.Key, out StitchTile seam);
+                        land = farLand.Pick(d.Key, d.Tile, TerrainFarLand.MaxPixels * nearM * pixelAngle, 1.0 / (1.0 + nearM / 1000), smoothShading, seam) ?? m.Land;
+                    }
+                    Graphics.RenderMesh(landParams, land, 0, matrix);
+                    // The T-junction fill rides with the tile's own land (not an under-parent's).
+                    if (m.Fill != null && !d.Under) Graphics.RenderMesh(landParams, m.Fill, 0, matrix);
                 }
                 // terrainEntity.ts riverMaterial: after the land and the roads, true width only.
                 if (m.Rivers != null && !d.Under)
@@ -506,6 +609,7 @@ namespace Retro.Unity
             foreach (TileGpuMeshes m in gpu.Values) m.Destroy();
             gpu.Clear();
             covers?.Dispose();
+            farLand?.Dispose();
             if (noCover != null) Destroy(noCover);
         }
     }

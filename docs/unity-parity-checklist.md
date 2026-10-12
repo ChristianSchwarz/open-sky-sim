@@ -19,7 +19,7 @@ Rows, not settings or keys: one row can cover several.
 | Area | Done | Partial | Missing |
 |---|---|---|---|
 | Simulation | 11 | 2 | 0 |
-| Terrain | 10 | 1 | 3 |
+| Terrain | 13 | 1 | 0 |
 | World detail | 12 | 0 | 0 |
 | Sky and FX | 8 | 2 | 5 |
 | Aircraft | 3 | 1 | 2 |
@@ -27,14 +27,14 @@ Rows, not settings or keys: one row can cover several.
 | Settings | 12 | 2 | 0 |
 | Input, views, replay, audio | 6 | 3 | 4 |
 | Boot and spawn | 3 | 1 | 1 |
-| **Total** | **77** | **13** | **16** |
+| **Total** | **80** | **13** | **13** |
 
 What is missing most visibly, in suggested order:
 1. ~~Engine audio~~ and ~~replay (F4)~~: done since the checklist was written (see the Input table).
 3. ~~Building and scenery colliders, and the glTF scenery~~: done since (see World detail).
 4. ~~Target cycling (T)~~ and the ILS: done since (see HUD and cockpit).
 5. ~~Settings that are only stored~~: done since (see Terrain and Settings).
-6. **Terrain**: runtime seam stitching, far land (`.pfl`), rivers.
+6. ~~Terrain~~: seam stitching, far land and rivers done since (see Terrain).
 7. **Space view**: the atmosphere shell and stars are missing, and so is the sun-visibility skyline.
 8. **Debug and showcase views**: F8 wireframe, V force vectors, Tab debug debris, F12 showcase and the land-cover tooltip.
 
@@ -68,11 +68,11 @@ What is missing most visibly, in suggested order:
 | Tile water (deep/shallow) | done | `TerrainRenderer.cs` |
 | Open sea | partial | one camera-centred curved grid (`U/Terrain/SeaSurface.cs`) instead of per-tile `oceanPatch.ts` patches |
 | Land-use size reveal (`landuseRevealPx`) | done | `TD/Land/LandMesh.cs` RegionSizes (golden `land_mesh.json`, 8 real tiles bit-exact) as a TEXCOORD0 stream; `TerrainLod.hlsl` RetroSizeReveal: leaf fills dissolve, coarser votes take their sampled colour; prepared off the main thread (`LandPrep`). Checked at 1 vs 24 px over GC |
-| Runtime seam stitching | missing | border table decoded (`Ptm.cs`), nothing stitches (web `seamStitch.ts`) |
-| Far land `.pfl` swap + fingerprint guard | missing | codec only (`TD/Codecs/Pfl.cs`) |
+| Runtime seam stitching | done | `TD/Land/SeamStitch.cs` (golden `seam_stitch.json`: 4 real GC tiles, 6 scenarios incl. masters leaving and returning, bit-exact); `TerrainRenderer.StitchSeams` per frame over the drawn non-under tiles; a moved tile's land (faceted or welded) is rebuilt from its arrays, the T-junction fill drawn with it. 99 fills over GC, no cracks seen |
+| Far land `.pfl` swap + fingerprint guard | done | `U/Terrain/TerrainFarLand.cs`: the coarsest level under half a pixel at the tile's nearest point (from its quantised half-extent, the web uses the quadtree sphere), stale sidecars refused by the near fingerprint, SMOOTH welds a few a frame, levels follow the stitched border (followSeam). 47 of 51 drawn tiles attached at GC |
 | Far cover textures `.ptx` on terrain | done | `U/Terrain/TerrainCoverTextures.cs` (own tile cache, point-sampled mip chain from `TD/Codecs/CoverTexture.cs`, coverFrame per tile, 4 tests); leaf textures past 3 km. 98 attached over GC at 6 km; on/off compared on screen |
 | Smooth shading | done | the ported weld (`LandMesh.BuildSmoothLandGeometry`, golden) uploaded indexed, `RETRO_SMOOTH` interpolates colour and normal; a toggle keeps each tile's mesh until its other kind is ready. Edge-normal lean ported too |
-| Rivers (`riverVP`) | missing | river arrays decoded, never drawn |
+| Rivers (`riverVP`) | done | each tile's water strokes in RoadStroke at true width (the web's riverMaterial sets no pixel floor), deep-water tone, after land and roads; 56 tiles at GC, seen continuing the river upstream |
 | Colour adjust (trees, terrain, water, sky) | done | `Shaders/ColourAdjust.hlsl` (the GLSL adjustColour) on the terrain facet colour, tree leaves and sky dome; water on its two palette tones (`ScenePalette.SetWaterTweak`). Checked on screen with extreme values, then restored |
 
 ## World detail
