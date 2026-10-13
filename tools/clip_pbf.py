@@ -65,6 +65,9 @@ from osm_common import glue_negative_bbox
 # whole z7/z8 cells around the bbox for the same reason.
 MARGIN_DEG = 0.05
 
+# PBF bytes merge_pbfs holds in memory per pass (see there).
+MERGE_BATCH_BYTES = 1_000_000_000
+
 
 def parse_bbox(text: str):
     parts = [float(p.strip()) for p in text.split(',')]
@@ -435,18 +438,35 @@ def merge_pbfs(paths: List[str], out_path: str) -> None:
     streams the largest file and folds the others in, sorted, keeping one
     copy per id - identical to clipping the union in one go (checked on two
     overlapping Canary Islands clips).
+
+    The folded-in files are held in memory whole, at roughly five times their
+    PBF size: DACH's ten neighbour clips (4 GB) took 20 GB and grew the
+    pagefile until the disk was full. So they are folded in a batch of about
+    MERGE_BATCH_BYTES at a time, each pass streaming the previous result.
     """
     paths = sorted(paths, key=os.path.getsize, reverse=True)
-    merger = osmium.MergeInputReader()
+    batches: List[List[str]] = []
     for path in paths[1:]:
-        merger.add_file(path)
-    tmp = out_path + '.part'
-    writer = osmium.io.Writer(osmium.io.File(tmp, 'pbf'), overwrite=True)
-    try:
-        merger.apply_to_reader(osmium.io.Reader(paths[0]), writer)
-    finally:
-        writer.close()
-    os.replace(tmp, out_path)
+        if not batches or sum(map(os.path.getsize, batches[-1])) + os.path.getsize(path) > MERGE_BATCH_BYTES:
+            batches.append([])
+        batches[-1].append(path)
+    base = paths[0]
+    for i, batch in enumerate(batches):
+        merger = osmium.MergeInputReader()
+        for path in batch:
+            merger.add_file(path)
+        tmp = f'{out_path}.part{i}.pbf'
+        writer = osmium.io.Writer(osmium.io.File(tmp, 'pbf'), overwrite=True)
+        try:
+            merger.apply_to_reader(osmium.io.Reader(base), writer)
+        finally:
+            writer.close()
+        if base != paths[0]:
+            os.remove(base)
+        base = tmp
+        if len(batches) > 1:
+            print(f'merge {i + 1}/{len(batches)}', flush=True)
+    os.replace(base, out_path)
 
 
 def main() -> int:
