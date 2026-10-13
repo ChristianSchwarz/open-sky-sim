@@ -303,6 +303,15 @@ def _batches(blobs, target_bytes: int):
 
 
 def default_workers() -> int:
+    """cores - 2, at most 16; CLIP_PBF_WORKERS overrides it.
+
+    Every worker loads the whole wanted-id list (423 MB for one dense 2-degree
+    chunk of the DACH extract), so a big read on a full disk runs out of
+    commit at 16 of them.
+    """
+    env = os.environ.get('CLIP_PBF_WORKERS')
+    if env:
+        return max(1, int(env))
     return max(1, min(16, (os.cpu_count() or 2) - 2))
 
 
