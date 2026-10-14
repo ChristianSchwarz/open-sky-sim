@@ -104,8 +104,19 @@ const HUDFontLetterMap = new Map<number, { col: number, row: number }>([
     [25, { col: 1, row: 3 }]
 ]);
 
+/**
+ * Strings kept drawn, by font, colours, effect and text. The HUD repaints
+ * every frame, and drawing it a glyph at a time was a few hundred drawImage
+ * calls; most of its strings are the same from one frame to the next.
+ */
+const RUN_CACHE_SIZE = 512;
+
 export class TextRenderer {
     private handles: Map<string, FontHandle>;
+    /** Least recently drawn first (Map order). */
+    private readonly runs = new Map<string, HTMLCanvasElement>();
+    /** Canvases of evicted runs, for the next ones. */
+    private readonly spareRuns: HTMLCanvasElement[] = [];
 
     constructor(private ctx: CanvasRenderingContext2D, colors: string[] = []) {
         const allColors = [...colors];
@@ -146,6 +157,47 @@ export class TextRenderer {
             x0 = x - Math.floor((text.length * charWidth + (text.length - 1) * charSpacing) / 2);
         }
 
+        // Drawn once into a run of its own, then copied: one drawImage a
+        // string. Not before the atlas has loaded, or a blank run would stick.
+        if (h.source.complete && h.source.naturalWidth > 0 && text.length > 0) {
+            const key = `${font.id}|${color ?? ''}|${effect}|${effectColor}|${text}`;
+            let run = this.runs.get(key);
+            if (run) {
+                this.runs.delete(key);
+            } else {
+                run = this.spareRuns.pop() ?? document.createElement('canvas');
+                run.width = text.length * (charWidth + charSpacing) + 3;
+                run.height = charHeight + 3;
+                const runCtx = run.getContext('2d');
+                if (!runCtx) {
+                    this.drawRun(h, srcCanvas, x0, y, text, color, effect, effectColor);
+                    return;
+                }
+                const main = this.ctx;
+                this.ctx = runCtx;
+                this.drawRun(h, srcCanvas, 1, 1, text, color, effect, effectColor);
+                this.ctx = main;
+                if (this.runs.size >= RUN_CACHE_SIZE) {
+                    const oldest = this.runs.keys().next().value as string;
+                    this.spareRuns.push(this.runs.get(oldest)!);
+                    this.runs.delete(oldest);
+                }
+            }
+            this.runs.set(key, run);
+            this.ctx.drawImage(run, x0 - 1, y - 1);
+            return;
+        }
+        this.drawRun(h, srcCanvas, x0, y, text, color, effect, effectColor);
+    }
+
+    /** The glyphs of `text` with their effect, the first one's top left at (x0, y). */
+    private drawRun(
+        h: FontHandle, srcCanvas: HTMLImageElement | HTMLCanvasElement, x0: number, y: number, text: string,
+        color: string | undefined, effect: TextEffect, effectColor: string,
+    ): void {
+        const charWidth = h.font.charWidth;
+        const charHeight = h.font.charHeight;
+        const charSpacing = h.font.charSpacing;
         if (effect === TextEffect.BACKGROUND) {
             this.ctx.fillStyle = effectColor;
             this.ctx.fillRect(x0 - 1, y - 1, text.length * (charWidth + charSpacing) + 1, charHeight + 2);

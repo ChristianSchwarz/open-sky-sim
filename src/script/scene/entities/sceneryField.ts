@@ -128,7 +128,7 @@ export class SceneryField implements Entity {
         // relying solely on Three's own per-mesh cull deep inside the
         // render list build.
         this.tmpProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-        this.tmpFrustum.setFromProjectionMatrix(this.tmpProjScreenMatrix);
+        this.tmpFrustum.setFromProjectionMatrix(this.tmpProjScreenMatrix, THREE.WebGLCoordinateSystem, camera.reversedDepth);
 
         let triangles = 0;
         let idx = 0;

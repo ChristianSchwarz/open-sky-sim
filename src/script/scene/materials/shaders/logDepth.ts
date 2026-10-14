@@ -1,9 +1,17 @@
-/** GLSL snippets for Three.js logarithmic depth (custom ShaderMaterials). */
+/**
+ * GLSL snippets for the depth the custom ShaderMaterials write: Three's
+ * logarithmic depth (USE_LOGARITHMIC_DEPTH_BUFFER), or under a reversed float
+ * depth buffer (USE_REVERSED_DEPTH_BUFFER, see Renderer useReversedDepth)
+ * nothing but the depth push - the rasteriser's own depth is the depth, and
+ * leaving gl_FragDepth alone is what keeps the early depth test on.
+ */
 
 export const LOG_DEPTH_PARS_VERTEX = `
 #ifdef USE_LOGARITHMIC_DEPTH_BUFFER
   varying float vFragDepth;
   varying float vIsPerspective;
+#endif
+#if defined(USE_LOGARITHMIC_DEPTH_BUFFER) || defined(USE_REVERSED_DEPTH_BUFFER)
   /**
    * Metres added to the view depth before it is written, so a surface can be
    * made to lose the depth test to anything drawn within that of it. A
@@ -22,6 +30,14 @@ export const LOG_DEPTH_VERTEX = `
   // fragment the same depth and the pass would z-fight itself. Same test
   // Three's own chunk makes; the ortho branch falls back to gl_FragCoord.z.
   vIsPerspective = projectionMatrix[2][3] == -1.0 ? 1.0 : 0.0;
+#elif defined(USE_REVERSED_DEPTH_BUFFER)
+  // Three's reversed projection writes depth = d / w - c, with c and d its
+  // [2][2] and [3][2] entries; a push takes the depth of w + uDepthPush.
+  // Per vertex rather than per fragment, so only exact at the vertices: the
+  // pushes are a tile's geometric error and more, far past that error.
+  if (uDepthPush != 0.0 && projectionMatrix[2][3] == -1.0) {
+    gl_Position.z = gl_Position.w * (projectionMatrix[3][2] / (gl_Position.w + uDepthPush) - projectionMatrix[2][2]);
+  }
 #endif
 `;
 

@@ -20,8 +20,13 @@ const BLIT_VERTEX_PROGRAM = `
   varying vec2 vUv;
   void main() {
     vUv = uv;
-    // A unit quad straight to clip space at the far plane; no camera is involved.
+    // A unit quad straight to clip space at the far plane; no camera is
+    // involved. A reversed depth buffer has its far plane at 0.
+#ifdef USE_REVERSED_DEPTH_BUFFER
+    gl_Position = vec4(position.xy * 2.0, 0.0, 1.0);
+#else
     gl_Position = vec4(position.xy * 2.0, 1.0, 1.0);
+#endif
   }
 `;
 
@@ -38,8 +43,8 @@ const BLIT_FRAGMENT_PROGRAM = `
 export class BlitPass {
     /** Holds the quad for a target no scene pass drew into; see drawDeferred. */
     private readonly scene = new THREE.Scene();
-    /** Identity: the quad is already in clip space. */
-    private readonly camera = new THREE.Camera();
+    /** Unused by the shader, but a projection camera; see SceneDepthPass.camera. */
+    private readonly camera = new THREE.OrthographicCamera();
     private readonly quad: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
 
     constructor() {

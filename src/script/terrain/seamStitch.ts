@@ -51,6 +51,24 @@ export interface StitchableTile {
     seam?: SeamState;
     /** The T-junction fill, while there is one; a child of `group`. */
     seamFill?: THREE.Mesh;
+    /**
+     * The widest gap the fill closes, in the tile's quantised units (a
+     * triangle's height over its longest side): what decides how far off the
+     * fill is still worth a draw (seamFillVisibleAt).
+     */
+    seamFillGap?: number;
+}
+
+/**
+ * Whether a fill still closes a gap worth drawing with `pixelM` ground metres
+ * per pixel at the tile's near edge. A tile is a draw call per fill, and most
+ * fills are kilometres off: a gap under a fraction of a pixel there shows at
+ * most the border skirt under it, a pixel at a time, not the sky.
+ */
+export const SEAM_FILL_MIN_PIXELS = 0.35;
+export function seamFillVisibleAt(tile: StitchableTile, pixelM: number): boolean {
+    const gapM = (tile.seamFillGap ?? Infinity) * Math.abs(tile.group.scale.x);
+    return pixelM <= 0 || gapM >= SEAM_FILL_MIN_PIXELS * pixelM;
 }
 
 /** Per-tile bookkeeping, kept on the tile itself so it goes when the tile does. */
@@ -375,6 +393,7 @@ export function disposeSeamFill(tile: StitchableTile): void {
         tile.seamFill.removeFromParent();
         tile.seamFill.geometry.dispose();
         tile.seamFill = undefined;
+        tile.seamFillGap = undefined;
     }
 }
 
@@ -518,6 +537,19 @@ function rebuildFill(id: TileKey, tile: StitchableTile, state: SeamState, master
         attrs[i * 4 + 3] = cArr ? cArr[v.a * 4 + 3] : 0;
         sizes[i] = sArr ? sArr[v.a] : 0;
     });
+    let gap = 0;
+    for (let t = 0; t + 2 < n; t += 3) {
+        const p = (i: number, k: number) => position[(t + i) * 3 + k];
+        const e1 = [p(1, 0) - p(0, 0), p(1, 1) - p(0, 1), p(1, 2) - p(0, 2)];
+        const e2 = [p(2, 0) - p(0, 0), p(2, 1) - p(0, 1), p(2, 2) - p(0, 2)];
+        const cross = Math.hypot(
+            e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]);
+        const longest = Math.max(Math.hypot(...e1), Math.hypot(...e2),
+            Math.hypot(p(2, 0) - p(1, 0), p(2, 1) - p(1, 1), p(2, 2) - p(1, 2)));
+        if (longest > 0) {
+            gap = Math.max(gap, cross / longest);
+        }
+    }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(position, 3));
     g.setAttribute('normal', new THREE.InterleavedBufferAttribute(new THREE.InterleavedBuffer(normals, 4), 3, 0, true));
@@ -538,4 +570,5 @@ function rebuildFill(id: TileKey, tile: StitchableTile, state: SeamState, master
     mesh.renderOrder = land.renderOrder;
     tile.group.add(mesh);
     tile.seamFill = mesh;
+    tile.seamFillGap = gap;
 }

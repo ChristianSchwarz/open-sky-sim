@@ -17,7 +17,7 @@ import { AircraftFx } from './aircraftFx';
 import { setAircraftShadowPose } from './aircraftShadow';
 import { SUN_STATE } from '../materials/shaders/sun';
 import { ModelManager } from '../models/models';
-import { Scene, SceneLayers } from '../scene';
+import { Scene, SceneLayers, drawsEntityLayers } from '../scene';
 import { WeaponsTarget } from './weaponsTarget';
 import { flightConfigWithArrestorHook } from './arrestorCables';
 import { WreckField, WreckPart, WreckTracker } from './wreckField';
@@ -465,6 +465,9 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
     // --- Rendering -----------------------------------------------------------
 
     render3D(targetWidth: number, targetHeight: number, camera: THREE.Camera, lists: Map<string, THREE.Scene>, palette: Palette): void {
+        if (!drawsEntityLayers(lists)) {
+            return;
+        }
         this.flightModel.getRenderPosition(this.displayPosition);
         this.flightModel.getRenderQuaternion(this.displayQuaternion);
         this.flightModel.getRenderVelocity(this.displayVelocity);

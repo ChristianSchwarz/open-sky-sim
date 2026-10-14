@@ -16,9 +16,11 @@
  *    slot, and the far copy maps its border corners onto the same slots.
  *  - The ground's outline (the shore, which the water meets vertex for
  *    vertex) and every steep face; a fill's outline only slides along
- *    itself, within the tolerance. Nor does a vertex go whose triangles are
- *    not all ground or all one land-use fill, or not all of one cover class
- *    and near enough one colour, or any of whose triangles is a wall or skirt.
+ *    itself, within the tolerance, and so does the edge between two cover
+ *    classes (one field against the next). Nor does a vertex go whose
+ *    triangles are not all ground or all one land-use fill, or span more than
+ *    two classes, or not near enough one colour within each, or any of whose
+ *    triangles is a wall or skirt.
  *  - Order between layers. The ground under a fill may only sink, and a
  *    fill may sink by less than it floats over the ground (FILL_SINK_M), so
  *    the ground never shows through a field. Ground with no fill over it
@@ -54,6 +56,8 @@ export interface FarLandInput {
     maxColourStep?: number;
     /** Faces closer to vertical than this (|n.up|) are walls or skirts and stay. */
     minUpDot?: number;
+    /** Diagnostics: filled with how many vertices each rule kept, by rule. */
+    diag?: Record<string, number>;
 }
 
 export interface FarLand {
@@ -145,10 +149,22 @@ export function buildFarLand(input: FarLandInput): FarLand {
     }
 
     const fixed = new Uint8Array(V);
+    const diag = input.diag;
+    const why = (reason: string) => {
+        if (diag) {
+            diag[reason] = (diag[reason] ?? 0) + 1;
+        }
+    };
+    if (diag) {
+        diag.vertices = V;
+    }
     const borderSlotOf = new Int32Array(V).fill(-1);
     for (const slot of input.borderSlots) {
         if (slot < triCount * 3) {
             const v = vertexOf[slot];
+            if (!fixed[v]) {
+                why('border');
+            }
             fixed[v] = 1;
             if (borderSlotOf[v] < 0) {
                 borderSlotOf[v] = slot;
@@ -163,7 +179,10 @@ export function buildFarLand(input: FarLandInput): FarLand {
         return (nx * ux + ny * uy + nz * uz) / l;
     };
 
-    // Which vertices may go at all.
+    // Which vertices may go at all. Up to two classes round one: the second
+    // only along a single class edge through it (checked below), and the
+    // colour judged within each class, not across the edge between them.
+    const twoClass = new Uint8Array(V);
     for (let v = 0; v < V; v++) {
         if (fixed[v]) {
             continue;
@@ -171,20 +190,39 @@ export function buildFarLand(input: FarLandInput): FarLand {
         const tris = incident[v];
         const t0 = tris[0];
         const layer = fills[t0];
-        const cls = attrs[t0 * 12 + 3];
-        let lo = [255, 255, 255], hi = [0, 0, 0];
+        const classes: number[] = [];
+        const lo: number[][] = [], hi: number[][] = [];
         for (const t of tris) {
-            if (fills[t] !== layer || attrs[t * 12 + 3] !== cls || Math.abs(faceUpDot(t)) < minUpDot) {
+            if (fills[t] !== layer || Math.abs(faceUpDot(t)) < minUpDot) {
+                why(fills[t] !== layer ? 'layer' : 'steep');
                 fixed[v] = 1;
                 break;
             }
+            const cls = attrs[t * 12 + 3];
+            let c = classes.indexOf(cls);
+            if (c < 0) {
+                if (classes.length === 2) {
+                    why('class');
+                    fixed[v] = 1;
+                    break;
+                }
+                c = classes.push(cls) - 1;
+                lo.push([255, 255, 255]);
+                hi.push([0, 0, 0]);
+            }
             const k = tv[t * 3] === v ? 0 : tv[t * 3 + 1] === v ? 1 : 2;
             const a = (t * 3 + k) * 4;
-            lo = [Math.min(lo[0], attrs[a]), Math.min(lo[1], attrs[a + 1]), Math.min(lo[2], attrs[a + 2])];
-            hi = [Math.max(hi[0], attrs[a]), Math.max(hi[1], attrs[a + 1]), Math.max(hi[2], attrs[a + 2])];
+            for (let ch = 0; ch < 3; ch++) {
+                lo[c][ch] = Math.min(lo[c][ch], attrs[a + ch]);
+                hi[c][ch] = Math.max(hi[c][ch], attrs[a + ch]);
+            }
         }
-        if (!fixed[v] && (hi[0] - lo[0] > maxStep || hi[1] - lo[1] > maxStep || hi[2] - lo[2] > maxStep)) {
+        if (!fixed[v] && lo.some((l, c) => hi[c][0] - l[0] > maxStep || hi[c][1] - l[1] > maxStep || hi[c][2] - l[2] > maxStep)) {
+            why('colour');
             fixed[v] = 1;
+        }
+        if (!fixed[v] && classes.length === 2) {
+            twoClass[v] = 1;
         }
     }
     // Outlines: the open edges round each layer (a fill's polygon, the
@@ -193,16 +231,33 @@ export function buildFarLand(input: FarLandInput): FarLand {
     // shared by more than two triangles, stays.
     const edgeCount = new Map<number, number>();
     const edgeKey = (a: number, b: number) => (a < b ? a * V + b : b * V + a);
+    // An edge's first triangle, to tell an edge between two classes.
+    const edgeFirst = new Map<number, number>();
+    const classNbrs: number[][] = Array.from({ length: V }, () => []);
     for (let t = 0; t < triCount; t++) {
         for (let k = 0; k < 3; k++) {
-            const key = edgeKey(tv[t * 3 + k], tv[t * 3 + (k + 1) % 3]);
-            edgeCount.set(key, (edgeCount.get(key) ?? 0) + 1);
+            const a = tv[t * 3 + k], b = tv[t * 3 + (k + 1) % 3];
+            const key = edgeKey(a, b);
+            const n = (edgeCount.get(key) ?? 0) + 1;
+            edgeCount.set(key, n);
+            if (n === 1) {
+                edgeFirst.set(key, t);
+            } else if (n === 2 && attrs[edgeFirst.get(key)! * 12 + 3] !== attrs[t * 12 + 3]) {
+                classNbrs[a].push(b);
+                classNbrs[b].push(a);
+            }
         }
     }
     const openNbrs: number[][] = Array.from({ length: V }, () => []);
     for (const [key, n] of edgeCount) {
         const a = Math.floor(key / V), b = key % V;
         if (n > 2) {
+            if (!fixed[a]) {
+                why('nonManifold');
+            }
+            if (!fixed[b]) {
+                why('nonManifold');
+            }
             fixed[a] = 1;
             fixed[b] = 1;
         } else if (n === 1) {
@@ -212,13 +267,27 @@ export function buildFarLand(input: FarLandInput): FarLand {
     }
     for (let v = 0; v < V; v++) {
         if (openNbrs[v].length !== 0 && openNbrs[v].length !== 2) {
+            if (!fixed[v]) {
+                why('outlineJunction');
+            }
             fixed[v] = 1;
         }
         // Only a fill's outline may slide: the ground is under it. The
         // ground's own outline is the shore, which the water sheet meets
         // vertex for vertex, so a moved one opens a crack to the sky.
         if (openNbrs[v].length === 2 && !fills[incident[v][0]]) {
+            if (!fixed[v]) {
+                why('groundOutline');
+            }
             fixed[v] = 1;
+        }
+        // Two classes: only on one class edge through it, and on no outline.
+        if (twoClass[v] && !fixed[v] && (classNbrs[v].length !== 2 || openNbrs[v].length !== 0)) {
+            why('classJunction');
+            fixed[v] = 1;
+        }
+        if (!twoClass[v]) {
+            classNbrs[v] = [];
         }
     }
     /** How far each outline edge already strays from the outline it replaced, metres. */
@@ -360,6 +429,12 @@ export function buildFarLand(input: FarLandInput): FarLand {
         if (onOutline && !openNbrs[u].includes(v)) {
             return false;
         }
+        // On the edge between two classes: along it only, like an outline,
+        // but an interior edge, with a triangle of each class to drop.
+        const onClassEdge = classNbrs[u].length === 2;
+        if (onClassEdge && !classNbrs[u].includes(v)) {
+            return false;
+        }
         if (drop.length !== (onOutline ? 1 : 2)) {
             return false;
         }
@@ -367,8 +442,9 @@ export function buildFarLand(input: FarLandInput): FarLand {
         // replaces its two, on top of what those two already strayed.
         let outlineKey = -1, outlineStray = 0;
         let w = -1;
-        if (onOutline) {
-            w = openNbrs[u][0] === v ? openNbrs[u][1] : openNbrs[u][0];
+        const line = onOutline ? openNbrs[u] : onClassEdge ? classNbrs[u] : undefined;
+        if (line) {
+            w = line[0] === v ? line[1] : line[0];
             if (w === v) {
                 return false;
             }
@@ -495,6 +571,19 @@ export function buildFarLand(input: FarLandInput): FarLand {
             openNbrs[v][openNbrs[v].indexOf(u)] = w;
             outlineErr.set(outlineKey, outlineStray);
             openNbrs[u] = [];
+        } else if (onClassEdge) {
+            // v is on the class edge too, fixed or not: keep its list exact
+            // for the vertices that still slide along it.
+            const atW = classNbrs[w].indexOf(u);
+            if (atW >= 0) {
+                classNbrs[w][atW] = v;
+            }
+            const atV = classNbrs[v].indexOf(u);
+            if (atV >= 0) {
+                classNbrs[v][atV] = w;
+            }
+            outlineErr.set(outlineKey, outlineStray);
+            classNbrs[u] = [];
         }
         return true;
     };

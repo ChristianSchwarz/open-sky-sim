@@ -211,6 +211,7 @@ export class Quadtree {
             new THREE.Matrix4().multiplyMatrices(
                 camera.projectionMatrix, camera.matrixWorldInverse,
             ),
+            THREE.WebGLCoordinateSystem, camera.reversedDepth,
         );
         const camPos = camera.position;
         const altitude = camPos.y;

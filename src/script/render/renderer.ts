@@ -6,13 +6,14 @@ import { Entity } from '../scene/entity';
 import { assertExpr, assertIsDefined } from '../utils/asserts';
 import { getOverlayLayout, getOverlayStrokeWidth } from '../scene/entities/overlay/overlayUtils';
 import { CanvasPainter } from './screen/canvasPainter';
-import { CanvasDirt, trackCanvasDirt } from './screen/canvasDirt';
+import { CanvasDirt, DirtRect, MAX_RECTS, trackCanvasDirt } from './screen/canvasDirt';
 import { TextEffect } from './screen/text';
 import { beginRenderListPass, pruneRenderList } from './renderList';
 import { clearRenderOrigin, setRenderOrigin } from './renderOrigin';
 import { BlitPass } from './blitPass';
 import { GpuPassTimer } from './gpuPassTimer';
 import { SceneDepthPass } from './sceneDepthPass';
+import { NearFirstOpaqueSort } from './opaqueOrder';
 
 export interface RendererOptions {
     textColors?: string[];
@@ -94,26 +95,91 @@ export interface RenderLayer {
 }
 
 /**
- * The depth+stencil attachment for a scene target, as a sampleable texture.
- *
- * DEPTH24_STENCIL8 rather than plain depth: the shadow volume pass counts into
- * the stencil, and a target cannot carry a depth texture and a separate stencil
- * renderbuffer at once.
+ * The depth attachment for a scene target, as a sampleable texture: 32-bit
+ * float under a reversed depth buffer (the float's exponent is what spreads
+ * the precision evenly from the cockpit to the horizon), else depth+stencil
+ * as it always was.
  */
-/** The compositor quad for a canvas target, v running top-down like the canvas's rows (flipY off). */
-function canvasPlane(width: number, height: number): THREE.PlaneGeometry {
-    const plane = new THREE.PlaneGeometry(width, height);
-    const uv = plane.getAttribute('uv') as THREE.BufferAttribute;
-    for (let i = 0; i < uv.count; i++) {
-        uv.setY(i, 1 - uv.getY(i));
+/**
+ * The compositor geometry for a canvas target: up to MAX_RECTS quads over
+ * the parts of it that hold drawing (setCanvasCover), centred like a plane of
+ * its size, v running top-down like the canvas's rows (flipY off).
+ */
+function canvasCover(width: number, height: number): THREE.BufferGeometry {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_RECTS * 4 * 3), 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(MAX_RECTS * 4 * 2), 2));
+    const index = new Uint16Array(MAX_RECTS * 6);
+    for (let q = 0; q < MAX_RECTS; q++) {
+        index.set([q * 4, q * 4 + 2, q * 4 + 1, q * 4 + 1, q * 4 + 2, q * 4 + 3], q * 6);
     }
-    return plane;
+    g.setIndex(new THREE.BufferAttribute(index, 1));
+    setCanvasCover(g, width, height, undefined);
+    return g;
 }
 
-function sceneDepthTexture(width: number, height: number): THREE.DepthTexture {
+/**
+ * Cover only `rects` of a `width` x `height` canvas (canvas pixels, top
+ * left origin), or all of it. The overlay is a transparent layer the size of
+ * the screen, blended over the frame: a full quad cost a blend of every
+ * pixel for a HUD that covers a few percent of them.
+ */
+function setCanvasCover(g: THREE.BufferGeometry, width: number, height: number, rects: DirtRect[] | undefined): void {
+    const all = rects ?? [{ x: 0, y: 0, width, height }];
+    const pos = g.getAttribute('position') as THREE.BufferAttribute;
+    const uv = g.getAttribute('uv') as THREE.BufferAttribute;
+    const n = Math.min(all.length, MAX_RECTS);
+    for (let q = 0; q < n; q++) {
+        const r = all[q];
+        const corners = [[r.x, r.y], [r.x + r.width, r.y], [r.x, r.y + r.height], [r.x + r.width, r.y + r.height]];
+        corners.forEach(([px, py], k) => {
+            pos.setXYZ(q * 4 + k, px - width / 2, height / 2 - py, 0);
+            uv.setXY(q * 4 + k, px / width, py / height);
+        });
+    }
+    pos.needsUpdate = true;
+    uv.needsUpdate = true;
+    g.setDrawRange(0, n * 6);
+    g.computeBoundingSphere();
+}
+
+function sceneDepthTexture(width: number, height: number, reversed: boolean): THREE.DepthTexture {
+    if (reversed) {
+        return new THREE.DepthTexture(width, height, THREE.FloatType);
+    }
     const texture = new THREE.DepthTexture(width, height, THREE.UnsignedInt248Type);
     texture.format = THREE.DepthStencilFormat;
     return texture;
+}
+
+/**
+ * Read as the bundle loads: the game rewrites the URL into its own camera
+ * form (Maps-style `@lat,lng,...`) before the renderer is built.
+ */
+const FORCE_LOG_DEPTH = typeof location !== 'undefined' && /[?&]logdepth\b/.test(location.search);
+
+/**
+ * Whether to draw with a reversed float depth buffer (EXT_clip_control)
+ * rather than the logarithmic one. Both hold the cockpit and a horizon half a
+ * megametre off in one buffer; the logarithmic one does it by writing
+ * gl_FragDepth from every fragment shader, which switches off the GPU's early
+ * depth test: every fragment of every surface is shaded, hidden or not. The
+ * reversed buffer needs no fragment depth, so what is behind the terrain
+ * already drawn (NearFirstOpaqueSort) is rejected before it is shaded.
+ * `?logdepth` in the URL keeps the logarithmic buffer, for comparison.
+ */
+function useReversedDepth(): boolean {
+    if (FORCE_LOG_DEPTH) {
+        return false;
+    }
+    try {
+        const gl = document.createElement('canvas').getContext('webgl2');
+        const supported = gl?.getExtension('EXT_clip_control') != null;
+        gl?.getExtension('WEBGL_lose_context')?.loseContext();
+        return supported;
+    } catch {
+        return false;
+    }
 }
 
 export class Renderer {
@@ -135,6 +201,7 @@ export class Renderer {
     private readonly relativeRoot = new THREE.Group();
     private readonly savedCamPos = new THREE.Vector3();
     private readonly sceneDepthPass = new SceneDepthPass();
+    private readonly opaqueSort = new NearFirstOpaqueSort(material => Renderer.deferredBlitRank(material));
     private readonly blitPass = new BlitPass();
     /**
      * One small offscreen buffer per destination target, the background sky
@@ -173,6 +240,8 @@ export class Renderer {
      */
     private readonly isWebGL2: boolean;
     private readonly gpuTimer: GpuPassTimer;
+    /** A reversed float depth buffer rather than a logarithmic one (useReversedDepth). */
+    private readonly reversedDepth: boolean;
 
     constructor(private materials: SceneMaterialManager, private composeWidth: number, private composeHeight: number, palette: Palette) {
         const container = document.getElementById('container');
@@ -180,7 +249,11 @@ export class Renderer {
         this.container = container;
         this.composeCamera = new THREE.OrthographicCamera(-composeWidth / 2, composeWidth / 2, composeHeight / 2, -composeHeight / 2, -10, 10);
         this.palette = palette;
-        this.renderer = new THREE.WebGLRenderer({ antialias: false, logarithmicDepthBuffer: true });
+        const reversed = useReversedDepth();
+        this.renderer = new THREE.WebGLRenderer({
+            antialias: false, reversedDepthBuffer: reversed, logarithmicDepthBuffer: !reversed,
+        });
+        this.reversedDepth = this.renderer.capabilities.reversedDepthBuffer;
         // Cap DPR so HD on high-DPI displays does not explode fill rate.
         this.renderer.setPixelRatio(Math.min(1.5, window.devicePixelRatio || 1));
         const gl = this.renderer.getContext();
@@ -194,10 +267,10 @@ export class Renderer {
         );
         this.renderer.autoClear = false;
         this.renderer.sortObjects = false;
-        // Only for the pass that carries a deferred sky (render3D): the
-        // traversal order everything relies on, but the sky quad after the
-        // geometry that writes depth. Array.prototype.sort is stable.
-        this.renderer.setOpaqueSort((a, b) => Renderer.deferredBlitRank(a.material) - Renderer.deferredBlitRank(b.material));
+        // Only for the pass that carries a deferred sky (render3D): the sky
+        // quad after the geometry that writes depth, that geometry nearest
+        // first, and everything else in traversal order (NearFirstOpaqueSort).
+        this.renderer.setOpaqueSort(this.opaqueSort.compare);
         this.renderer.setTransparentSort(() => 0);
         this.relativeRoot.name = 'CameraRelativeRoot';
         this.updateViewportSize();
@@ -311,7 +384,7 @@ export class Renderer {
 
         renderTarget.compositorObj.geometry.dispose();
         renderTarget.compositorObj.geometry = renderTarget.type === RenderTargetType.CANVAS
-            ? canvasPlane(width, height)
+            ? canvasCover(width, height)
             : new THREE.PlaneGeometry(width, height);
     }
 
@@ -477,7 +550,7 @@ export class Renderer {
         // frame between sunset and sunrise - a full-screen resolve per view is
         // not worth paying for a pass with nothing in it.
         if (layer.sceneDepthFrom !== undefined && this.hasAnythingInView(layer)) {
-            this.sceneDepthPass.resolve(this.renderer, renderTarget.target, layer.sceneDepthFrom.far);
+            this.sceneDepthPass.resolve(this.renderer, renderTarget.target, layer.sceneDepthFrom);
         }
 
         const sky = this.pendingSky.get(layer.target);
@@ -491,6 +564,7 @@ export class Renderer {
         const quad = this.blitPass.deferredMesh(sky.texture);
         list.add(quad);
         this.renderer.sortObjects = true;
+        this.opaqueSort.beginPass();
         try {
             this.submitCameraRelative(layer, palette);
         } finally {
@@ -571,7 +645,7 @@ export class Renderer {
         const camera = layer.camera;
         camera.updateMatrixWorld();
         Renderer._viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-        Renderer._frustum.setFromProjectionMatrix(Renderer._viewProjection);
+        Renderer._frustum.setFromProjectionMatrix(Renderer._viewProjection, THREE.WebGLCoordinateSystem, camera.reversedDepth);
         let inView = false;
         for (const listId of layer.lists) {
             this.current3DRenderLists.get(listId)?.traverseVisible(object => {
@@ -695,6 +769,8 @@ export class Renderer {
     private refreshCanvas(renderTarget: CanvasRenderTarget): void {
         const debug = globalThis as Record<string, unknown>;
         const rects = renderTarget.dirt.take();
+        setCanvasCover(renderTarget.compositorObj.geometry, renderTarget.width, renderTarget.height,
+            debug.__debugWholeCanvasUpload ? undefined : renderTarget.dirt.content);
         if (debug.__debugSkipCanvasUpload) {
             return;
         }
@@ -750,7 +826,7 @@ export class Renderer {
                 // Depth as a texture rather than a renderbuffer, so a later
                 // pass in this same target can be told what it is covering
                 // (SceneDepthPass).
-                depthTexture: sceneDepthTexture(textureWidth, textureHeight)
+                depthTexture: sceneDepthTexture(textureWidth, textureHeight, this.reversedDepth)
             });
             const compositorObj = new THREE.Mesh(
                 new THREE.PlaneGeometry(width, height),
@@ -768,7 +844,7 @@ export class Renderer {
             target.flipY = false;
             const source = new THREE.CanvasTexture(canvas);
             const compositorObj = new THREE.Mesh(
-                canvasPlane(width, height),
+                canvasCover(width, height),
                 new THREE.MeshBasicMaterial({ map: target, depthWrite: false, transparent: true })
             );
             compositorObj.position.set(x, y, 0);

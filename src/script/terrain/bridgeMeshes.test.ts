@@ -54,6 +54,25 @@ describe('buildBridgeMeshes', () => {
         assert.equal(set.concrete!.geometry.getIndex()!.count, 6);
     });
 
+    it('draws every role in one solid mesh, spans first, furniture last', () => {
+        const tile = sample();
+        // The deck quad becomes furniture: it must move behind the concrete.
+        for (let i = 0; i < 4; i++) {
+            tile.normals[i * 4 + 3] = BridgeRole.SignRed;
+        }
+        const solid = new THREE.MeshBasicMaterial();
+        const set = buildBridgeMeshes(tile, 0.5, { ...mats, solid });
+        assert.equal(set.deck, undefined);
+        assert.equal(set.concrete, undefined);
+        assert.equal(set.solid!.material, solid);
+        const index = Array.from(set.solid!.geometry.getIndex()!.array);
+        assert.deepEqual(index, [4, 5, 6, 4, 6, 7, 0, 1, 2, 0, 2, 3]);
+        assert.equal(set.solidSpanCount, 6);
+        const tone = Array.from(set.solid!.geometry.getAttribute('tone').array);
+        assert.deepEqual(tone, [3, 3, 3, 3, 1, 1, 1, 1]);
+        assert.ok(set.solid!.geometry.getAttribute('rawColor'), 'binds rawColor, or the tone shader reads black');
+    });
+
     it('rescales a sidecar baked at another quantisation step', () => {
         const set = buildBridgeMeshes(sample(), 0.25, mats);
         assert.ok(Math.abs(set.group.scale.x - 2) < 1e-6);

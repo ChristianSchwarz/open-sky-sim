@@ -13,8 +13,8 @@
 const TILE = 32;
 /** Past this share of the canvas, one whole upload beats the pieces. */
 const WHOLE_SHARE = 0.5;
-/** Past this many rectangles, their bounding box goes up instead. */
-const MAX_RECTS = 32;
+/** Past this many rectangles, their bounding box goes up instead: each part is a texSubImage2D, and a call costs the main thread more than its pixels do. */
+export const MAX_RECTS = 12;
 
 export interface DirtRect {
     x: number;
@@ -30,6 +30,11 @@ export class CanvasDirt {
     private previous = new Uint8Array(0);
     /** Set by anything the tracker cannot bound: the next take() asks for a whole upload. */
     private everything = true;
+    /**
+     * Where the frame take() last closed drew anything, or undefined when
+     * that is not known: the only parts of the canvas worth compositing.
+     */
+    content: DirtRect[] | undefined;
 
     constructor(private width: number, private height: number) {
         this.resize(width, height);
@@ -69,62 +74,78 @@ export class CanvasDirt {
     }
 
     /**
+     * Marked tiles as at most MAX_RECTS rectangles: runs along each tile row,
+     * a run carried down while the rows below repeat it exactly, then the
+     * pair whose union adds the least area merged until few enough are left
+     * (neighbours fold together, the far corners stay apart).
+     */
+    private rectsOf(tiles: Uint8Array): DirtRect[] {
+        const { cols, rows } = this;
+        const rects: DirtRect[] = [];
+        let open = new Map<number, DirtRect>();
+        for (let r = 0; r < rows; r++) {
+            const next = new Map<number, DirtRect>();
+            for (let c = 0; c < cols;) {
+                if (!tiles[r * cols + c]) {
+                    c++;
+                    continue;
+                }
+                let end = c;
+                while (end + 1 < cols && tiles[r * cols + end + 1]) {
+                    end++;
+                }
+                const key = c * 65536 + end;
+                const above = open.get(key);
+                if (above) {
+                    above.height += TILE;
+                    next.set(key, above);
+                } else {
+                    const rect = { x: c * TILE, y: r * TILE, width: (end - c + 1) * TILE, height: TILE };
+                    rects.push(rect);
+                    next.set(key, rect);
+                }
+                c = end + 1;
+            }
+            open = next;
+        }
+        for (const rect of rects) {
+            rect.width = Math.min(rect.width, this.width - rect.x);
+            rect.height = Math.min(rect.height, this.height - rect.y);
+        }
+        while (rects.length > MAX_RECTS) {
+            let best = Infinity, bi = 0, bj = 1;
+            for (let i = 0; i < rects.length; i++) {
+                for (let j = i + 1; j < rects.length; j++) {
+                    const added = unionArea(rects[i], rects[j]) - area(rects[i]) - area(rects[j]);
+                    if (added < best) {
+                        best = added;
+                        bi = i;
+                        bj = j;
+                    }
+                }
+            }
+            rects[bi] = union(rects[bi], rects[bj]);
+            rects.splice(bj, 1);
+        }
+        return rects;
+    }
+
+    /**
      * The rectangles to refresh for the frame just painted, or undefined for
-     * the whole canvas; starts the next frame.
+     * the whole canvas; starts the next frame. Also sets `content`.
      */
     take(): DirtRect[] | undefined {
-        const { cols, rows } = this;
         const both = this.previous;
         let tiles = 0;
         for (let i = 0; i < both.length; i++) {
             both[i] |= this.current[i];
             tiles += both[i];
         }
+        // What holds the frame's drawing, before the tiles to erase join it.
+        this.content = this.everything ? undefined : this.rectsOf(this.current);
         let rects: DirtRect[] | undefined;
         if (!this.everything && tiles * TILE * TILE < WHOLE_SHARE * this.width * this.height) {
-            // Runs along each tile row, and a run carried down while the rows
-            // below repeat it exactly.
-            rects = [];
-            let open = new Map<number, DirtRect>();
-            for (let r = 0; r < rows; r++) {
-                const next = new Map<number, DirtRect>();
-                for (let c = 0; c < cols;) {
-                    if (!both[r * cols + c]) {
-                        c++;
-                        continue;
-                    }
-                    let end = c;
-                    while (end + 1 < cols && both[r * cols + end + 1]) {
-                        end++;
-                    }
-                    const key = c * 65536 + end;
-                    const above = open.get(key);
-                    if (above) {
-                        above.height += TILE;
-                        next.set(key, above);
-                    } else {
-                        const rect = { x: c * TILE, y: r * TILE, width: (end - c + 1) * TILE, height: TILE };
-                        rects.push(rect);
-                        next.set(key, rect);
-                    }
-                    c = end + 1;
-                }
-                open = next;
-            }
-            for (const rect of rects) {
-                rect.width = Math.min(rect.width, this.width - rect.x);
-                rect.height = Math.min(rect.height, this.height - rect.y);
-            }
-            if (rects.length > MAX_RECTS) {
-                let x0 = Infinity, y0 = Infinity, x1 = 0, y1 = 0;
-                for (const rect of rects) {
-                    x0 = Math.min(x0, rect.x);
-                    y0 = Math.min(y0, rect.y);
-                    x1 = Math.max(x1, rect.x + rect.width);
-                    y1 = Math.max(y1, rect.y + rect.height);
-                }
-                rects = [{ x: x0, y: y0, width: x1 - x0, height: y1 - y0 }];
-            }
+            rects = this.rectsOf(both);
         }
         // This frame's tiles become the ones to erase next frame.
         this.previous = this.current;
@@ -133,6 +154,13 @@ export class CanvasDirt {
         return rects;
     }
 }
+
+const area = (r: DirtRect) => r.width * r.height;
+const union = (a: DirtRect, b: DirtRect): DirtRect => {
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+    return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
+};
+const unionArea = (a: DirtRect, b: DirtRect) => area(union(a, b));
 
 type Matrix = [number, number, number, number, number, number];
 

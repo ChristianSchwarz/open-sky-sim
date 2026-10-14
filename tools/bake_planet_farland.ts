@@ -16,6 +16,8 @@
  *     --levels a,b     tolerances in metres (default 1,4)
  *     --resume         skip leaves whose sidecar is newer than their mesh
  *                      (an interrupted run); the index still covers them all
+ *     --skip-newer T   skip leaves whose sidecar was written after time T
+ *                      (ISO): an interrupted re-bake of unchanged meshes
  *     --no-bundle      run the worker under tsx instead of an esbuild bundle
  */
 
@@ -42,6 +44,7 @@ interface Args {
     levelsM: number[];
     noBundle: boolean;
     resume: boolean;
+    skipNewerMs?: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -60,6 +63,12 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--levels') a.levelsM = next().split(',').map(Number);
         else if (k === '--no-bundle') a.noBundle = true;
         else if (k === '--resume') a.resume = true;
+        else if (k === '--skip-newer') {
+            a.skipNewerMs = Date.parse(next());
+            if (!Number.isFinite(a.skipNewerMs)) {
+                throw new Error('--skip-newer wants an ISO time');
+            }
+        }
         else throw new Error(`unknown argument ${k}`);
     }
     if (a.levelsM.length === 0 || !a.levelsM.every(m => m > 0) || a.levelsM.some((m, i) => i > 0 && m <= a.levelsM[i - 1])) {
@@ -104,9 +113,13 @@ async function main(): Promise<void> {
         .filter(k => k.z === leafZoom && (args.bbox === undefined || overlaps(boundsOf(k), args.bbox)));
     // Resuming: a sidecar written after its leaf's mesh was is that mesh's.
     const mtime = (f: string) => (fs.existsSync(f) ? fs.statSync(f).mtimeMs : -1);
-    const todo = args.resume
-        ? tiles.filter(k => mtime(tileFile(args.dir, k, FAR_LAND_EXT)) < mtime(tileFile(args.dir, k, '.ptm')))
-        : tiles;
+    const todo = tiles.filter(k => {
+        const own = mtime(tileFile(args.dir, k, FAR_LAND_EXT));
+        if (args.resume && own >= mtime(tileFile(args.dir, k, '.ptm'))) {
+            return false;
+        }
+        return !(args.skipNewerMs !== undefined && own > args.skipNewerMs);
+    });
     const jobs = Math.max(1, Math.min(args.jobs ?? os.cpus().length - 1, todo.length));
     console.log(`bake_planet_farland: ${todo.length} leaves${todo.length < tiles.length ? ` of ${tiles.length} (resumed)` : ''}`
         + `${args.bbox ? ' (scoped)' : ''}, levels ${args.levelsM.join(', ')} m, `

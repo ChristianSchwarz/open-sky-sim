@@ -34,17 +34,27 @@ const RESOLVE_FRAGMENT_PROGRAM = `
 
   uniform sampler2D uDepth;
   uniform float uLogCurve;
+  uniform float uNear;
+  uniform float uFar;
   uniform float uInvFar;
   uniform float uCeiling;
   varying vec2 vUv;
 ${SCENE_DEPTH_PACK_FRAGMENT}
   void main() {
     float depth = texture2D(uDepth, vUv).x;
+#ifdef USE_REVERSED_DEPTH_BUFFER
+    // Three's reversed projection: depth = near (far - w) / (w (far - near)),
+    // with w the view-axis distance - 1 at the near plane, 0 at the far one.
+    // Invert it. The buffer's clear value of 0 lands exactly on the far plane,
+    // which is what marks open sky.
+    float w = uNear * uFar / (depth * (uFar - uNear) + uNear);
+#else
     // Every material in the scene pass writes the logarithmic depth Three sets
     // up: gl_FragDepth = log2(1 + w) / log2(far + 1), with w the view-axis
     // distance (see shaders/logDepth.ts). Invert it. The buffer's clear value
     // of 1 lands exactly on the far plane, which is what marks open sky.
     float w = exp2(depth * uLogCurve) - 1.0;
+#endif
     gl_FragColor = vec4(packUnit(min(w * uInvFar, uCeiling)), 1.0);
   }
 `;
@@ -58,8 +68,12 @@ export class SceneDepthPass {
      */
     private readonly copies: Map<THREE.WebGLRenderTarget, THREE.WebGLRenderTarget> = new Map();
     private readonly scene = new THREE.Scene();
-    /** Identity: the quad is already in clip space. */
-    private readonly camera = new THREE.Camera();
+    /**
+     * Unused by the shader - the quad is already in clip space - but a
+     * projection camera: under a reversed depth buffer three rebuilds every
+     * camera's projection, and a bare THREE.Camera has none to rebuild.
+     */
+    private readonly camera = new THREE.OrthographicCamera();
     private readonly material: THREE.ShaderMaterial;
 
     constructor() {
@@ -69,6 +83,8 @@ export class SceneDepthPass {
             uniforms: {
                 uDepth: { value: null },
                 uLogCurve: { value: 1 },
+                uNear: { value: 1 },
+                uFar: { value: 1 },
                 uInvFar: { value: 1 },
                 uCeiling: { value: SCENE_DEPTH_CEILING },
             },
@@ -80,14 +96,15 @@ export class SceneDepthPass {
 
     /**
      * Resolves `source`'s depth and points {@link SCENE_DEPTH_UNIFORMS} at the
-     * result. `far` is the far plane of the camera whose pass wrote that depth,
-     * which sets the logarithmic curve it has to be read back through.
+     * result. `camera` is the one whose pass wrote that depth: its planes set
+     * the curve it has to be read back through.
      *
      * Leaves the bound render target as it found it: layers after the first on
      * a target never rebind it themselves, so anything that borrows the binding
      * mid-frame has to give it back.
      */
-    resolve(renderer: THREE.WebGLRenderer, source: THREE.WebGLRenderTarget, far: number): void {
+    resolve(renderer: THREE.WebGLRenderer, source: THREE.WebGLRenderTarget, camera: THREE.PerspectiveCamera): void {
+        const { near, far } = camera;
         const depth = source.depthTexture;
         if (!depth) {
             return;
@@ -96,6 +113,8 @@ export class SceneDepthPass {
 
         this.material.uniforms.uDepth.value = depth;
         this.material.uniforms.uLogCurve.value = Math.log2(far + 1);
+        this.material.uniforms.uNear.value = near;
+        this.material.uniforms.uFar.value = far;
         this.material.uniforms.uInvFar.value = 1 / far;
 
         const previous = renderer.getRenderTarget();

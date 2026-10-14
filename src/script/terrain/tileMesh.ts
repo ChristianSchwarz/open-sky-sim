@@ -28,6 +28,7 @@ import { TerrainShading } from '../state/gameDefs';
 import { EnuBasis, ecefToEnu, geodeticToEcef, sceneFromEnu } from './geodesy';
 import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmBorder, PtmTile } from './ptm';
 import type { SeamState } from './seamStitch';
+import { GROUND_CLASS, SmoothWeld, hasLanduseGround, weldSmoothLand } from './smoothWeld';
 import type { BridgeMeshSet } from './bridgeMeshes';
 import type { BuildingMeshSet } from './buildingMeshes';
 import type { RoadMeshes } from './roadStrokes';
@@ -63,8 +64,8 @@ export interface TileMeshes {
      * hard colour edge between two, and lights the slope continuously
      * across it — it is only worth the
      * weld-and-average pass for a tile actually shown in SMOOTH mode, so it
-     * is built at upload time when SMOOTH is already active, or lazily on the
-     * first switch to SMOOTH otherwise (see TerrainEntity.setTerrainShading).
+     * is built only while SMOOTH is active, off the main thread, and swapped
+     * in when it is back (see TerrainEntity.pumpSmooth).
      */
     landGeometryFaceted?: THREE.BufferGeometry;
     landGeometrySmooth?: THREE.BufferGeometry;
@@ -144,6 +145,8 @@ export interface TileMeshes {
     seam?: SeamState;
     /** The stitcher's T-junction fill, while the tile has one. */
     seamFill?: THREE.Mesh;
+    /** See StitchableTile.seamFillGap. */
+    seamFillGap?: number;
     /** Bytes of GPU buffer, for the cache budget. */
     bytes: number;
 }
@@ -153,22 +156,6 @@ export type ToneMaterials = readonly THREE.Material[];
 
 // TerrainClass.Ground spelled out: it is a `const enum`, and the tsx test
 // runner leaves an imported const-enum binding undefined.
-const GROUND_CLASS = 13;
-
-/**
- * Whether any land vertex is TerrainClass.Ground - land no land-use polygon
- * claims, on a tile that has land-use. Only such a tile's other classes are
- * land-use regions (exact fills on the leaf, votes above it); on a raster-only
- * tile the classes *are* the ground.
- */
-function hasLanduseGround(landAttrs: Uint8Array): boolean {
-    for (let i = 3; i < landAttrs.length; i += 4) {
-        if (landAttrs[i] === GROUND_CLASS) {
-            return true;
-        }
-    }
-    return false;
-}
 
 /**
  * Per vertex, the width in metres of the land-use region it belongs to: the
@@ -348,14 +335,6 @@ export function landGeometryFromArrays(
  * facet carries its own sample, so keying on colour there would split the
  * weld back into facets: class alone tells the region.
  */
-function regionKeyOf(attrs: Uint8Array, v: number, landuse: boolean): number {
-    const cls = attrs[v * 4 + 3];
-    if (!landuse || cls === GROUND_CLASS) {
-        return cls;
-    }
-    return attrs[v * 4] | (attrs[v * 4 + 1] << 8) | (attrs[v * 4 + 2] << 16) | (cls << 24);
-}
-
 /** Fraction of the tile's width, from each edge, that counts as its border. */
 const EDGE_NORMAL_BAND = 0.01;
 /** How far a border normal leans toward straight up, 0..1. */
@@ -392,127 +371,22 @@ export function buildSmoothLandGeometry(
     /** Per-vertex region width (see regionSizes); the weld keeps the largest. */
     sizes?: Uint16Array,
 ): THREE.BufferGeometry | undefined {
-    const vertexCount = positions.length / 3;
-    if (vertexCount === 0) {
-        return undefined;
-    }
+    const weld = weldSmoothLand(positions, normals, attrs, sizes);
+    return weld && smoothGeometryFromWeld(weld);
+}
 
-    // Two welds over one pass: colour (and class, size) by position+region,
-    // normal by position alone. A position's slot is its normal; the output
-    // vertices at one position (one per region there, rarely more than
-    // three) hang off it in a list. Both in first-seen order. Typed arrays
-    // and an open-addressed table rather than Maps keyed on strings: a leaf
-    // has up to 100K vertices, and this runs on the main thread for every
-    // leaf streamed in under SMOOTH (30-50 ms a leaf with the strings).
-    let capacity = 16;
-    while (capacity < vertexCount * 2) {
-        capacity *= 2;
-    }
-    const mask = capacity - 1;
-    const table = new Int32Array(capacity).fill(-1);
-    const slotPositions = new Int16Array(vertexCount * 3);
-    const firstOut = new Int32Array(vertexCount);
-    const normalSum = new Float64Array(vertexCount * 3);
-    let slots = 0;
-    const nextOut = new Int32Array(vertexCount);
-    const outRegion = new Int32Array(vertexCount);
-    const normalOf = new Int32Array(vertexCount);
-    const uniquePositions = new Int16Array(vertexCount * 3);
-    const colorSum = new Float64Array(vertexCount * 4);
-    const vertexClass = new Uint8Array(vertexCount);
-    const sizeMax = new Uint16Array(vertexCount);
-    let uniqueCount = 0;
-    const remap = new Uint32Array(vertexCount);
-    const landuse = hasLanduseGround(attrs);
-
-    for (let i = 0; i < vertexCount; i++) {
-        const px = positions[i * 3];
-        const py = positions[i * 3 + 1];
-        const pz = positions[i * 3 + 2];
-        let h = (Math.imul(px, 73856093) ^ Math.imul(py, 19349663) ^ Math.imul(pz, 83492791)) & mask;
-        let n = table[h];
-        while (n !== -1 && (slotPositions[n * 3] !== px || slotPositions[n * 3 + 1] !== py || slotPositions[n * 3 + 2] !== pz)) {
-            h = (h + 1) & mask;
-            n = table[h];
-        }
-        if (n === -1) {
-            n = slots++;
-            table[h] = n;
-            slotPositions[n * 3] = px;
-            slotPositions[n * 3 + 1] = py;
-            slotPositions[n * 3 + 2] = pz;
-            firstOut[n] = -1;
-        }
-        const region = regionKeyOf(attrs, i, landuse);
-        let idx = firstOut[n];
-        while (idx !== -1 && outRegion[idx] !== region) {
-            idx = nextOut[idx];
-        }
-        if (idx === -1) {
-            idx = uniqueCount++;
-            outRegion[idx] = region;
-            nextOut[idx] = firstOut[n];
-            firstOut[n] = idx;
-            uniquePositions[idx * 3] = px;
-            uniquePositions[idx * 3 + 1] = py;
-            uniquePositions[idx * 3 + 2] = pz;
-            normalOf[idx] = n;
-            vertexClass[idx] = attrs[i * 4 + 3];
-        }
-        remap[i] = idx;
-        if (sizes && sizes[i] > sizeMax[idx]) {
-            sizeMax[idx] = sizes[i];
-        }
-
-        const ni = i * 4;
-        normalSum[n * 3] += normals[ni];
-        normalSum[n * 3 + 1] += normals[ni + 1];
-        normalSum[n * 3 + 2] += normals[ni + 2];
-
-        const ai = i * 4;
-        colorSum[idx * 4] += attrs[ai];
-        colorSum[idx * 4 + 1] += attrs[ai + 1];
-        colorSum[idx * 4 + 2] += attrs[ai + 2];
-        colorSum[idx * 4 + 3] += 1;
-    }
-
-    const outPositions = uniquePositions.slice(0, uniqueCount * 3);
-    const outNormals = new Int8Array(uniqueCount * 4);
-    const outAttrs = new Uint8Array(uniqueCount * 4);
-    const outSizes = sizeMax.slice(0, uniqueCount);
-    for (let v = 0; v < uniqueCount; v++) {
-        const n = normalOf[v];
-        const nx = normalSum[n * 3];
-        const ny = normalSum[n * 3 + 1];
-        const nz = normalSum[n * 3 + 2];
-        const len = Math.hypot(nx, ny, nz) || 1;
-        outNormals[v * 4] = Math.round((nx / len) * 127);
-        outNormals[v * 4 + 1] = Math.round((ny / len) * 127);
-        outNormals[v * 4 + 2] = Math.round((nz / len) * 127);
-        outNormals[v * 4 + 3] = 0;
-
-        const count = colorSum[v * 4 + 3] || 1;
-        outAttrs[v * 4] = Math.round(colorSum[v * 4] / count);
-        outAttrs[v * 4 + 1] = Math.round(colorSum[v * 4 + 1] / count);
-        outAttrs[v * 4 + 2] = Math.round(colorSum[v * 4 + 2] / count);
-
-        outAttrs[v * 4 + 3] = vertexClass[v];
-    }
-
-    const IndexArray = uniqueCount > 65535 ? Uint32Array : Uint16Array;
-    const indices = new IndexArray(vertexCount);
-    indices.set(remap);
-
+/** The SMOOTH land geometry over a weld (weldSmoothLand), made here or in a worker (SmoothWelder). */
+export function smoothGeometryFromWeld(weld: SmoothWeld): THREE.BufferGeometry {
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(outPositions, 3));
-    const normalBuffer = new THREE.InterleavedBuffer(outNormals as unknown as Int8Array, 4);
+    g.setAttribute('position', new THREE.BufferAttribute(weld.positions, 3));
+    const normalBuffer = new THREE.InterleavedBuffer(weld.normals as unknown as Int8Array, 4);
     g.setAttribute('normal', new THREE.InterleavedBufferAttribute(normalBuffer, 3, 0, true));
-    const attrBuffer = new THREE.InterleavedBuffer(outAttrs, 4);
+    const attrBuffer = new THREE.InterleavedBuffer(weld.attrs, 4);
     g.setAttribute('coverColor', new THREE.InterleavedBufferAttribute(attrBuffer, 3, 0, true));
     g.setAttribute('coverClass', new THREE.InterleavedBufferAttribute(attrBuffer, 1, 3, false));
-    g.setAttribute('regionSize', new THREE.BufferAttribute(outSizes, 1, false));
-    g.setIndex(new THREE.BufferAttribute(indices, 1));
-    g.addGroup(0, indices.length, LAND_TONE_BASE);
+    g.setAttribute('regionSize', new THREE.BufferAttribute(weld.sizes, 1, false));
+    g.setIndex(new THREE.BufferAttribute(weld.indices, 1));
+    g.addGroup(0, weld.indices.length, LAND_TONE_BASE);
     return g;
 }
 

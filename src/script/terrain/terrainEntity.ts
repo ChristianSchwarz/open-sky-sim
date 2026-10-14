@@ -66,10 +66,10 @@ import { Airfield } from './airfields';
 import { OceanPatch, buildOceanPatch, disposeOceanPatch } from './oceanPatch';
 import { PtmTile, decodePtm } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
-import { stitchSeams } from './seamStitch';
+import { seamFillVisibleAt, stitchSeams } from './seamStitch';
 import { TileIndex } from './tileIndex';
 import {
-    TileMeshes, TileRailBed, buildSmoothLandGeometryFromFaceted, buildTileMeshes, disposeTileMeshes,
+    TileMeshes, TileRailBed, buildTileMeshes, disposeTileMeshes, smoothGeometryFromWeld,
     landGeometryFromArrays, tileOriginWorld,
 } from './tileMesh';
 import { RailWalls, buildRailBedExclusion } from './railBed';
@@ -90,6 +90,8 @@ import {
     TerrainDetailSetting, TerrainShadingSetting, TreeDensitySetting, TriangleBudgetSetting, VisibleZoomSetting,
 } from '../config/configService';
 import { publishTerrainStats, trackTerrainMaterial } from './debug';
+import { refreshWeldPositions } from './smoothWeld';
+import { SmoothWelder } from './smoothWelder';
 
 /**
  * The palette tone a landcover class is painted in.
@@ -149,6 +151,9 @@ const PAD_RELEVANCE_M = 400_000;
  * needs this spread over several frames instead of firing all at once.
  */
 const TREE_INITIAL_ATTACHES_PER_FRAME = 1;
+
+/** SMOOTH welds out with the workers at once, see TerrainEntity.pumpSmooth. */
+const SMOOTH_IN_FLIGHT = 4;
 
 /** A tile's part in the leaf dissolve this pass; on its group's userData. */
 interface TileLodState {
@@ -379,8 +384,12 @@ export class TerrainEntity implements Entity {
      */
     private bootstrapping = true;
 
-    /** True while upgradeResidentToSmooth is already pacing through the resident set, so a second call doesn't start a redundant one. */
-    private smoothUpgradeRunning = false;
+    /** The SMOOTH weld, on workers (see pumpSmooth). */
+    private readonly welder = new SmoothWelder();
+    /** Tiles whose weld is out with the welder. */
+    private readonly smoothPending = new Set<TileMeshes>();
+    /** A tile may be missing its SMOOTH geometry: one came in, a weld came back, or SMOOTH was switched on. */
+    private smoothBacklog = false;
 
     /**
      * Switch between flat per-facet colour and smooth (Gouraud) shading.
@@ -390,7 +399,7 @@ export class TerrainEntity implements Entity {
      * too expensive to pay on every streamed tile regardless of which mode is
      * showing. Switching to SMOOTH swaps in whatever's already cached
      * immediately (cheap - no allocation), then hands off to
-     * upgradeResidentToSmooth to build the rest: it used to build every
+     * pumpSmooth to build the rest: it used to build every
      * still-missing one right here, in one uninterrupted loop, which was
      * exactly the boot-time OOM (see `bootstrapping`) moved to whenever a
      * saved SMOOTH setting got applied instead of avoided.
@@ -406,53 +415,60 @@ export class TerrainEntity implements Entity {
             }
         }
         if (mode === TerrainShading.SMOOTH) {
-            void this.upgradeResidentToSmooth();
+            this.smoothBacklog = true;
+            this.pumpSmooth();
         }
     }
 
     /**
-     * Paces through the resident set building any still-missing SMOOTH
-     * geometry, a short burst at a time with a real yield in between - the
-     * same burst/yield/GC-opportunity shape as waitForPinned, for the same
-     * reason: building many of these back to back with no yield lets their
-     * temporary buffers pile up as un-reclaimable garbage across the whole
-     * burst instead of being reclaimed between tiles. Safe to call whenever
-     * SMOOTH becomes active; only one pass ever runs at a time, and it stops
-     * on its own if the mode is switched away before it finishes.
+     * Hands the welder (SmoothWelder) the resident tiles still missing their
+     * SMOOTH geometry, a few at a time, and swaps each in as it comes back.
+     * Called every frame of the LOD pass; a frame with no backlog does
+     * nothing. Not while booting: the pinned burst uploads FACETED and the
+     * upgrade starts once it is over (see `bootstrapping`). At most
+     * SMOOTH_IN_FLIGHT at once, since each job carries a copy of its tile's
+     * land (up to ~1.6 MB a leaf).
      */
-    private async upgradeResidentToSmooth(): Promise<void> {
-        if (this.smoothUpgradeRunning) {
+    private pumpSmooth(): void {
+        if (!this.smoothBacklog || this.bootstrapping || this.landShading !== TerrainShading.SMOOTH) {
             return;
         }
-        this.smoothUpgradeRunning = true;
-        try {
-            const BUDGET_MS = 15;
-            const YIELD_MS = 20;
-            let moreToBuild = true;
-            while (moreToBuild && this.landShading === TerrainShading.SMOOTH) {
-                moreToBuild = false;
-                const burstStart = Date.now();
-                for (const meshes of this.streamer.values()) {
-                    if (meshes.landGeometrySmooth || !meshes.landGeometryFaceted) {
-                        continue;
-                    }
-                    const smoothLg = buildSmoothLandGeometryFromFaceted(meshes.landGeometryFaceted);
-                    meshes.landGeometrySmooth = smoothLg;
-                    if (smoothLg && meshes.land && this.landShading === TerrainShading.SMOOTH) {
-                        meshes.land.geometry = smoothLg;
-                    }
-                    if (Date.now() - burstStart >= BUDGET_MS) {
-                        moreToBuild = true;
-                        break;
-                    }
-                }
-                if (moreToBuild) {
-                    await new Promise(r => setTimeout(r, YIELD_MS));
-                }
+        for (const meshes of this.streamer.values()) {
+            if (this.welder.inFlight >= SMOOTH_IN_FLIGHT) {
+                return;
             }
-        } finally {
-            this.smoothUpgradeRunning = false;
+            if (!meshes.landGeometrySmooth && meshes.landGeometryFaceted && !this.smoothPending.has(meshes)) {
+                this.requestSmooth(meshes, meshes.landGeometryFaceted);
+            }
         }
+        // A whole pass with room to spare: nothing left to ask for.
+        this.smoothBacklog = false;
+    }
+
+    private requestSmooth(meshes: TileMeshes, faceted: THREE.BufferGeometry): void {
+        const position = faceted.getAttribute('position') as THREE.BufferAttribute;
+        const normal = faceted.getAttribute('normal') as THREE.InterleavedBufferAttribute;
+        const coverColor = faceted.getAttribute('coverColor') as THREE.InterleavedBufferAttribute;
+        const regionSize = faceted.getAttribute('regionSize') as THREE.BufferAttribute | undefined;
+        this.smoothPending.add(meshes);
+        void this.welder.weld(
+            position.array as Int16Array, normal.data.array as Int8Array,
+            coverColor.data.array as Uint8Array, regionSize?.array as Uint16Array | undefined,
+        ).then(weld => {
+            this.smoothPending.delete(meshes);
+            this.smoothBacklog = true;
+            if (!weld || meshes.disposed || meshes.landGeometrySmooth || meshes.landGeometryFaceted !== faceted) {
+                return;
+            }
+            // The seams may have moved the border since the copy was taken.
+            refreshWeldPositions(weld.positions, weld.indices, position.array as Int16Array);
+            const smooth = smoothGeometryFromWeld(weld);
+            meshes.landGeometrySmooth = smooth;
+            meshes.bytes += weld.indices.byteLength;
+            if (meshes.land && this.landShading === TerrainShading.SMOOTH) {
+                meshes.land.geometry = smooth;
+            }
+        });
     }
 
     /**
@@ -628,8 +644,7 @@ export class TerrainEntity implements Entity {
      * may have had its raw decoded bytes evicted independently of its GPU
      * resources (see TileStore); such a tile just keeps its trees at the old
      * density until it streams in again. Paced a handful of tiles at a time
-     * with a real yield in between, the same shape as upgradeResidentToSmooth,
-     * since scattering runs synchronously and re-attaching awaits atlas
+     * with a real yield in between, since scattering runs synchronously and re-attaching awaits atlas
      * textures that are normally already cached and resolve immediately.
      */
     private async rebuildResidentTrees(materials: SceneMaterialManager): Promise<void> {
@@ -740,9 +755,10 @@ export class TerrainEntity implements Entity {
             },
         }) as THREE.ShaderMaterial;
         this.landMaterial.side = THREE.DoubleSide;
-        this.landMaterial.polygonOffset = true;
-        this.landMaterial.polygonOffsetFactor = 1;
-        this.landMaterial.polygonOffsetUnits = 1;
+        // No polygon offset (it had one): under the logarithmic depth buffer
+        // every fragment wrote gl_FragDepth, which replaces the offset depth,
+        // so it never did anything, and under the reversed one it would start
+        // to - moving the land against every stroke laid on it.
         trackTerrainMaterial(this.landMaterial);
 
         // Rivers take the deep-water colour: a canal is water, and reading as
@@ -809,11 +825,7 @@ export class TerrainEntity implements Entity {
                 secondTone: tone === TerrainTone.Water ? TONE_CATEGORIES[TerrainTone.ShallowWater] : undefined,
             }) as THREE.ShaderMaterial;
             mat.side = THREE.DoubleSide;
-            mat.polygonOffset = true;
-            // Water sits farther back than land so a coplanar beach edge
-            // resolves to land rather than sky-coloured sparkles.
-            mat.polygonOffsetFactor = 2;
-            mat.polygonOffsetUnits = 2;
+            // No polygon offset, as for the land material above.
             trackTerrainMaterial(mat);
             this.materials.push(mat);
         }
@@ -923,9 +935,12 @@ export class TerrainEntity implements Entity {
                 const meshes = buildTileMeshes(
                     tile, this.basis, this.materials, this.riverMaterial,
                     tileBeforeRender, this.frameFix,
-                    this.bootstrapping ? TerrainShading.FACETED : this.landShading,
+                    // SMOOTH follows from the welder's workers (pumpSmooth):
+                    // welded here it was a frame lost per leaf streamed in.
+                    TerrainShading.FACETED,
                     undefined, opts.manifest.mesh.maxZoom,
                 );
+                this.smoothBacklog = true;
                 // Trees (and ground clutter - see stones.ts) are attached
                 // lazily from the draw loop (see syncGroup), for the tiles
                 // actually being drawn - not here. Keep the source for that:
@@ -979,12 +994,13 @@ export class TerrainEntity implements Entity {
         // Bridges are lit solids on the leaf, in the two road greys: the
         // surface in the main road's, the concrete a shade off it. Both
         // depth-write, unlike the strokes they replace.
-        const bridgeMaterial = (category: PaletteCategory) => {
+        const bridgeMaterial = (category: PaletteCategory, vertexTones?: readonly PaletteCategory[]) => {
             const m = opts.materials.build({
                 type: SceneMaterialPrimitiveType.MESH,
                 category,
                 depthWrite: true,
                 shaded: true as const,
+                vertexTones,
             }) as THREE.ShaderMaterial;
             m.side = THREE.DoubleSide;
             trackTerrainMaterial(m);
@@ -996,6 +1012,12 @@ export class TerrainEntity implements Entity {
         this.bridges = new BridgeMeshes({
             manifest: opts.manifest,
             baseUrl: base,
+            // A tile's bridges in one draw: each role's tone per vertex, in BridgeRole order.
+            solidMaterial: bridgeMaterial(PaletteCategory.SCENERY_ROAD_SECONDARY, [
+                PaletteCategory.SCENERY_ROAD_MAIN, PaletteCategory.SCENERY_ROAD_SECONDARY,
+                PaletteCategory.SCENERY_RAIL, PaletteCategory.SCENERY_BUILDING_METAL_RED,
+                PaletteCategory.SCENERY_BUILDING_METAL_WHITE, PaletteCategory.SCENERY_BUILDING_METAL,
+            ]),
             deckMaterial: bridgeMaterial(PaletteCategory.SCENERY_ROAD_MAIN),
             concreteMaterial: bridgeMaterial(PaletteCategory.SCENERY_ROAD_SECONDARY),
             railDeckMaterial: bridgeMaterial(PaletteCategory.SCENERY_RAIL),
@@ -1581,6 +1603,7 @@ export class TerrainEntity implements Entity {
         if (isLodPass) {
             this.viewportHeightPx = targetHeight;
             this.reconcile(camera);
+            this.pumpSmooth();
         }
         const list = lists.get(SceneLayers.Terrain);
         if (list) {
@@ -1616,6 +1639,11 @@ export class TerrainEntity implements Entity {
         if (camera) {
             this.buildings.beginFrame();
             this.farLand.beginFrame();
+            // In the scene's frame, like the tile groups (see tileFrameBounds.ts).
+            camera.updateMatrixWorld();
+            this.buildingFrustum.setFromProjectionMatrix(
+                this.buildingViewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse),
+                THREE.WebGLCoordinateSystem, camera.reversedDepth);
         }
         for (const node of this.drawList) {
             const meshes = this.streamer.get(node.id);
@@ -1628,6 +1656,10 @@ export class TerrainEntity implements Entity {
                 // them every MFD refresh and back churned every far tile
                 // twice a refresh for a small, half-resolution display.
                 this.roads.showTrackDetail(meshes, true);
+                this.buildings.showAll(meshes);
+                if (meshes.seamFill) {
+                    meshes.seamFill.visible = true;
+                }
                 for (const trees of meshes.trees ?? []) {
                     trees.count = treeInstancesToDraw(trees, meshes.group, undefined, 0);
                     trees.visible = true;
@@ -1636,11 +1668,14 @@ export class TerrainEntity implements Entity {
             }
             const nearM = Math.max(0, node.center.distanceTo(camera.position) - node.radius);
             if (!node.under) {
-                this.buildings.want(meshes, nearM);
+                this.buildings.want(meshes, camera.position, this.buildingFrustum);
             }
             this.roads.showTrackDetail(meshes, nearM <= reach);
             this.roads.showLevel(meshes, roadLevelFor(nearM * pixelAngle));
             this.bridges.showLevel(meshes, camera.position, pixelAngle);
+            if (meshes.seamFill) {
+                meshes.seamFill.visible = seamFillVisibleAt(meshes, nearM * pixelAngle);
+            }
             for (const trees of meshes.trees ?? []) {
                 trees.count = treeInstancesToDraw(trees, meshes.group, camera.position, pixelAngle);
                 // A patch thinned to nothing is still a draw call.
@@ -1670,6 +1705,8 @@ export class TerrainEntity implements Entity {
     }
 
     private readonly cullFrustum = new THREE.Frustum();
+    private readonly buildingFrustum = new THREE.Frustum();
+    private readonly buildingViewProjection = new THREE.Matrix4();
     private readonly cullProjScreenMatrix = new THREE.Matrix4();
 
     /**
@@ -1701,7 +1738,7 @@ export class TerrainEntity implements Entity {
         this.limitTrackDetail(undefined);
         camera.updateMatrixWorld();
         this.cullProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-        this.cullFrustum.setFromProjectionMatrix(this.cullProjScreenMatrix);
+        this.cullFrustum.setFromProjectionMatrix(this.cullProjScreenMatrix, THREE.WebGLCoordinateSystem, camera.reversedDepth);
         for (const node of this.drawList) {
             const group = this.streamer.get(node.id)?.group ?? this.oceans.get(node.key)?.group;
             if (group) {

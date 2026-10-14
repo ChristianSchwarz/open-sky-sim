@@ -13,7 +13,7 @@ import { clamp, easeOutQuad, easeOutQuint, FORWARD, RIGHT, UP } from '../../util
 import { Entity, ENTITY_TAGS } from "../entity";
 import { SceneMaterialManager } from '../materials/materials';
 import { ModelManager, Model } from '../models/models';
-import { Scene, SceneLayers } from "../scene";
+import { Scene, SceneLayers, drawsEntityLayers } from "../scene";
 import { AircraftFx } from './aircraftFx';
 import { AircraftForceVectors } from './aircraftForceVectors';
 import { setAircraftShadowPose } from './aircraftShadow';
@@ -898,6 +898,9 @@ export class PlayerEntity implements Entity {
     }
 
     render3D(targetWidth: number, targetHeight: number, camera: THREE.Camera, lists: Map<string, THREE.Scene>, palette: Palette): void {
+        if (!drawsEntityLayers(lists)) {
+            return;
+        }
 
         this.updateWreck();
 

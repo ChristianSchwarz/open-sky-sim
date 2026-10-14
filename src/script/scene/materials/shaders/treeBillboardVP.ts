@@ -9,9 +9,11 @@ import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
  * drawn over one another for a canopy the eye reads as one texture. Past the
  * distance where a tile's spacing projects to this, each tree is kept with
  * the probability that holds the on-screen spacing there, by its own
- * distance rather than its tile's (a tile is 6-7 km across).
+ * distance rather than its tile's (a tile is 6-7 km across). Four, not three:
+ * at three a far forest still cost ~3 ms of an integrated GPU's vertex work,
+ * and the kept trees grow (TREE_MAX_GROW) to cover the same ground.
  */
-export const TREE_MIN_SPACING_PX = 3;
+export const TREE_MIN_SPACING_PX = 4;
 /**
  * How much a kept tree may grow to cover for the ones dropped round it: by
  * the square root of what was dropped, so the canopy covers about as much

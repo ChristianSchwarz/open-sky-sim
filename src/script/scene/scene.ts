@@ -27,6 +27,16 @@ export enum SceneLayers {
     ForegroundSky = 'ForegroundSky'
 }
 
+/**
+ * Whether a pass draws any of the entity layers. Every entity's render3D runs
+ * for every pass - the sky, the ground and the glare too - so one that does
+ * per-frame work there (an aircraft's effects, its wreck, its shadow pose)
+ * should return early for a pass that draws none of what it adds.
+ */
+export function drawsEntityLayers(lists: Map<string, THREE.Scene>): boolean {
+    return lists.has(SceneLayers.EntityVolumes) || lists.has(SceneLayers.EntityFlats) || lists.has(SceneLayers.EntityFX);
+}
+
 export class Scene {
 
     private entities: Entity[] = [];

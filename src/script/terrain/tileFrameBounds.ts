@@ -4,8 +4,8 @@ const sphere = new THREE.Sphere();
 const toTile = new THREE.Matrix4();
 
 /**
- * How far `mesh`, a part of the tile drawn by `tileGroup`, is from `eye` at
- * its near edge, both in the scene's own frame.
+ * `mesh`'s bounding sphere in the scene's own frame, `mesh` being a part of
+ * the tile drawn by `tileGroup`, written to `out`.
  *
  * Not from the mesh's matrixWorld: the renderer draws camera-relative
  * (Renderer.submitCameraRelative), which leaves every matrixWorld relative to
@@ -14,7 +14,7 @@ const toTile = new THREE.Matrix4();
  * re-base (FrameShift.object), and what hangs off it does not move within it,
  * so the bounds are kept in the tile's frame.
  */
-export function nearDistanceInTile(mesh: THREE.Mesh, tileGroup: THREE.Object3D, eye: THREE.Vector3): number {
+export function sphereInTile(mesh: THREE.Mesh, tileGroup: THREE.Object3D, out: THREE.Sphere): THREE.Sphere {
     let local = mesh.userData.tileSphere as THREE.Sphere | undefined;
     if (local === undefined) {
         const instanced = mesh as THREE.InstancedMesh;
@@ -40,6 +40,10 @@ export function nearDistanceInTile(mesh: THREE.Mesh, tileGroup: THREE.Object3D, 
         local = (bounds ?? new THREE.Sphere()).clone().applyMatrix4(toTile);
         mesh.userData.tileSphere = local;
     }
-    sphere.copy(local).applyMatrix4(tileGroup.matrix);
-    return Math.max(0, sphere.distanceToPoint(eye));
+    return out.copy(local).applyMatrix4(tileGroup.matrix);
+}
+
+/** How far `mesh` is from `eye` at its near edge, both in the scene's own frame (see sphereInTile). */
+export function nearDistanceInTile(mesh: THREE.Mesh, tileGroup: THREE.Object3D, eye: THREE.Vector3): number {
+    return Math.max(0, sphereInTile(mesh, tileGroup, sphere).distanceToPoint(eye));
 }

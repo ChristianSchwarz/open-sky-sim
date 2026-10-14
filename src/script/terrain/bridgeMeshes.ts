@@ -39,6 +39,13 @@ export interface BridgeMeshSet {
     signPost?: THREE.Mesh;
     /** Meshes past one per slot (furniture beside a role's bridge geometry). */
     extra?: THREE.Mesh[];
+    /**
+     * Every role of the sidecar's own geometry in one draw (BridgeMaterials
+     * .solid), in place of the per-role meshes above: the spans first, the
+     * furniture last, so `solidSpanCount` indices draw the spans alone.
+     */
+    solid?: THREE.Mesh;
+    solidSpanCount?: number;
     /** Sleepers and rails along the rail decks, a rail stroke. */
     track?: THREE.Mesh;
     /** The deck track's sleeper and rail passes, sharing `track`'s geometry. */
@@ -53,6 +60,8 @@ export interface BridgeMeshSet {
 export interface BridgeMeshesOptions {
     manifest: TerrainManifest;
     baseUrl: string;
+    /** Every role in one draw; see BridgeMaterials.solid. */
+    solidMaterial?: THREE.Material;
     /** Road surface on top of a deck. */
     deckMaterial: THREE.Material;
     /** Undersides, sides, parapets, piers, abutments. */
@@ -156,6 +165,47 @@ export function boxGeometry(boxes: Float32Array, role: BridgeRole, quantScale: n
     return g;
 }
 
+/** Furniture roles, drawn after the spans in a solid mesh. */
+const isFurniture = (role: BridgeRole) =>
+    role === BridgeRole.SignRed || role === BridgeRole.SignWhite || role === BridgeRole.SignPost;
+
+/**
+ * The sidecar's own geometry as one mesh: its triangles ordered spans first
+ * and furniture last, each vertex carrying its role as `tone`.
+ */
+function solidGeometry(tile: PbrTile): { geometry: THREE.BufferGeometry; spanCount: number; toneBytes: number } | undefined {
+    const all = tile.indices;
+    if (all.length === 0) {
+        return undefined;
+    }
+    const roleOf = (v: number) => pbrRole(tile.normals[v * 4 + 3]);
+    const ordered = new Uint16Array(all.length);
+    let o = 0;
+    const take = (furniture: boolean) => {
+        for (let i = 0; i < all.length; i += 3) {
+            if (isFurniture(roleOf(all[i])) === furniture) {
+                ordered[o++] = all[i];
+                ordered[o++] = all[i + 1];
+                ordered[o++] = all[i + 2];
+            }
+        }
+    };
+    take(false);
+    const spanCount = o;
+    take(true);
+    const vertices = tile.positions.length / 3;
+    const tone = new Uint8Array(vertices);
+    for (let v = 0; v < vertices; v++) {
+        tone[v] = roleOf(v);
+    }
+    const geometry = bridgeGeometry(tile, ordered);
+    geometry.setAttribute('tone', new THREE.BufferAttribute(tone, 1));
+    // No colour of its own: the tone always (an unbound rawColor reads black).
+    const raw = new Uint8Array(vertices * 4);
+    geometry.setAttribute('rawColor', new THREE.BufferAttribute(raw, 4, true));
+    return { geometry, spanCount, toneBytes: tone.byteLength + raw.byteLength };
+}
+
 function bridgeGeometry(tile: PbrTile, indices: Uint16Array): THREE.BufferGeometry {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(tile.positions, 3));
@@ -167,6 +217,12 @@ function bridgeGeometry(tile: PbrTile, indices: Uint16Array): THREE.BufferGeomet
 
 /** A material per role, in BridgeRole order. */
 export interface BridgeMaterials {
+    /**
+     * Optional: one shaded material taking each role's palette tone per
+     * vertex (vertexTones in BridgeRole order, a `tone` attribute). A tile's
+     * bridges are then one draw instead of one per role.
+     */
+    solid?: THREE.Material;
     deck: THREE.Material;
     concrete: THREE.Material;
     railDeck: THREE.Material;
@@ -202,7 +258,23 @@ export function buildBridgeMeshes(
     group.updateMatrix();
     group.matrixAutoUpdate = false;
     const set: BridgeMeshSet = { group, bytes: 0 };
+    const solid = materials.solid ? solidGeometry(tile) : undefined;
+    if (solid && materials.solid) {
+        const mesh = new THREE.Mesh(solid.geometry, materials.solid);
+        mesh.frustumCulled = false;
+        mesh.matrixAutoUpdate = false;
+        if (onBeforeRender) {
+            mesh.onBeforeRender = onBeforeRender;
+        }
+        group.add(mesh);
+        set.solid = mesh;
+        set.solidSpanCount = solid.spanCount;
+        set.bytes += (solid.geometry.getIndex()?.array.byteLength ?? 0) + solid.toneBytes;
+    }
     for (const [role, slot] of ROLE_SLOTS) {
+        if (solid) {
+            break;
+        }
         const material = materials[slot];
         const indices = material ? roleIndices(tile, role) : undefined;
         if (!indices || !material) {
@@ -285,7 +357,7 @@ const FURNITURE_HIDE_PIXEL_M = 1;
 
 function triangles(set: BridgeMeshSet): number {
     let n = 0;
-    for (const mesh of [set.deck, set.concrete, set.railDeck, set.signRed, set.signWhite, set.signPost,
+    for (const mesh of [set.solid, set.deck, set.concrete, set.railDeck, set.signRed, set.signWhite, set.signPost,
         set.track, set.trackDetail, set.trackTop, ...(set.extra ?? [])]) {
         if (mesh) {
             n += (mesh.geometry.getIndex()?.count ?? 0) / 3;
@@ -310,6 +382,7 @@ export class BridgeMeshes {
         this.minZoom = spec?.minZoom ?? 0;
         this.maxZoom = spec?.maxZoom ?? -1;
         this.materials = {
+            solid: opts.solidMaterial,
             deck: opts.deckMaterial, concrete: opts.concreteMaterial, railDeck: opts.railDeckMaterial,
             signRed: opts.signRedMaterial, signWhite: opts.signWhiteMaterial, signPost: opts.signPostMaterial,
             track: opts.trackMaterial,
@@ -475,6 +548,12 @@ export class BridgeMeshes {
                 mesh.visible = nearDistanceInTile(mesh, tile, eye) * pixelAngle <= limitM;
             }
         };
+        if (set.solid) {
+            show(set.solid, DECK_HIDE_PIXEL_M);
+            // Past the furniture's reach, the spans alone.
+            const far = nearDistanceInTile(set.solid, tile, eye) * pixelAngle > FURNITURE_HIDE_PIXEL_M;
+            set.solid.geometry.setDrawRange(0, far ? set.solidSpanCount ?? Infinity : Infinity);
+        }
         show(set.deck, DECK_HIDE_PIXEL_M);
         show(set.concrete, DECK_HIDE_PIXEL_M);
         show(set.railDeck, DECK_HIDE_PIXEL_M);

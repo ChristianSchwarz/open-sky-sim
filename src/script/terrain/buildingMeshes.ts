@@ -10,12 +10,14 @@
  * budget of BUILDING_BUILD_MS a frame, a tile at a time, most prominent
  * building first.
  *
- * One mesh, one draw per tile: every face carries its palette tone index
- * (BUILDING_TONES) and the material looks it up (`vertexTones`). The
- * records arrive most prominent first, so a far tile draws a prefix of the
- * mesh - every building at least BUILDING_MIN_PIXELS across - and a frame
- * that would draw more than BUILDING_TRIANGLE_BUDGET raises that floor for
- * every tile alike until it fits. The terrain's own budget never counts
+ * A mesh per patch of the tile (BUILDING_PATCHES a side), one draw each:
+ * every face carries its palette tone index (BUILDING_TONES) and the
+ * material looks it up (`vertexTones`). The records arrive most prominent
+ * first, so a far patch draws a prefix of its mesh - every building at least
+ * BUILDING_MIN_PIXELS across at the patch's own near edge - and a frame that
+ * would draw more than BUILDING_TRIANGLE_BUDGET raises that floor for every
+ * patch alike until it fits. A patch out of view is not drawn and does not
+ * count: the tile round the camera is mostly behind it. The terrain's own budget never counts
  * buildings: dropping a house must never coarsen the ground under it.
  */
 
@@ -27,6 +29,7 @@ import { TileIndex } from './tileIndex';
 import { TileMeshes } from './tileMesh';
 import { TileStore } from './tileStore';
 import { TileKey } from './tiling';
+import { sphereInTile } from './tileFrameBounds';
 
 /** Decoded sidecars kept; a bound tile no longer needs its record bytes. */
 const BUILDING_CACHE_BYTES = 24 * 1024 * 1024;
@@ -44,9 +47,14 @@ export const BUILDING_BUILD_MS = 3;
  */
 export const BUILDING_GROW_SECONDS = 8;
 const BUILDING_GROW_MIN_PER_S = 25;
+/**
+ * Patches a side a tile's buildings are split into. Two: the tile under the
+ * camera loses the half behind it, for three more draws a tile at most.
+ */
+const BUILDING_PATCHES = 2;
 
-export interface BuildingMeshSet {
-    group: THREE.Group;
+/** The buildings of one patch of a tile, most prominent first. */
+export interface BuildingPatch {
     mesh: THREE.Mesh;
     /** Triangles after the first i + 1 buildings. */
     prefix: Uint32Array;
@@ -56,6 +64,13 @@ export interface BuildingMeshSet {
     shown: number;
     /** Buildings drawn now: the prefix `shown` is the triangles of. */
     count: number;
+}
+
+export interface BuildingMeshSet {
+    group: THREE.Group;
+    patches: BuildingPatch[];
+    /** Triangles bound, every patch. */
+    triangles: number;
     /** GPU bytes bound, for the cache budget. */
     bytes: number;
 }
@@ -205,10 +220,12 @@ function countAtLeast(prominence: Float32Array, minProminence: number): number {
     return lo;
 }
 
-function trianglesFor(set: BuildingMeshSet, minProminence: number): number {
-    const n = countAtLeast(set.prominence, minProminence);
-    return n > 0 ? set.prefix[n - 1] : 0;
+function trianglesFor(patch: BuildingPatch, minProminence: number): number {
+    const n = countAtLeast(patch.prominence, minProminence);
+    return n > 0 ? patch.prefix[n - 1] : 0;
 }
+
+const patchSphere = new THREE.Sphere();
 
 export class BuildingMeshes {
     private readonly store: TileStore<PbhTile> | undefined;
@@ -223,10 +240,10 @@ export class BuildingMeshes {
     private shownTris = 0;
     private minPixels = BUILDING_MIN_PIXELS;
     private lastFrameMs = 0;
-    /** Fractions of a building owed to each tile between frames. */
-    private readonly owed = new WeakMap<BuildingMeshSet, number>();
-    /** This frame's drawn leaves and their near-edge distance, for the budget. */
-    private readonly frame: Array<{ set: BuildingMeshSet; nearM: number }> = [];
+    /** Fractions of a building owed to each patch between frames. */
+    private readonly owed = new WeakMap<BuildingPatch, number>();
+    /** This frame's patches of drawn leaves: their near-edge distance, and whether in view. */
+    private readonly frame: Array<{ patch: BuildingPatch; nearM: number; inView: boolean }> = [];
     budget = BUILDING_TRIANGLE_BUDGET;
 
     constructor(opts: BuildingMeshesOptions) {
@@ -354,31 +371,19 @@ export class BuildingMeshes {
         for (let i = 1; i < job.prominence.length; i++) {
             job.prominence[i] = Math.min(job.prominence[i], job.prominence[i - 1]);
         }
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(soup.pos.slice(0, soup.tris * 9), 3));
-        geometry.setAttribute('normal', new THREE.BufferAttribute(soup.nrm.slice(0, soup.tris * 9), 3, true));
-        geometry.setAttribute('tone', new THREE.BufferAttribute(soup.tone.slice(0, soup.tris * 3), 1));
-        geometry.setAttribute('rawColor', new THREE.BufferAttribute(soup.raw.slice(0, soup.tris * 12), 4, true));
-        const mesh = new THREE.Mesh(geometry, this.material);
-        // Buildings overhang their tile's edge, and the tile is culled whole.
-        mesh.frustumCulled = false;
-        mesh.matrixAutoUpdate = false;
-        if (this.onBeforeRender) {
-            mesh.onBeforeRender = this.onBeforeRender;
-        }
         const group = new THREE.Group();
         group.name = `buildings:${job.id.z}/${job.id.x}/${job.id.y}`;
         // Positions are metres; the tile group scales its quantised land up.
         group.scale.setScalar(1 / meshes.group.scale.x);
         group.updateMatrix();
         group.matrixAutoUpdate = false;
-        group.add(mesh);
+        const patches = this.patchesOf(job);
+        for (const patch of patches) {
+            group.add(patch.mesh);
+        }
         group.visible = this.on;
-        // Hidden until the next frame's budget pass gives it a draw range.
-        mesh.visible = false;
         const set: BuildingMeshSet = {
-            group, mesh, prefix: job.prefix, prominence: job.prominence, shown: soup.tris, count: 0,
-            bytes: soup.tris * 3 * (12 + 3 + 1 + 4),
+            group, patches, triangles: soup.tris, bytes: soup.tris * 3 * (12 + 3 + 1 + 4),
         };
         meshes.group.add(group);
         meshes.buildings = set;
@@ -387,13 +392,88 @@ export class BuildingMeshes {
         this.tris += soup.tris;
     }
 
+    /**
+     * Split a tile's extruded buildings into BUILDING_PATCHES^2 meshes by
+     * where each one stands, keeping their order (most prominent first).
+     */
+    private patchesOf(job: PendingBuild): BuildingPatch[] {
+        const { soup, prefix, prominence } = job;
+        const n = prefix.length;
+        const startOf = (i: number) => (i === 0 ? 0 : prefix[i - 1]);
+        // Each building's place in plan: the mean of its first triangle (x, z).
+        const cx = new Float32Array(n), cz = new Float32Array(n);
+        let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        for (let i = 0; i < n; i++) {
+            const o = startOf(i) * 9;
+            if (prefix[i] === startOf(i)) {
+                continue;
+            }
+            cx[i] = (soup.pos[o] + soup.pos[o + 3] + soup.pos[o + 6]) / 3;
+            cz[i] = (soup.pos[o + 2] + soup.pos[o + 5] + soup.pos[o + 8]) / 3;
+            x0 = Math.min(x0, cx[i]);
+            x1 = Math.max(x1, cx[i]);
+            z0 = Math.min(z0, cz[i]);
+            z1 = Math.max(z1, cz[i]);
+        }
+        const p = BUILDING_PATCHES;
+        const cell = (i: number) =>
+            Math.min(p - 1, Math.floor(((cx[i] - x0) / Math.max(x1 - x0, 1e-6)) * p))
+            + p * Math.min(p - 1, Math.floor(((cz[i] - z0) / Math.max(z1 - z0, 1e-6)) * p));
+        const members: number[][] = Array.from({ length: p * p }, () => []);
+        for (let i = 0; i < n; i++) {
+            members[cell(i)].push(i);
+        }
+        const patches: BuildingPatch[] = [];
+        for (const list of members) {
+            let tris = 0;
+            for (const i of list) {
+                tris += prefix[i] - startOf(i);
+            }
+            if (tris === 0) {
+                continue;
+            }
+            const pos = new Float32Array(tris * 9), nrm = new Int8Array(tris * 9);
+            const tone = new Uint8Array(tris * 3), raw = new Uint8Array(tris * 12);
+            const patchPrefix = new Uint32Array(list.length), patchProminence = new Float32Array(list.length);
+            let at = 0;
+            list.forEach((i, k) => {
+                const a = startOf(i), b = prefix[i];
+                pos.set(soup.pos.subarray(a * 9, b * 9), at * 9);
+                nrm.set(soup.nrm.subarray(a * 9, b * 9), at * 9);
+                tone.set(soup.tone.subarray(a * 3, b * 3), at * 3);
+                raw.set(soup.raw.subarray(a * 12, b * 12), at * 12);
+                at += b - a;
+                patchPrefix[k] = at;
+                patchProminence[k] = prominence[i];
+            });
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geometry.setAttribute('normal', new THREE.BufferAttribute(nrm, 3, true));
+            geometry.setAttribute('tone', new THREE.BufferAttribute(tone, 1));
+            geometry.setAttribute('rawColor', new THREE.BufferAttribute(raw, 4, true));
+            const mesh = new THREE.Mesh(geometry, this.material);
+            // Culled by the budget pass (endFrame), against its own bounds.
+            mesh.frustumCulled = false;
+            mesh.matrixAutoUpdate = false;
+            if (this.onBeforeRender) {
+                mesh.onBeforeRender = this.onBeforeRender;
+            }
+            // Hidden until the next frame's budget pass gives it a draw range.
+            mesh.visible = false;
+            patches.push({ mesh, prefix: patchPrefix, prominence: patchProminence, shown: tris, count: 0 });
+        }
+        return patches;
+    }
+
     /** A tile is being released; drop its buildings. */
     release(meshes: TileMeshes): void {
         const set = meshes.buildings;
         if (set !== undefined && set !== 'pending' && set !== 'none') {
             this.attached.delete(set);
-            this.tris -= set.prefix[set.prefix.length - 1] ?? 0;
-            set.mesh.geometry.dispose();
+            this.tris -= set.triangles;
+            for (const patch of set.patches) {
+                patch.mesh.geometry.dispose();
+            }
             set.group.clear();
         }
         // A sidecar in flight or a build in the queue must not bind to a released tile.
@@ -405,14 +485,32 @@ export class BuildingMeshes {
         this.frame.length = 0;
     }
 
-    /** A drawn tile and how far its near edge is; the draw ranges are set in endFrame. */
-    want(meshes: TileMeshes, nearM: number): void {
+    /** A passive pass (the target MFD) looks elsewhere: every patch the main view gave a draw range. */
+    showAll(meshes: TileMeshes): void {
+        const set = meshes.buildings;
+        if (set !== undefined && set !== 'pending' && set !== 'none') {
+            for (const patch of set.patches) {
+                patch.mesh.visible = this.on && patch.shown > 0 && patch.count > 0;
+            }
+        }
+    }
+
+    /**
+     * A drawn tile, seen from `eye` (scene frame) through `frustum`; the draw
+     * ranges are set in endFrame.
+     */
+    want(meshes: TileMeshes, eye: THREE.Vector3, frustum: THREE.Frustum): void {
         if (!this.on) {
             return;
         }
         const set = meshes.buildings;
         if (set !== undefined && set !== 'pending' && set !== 'none') {
-            this.frame.push({ set, nearM });
+            for (const patch of set.patches) {
+                const s = sphereInTile(patch.mesh, meshes.group, patchSphere);
+                this.frame.push({
+                    patch, nearM: Math.max(0, s.distanceToPoint(eye)), inView: frustum.intersectsSphere(s),
+                });
+            }
         }
     }
 
@@ -424,8 +522,10 @@ export class BuildingMeshes {
     endFrame(pixelAngle: number): void {
         const total = (px: number) => {
             let sum = 0;
-            for (const { set, nearM } of this.frame) {
-                sum += trianglesFor(set, px * nearM * pixelAngle);
+            for (const { patch, nearM, inView } of this.frame) {
+                if (inView) {
+                    sum += trianglesFor(patch, px * nearM * pixelAngle);
+                }
             }
             return sum;
         };
@@ -455,26 +555,29 @@ export class BuildingMeshes {
         const now = performance.now();
         const dt = this.lastFrameMs === 0 ? 0 : Math.min(0.25, (now - this.lastFrameMs) / 1000);
         this.lastFrameMs = now;
-        for (const { set, nearM } of this.frame) {
-            const want = countAtLeast(set.prominence, px * nearM * pixelAngle);
+        for (const { patch, nearM, inView } of this.frame) {
+            // Out of view it still grows, so turning to it shows no fade-in.
+            const want = countAtLeast(patch.prominence, px * nearM * pixelAngle);
             // Shrinking is at once, so the budget holds; growing is one by one.
-            if (want <= set.count) {
-                set.count = want;
-                this.owed.delete(set);
+            if (want <= patch.count) {
+                patch.count = want;
+                this.owed.delete(patch);
             } else {
                 const rate = Math.max(BUILDING_GROW_MIN_PER_S, want / BUILDING_GROW_SECONDS);
-                const owe = (this.owed.get(set) ?? 0) + rate * dt;
+                const owe = (this.owed.get(patch) ?? 0) + rate * dt;
                 const add = Math.floor(owe);
-                this.owed.set(set, owe - add);
-                set.count = Math.min(want, set.count + add);
+                this.owed.set(patch, owe - add);
+                patch.count = Math.min(want, patch.count + add);
             }
-            const tris = set.count > 0 ? set.prefix[set.count - 1] : 0;
-            if (tris !== set.shown) {
-                set.shown = tris;
-                set.mesh.geometry.setDrawRange(0, tris * 3);
+            const tris = patch.count > 0 ? patch.prefix[patch.count - 1] : 0;
+            if (tris !== patch.shown) {
+                patch.shown = tris;
+                patch.mesh.geometry.setDrawRange(0, tris * 3);
             }
-            set.mesh.visible = tris > 0;
-            shown += tris;
+            patch.mesh.visible = inView && tris > 0;
+            if (inView) {
+                shown += tris;
+            }
         }
         this.shownTris = shown;
     }
