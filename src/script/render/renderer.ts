@@ -156,7 +156,7 @@ function sceneDepthTexture(width: number, height: number, reversed: boolean): TH
  * Read as the bundle loads: the game rewrites the URL into its own camera
  * form (Maps-style `@lat,lng,...`) before the renderer is built.
  */
-const FORCE_LOG_DEPTH = typeof location !== 'undefined' && /[?&]logdepth\b/.test(location.search);
+const OPT_IN_REVERSED_DEPTH = typeof location !== 'undefined' && /[?&]reversedz\b/.test(location.search);
 
 /**
  * Whether to draw with a reversed float depth buffer (EXT_clip_control)
@@ -166,10 +166,17 @@ const FORCE_LOG_DEPTH = typeof location !== 'undefined' && /[?&]logdepth\b/.test
  * depth test: every fragment of every surface is shaded, hidden or not. The
  * reversed buffer needs no fragment depth, so what is behind the terrain
  * already drawn (NearFirstOpaqueSort) is rejected before it is shaded.
- * `?logdepth` in the URL keeps the logarithmic buffer, for comparison.
+ *
+ * Only with `?reversedz` in the URL, for now. Everything laid flat on the
+ * land - runways, road and rail beds, ground fires, the haze puffs - wins its
+ * depth tie against the land by being drawn after it: the logarithmic depth
+ * rounds both to the same 24-bit step, the float buffer keeps the
+ * rasteriser's last-bit differences and the land wins about half of them,
+ * so those overlays vanished (2026-10-14). The reversed buffer needs a depth
+ * bias toward the camera on every such overlay before it can be the default.
  */
 function useReversedDepth(): boolean {
-    if (FORCE_LOG_DEPTH) {
+    if (!OPT_IN_REVERSED_DEPTH) {
         return false;
     }
     try {

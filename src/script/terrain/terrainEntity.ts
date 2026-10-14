@@ -755,10 +755,9 @@ export class TerrainEntity implements Entity {
             },
         }) as THREE.ShaderMaterial;
         this.landMaterial.side = THREE.DoubleSide;
-        // No polygon offset (it had one): under the logarithmic depth buffer
-        // every fragment wrote gl_FragDepth, which replaces the offset depth,
-        // so it never did anything, and under the reversed one it would start
-        // to - moving the land against every stroke laid on it.
+        this.landMaterial.polygonOffset = true;
+        this.landMaterial.polygonOffsetFactor = 1;
+        this.landMaterial.polygonOffsetUnits = 1;
         trackTerrainMaterial(this.landMaterial);
 
         // Rivers take the deep-water colour: a canal is water, and reading as
@@ -825,7 +824,11 @@ export class TerrainEntity implements Entity {
                 secondTone: tone === TerrainTone.Water ? TONE_CATEGORIES[TerrainTone.ShallowWater] : undefined,
             }) as THREE.ShaderMaterial;
             mat.side = THREE.DoubleSide;
-            // No polygon offset, as for the land material above.
+            mat.polygonOffset = true;
+            // Water sits farther back than land so a coplanar beach edge
+            // resolves to land rather than sky-coloured sparkles.
+            mat.polygonOffsetFactor = 2;
+            mat.polygonOffsetUnits = 2;
             trackTerrainMaterial(mat);
             this.materials.push(mat);
         }
