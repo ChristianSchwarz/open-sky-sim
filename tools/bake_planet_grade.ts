@@ -91,6 +91,28 @@ function parseArgs(argv: string[]): Args {
 }
 
 const keyOf = (k: TileKey) => `${k.z}/${k.x}/${k.y}`;
+
+/** Removes every leaf's first-pass file under `dir`, left there by a run that never reached its cleanup. */
+function sweepPass1(dir: string, leafZoom: number): number {
+    const root = path.join(dir, String(leafZoom));
+    if (!fs.existsSync(root)) {
+        return 0;
+    }
+    let n = 0;
+    for (const x of fs.readdirSync(root)) {
+        const col = path.join(root, x);
+        if (!fs.statSync(col).isDirectory()) {
+            continue;
+        }
+        for (const f of fs.readdirSync(col)) {
+            if (f.endsWith(PASS1_EXT)) {
+                fs.unlinkSync(path.join(col, f));
+                n++;
+            }
+        }
+    }
+    return n;
+}
 const overlaps = (a: LonLatBounds, b: LonLatBounds) =>
     !(a.east <= b.west || a.west >= b.east || a.north <= b.south || a.south >= b.north);
 
@@ -245,6 +267,12 @@ async function main(): Promise<void> {
     const errors: string[] = [];
     let stoppedForDisk = false;
     const diskLow = () => freeBytes(args.dir) < MIN_FREE_BYTES;
+    // A run killed before its cleanup left its .pbd1 files behind; they ship
+    // with the tiles (31,696 of them, 0.5 GB, across DACH) unless swept.
+    const stale = sweepPass1(args.dir, leafZoom);
+    if (stale > 0) {
+        console.log(`removed ${stale} stale ${PASS1_EXT} files from an earlier run`);
+    }
     const pass1: TileKey[] = [];
     if (args.freeBorder) {
         // The box's leaves and the ring round them: a ring tile's beds reach over its border into the box.

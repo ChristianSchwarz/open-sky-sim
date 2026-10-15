@@ -7,6 +7,7 @@
 // AWS_SECRET_ACCESS_KEY (an R2 API token). Everything lands under <version>/,
 // so a re-bake is a new version and old URLs stay valid in every cache.
 import { spawnSync } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 
 const args = process.argv.slice(2);
@@ -25,19 +26,20 @@ if (!bucket || !version || !endpoint) {
 }
 
 const IMMUTABLE = 'public, max-age=31536000, immutable';
+// A tree packed by tools/pack_terrain_br.mjs holds its tiles as Brotli.
+const tileEncoding = fs.existsSync(path.join(src, 'PACKED_BROTLI')) ? 'br' : 'gzip';
 // [glob, content type, content encoding]. The gzip-transport formats are stored
-// gzipped on disk, so they must be served with Content-Encoding: gzip; the
-// page inflates them itself if a host drops the header (tileStore.ts).
+// compressed on disk, so they must be served with that Content-Encoding; the
+// page inflates gzip itself if a host drops the header (tileStore.ts), but
+// cannot read Brotli without it.
 const groups = [
-    ['*.ptm', 'application/octet-stream', 'gzip'],
-    ['*.ptx', 'application/octet-stream', 'gzip'],
-    ['*.ptr', 'application/octet-stream', 'gzip'],
-    ['*.pbr', 'application/octet-stream', 'gzip'],
-    ['*.pbh', 'application/octet-stream', 'gzip'],
+    ...['ptm', 'ptx', 'ptr', 'pbr', 'pbd', 'pfl', 'pbh']
+        .map(ext => [`*.${ext}`, 'application/octet-stream', tileEncoding]),
     ['*.pdm', 'application/octet-stream', null], // zlib, inflated in JS
     ['*.bin', 'application/octet-stream', null],
     ['*.json', 'application/json', null],
 ];
+console.log(`tiles: Content-Encoding ${tileEncoding}${tileEncoding === 'gzip' ? ' (pack with tools/pack_terrain_br.mjs for Brotli)' : ''}`);
 
 let failed = false;
 for (const [glob, type, encoding] of groups) {
