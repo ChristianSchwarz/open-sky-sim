@@ -26,7 +26,7 @@ import { attachToRenderList } from '../render/renderList';
 import { getTreeAtlas } from '../scene/textures/treeAtlas';
 import { getStoneAtlas } from '../scene/textures/stoneAtlas';
 import {
-    TREE_DENSITY_MULTIPLIER_DEFAULT, buildTreeMeshes, treeInstancesToDraw, treeSpacingM, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
+    TREE_DENSITY_MULTIPLIER_DEFAULT, buildTreeMeshes, orderTreesFor, treeInstancesToDraw, treeReorderWanted, treeSpacingM, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
 } from './treeBillboards';
 import { CLUTTER_ELIGIBLE_CLASSES, buildStoneMesh, scatterGroundClutter } from './stones';
 import { sphereInFrustum } from './culling';
@@ -92,6 +92,7 @@ import {
 import { publishTerrainStats, trackTerrainMaterial } from './debug';
 import { refreshWeldPositions } from './smoothWeld';
 import { SmoothWelder } from './smoothWelder';
+import { sphereInTile } from './tileFrameBounds';
 
 /**
  * The palette tone a landcover class is painted in.
@@ -151,6 +152,9 @@ const PAD_RELEVANCE_M = 400_000;
  * needs this spread over several frames instead of firing all at once.
  */
 const TREE_INITIAL_ATTACHES_PER_FRAME = 1;
+
+/** Main-thread time a frame may spend ordering tree patches (orderTreesFor), ms. */
+const TREE_REORDER_MS = 1;
 
 /** SMOOTH welds out with the workers at once, see TerrainEntity.pumpSmooth. */
 const SMOOTH_IN_FLIGHT = 4;
@@ -1683,6 +1687,12 @@ export class TerrainEntity implements Entity {
                 trees.count = treeInstancesToDraw(trees, meshes.group, camera.position, pixelAngle);
                 // A patch thinned to nothing is still a draw call.
                 trees.visible = trees.count > 0;
+                // Only what is in view: an order is uploaded, and three culls
+                // a patch outside the frustum without drawing it.
+                if (trees.visible && treeReorderWanted(trees, meshes.group, camera.position, pixelAngle)
+                    && this.buildingFrustum.intersectsSphere(sphereInTile(trees, meshes.group, this.treeSphere))) {
+                    this.treeReorders.push({ mesh: trees, group: meshes.group });
+                }
             }
             const smooth = this.landShading === TerrainShading.SMOOTH;
             const near = smooth ? meshes.landGeometrySmooth ?? meshes.landGeometryFaceted : meshes.landGeometryFaceted;
@@ -1690,10 +1700,35 @@ export class TerrainEntity implements Entity {
                 PRIORITY_IN_FRUSTUM - nearM, near, smooth && near === meshes.landGeometrySmooth);
         }
         if (camera) {
+            this.reorderTrees(camera.position, pixelAngle);
             this.roads.buildPendingLevels(ROAD_LEVEL_BUILD_MS);
             this.buildings.buildPending(BUILDING_BUILD_MS);
             this.buildings.endFrame(pixelAngle);
         }
+    }
+
+    private readonly treeSphere = new THREE.Sphere();
+    /** Tree patches that asked to be ordered this frame (treeReorderWanted). */
+    private readonly treeReorders: Array<{ mesh: THREE.InstancedMesh; group: THREE.Object3D }> = [];
+
+    /**
+     * Order the tree patches that asked for it, the ones submitting most
+     * first, within TREE_REORDER_MS; the rest ask again next frame. Each is
+     * drawn at its new count from the next frame on.
+     */
+    private reorderTrees(eye: THREE.Vector3, pixelAngle: number): void {
+        const queue = this.treeReorders;
+        queue.sort((a, b) => b.mesh.count - a.mesh.count);
+        const start = performance.now();
+        for (const { mesh, group } of queue) {
+            if (performance.now() - start >= TREE_REORDER_MS) {
+                break;
+            }
+            orderTreesFor(mesh, group, eye);
+            mesh.count = treeInstancesToDraw(mesh, group, eye, pixelAngle);
+            mesh.visible = mesh.count > 0;
+        }
+        queue.length = 0;
     }
 
     /**

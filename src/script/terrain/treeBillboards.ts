@@ -19,7 +19,7 @@ import * as THREE from 'three';
 import { PaletteCategory } from '../config/palettes/palette';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../scene/materials/materials';
 import { TREE_MIN_SPACING_PX } from '../scene/materials/shaders/treeBillboardVP';
-import { nearDistanceInTile } from './tileFrameBounds';
+import { nearDistanceInTile, sphereInTile } from './tileFrameBounds';
 import { TREE_SPECIES_COUNT, Species } from '../scene/vegetation/treeSprites';
 import { PtmTile } from './ptm';
 
@@ -269,13 +269,194 @@ export function treeSpacingM(densityScale: number): number {
 const TREE_CELLS = 4;
 
 /**
+ * A tree mesh's instances stored in the order they survive the thinning for
+ * one eye (orderTreesFor), so the ones it keeps are a prefix from anywhere
+ * near that eye rather than only at the patch's near edge.
+ *
+ * The shader keeps a tree while its hash is under the keep fraction at its
+ * own distance d, (spacing / (d * pixelAngle))^2 / TREE_MIN_SPACING_PX^2
+ * capped at 1, which is hash * d^2 < (spacing / (TREE_MIN_SPACING_PX *
+ * pixelAngle))^2: one score per tree against one threshold per frame. Before
+ * any order the instances sit in hash order and the near edge's fraction is
+ * the prefix, which across a patch a kilometre or two deep submitted three
+ * to five trees for every one the shader kept.
+ */
+interface TreeOrder {
+    /**
+     * The eye the order was made for, in the tile group's frame: a re-base
+     * (FrameShift) moves the tile and the eye together, which is no move.
+     */
+    eye: THREE.Vector3;
+    /** Metres per unit of the tile group's frame: it scales the quantised land up (see PtmTile.quantScale). */
+    metresPerUnit: number;
+    /** The nearest tree's distance from that eye, in metres. */
+    nearM: number;
+    /** hash * d^2 of each instance from that eye, ascending: the stored order. */
+    scores: Float32Array;
+}
+
+/**
+ * Past this much slack an order is made again (see treeOrderSlack): the
+ * prefix then carries 40 % more trees than the shader can keep.
+ */
+export const TREE_REORDER_SLACK = 1.4;
+
+const eyeInTile = new THREE.Vector3();
+const toTile = new THREE.Matrix4();
+const invTile = new THREE.Matrix4();
+const point = new THREE.Vector3();
+
+function eyeInTileFrame(tileGroup: THREE.Object3D, eye: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+    return out.copy(eye).applyMatrix4(invTile.copy(tileGroup.matrix).invert());
+}
+
+/**
+ * The distance inside which the thinning keeps every tree of a mesh with
+ * `spacingM`: where its keep fraction reaches 1. A tree's score (TreeOrder)
+ * is under its square exactly when the shader keeps it.
+ */
+function keepAllWithinM(spacingM: number, pixelAngle: number): number {
+    return spacingM / (TREE_MIN_SPACING_PX * pixelAngle);
+}
+
+/**
+ * How much more than the thinning can keep an order may have to submit
+ * from `eye`, at most: (near / (near - moved))^2, with `moved` how far the
+ * eye went since the order was made and `near` the larger of the nearest
+ * tree's distance then and keepAllWithinM - moved. A tree that was nearer
+ * than that scores under the threshold anyway; one farther off is at least
+ * near - moved away now, so if it is kept now, it scored under the
+ * threshold times this when the order was made. Infinite without an order,
+ * or once the eye has gone as far as `near`.
+ */
+export function treeOrderSlack(
+    mesh: THREE.InstancedMesh, tileGroup: THREE.Object3D, eye: THREE.Vector3, pixelAngle: number,
+): number {
+    const order = mesh.userData.treeOrder as TreeOrder | undefined;
+    const spacingM: number = mesh.userData.treeSpacingM ?? 0;
+    if (order === undefined || spacingM <= 0 || pixelAngle <= 0) {
+        return Infinity;
+    }
+    const moved = eyeInTileFrame(tileGroup, eye, eyeInTile).distanceTo(order.eye) * order.metresPerUnit;
+    const near = Math.max(order.nearM, keepAllWithinM(spacingM, pixelAngle) - moved);
+    if (moved >= near) {
+        return Infinity;
+    }
+    const f = near / (near - moved);
+    return f * f;
+}
+
+/**
+ * Store `mesh`'s instances in the order they survive the thinning seen from
+ * `eye` (scene frame), see TreeOrder. A permutation of every instance
+ * attribute and one upload of each; the hash travels with its tree
+ * (instanceHash), so the trees the shader keeps do not change.
+ */
+export function orderTreesFor(mesh: THREE.InstancedMesh, tileGroup: THREE.Object3D, eye: THREE.Vector3): void {
+    const total: number = mesh.userData.treeTotal ?? mesh.count;
+    const geometry = mesh.geometry;
+    const hashAttr = geometry.getAttribute('instanceHash') as THREE.InstancedBufferAttribute | undefined;
+    if (!hashAttr || total < 2) {
+        return;
+    }
+    // Distances in the scene's frame, in metres, as the shader measures
+    // them: the tile group's matrix scales its quantised units up.
+    toTile.identity();
+    for (let o: THREE.Object3D | null = mesh; o !== null && o !== tileGroup; o = o.parent) {
+        toTile.premultiply(o.matrix);
+    }
+    toTile.premultiply(tileGroup.matrix);
+    const local = eyeInTileFrame(tileGroup, eye, new THREE.Vector3());
+    const matrices = mesh.instanceMatrix.array as Float32Array;
+    const hashes = hashAttr.array as Float32Array;
+    const scores = new Float64Array(total);
+    let nearM = Infinity;
+    for (let i = 0; i < total; i++) {
+        point.set(matrices[i * 16 + 12], matrices[i * 16 + 13], matrices[i * 16 + 14]).applyMatrix4(toTile);
+        const d2 = point.distanceToSquared(eye);
+        nearM = Math.min(nearM, Math.sqrt(d2));
+        scores[i] = hashes[i] * d2;
+    }
+    const by = new Uint32Array(total);
+    for (let i = 0; i < total; i++) {
+        by[i] = i;
+    }
+    by.sort((a, b) => scores[a] - scores[b]);
+    permuteInstances(mesh.instanceMatrix, by, 16);
+    for (const name of ['instanceShade', 'instanceNormal', 'instanceSpecies', 'instanceHash']) {
+        const attr = geometry.getAttribute(name) as THREE.InstancedBufferAttribute | undefined;
+        if (attr) {
+            permuteInstances(attr, by, attr.itemSize);
+        }
+    }
+    const sorted = new Float32Array(total);
+    for (let i = 0; i < total; i++) {
+        sorted[i] = scores[by[i]];
+    }
+    const order: TreeOrder = { eye: local, metresPerUnit: tileGroup.matrix.getMaxScaleOnAxis(), nearM, scores: sorted };
+    mesh.userData.treeOrder = order;
+}
+
+function permuteInstances(attr: THREE.BufferAttribute, by: Uint32Array, size: number): void {
+    const src = attr.array as Float32Array;
+    const out = new Float32Array(src.length);
+    for (let i = 0; i < by.length; i++) {
+        const from = by[i] * size;
+        for (let k = 0; k < size; k++) {
+            out[i * size + k] = src[from + k];
+        }
+    }
+    src.set(out);
+    attr.needsUpdate = true;
+}
+
+/**
+ * Whether ordering `mesh` for `eye` is worth its upload: the shader drops
+ * more than half the trees at the patch's far edge - most of a patch, as
+ * the far part holds most of its ground - and the mesh has no order yet or
+ * one with more slack than TREE_REORDER_SLACK. A patch the thinning hardly
+ * touches keeps nearly everything either way.
+ */
+export function treeReorderWanted(
+    mesh: THREE.InstancedMesh, tileGroup: THREE.Object3D, eye: THREE.Vector3, pixelAngle: number,
+): boolean {
+    const spacingM: number = mesh.userData.treeSpacingM ?? 0;
+    if (spacingM <= 0 || pixelAngle <= 0) {
+        return false;
+    }
+    const bounds = sphereInTile(mesh, tileGroup, farSphere);
+    const pixelM = (bounds.center.distanceTo(eye) + bounds.radius) * pixelAngle;
+    const spacingPx = spacingM / Math.max(pixelM, 1e-9);
+    const keepFar = (spacingPx * spacingPx) / (TREE_MIN_SPACING_PX * TREE_MIN_SPACING_PX);
+    return keepFar < 0.5 && treeOrderSlack(mesh, tileGroup, eye, pixelAngle) > TREE_REORDER_SLACK;
+}
+
+const farSphere = new THREE.Sphere();
+
+/** How many of `scores` (ascending) are under `bound`. */
+function countUnder(scores: Float32Array, bound: number): number {
+    let lo = 0, hi = scores.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (scores[mid] < bound) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/**
  * How many of a tree mesh's instances the screen-space thinning can keep
  * anywhere in it, seen from `eye` (scene frame) with `pixelAngle` ground
- * metres per pixel per metre of range: the shader's keep fraction at the
- * mesh's near edge, as a prefix of the shuffled instances. The rest are never
- * submitted - a far forest's own vertex work otherwise, even for the trees
- * the shader drops. Without an eye, all of them. `tileGroup` is the tile the
- * mesh belongs to (see nearDistanceInTile).
+ * metres per pixel per metre of range, as a prefix of the stored instances.
+ * The rest are never submitted - their vertex work otherwise, even for the
+ * trees the shader drops. With an order (orderTreesFor), the trees scoring
+ * under the threshold times the order's slack; without one, the shader's
+ * keep fraction at the mesh's near edge as a prefix of the hash order.
+ * Without an eye, all of them. `tileGroup` is the tile the mesh belongs to
+ * (see nearDistanceInTile).
  */
 export function treeInstancesToDraw(
     mesh: THREE.InstancedMesh, tileGroup: THREE.Object3D, eye: THREE.Vector3 | undefined, pixelAngle: number,
@@ -284,6 +465,16 @@ export function treeInstancesToDraw(
     const spacingM: number = mesh.userData.treeSpacingM ?? 0;
     if (spacingM <= 0 || eye === undefined) {
         return total;
+    }
+    const order = mesh.userData.treeOrder as TreeOrder | undefined;
+    if (order !== undefined) {
+        const slack = treeOrderSlack(mesh, tileGroup, eye, pixelAngle);
+        if (!Number.isFinite(slack)) {
+            return total;
+        }
+        const threshold = keepAllWithinM(spacingM, pixelAngle);
+        // A hair over, for the float rounding between here and the shader.
+        return countUnder(order.scores, threshold * threshold * slack * 1.001);
     }
     const pixelM = nearDistanceInTile(mesh, tileGroup, eye) * pixelAngle;
     if (pixelM <= 0) {
@@ -368,11 +559,11 @@ export function buildTreeMesh(
         map: atlas,
     }) as THREE.ShaderMaterial;
     material.uniforms.uTreeSpacingM = { value: spacingM };
-    material.uniforms.uTreeInvCount = { value: 1 / Math.max(1, count) };
 
-    // A seeded shuffle of the slots: an instance's index is its thinning
-    // hash, so the trees any thinning keeps are a prefix, spread evenly over
-    // the tile and the same every build.
+    // A seeded shuffle of the slots: a tree's slot is its thinning hash
+    // (instanceHash), so the trees any thinning keeps are spread evenly over
+    // the patch and the same every build, and in slot order a prefix -
+    // until orderTreesFor stores them by distance, the hash going with them.
     const slot = new Uint32Array(count);
     for (let j = 0; j < count; j++) {
         slot[j] = j;
@@ -393,6 +584,7 @@ export function buildTreeMesh(
     const shade = new Float32Array(count * 4);
     const speciesAttr = new Float32Array(count);
     const normalAttr = new Float32Array(count * 3);
+    const hashAttr = new Float32Array(count);
     const m = new THREE.Matrix4();
     let i = 0;
     for (const group of groups) {
@@ -406,6 +598,7 @@ export function buildTreeMesh(
             m.setPosition(p.x, p.y, p.z);
             const s = slot[i];
             mesh.setMatrixAt(s, m);
+            hashAttr[s] = (s + 0.5) / count;
             speciesAttr[s] = group.species;
             normalAttr[s * 3] = group.normals[k * 3];
             normalAttr[s * 3 + 1] = group.normals[k * 3 + 1];
@@ -422,6 +615,7 @@ export function buildTreeMesh(
     geometry.setAttribute('instanceShade', new THREE.InstancedBufferAttribute(shade, 4));
     geometry.setAttribute('instanceNormal', new THREE.InstancedBufferAttribute(normalAttr, 3));
     geometry.setAttribute('instanceSpecies', new THREE.InstancedBufferAttribute(speciesAttr, 1));
+    geometry.setAttribute('instanceHash', new THREE.InstancedBufferAttribute(hashAttr, 1));
     // Real bounding sphere (instances plus the quad) so the renderer culls
     // a tile's trees that are off-screen; the tile group's matrix is static
     // (LOD push is a shader uniform), so the sphere stays valid.

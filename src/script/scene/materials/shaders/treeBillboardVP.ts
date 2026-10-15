@@ -55,11 +55,11 @@ export const TreeBillboardVertProgram: string = `
   uniform vec3 uAdjTrees;
   /** Metres between this tile's trees, for the screen-space thinning; 0 keeps them all. */
   uniform float uTreeSpacingM;
-  /** 1 / the tile's instance count. The instances are stored shuffled, so an index is a tree's hash. */
-  uniform float uTreeInvCount;
 ${COLOUR_ADJUST_PARS}
   attribute vec4 instanceShade;
   attribute float instanceSpecies;
+  /** The tree's thinning hash in [0, 1): its slot in a seeded shuffle, carried with it when the instances are reordered (orderTreesFor). */
+  attribute float instanceHash;
   attribute vec3 instanceNormal;
 
   varying vec3 vPosition;
@@ -71,17 +71,17 @@ ${LOG_DEPTH_PARS_VERTEX}
     vec4 worldBase = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
     float s = length(instanceMatrix[0].xyz);
 
-    // Screen-space thinning, see TREE_MIN_SPACING_PX. The hash is the
-    // instance's shuffled index, so the same trees stay as the camera moves,
-    // and the ones dropped at a tile's near edge are a tail the draw leaves
-    // off (treeInstancesToDraw). A dropped tree leaves here, before the
+    // Screen-space thinning, see TREE_MIN_SPACING_PX. The hash is fixed per
+    // tree, so the same trees stay as the camera moves, and the ones no part
+    // of the patch can keep are a tail the draw leaves off
+    // (treeInstancesToDraw). A dropped tree leaves here, before the
     // lighting and the billboard below: the trees cost vertex work, not fill.
 #if __VERSION__ >= 300
     if (uTreeSpacingM > 0.0) {
       float pixelM = length(cameraPosition - worldBase.xyz) / (projectionMatrix[1][1] * max(halfHeight, 1.0));
       float spacingPx = uTreeSpacingM / max(pixelM, 1.0e-6);
       float keep = min(1.0, (spacingPx * spacingPx) / ${f(TREE_MIN_SPACING_PX * TREE_MIN_SPACING_PX)});
-      float h = (float(gl_InstanceID) + 0.5) * uTreeInvCount;
+      float h = instanceHash;
       float fade = clamp((keep - h) / (${f(TREE_THIN_FADE)} * keep), 0.0, 1.0);
       if (fade <= 0.0) {
         // Outside the clip volume on every corner: the quad is never rasterised.
