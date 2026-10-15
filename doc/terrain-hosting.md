@@ -17,9 +17,20 @@ Pages and the terrain on R2.
    dashboard. Optional: block requests whose `Referer` is not your site.
 
 ## Publish a bake
+Pack the tree as Brotli first: 25-30 % smaller than the gzip the bake writes.
+Quality 11 is slow (about 5 h for all of DACH), but later runs only re-pack
+what a re-bake touched.
+```bash
+node tools/pack_terrain_br.mjs --out E:/retroflightsim-data/terrain-br
+```
+Then upload the packed tree. The uploader sees its `PACKED_BROTLI` marker and
+sets `Content-Encoding: br` on the tiles (an unpacked tree goes up as gzip, as
+before). The page cannot inflate Brotli itself, so the header must reach it;
+R2 keeps it.
 ```bash
 export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 node tools/upload_terrain.mjs --bucket retro-terrain --version v1 \
+     --src E:/retroflightsim-data/terrain-br \
      --endpoint https://<account>.r2.cloudflarestorage.com --dry-run
 # drop --dry-run to upload
 TERRAIN_URL=https://terrain.example.com/v1/manifest.json npm run build:prod
@@ -34,5 +45,5 @@ first upload is ~38k writes. Requests, not gigabytes, are what to watch.
 
 ## Verify
 `curl -sI https://terrain.example.com/v1/12/1509/1203.ptm` should show
-`content-encoding: gzip`, `cache-control: ... immutable`, and on the second
+`content-encoding: br` (`gzip` for an unpacked tree), `cache-control: ... immutable`, and on the second
 request `cf-cache-status: HIT`.
