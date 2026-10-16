@@ -757,6 +757,20 @@ export function decodePtm(bytes: ArrayBuffer | Uint8Array): PtmTile {
     };
 }
 
+/** A border table as its section's bytes (borderSectionBytes long). */
+function encodeBorderSection(b: PtmBorder): Uint8Array {
+    const out = new Uint8Array(borderSectionBytes(b));
+    const v = new DataView(out.buffer);
+    v.setUint32(0, b.vertices.length, true);
+    v.setUint32(4, b.edges.length / 2, true);
+    let at = 8;
+    for (const x of b.vertices) { v.setUint32(at, x, true); at += 4; }
+    for (const x of b.vertexParams) { v.setFloat32(at, x, true); at += 4; }
+    for (const x of b.edges) { v.setUint32(at, x, true); at += 4; }
+    for (const x of b.edgeParams) { v.setFloat32(at, x, true); at += 4; }
+    return out;
+}
+
 /** Two counts, then the vertices, their params, the edges and theirs; all 4-byte. */
 function borderSectionBytes(b: PtmBorder): number {
     return 8 + b.vertices.length * 8 + b.edges.length * 8;
@@ -787,24 +801,29 @@ export interface PtmLandSoup {
  * and the bounding radius are kept exactly. (encodePtm would not round-trip:
  * it takes one normal per face and rebuilds the flags.) The new land is in
  * the tile's own quantisation, and its first vertices must be the old ones'
- * slots - the border table indexes them (railBed.ts keeps them).
+ * slots - the border table indexes them (railBed.ts keeps them) - unless
+ * `border` is given: a table for the new land, written in the old one's
+ * place (the land simplified, its vertices numbered anew).
  */
-export function writePtmLand(bytes: Uint8Array, land: PtmLandSoup): Uint8Array {
+export function writePtmLand(bytes: Uint8Array, land: PtmLandSoup, border?: PtmBorder): Uint8Array {
     const old = decodePtm(bytes);
     const verts = land.positions.length / 3;
     if (verts % 3 !== 0 || land.normals.length !== verts * 4 || land.attrs.length !== verts * 4) {
         throw new Error(`PTM1: land soup sizes disagree (${land.positions.length}, ${land.normals.length}, ${land.attrs.length})`);
     }
     const oldVerts = old.landPositions.length / 3;
-    if (verts < oldVerts) {
+    if (verts < oldVerts && !border) {
         throw new Error(`PTM1: new land has fewer vertices (${verts}) than the old (${oldVerts}); border indices would break`);
     }
     const head = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const oldLandBytes = align4(oldVerts * 6) + align4(oldVerts * 4) * 2;
     const restStart = PTM_HEADER_BYTES + oldLandBytes;
-    const rest = bytes.subarray(restStart);
+    const oldBorderBytes = head.getUint32(24, true);
+    // Water and rivers as they were; the border table too, or the new one.
+    const rest = border ? bytes.subarray(restStart, bytes.byteLength - oldBorderBytes) : bytes.subarray(restStart);
+    const newBorder = border ? encodeBorderSection(border) : undefined;
     const posBytes = align4(verts * 6), nrmBytes = align4(verts * 4), attrBytes = align4(verts * 4);
-    const out = new Uint8Array(PTM_HEADER_BYTES + posBytes + nrmBytes + attrBytes + rest.byteLength);
+    const out = new Uint8Array(PTM_HEADER_BYTES + posBytes + nrmBytes + attrBytes + rest.byteLength + (newBorder?.byteLength ?? 0));
     out.set(bytes.subarray(0, PTM_HEADER_BYTES), 0);
     let off = PTM_HEADER_BYTES;
     out.set(new Uint8Array(land.positions.buffer, land.positions.byteOffset, land.positions.byteLength), off);
@@ -814,8 +833,14 @@ export function writePtmLand(bytes: Uint8Array, land: PtmLandSoup): Uint8Array {
     out.set(new Uint8Array(land.attrs.buffer, land.attrs.byteOffset, land.attrs.byteLength), off);
     off += attrBytes;
     out.set(rest, off);
+    if (newBorder) {
+        out.set(newBorder, off + rest.byteLength);
+    }
     const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
     view.setUint32(32, verts, true);
+    if (newBorder) {
+        view.setUint32(24, newBorder.byteLength, true);
+    }
     view.setUint16(6, head.getUint16(6, true) | PTM_FLAG_GRADED, true);
     // The beds can lift land past the old bound (an embankment on a peak).
     const q = old.quantScale;

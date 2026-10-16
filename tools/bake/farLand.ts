@@ -522,6 +522,51 @@ export function buildFarLand(input: FarLandInput): FarLand {
         if (ownT < 0) {
             return false;
         }
+        // The surface between the corners as well: the old and new surfaces
+        // differ most at u and where an old edge from u crosses a new one
+        // from v. Checked only at u, a long hillside facet swung round a kept
+        // corner and the land at a crossing came out 12.8 m lower (a graded
+        // Munich leaf simplified at 0.1 m).
+        const crossings: number[] = [];
+        const link = new Set<number>();
+        for (const t of keep) {
+            for (let k = 0; k < 3; k++) {
+                const x = repl(t, k);
+                if (x !== v) {
+                    link.add(x);
+                }
+            }
+        }
+        for (const t of incident[u]) {
+            for (let k = 0; k < 3; k++) {
+                const w2 = tv[t * 3 + k];
+                if (w2 === u || w2 === v) {
+                    continue;
+                }
+                const ux = P[u * 3], uy = P[u * 3 + 1], dx = P[w2 * 3] - ux, dy = P[w2 * 3 + 1] - uy;
+                for (const x of link) {
+                    if (x === w2) {
+                        continue;
+                    }
+                    const vx = P[v * 3], vy = P[v * 3 + 1], ex = P[x * 3] - vx, ey = P[x * 3 + 1] - vy;
+                    const den = dx * ey - dy * ex;
+                    if (Math.abs(den) < 1e-12) {
+                        continue;
+                    }
+                    const s = ((vx - ux) * ey - (vy - uy) * ex) / den;
+                    const r = ((vx - ux) * dy - (vy - uy) * dx) / den;
+                    if (s <= 1e-6 || s >= 1 - 1e-6 || r <= 1e-6 || r >= 1 - 1e-6) {
+                        continue;
+                    }
+                    const a = ux + dx * s, b = uy + dy * s;
+                    const h = P[u * 3 + 2] + (P[w2 * 3 + 2] - P[u * 3 + 2]) * s;
+                    if (check(a, b, h, layerKind) < 0) {
+                        return false;
+                    }
+                    crossings.push(a, b, h);
+                }
+            }
+        }
         const moved = new Map<number, number[]>();
         for (const t of incident[u]) {
             for (const p of absorbed[t]) {
@@ -546,6 +591,13 @@ export function buildFarLand(input: FarLandInput): FarLand {
             absorbed[t] = list;
         }
         absorbed[ownT].push(pu);
+        // The crossings stay points the land must keep near, collapse after collapse.
+        for (let i = 0; i < crossings.length; i += 3) {
+            const owner = check(crossings[i], crossings[i + 1], crossings[i + 2], layerKind);
+            if (owner >= 0) {
+                absorbed[owner].push(addPoint(crossings[i], crossings[i + 1], crossings[i + 2], layerKind));
+            }
+        }
         for (const t of drop) {
             alive[t] = 0;
             for (let k = 0; k < 3; k++) {

@@ -23,6 +23,8 @@
  *     --jobs N         worker threads (default: CPUs - 1)
  *     --no-bundle      run the worker under tsx instead of an esbuild bundle
  *     --no-free-border grade each leaf alone, its beds fading out at the border
+ *     --simplify M     simplify each graded leaf's land to M metres (default
+ *                      LAND_SIMPLIFY_M, 0.1; 0 keeps it as graded)
  *     --lidar-store DIR the lidar store (default data/imports/lidar/store),
  *                      written by tools/measure_lidar.py; leaves it has
  *                      measured fit their lines to the lidar
@@ -50,6 +52,7 @@ import { LonLatBounds } from './bake/shoreline';
 import { GradeConfig, GradeResult, PASS1_EXT } from './bake/gradeTile';
 import { tileFile } from './bake/railBedInputs';
 import { LIDAR_STORE_DIR } from './bake/lidarStore';
+import { LAND_SIMPLIFY_M } from './bake/simplifyLand';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'gradeTileWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'gradeTileWorker.cjs');
@@ -62,13 +65,14 @@ interface Args {
     jobs?: number;
     noBundle: boolean;
     freeBorder: boolean;
+    simplifyM: number;
     lidarStore: string;
     src: string;
     lidar: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-    const a: Args = { dir: 'assets/terrain', noBundle: false, freeBorder: true, lidarStore: LIDAR_STORE_DIR, src: 'assets/planet', lidar: true };
+    const a: Args = { dir: 'assets/terrain', noBundle: false, freeBorder: true, simplifyM: LAND_SIMPLIFY_M, lidarStore: LIDAR_STORE_DIR, src: 'assets/planet', lidar: true };
     for (let i = 0; i < argv.length; i++) {
         const k = argv[i];
         const next = () => argv[++i];
@@ -82,6 +86,7 @@ function parseArgs(argv: string[]): Args {
         } else if (k === '--jobs') a.jobs = Math.max(1, Number(next()));
         else if (k === '--no-bundle') a.noBundle = true;
         else if (k === '--no-free-border') a.freeBorder = false;
+        else if (k === '--simplify') a.simplifyM = Math.max(0, Number(next()));
         else if (k === '--lidar-store') a.lidarStore = next();
         else if (k === '--src') a.src = next();
         else if (k === '--no-lidar') a.lidar = false;
@@ -262,7 +267,7 @@ async function main(): Promise<void> {
         + `${(freeBytes(args.dir) / 1e9).toFixed(1)} GB free`);
     const lidar = args.lidar && fs.existsSync(args.lidarStore) ? { store: args.lidarStore, planet: args.src } : undefined;
     console.log(lidar ? `lidar: lines fitted to the measurements in ${args.lidarStore}` : 'lidar: none, the beds follow the land');
-    const cfg: GradeConfig = { dir: args.dir, enuOrigin: manifest.enuOrigin, leafZoom, centreHeights, freeBorder: args.freeBorder, lidar };
+    const cfg: GradeConfig = { dir: args.dir, enuOrigin: manifest.enuOrigin, leafZoom, centreHeights, freeBorder: args.freeBorder, lidar, simplifyM: args.simplifyM };
     const worker = await prepareWorker(args.noBundle);
     const errors: string[] = [];
     let stoppedForDisk = false;
@@ -344,7 +349,7 @@ async function main(): Promise<void> {
         if (!r) {
             continue;
         }
-        const s = byZ.get(r.z) ?? { n: 0, graded: 0, already: 0, added: 0, walls: 0, underpins: 0, spikes: 0, over: 0, before: 0, after: 0, ms: 0, beds: 0, bedsW: 0 };
+        const s = byZ.get(r.z) ?? { n: 0, graded: 0, already: 0, added: 0, walls: 0, underpins: 0, spikes: 0, over: 0, before: 0, after: 0, ms: 0, beds: 0, bedsW: 0, stages: [] as number[], maxMs: 0 };
         byZ.set(r.z, s);
         s.n++;
         if (r.skipped === 'graded') {
@@ -365,11 +370,22 @@ async function main(): Promise<void> {
         s.ms += r.ms ?? 0;
         s.beds += r.beds ?? 0;
         s.bedsW += r.bedsWritten ?? 0;
+        s.maxMs = Math.max(s.maxMs, r.ms ?? 0);
+        (r.triangleStages ?? []).forEach((n, i) => { s.stages[i] = (s.stages[i] ?? 0) + n; });
     }
     for (const [z, s] of [...byZ].sort((a, b) => a[0] - b[0])) {
         console.log(`z${z}: ${s.graded} graded (${s.already} already graded), +${s.added} land triangles, ${s.walls} wall triangles (${s.underpins} under bridges), ${s.spikes} spikes lowered, `
             + `over limit ${(s.over / 1000).toFixed(2)} km, beds ${s.beds} -> ${s.bedsW} written, `
             + `${(s.before / 1e6).toFixed(1)} -> ${(s.after / 1e6).toFixed(1)} MB, ${(s.ms / Math.max(1, s.graded)).toFixed(0)} ms/tile`);
+    }
+    for (const [z, s] of [...byZ].sort((a, b) => a[0] - b[0])) {
+        if (s.stages.length >= 5) {
+            const [base, refined, roads, collapsed, out, lean] = s.stages;
+            console.log(`z${z} land triangles: ${base} baked -> ${refined} refined (+${refined - base}) -> ${roads} under roads (+${roads - refined}) `
+                + `-> ${collapsed} collapsed (${collapsed - roads}) -> ${out} written (+${out - collapsed} at walls); x${(out / Math.max(1, base)).toFixed(2)}`
+                + (lean !== undefined ? ` -> ${lean} simplified, x${(lean / Math.max(1, base)).toFixed(2)}` : '') + `; `
+                + `slowest tile ${(s.maxMs / 1000).toFixed(0)} s`);
+        }
     }
     for (const e of errors.slice(0, 20)) {
         console.error(`error: ${e}`);

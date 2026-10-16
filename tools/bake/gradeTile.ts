@@ -22,7 +22,8 @@ import { PTR_MAX_VERTS, PTR_TILE_GRADED, PtrTile, encodePtrRaw } from '../../src
 import { RAIL_BED_SEGMENT_FLOATS, layRailBeds } from '../../src/script/terrain/railBed';
 import { TileKey } from '../../src/script/terrain/tiling';
 import { LidarStore } from './lidarStore';
-import { readTileFile, railBedInputFor, tileFile, tileOriginEnu } from './railBedInputs';
+import { readTileFile, railBedInputFor, tileFile, tileOriginEnu, tileUp } from './railBedInputs';
+import { simplifyLand } from './simplifyLand';
 
 export interface GradeConfig {
     dir: string;
@@ -36,6 +37,8 @@ export interface GradeConfig {
      * written every leaf's beds to a .pbd1 for its neighbours to read.
      */
     freeBorder: boolean;
+    /** Vertical tolerance a leaf's graded land is simplified to (simplifyLand.ts), metres; 0 keeps it as graded. */
+    simplifyM: number;
     /**
      * The lidar store (tools/measure_lidar.py) the leaves' lines are fitted
      * to, and the planet pyramid its signatures are checked against; absent,
@@ -66,6 +69,7 @@ export interface GradeResult {
     skipped?: 'graded' | 'no-strokes';
     landTris?: number;
     trianglesAdded?: number;
+    triangleStages?: number[];
     wallTriangles?: number;
     underpinTriangles?: number;
     spikesLowered?: number;
@@ -150,6 +154,45 @@ export function neighbourBeds(cfg: GradeConfig, k: TileKey, basis: ReturnType<ty
     return Float64Array.from(out);
 }
 
+/** Spacing of the points along a drawn line the simplifier keeps the land under, metres. */
+const STROKE_POINT_STEP_M = 2;
+
+/**
+ * Tile-local metres of points along every drawn road and river on the leaf,
+ * every STROKE_POINT_STEP_M: the simplifier keeps the land from rising at
+ * them. The vertices alone left the land free between them, and a collapse
+ * lifted it over the middle of a straight road.
+ */
+function strokePointsOf(
+    strokes: Pick<PtrTile, 'positions' | 'quantScale' | 'indices'>,
+    tile: { riverPositions: Int16Array; riverIndices: Uint16Array; quantScale: number },
+): Float32Array {
+    const out: number[] = [];
+    const along = (P: Int16Array, I: ArrayLike<number>, q: number) => {
+        const seen = new Set<number>();
+        for (let t = 0; t + 2 < I.length; t += 3) {
+            for (let k = 0; k < 3; k++) {
+                const a = I[t + k], b = I[t + (k + 1) % 3];
+                const key = a < b ? a * 65536 + b : b * 65536 + a;
+                if (seen.has(key)) {
+                    continue;
+                }
+                seen.add(key);
+                const ax = P[a * 3] * q, ay = P[a * 3 + 1] * q, az = P[a * 3 + 2] * q;
+                const bx = P[b * 3] * q, by = P[b * 3 + 1] * q, bz = P[b * 3 + 2] * q;
+                const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay, bz - az) / STROKE_POINT_STEP_M));
+                for (let i = 0; i <= n; i++) {
+                    const f = i / n;
+                    out.push(ax + (bx - ax) * f, ay + (by - ay) * f, az + (bz - az) * f);
+                }
+            }
+        }
+    };
+    along(strokes.positions, strokes.indices, strokes.quantScale);
+    along(tile.riverPositions, tile.riverIndices, tile.quantScale);
+    return Float32Array.from(out);
+}
+
 export function gradeTile(cfg: GradeConfig, k: TileKey): GradeResult {
     const key = `${k.z}/${k.x}/${k.y}`;
     const t0 = performance.now();
@@ -168,11 +211,6 @@ export function gradeTile(cfg: GradeConfig, k: TileKey): GradeResult {
         ? { ...g.input, freeBorder: true, neighbourBeds: neighbourBeds(cfg, k, basis, g.tile.centerHeightM) }
         : g.input);
 
-    // The land, graded or as it was: either way the tile is now the
-    // grading's, and the stages before it refuse it.
-    const land = r?.land ?? { positions: g.tile.landPositions, normals: g.tile.landNormals, attrs: g.tile.landAttrs };
-    writeGz(ptmPath, writePtmLand(g.ptmBytes, land));
-
     const strokes: PtrTile = r
         ? { ...g.ptr, ...(r.strokes ?? {}), positions: r.strokes?.positions ?? r.strokePositions }
         : g.ptr;
@@ -180,6 +218,16 @@ export function gradeTile(cfg: GradeConfig, k: TileKey): GradeResult {
         throw new Error(`${key}: ${strokes.positions.length / 3} stroke vertices after grading exceed ${PTR_MAX_VERTS}`);
     }
     const indices = strokes.indices instanceof Uint16Array ? strokes.indices : Uint16Array.from(strokes.indices);
+
+    // The land, graded or as it was: either way the tile is now the
+    // grading's, and the stages before it refuse it. A leaf's is simplified
+    // last (simplifyLand.ts), the drawn roads and rivers kept on it.
+    const graded = r?.land ?? { positions: g.tile.landPositions, normals: g.tile.landNormals, attrs: g.tile.landAttrs };
+    const simplify = cfg.simplifyM !== 0 && k.z === cfg.leafZoom;
+    const lean = simplify ? simplifyLand(graded, g.tile, tileUp(basis, k), strokePointsOf(strokes, g.tile), cfg.simplifyM) : undefined;
+    const land = lean?.land ?? graded;
+    writeGz(ptmPath, writePtmLand(g.ptmBytes, land, lean?.border));
+
     writeGz(ptrPath, encodePtrRaw({ ...strokes, indices }, PTR_TILE_GRADED));
 
     const beds = r ? simplifyBeds(r.beds) : new Float64Array(0);
@@ -192,6 +240,7 @@ export function gradeTile(cfg: GradeConfig, k: TileKey): GradeResult {
         key, z: k.z,
         landTris: land.positions.length / 9,
         trianglesAdded: r?.stats.trianglesAdded ?? 0,
+        triangleStages: r?.stats.triangleStages ? [...r.stats.triangleStages, land.positions.length / 9] : undefined,
         wallTriangles: r?.stats.wallTriangles ?? 0,
         underpinTriangles: r?.stats.underpinTriangles ?? 0,
         spikesLowered: r?.stats.spikesLowered ?? 0,

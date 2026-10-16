@@ -363,6 +363,12 @@ export interface RailBedStats {
     wallTriangles: number;
     /** Of those, the bridges' concrete carried down to the land graded under it. */
     underpinTriangles: number;
+    /**
+     * Live land triangles after each step of the land pass: as baked, refined
+     * for the beds, split under roads, collapsed, and as written (cut at the
+     * walls). Where the grade's triangles come from.
+     */
+    triangleStages?: number[];
     /** The same per tier (BED_TIERS order): lines, their length, steeper than the tier's limit before and after. */
     byTier: Array<{ chains: number; lengthM: number; steepM: number; overLimitM: number }>;
 }
@@ -1339,6 +1345,8 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
     };
 
     // --- refine where the bed moves the ground -------------------------------
+    const stages = [mesh.liveCount()];
+    stats.triangleStages = stages;
     const queue: number[] = [];
     for (let t = 0; t < mesh.tris.length; t++) {
         queue.push(t);
@@ -1373,6 +1381,7 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
         }
     }
 
+    stages.push(mesh.liveCount());
     // --- move the vertices -----------------------------------------------------
     // A vertex of a long triangle (a merged field hundreds of metres across)
     // moved for a street that does not refine tilted the whole field into a
@@ -1398,9 +1407,11 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
             mesh.placeNew = undefined;
             return r;
         })();
+    stages.push(mesh.liveCount());
     stats.landLoweredUnderRoads = underRoads.lowered;
     stats.splitForRoads = underRoads.split;
     if (moved === 0 && underRoads.lowered === 0 && underRoads.split === 0) {
+        stages.push(stages[stages.length - 1], stages[stages.length - 1]);
         return { strokePositions: outPositions, strokes: strokesOut, beds: bedFloats, stats };
     }
     // Splits that left the surface flat - the top of a bed, a straight
@@ -1422,6 +1433,7 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
     // Spikes left standing - one vertex held up while the land round it went
     // down to a road or a deck's clearance: under the B2's bridges at
     // Garmisch they stood 4-5 m tall and a metre wide.
+    stages.push(mesh.liveCount());
     stats.spikesLowered = mesh.despike(DESPIKE_SLOPE);
     stats.trianglesAdded = mesh.pieceCount();
     stats.verticesMoved = moved;
@@ -1465,6 +1477,7 @@ export function layRailBeds(input: RailBedInput): RailBedResult | undefined {
         (u, v) => border.taper(u, v) < CUT_BORDER_TAPER
             || (keep.allowance(u, v) < CUT_KEEP_ALLOWANCE_M && deckTops?.top(u, v) === undefined));
     const landOut = fitted.soup;
+    stages.push(landOut.positions.length / 9);
     stats.landCutAtWalls = fitted.cut;
     // A bridge's abutments and piers were built down to the ground as the
     // bridge bake read it, before these earthworks: where they lowered it,
@@ -5282,6 +5295,17 @@ class SoupMesh {
             }
         }
         return lowered;
+    }
+
+    /** Live triangles. */
+    liveCount(): number {
+        let n = 0;
+        for (const t of this.tris) {
+            if (t.alive) {
+                n++;
+            }
+        }
+        return n;
     }
 
     /** How many triangles the soup gains over its baked slots: the pieces toSoup appends. */

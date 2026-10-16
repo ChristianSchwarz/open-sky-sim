@@ -16,6 +16,7 @@ import {
     decodePtm,
     encodePtm,
     packBorderEntry,
+    writePtmLand,
 } from './ptm';
 import { TerrainClass, TerrainTone } from './tones';
 
@@ -78,6 +79,39 @@ describe('PTM1 border table', () => {
         assert.deepEqual(Array.from(b.edgeParams), [0, 0.5]);
         assert.deepEqual(Array.from(tile.landPositions), Array.from(plain.landPositions));
         assert.deepEqual(Array.from(tile.riverIndices), Array.from(plain.riverIndices));
+    });
+
+    it('writes a new table with new land, and keeps the water and rivers', () => {
+        const bytes = encodePtm(withBorder());
+        const old = decodePtm(bytes);
+        // Two of the three triangles, renumbered: a simplified land.
+        const land = {
+            positions: old.landPositions.slice(9),
+            normals: old.landNormals.slice(12),
+            attrs: old.landAttrs.slice(12),
+        };
+        const border = {
+            vertices: new Uint32Array([packBorderEntry(PTM_SIDE_E, 4)]),
+            vertexParams: new Float32Array([0.25]),
+            edges: new Uint32Array([packBorderEntry(PTM_SIDE_E, 3), packBorderEntry(PTM_SIDE_E, 4)]),
+            edgeParams: new Float32Array([0.5, 0.25]),
+        };
+        const out = decodePtm(writePtmLand(bytes, land, border));
+        assert.deepEqual([...out.landPositions], [...land.positions]);
+        assert.deepEqual(Array.from(out.border!.vertices, borderEntryIndex), [4]);
+        assert.deepEqual(Array.from(out.border!.vertices, borderEntrySide), [PTM_SIDE_E]);
+        assert.deepEqual([...out.border!.vertexParams], [0.25]);
+        assert.deepEqual(Array.from(out.border!.edges, borderEntryIndex), [3, 4]);
+        assert.deepEqual([...out.border!.edgeParams], [0.5, 0.25]);
+        assert.deepEqual([...out.waterPositions], [...old.waterPositions]);
+        assert.deepEqual([...out.waterIndices], [...old.waterIndices]);
+    });
+
+    it('refuses fewer land vertices without a new table', () => {
+        const bytes = encodePtm(withBorder());
+        const old = decodePtm(bytes);
+        const land = { positions: old.landPositions.slice(9), normals: old.landNormals.slice(12), attrs: old.landAttrs.slice(12) };
+        assert.throws(() => writePtmLand(bytes, land), /fewer vertices/);
     });
 
     it('decodes a tile without one as having none', () => {
