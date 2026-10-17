@@ -173,12 +173,22 @@ export function buildAirframeProfile(
 function skinBehind(edge: V3, tris: readonly number[]): BarricadeWingSkin {
     const top: V3[] = [edge.clone()];
     const bottom: V3[] = [edge.clone()];
+    // Only triangles the rays at this x can meet, behind this edge.
+    const deepest = SKIN_STEPS_M[SKIN_STEPS_M.length - 1];
+    const under: number[] = [];
+    for (let t = 0; t + 8 < tris.length; t += 9) {
+        const x0 = Math.min(tris[t], tris[t + 3], tris[t + 6]);
+        const x1 = Math.max(tris[t], tris[t + 3], tris[t + 6]);
+        const z0 = Math.min(tris[t + 2], tris[t + 5], tris[t + 8]);
+        const z1 = Math.max(tris[t + 2], tris[t + 5], tris[t + 8]);
+        if (x0 <= edge.x && x1 >= edge.x && z1 >= edge.z - deepest && z0 <= edge.z) under.push(t);
+    }
     for (const d of SKIN_STEPS_M) {
         if (d <= 0) continue;
         const z = edge.z - d;
         let hi = -Infinity;
         let lo = Infinity;
-        for (let t = 0; t + 8 < tris.length; t += 9) {
+        for (const t of under) {
             const y = rayHitY(tris, t, edge.x, z);
             if (y === undefined || Math.abs(y - edge.y) > SKIN_REACH_M) continue;
             if (y > hi) hi = y;

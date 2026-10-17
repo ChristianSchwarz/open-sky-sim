@@ -23,7 +23,8 @@ import { attachToRenderList } from '../../render/renderList';
 import { trackAircraftMaterial, trackAircraftMesh } from './aircraftDebug';
 import { SUN_STATE } from '../materials/shaders/sun';
 import { WeaponsTarget } from './weaponsTarget';
-import { ControlAxis, ControlSurfaceConfig, FlyableAircraftDef, SwingWingsConfig } from './aircraftDef';
+import { AircraftCollisionMesh, ControlAxis, ControlSurfaceConfig, FlyableAircraftDef, SwingWingsConfig } from './aircraftDef';
+import { bakeCollisionMeshFromModel } from './carrierDeck';
 import { nextWingSweepMode, poseSurface, stepWingSweep, WingSweepMode, wingSweepTarget } from './wingSweep';
 import { Combatant, Faction } from '../../weapons/combatant';
 import { CombatSimClient } from '../../physics/sim/combatSimClient';
@@ -1322,6 +1323,42 @@ export class PlayerEntity implements Entity {
             parts: this.collectWreckParts(),
             damage: this.damage.active ? this.damage : undefined,
         });
+    }
+
+    /**
+     * The airframe as it is drawn right now, in the body frame: the body, the
+     * gear if it is down, and every control surface at its present pose — a
+     * swing wing where it is swept to. The body model alone has no wings on
+     * an aircraft whose wings are surfaces (the F-14). Most detailed LOD only.
+     */
+    bakeDrawnAirframe(): AircraftCollisionMesh | undefined {
+        this.updateDisplayTransform();
+        const inv = new THREE.Quaternion().copy(this.displayQuaternion).invert();
+        const triangles: number[] = [];
+        const add = (model: Model, position: THREE.Vector3, quaternion: THREE.Quaternion) => {
+            const rel = new THREE.Matrix4().compose(
+                position.clone().sub(this.displayPosition).applyQuaternion(inv),
+                inv.clone().multiply(quaternion),
+                this.obj.scale,
+            );
+            const soup = bakeCollisionMeshFromModel(model, rel, 1);
+            if (!soup) return;
+            for (let i = 0; i < soup.triangles.length; i++) triangles.push(soup.triangles[i]);
+        };
+        add(this.modelBody.model, this.displayPosition, this.displayQuaternion);
+        for (const part of this.collectWreckParts()) {
+            add(part.model, part.position, part.quaternion);
+        }
+        if (triangles.length < 9) return undefined;
+        const min: [number, number, number] = [Infinity, Infinity, Infinity];
+        const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+        for (let i = 0; i < triangles.length; i += 3) {
+            for (let k = 0; k < 3; k++) {
+                min[k] = Math.min(min[k], triangles[i + k]);
+                max[k] = Math.max(max[k], triangles[i + k]);
+            }
+        }
+        return { triangles, aabb: { min, max } };
     }
 
     /** The gear and control surfaces as pieces, at their undamaged poses (gear id 0, surface i id 1 + i). */

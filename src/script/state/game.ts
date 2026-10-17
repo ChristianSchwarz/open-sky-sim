@@ -618,8 +618,8 @@ export class Game {
     /** Rig state last told to the sim, so it is only re-sent on a change. */
     private barricadeSentArmed = false;
     private barricadeSentGeneration = -1;
-    /** Airframe profiles the net is drawn on, per aircraft def. */
-    private readonly barricadeProfiles = new Map<string, BarricadeAirframeProfile>();
+    /** The airframe profile the net is drawn on, built once per catch from the drawn aircraft. */
+    private barricadeCatchProfile: BarricadeAirframeProfile | undefined;
     private readonly barricadeCatchScratch: BarricadeCatch = {
         position: new THREE.Vector3(),
         quaternion: new THREE.Quaternion(),
@@ -2534,20 +2534,19 @@ export class Game {
 
     /** The player in the net, if they are: drawn pose and airframe profile. */
     private playerBarricadeCatch(): BarricadeCatch | undefined {
-        if (this.playerBarricadeEngagement() === BarricadeEngagement.NONE) return undefined;
+        if (this.playerBarricadeEngagement() === BarricadeEngagement.NONE) {
+            this.barricadeCatchProfile = undefined;
+            return undefined;
+        }
         const def = this.currentDef;
-        let profile = this.barricadeProfiles.get(def.id);
+        let profile = this.barricadeCatchProfile;
         if (!profile) {
-            // The hitbox until the drawn airframe is in: webbing laid on the
-            // coarse collider sits inside the drawn wings.
-            profile = buildAirframeProfile(def.collisionMesh, def.flight?.gear.points);
-            this.barricadeProfiles.set(def.id, profile);
-            this.models.getModel(def.body, (_url, model) => {
-                const drawn = bakeCollisionMeshFromModel(model);
-                if (drawn) {
-                    this.barricadeProfiles.set(def.id, buildAirframeProfile(drawn, def.flight?.gear.points));
-                }
-            });
+            // The airframe as drawn at the catch, wings at their sweep; the
+            // hitbox only if nothing is drawn (the webbing sits inside drawn
+            // wings when laid on the coarse collider).
+            const drawn = this.player.bakeDrawnAirframe() ?? def.collisionMesh;
+            profile = buildAirframeProfile(drawn, def.flight?.gear.points);
+            this.barricadeCatchProfile = profile;
         }
         this.player.updateDisplayTransform();
         const c = this.barricadeCatchScratch;

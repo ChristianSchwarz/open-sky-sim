@@ -54,8 +54,13 @@ export function createCarrierMeshCollider(
  * Uses each mesh's local TRS (already world-baked by ModelManager for nested groups).
  * An optional `root` transform (e.g. the placed entity's rotation/scale) is
  * applied on top, keeping the soup in the entity-local frame around its origin.
+ * `maxLods` limits the bake to the most detailed levels (default: all of them).
  */
-export function bakeCollisionMeshFromModel(model: Model, root?: THREE.Matrix4): AircraftCollisionMesh | undefined {
+export function bakeCollisionMeshFromModel(
+    model: Model,
+    root?: THREE.Matrix4,
+    maxLods = Infinity,
+): AircraftCollisionMesh | undefined {
     const flat: number[] = [];
     const vA = new THREE.Vector3();
     const vB = new THREE.Vector3();
@@ -110,7 +115,7 @@ export function bakeCollisionMeshFromModel(model: Model, root?: THREE.Matrix4): 
         }
     };
 
-    for (let lod = 0; lod < model.lod.length; lod++) {
+    for (let lod = 0; lod < Math.min(model.lod.length, maxLods); lod++) {
         const level = model.lod[lod];
         for (let i = 0; i < level.volumes.length; i++) {
             consumeMesh(level.volumes[i]);
