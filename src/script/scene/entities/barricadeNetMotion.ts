@@ -19,7 +19,7 @@
  */
 import * as THREE from 'three';
 import { BARRICADE_DECK_Y } from './barricadeSpec';
-import { BarricadeNetShape } from './barricadeWrap';
+import { BarricadeNetShape, polylineAtX } from './barricadeWrap';
 
 type V3 = THREE.Vector3;
 
@@ -140,11 +140,12 @@ export class BarricadeNetMotion {
             const u = (j + 1) / (count + 1);
             const tv = target.verticals[j];
             const top = sampleAt(upper, u).add(tv[0].clone().sub(sampleAt(upperTarget, u)));
-            const bottom = sampleAt(lower, u).add(tv[tv.length - 1].clone().sub(sampleAt(lowerTarget, u)));
+            // The bottom joins the moving lower strap where the wrap joins it.
+            const end = tv[tv.length - 1];
+            const bottom = end.clone().add(polylineAtX(lower, end.x).sub(polylineAtX(lowerTarget, end.x)));
             if (tv.length > 2 && top.distanceTo(tv[0]) < HOOK_SNAP_M) {
-                // A sling round the wing: the wing holds all but its top end,
-                // and it ends in the glove under the wing.
-                verticals.push([top, ...tv.slice(1).map(p => p.clone())]);
+                // A sling round the wing: the wing holds its middle in place.
+                verticals.push([top, ...tv.slice(1, -1).map(p => p.clone()), bottom]);
             } else {
                 verticals.push([top, bottom]);
             }

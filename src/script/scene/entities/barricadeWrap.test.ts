@@ -11,7 +11,7 @@ import {
     BARRICADE_STRAP_COUNT,
     buildBarricadeField,
 } from './barricadeSpec';
-import { buildAirframeProfile, buildBarricadeShape } from './barricadeWrap';
+import { buildAirframeProfile, buildBarricadeShape, polylineAtX } from './barricadeWrap';
 
 /** Swept wings on a box fuselage, body frame (+Z forward), span 12 m. */
 function testAirframe(): number[] {
@@ -223,11 +223,18 @@ describe('barricade wrap on a cranked delta', () => {
         }
     });
 
-    it('ends every wing sling in the glove, not on the deck', () => {
-        // A drop from under the wing to the lower strap at the gear read as
-        // stray webs pointing at the deck.
-        for (const v of s.verticals.filter(v => v.length > 2)) {
-            for (const p of v) assert.ok(p.y > wingY - 0.1, `sling reaches ${(wingY - p.y).toFixed(2)} m below the wing`);
+    it('joins every strap to the lower strap straight below it', () => {
+        for (const v of s.verticals) {
+            const end = v[v.length - 1];
+            assert.ok(end.distanceTo(polylineAtX(s.lower, end.x)) < 1e-6, 'strap ends off the lower strap');
+        }
+        // Outboard of the gear the drop from under the wing is short and
+        // straight down: matched by position along the strap instead, it ran
+        // diagonally to the deck and read as a stray web.
+        for (const v of s.verticals.filter(v => v.length > 2 && Math.abs(v[0].x - BARRICADE_MID_X) > 2)) {
+            const drop = v[v.length - 1].clone().sub(v[v.length - 2]);
+            assert.ok(Math.hypot(drop.x, drop.z) < 1e-3, `drop leans ${Math.hypot(drop.x, drop.z).toFixed(2)} m`);
+            assert.ok(drop.y < 0 && drop.y > -0.75, `drop of ${(-drop.y).toFixed(2)} m`);
         }
     });
 
