@@ -20,6 +20,7 @@ import {
     SerializedStaticColliders,
     deserializeArrestorCables,
     SerializedArrestorCables,
+    SerializedBarricade,
     SerializedWorld,
 } from './serializedWorld';
 import {
@@ -34,7 +35,15 @@ import {
     hookWorldPos,
     trySnag,
 } from '../../scene/entities/arrestorCables';
-// Barricade imports removed
+import {
+    barricadeAlong,
+    barricadeCatches,
+    BarricadeEngagement,
+    BarricadeField,
+    BARRICADE_MAX_DECEL_MPS2,
+    BARRICADE_PULL_OUT_M,
+    buildBarricadeField,
+} from '../../scene/entities/barricadeSpec';
 
 import { AC, AC_STRIDE, PROJ_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
 import {
@@ -223,6 +232,14 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     /** Previous-step CG, for the barricade's plane-crossing test. */
     readonly prevPos = new THREE.Vector3();
     hasPrevPos = false;
+    /** In the barricade webbing: paying out, then held. */
+    barricadeState = BarricadeEngagement.NONE;
+    /** Which carrier's barricade holds this aircraft, or -1. */
+    barricadeFieldIndex = -1;
+    /** CG along the deck axis at engagement (for the run-out). */
+    barricadeSnagAlong = 0;
+    /** Rig generation of the webbing that caught it. */
+    barricadeGeneration = 0;
 
     // Normalized command buffer, written by the pilot (ai) or the client (external).
     private inPitch = 0;
@@ -309,6 +326,8 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.crashedCarrierLocalValid = false;
         this.hasPrevHook = false;
         this.hasPrevPos = false;
+        this.barricadeState = BarricadeEngagement.NONE;
+        this.barricadeFieldIndex = -1;
         this.model.position = this.tmp.fromArray(spawn.position);
         this.model.quaternion = new THREE.Quaternion().fromArray(spawn.quaternion);
         if (spawn.velocity) {
@@ -558,6 +577,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         out[base + AC.hookX] = this.hookNow.x;
         out[base + AC.hookY] = this.hookNow.y;
         out[base + AC.hookZ] = this.hookNow.z;
+        out[base + AC.barricade] = this.barricadeState;
     }
 }
 
@@ -604,6 +624,12 @@ export class CombatSim implements ProjectileSink {
     /** Colliders that arrived before the world did; applied when it does. */
     private pendingColliders: SerializedStaticColliders[] = [];
     private arrestorFields: ArrestorCableField[] = [];
+    private barricadeFields: BarricadeField[] = [];
+    /**
+     * Per carrier, the rig generation whose webbing has caught something. The
+     * main thread keeps saying "armed" until it hears; the sim already knows.
+     */
+    private readonly barricadeExpended: number[] = [];
     /** World velocity of the moving carrier (m/s); trap scrub is relative to this. */
     private readonly carrierVel = new THREE.Vector3();
     private readonly aircraft = new Map<string, SimAircraft>();
@@ -760,12 +786,25 @@ export class CombatSim implements ProjectileSink {
         applyStaticColliders(this.world, colliders);
     }
 
-    /** Barricade functionality has been removed. */
-    setBarricades(_barricades: any[]): void {
-        // No-op: barricade system has been removed
+    /**
+     * The ships' barricades, re-sent whenever a ship moves or a rig changes.
+     * A held aircraft is let go once its webbing is no longer the one rigged.
+     */
+    setBarricades(barricades: SerializedBarricade[]): void {
+        this.barricadeFields = barricades.map((b, i) => {
+            const q = new THREE.Quaternion().fromArray(b.quaternion);
+            const armed = b.armed && this.barricadeExpended[i] !== b.generation;
+            return buildBarricadeField(b.originX, b.originY, b.originZ, q, armed, b.generation);
+        });
+        for (const a of this.aircraft.values()) {
+            if (a.barricadeState === BarricadeEngagement.NONE) continue;
+            const field = this.barricadeFields[a.barricadeFieldIndex];
+            if (!field || field.generation !== a.barricadeGeneration) {
+                a.barricadeState = BarricadeEngagement.NONE;
+                a.barricadeFieldIndex = -1;
+            }
+        }
     }
-
-
 
     setArrestorCables(cables: SerializedArrestorCables[]): void {
         this.arrestorFields = deserializeArrestorCables({ arrestorCables: cables } as SerializedWorld);
@@ -971,14 +1010,7 @@ export class CombatSim implements ProjectileSink {
         a.bindWorld(this.world);
     }
 
-    /**
-     * The mesh the barricade webbing drapes over, if the caller has one.
-     *
-     * The webbing is drawn lying on the airframe, so it is solved against the
-     * airframe that is drawn rather than the coarse hitbox {@link setCollision}
-     * carries — that one is right for bullets and crashes and wrong here, and
-     * against it the net reads as threaded through the wings.
-     */
+    /** Coarse hitbox for bullets, crashes and belly contact. */
     setCollision(id: string, collision: AircraftCollisionMesh | undefined): void {
         const a = this.aircraft.get(id);
         if (a) a.collision = collision;
@@ -1198,6 +1230,7 @@ export class CombatSim implements ProjectileSink {
                 this.resolveSolidWorldContact(a, delta);
             }
             this.resolveArrestor(a, delta);
+            this.resolveBarricade(a, delta);
             a.resolveFiring();
         }
         // 4b. Aircraft against each other.
@@ -1269,7 +1302,7 @@ export class CombatSim implements ProjectileSink {
 
         hookWorldPos(a.model.position, a.model.quaternion, a.hookBody, a.hookNow);
 
-        if (a.arrestorLatch < 0) {
+        if (a.arrestorLatch < 0 && a.barricadeState === BarricadeEngagement.NONE) {
             for (let fi = 0; fi < this.arrestorFields.length; fi++) {
                 const field = this.arrestorFields[fi];
                 const idx = trySnag(
@@ -1326,8 +1359,59 @@ export class CombatSim implements ProjectileSink {
     }
 
     /**
-     * Emergency barricade: the webbing catches the *wings*, so there is no hook
-     * test — any airframe that crosses a raised net inside the stanchion span
+     * Emergency barricade: the webbing catches the wings, so there is no hook
+     * test — any airframe whose CG crosses the raised net inside the stanchions
+     * is caught, scrubbed to a stop over {@link BARRICADE_PULL_OUT_M} relative to
+     * the ship, and then held there until the rig is renewed. One catch expends
+     * the webbing. A hook already on a wire is left to the wire.
+     */
+    private resolveBarricade(a: SimAircraft, delta: number): void {
+        const pos = a.model.position;
+        if (a.model.isCrashed()) {
+            a.barricadeState = BarricadeEngagement.NONE;
+            a.barricadeFieldIndex = -1;
+        } else if (a.barricadeState === BarricadeEngagement.NONE) {
+            if (a.hasPrevPos && a.arrestorLatch < 0) {
+                for (let fi = 0; fi < this.barricadeFields.length; fi++) {
+                    const field = this.barricadeFields[fi];
+                    if (barricadeCatches(field, a.prevPos, pos, a.model.velocityVector, this.carrierVel)) {
+                        a.barricadeState = BarricadeEngagement.PULLING;
+                        a.barricadeFieldIndex = fi;
+                        a.barricadeSnagAlong = barricadeAlong(field, pos);
+                        a.barricadeGeneration = field.generation;
+                        field.armed = false;
+                        this.barricadeExpended[fi] = field.generation;
+                        break;
+                    }
+                }
+            }
+        }
+        if (a.barricadeState !== BarricadeEngagement.NONE) {
+            const field = this.barricadeFields[a.barricadeFieldIndex];
+            const vel = a.model.velocityVector;
+            const shipAlong = this.carrierVel.dot(field.deckAxis);
+            if (a.barricadeState === BarricadeEngagement.PULLING) {
+                const traveled = barricadeAlong(field, pos) - a.barricadeSnagAlong;
+                const stillPulling = applyArrestorVelocity(
+                    vel, field.deckAxis, delta, BARRICADE_PULL_OUT_M - traveled, shipAlong,
+                    BARRICADE_MAX_DECEL_MPS2,
+                );
+                a.model.snapPhysicsState();
+                if (!stillPulling) {
+                    a.model.setLanded(true);
+                    a.barricadeState = BarricadeEngagement.HELD;
+                }
+            } else {
+                // Tangled in the webbing: no further forward than the ship, at any throttle.
+                const along = vel.dot(field.deckAxis);
+                if (along > shipAlong) {
+                    vel.addScaledVector(field.deckAxis, shipAlong - along);
+                    a.model.snapPhysicsState();
+                }
+            }
+        }
+        a.prevPos.copy(pos);
+        a.hasPrevPos = true;
     }
 
     /**
@@ -1345,7 +1429,7 @@ export class CombatSim implements ProjectileSink {
             return false;
         }
         // Still pulling out — do not freeze pose.
-        if (a.arrestorLatch >= 0 && !a.arrestorHeld) {
+        if ((a.arrestorLatch >= 0 && !a.arrestorHeld) || a.barricadeState === BarricadeEngagement.PULLING) {
             a.carrierParkLocalValid = false;
             return false;
         }
@@ -1965,7 +2049,6 @@ export class CombatSim implements ProjectileSink {
     encodeSnapshotInto(
         aircraftBank: Float32Array | undefined,
         projectileBank: Float32Array | undefined,
-        barricadeBank?: Float32Array,
     ): SnapshotBuffers {
         const ids: string[] = [];
         for (const id of this.order) {

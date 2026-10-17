@@ -52,6 +52,9 @@ import {
 import { WGS84_A, WGS84_B, cloneEnuBasis, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, seaLevelSceneY, worldToGeodetic } from '../terrain/geodesy';
 import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
+import { BarricadeCatch, BarricadeEntity } from '../scene/entities/barricadeEntity';
+import { BarricadeEngagement, BARRICADE_LOCAL_Z } from '../scene/entities/barricadeSpec';
+import { BarricadeAirframeProfile, buildAirframeProfile } from '../scene/entities/barricadeWrap';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
 import { ShipWakeEntity } from '../scene/entities/shipWake';
 import {
@@ -387,7 +390,7 @@ const CARRIER_GROOVE_SPEED_MPS = CARRIER_GROOVE_SPEED_KMH / 3.6;
  * the hook up the wires are scenery, and the flatter path clears the ramp by
  * ~5 m instead of the ~1 m that put the gear through the rounddown.
  */
-const CARRIER_GROOVE_AIM_FROM_STERN_M = 0;  // barricade removed
+const CARRIER_GROOVE_AIM_FROM_STERN_M = KUZ_HULL.maxZ - BARRICADE_LOCAL_Z;
 /** ~3° glideslope, the same one the ILS needles and the ball are drawn from. */
 const CARRIER_GROOVE_ALTITUDE_M = CARRIER_DECK_Y
     + (CARRIER_GROOVE_DISTANCE_M + CARRIER_GROOVE_AIM_FROM_STERN_M) * ILS_GLIDESLOPE_TAN;
@@ -604,6 +607,18 @@ export class Game {
 
     /** Live Kuznetsov entity; cables / trap physics / ILS follow its pose. */
     private kuz: GroundTargetEntity | undefined;
+    /** The ship's emergency barricade (K rigs and strikes it). */
+    private barricade: BarricadeEntity | undefined;
+    /** Rig state last told to the sim, so it is only re-sent on a change. */
+    private barricadeSentArmed = false;
+    private barricadeSentGeneration = -1;
+    /** Airframe profiles the net is drawn on, per aircraft def. */
+    private readonly barricadeProfiles = new Map<string, BarricadeAirframeProfile>();
+    private readonly barricadeCatchScratch: BarricadeCatch = {
+        position: new THREE.Vector3(),
+        quaternion: new THREE.Quaternion(),
+        profile: undefined as unknown as BarricadeAirframeProfile,
+    };
     private readonly syncedCarrierPos = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
     private readonly syncedCarrierQuat = new THREE.Quaternion(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
     /** World bow direction and velocity for the steaming carrier. */
@@ -1032,17 +1047,7 @@ export class Game {
         });
     }
 
-    /**
-     * Triangle soup of the aircraft as it is *drawn*, for the barricade webbing
-     * to lie on.
-     *
-     * The hitbox the sim already has is a separate, much coarser model — right
-     * for bullets and crashes, and wrong for this: webbing solved against it and
-     * drawn against the real airframe reads as threaded through the wings. Baked
-     * once per airframe and cached, since it is only the gross shape and does not
-     * move with the control surfaces.
-     */
-    /** Hand the sim both the hitbox and the drawn shape for a given airframe. */
+    /** Hand the sim the hitbox for a given airframe. */
     private pushAircraftMeshes(simId: string, def: FlyableAircraftDef): void {
         this.combatSim.setCollision(simId, def.collisionMesh);
     }
@@ -2141,6 +2146,7 @@ export class Game {
             this.syncCarrierSystems();
             this.scene.update(delta);
             this.pumpCombatSim(delta);
+            this.syncBarricade(false);
             this.updateAiStraightTimer(delta);
             this.followFlightCameraInUrl(delta);
 
@@ -2419,10 +2425,6 @@ export class Game {
         this.seatCarrierOnSea();
     }
 
-    /**
-     * Step the barricade's raise/lower animation, feeding it the sim's live
-     * engagement flag so an arrestment expends the webbing.
-     */
     /** Carrier pose for arrestor visuals / latched hook (always live). */
     private carrierPose(): ArrestorCarrierPose {
         if (this.kuz) {
@@ -2474,6 +2476,7 @@ export class Game {
                 s.b.x - field.originX, s.b.y - field.originY, s.b.z - field.originZ,
             ] as [number, number, number, number, number, number]),
         }]);
+        this.syncBarricade(true);
         this.combatSim.setCarrierMeshOrigins(
             this.carrierMeshes.map(c => ({
                 originX: c.originX, originY: c.originY, originZ: c.originZ,
@@ -2482,6 +2485,63 @@ export class Game {
         this.combatSim.setCarrierVelocity(
             this.carrierVelocity.x, this.carrierVelocity.y, this.carrierVelocity.z,
         );
+    }
+
+    /** The player's barricade engagement as the sim last reported it. */
+    private playerBarricadeEngagement(): number {
+        const fm = this.player.getFlightModel();
+        return fm instanceof SimProxyFlightModel ? fm.getBarricadeEngagement() : BarricadeEngagement.NONE;
+    }
+
+    /**
+     * Tell the sim the rig state when it changes or the ship has moved, and
+     * book a catch the sim reported against the webbing.
+     */
+    private syncBarricade(shipMoved: boolean): void {
+        const rig = this.barricade;
+        if (!rig || !this.kuz) return;
+        if (this.playerBarricadeEngagement() !== BarricadeEngagement.NONE) {
+            rig.markExpended();
+        }
+        const armed = rig.armed;
+        if (!shipMoved && armed === this.barricadeSentArmed && rig.generation === this.barricadeSentGeneration) {
+            return;
+        }
+        this.barricadeSentArmed = armed;
+        this.barricadeSentGeneration = rig.generation;
+        const p = this.kuz.position;
+        const q = this.kuz.quaternion;
+        this.combatSim.setBarricades([{
+            originX: p.x, originY: p.y, originZ: p.z,
+            quaternion: [q.x, q.y, q.z, q.w],
+            armed,
+            generation: rig.generation,
+        }]);
+    }
+
+    /** The player in the net, if they are: drawn pose and airframe profile. */
+    private playerBarricadeCatch(): BarricadeCatch | undefined {
+        if (this.playerBarricadeEngagement() === BarricadeEngagement.NONE) return undefined;
+        const def = this.currentDef;
+        let profile = this.barricadeProfiles.get(def.id);
+        if (!profile) {
+            // The hitbox until the drawn airframe is in: webbing laid on the
+            // coarse collider sits inside the drawn wings.
+            profile = buildAirframeProfile(def.collisionMesh, def.flight?.gear.points);
+            this.barricadeProfiles.set(def.id, profile);
+            this.models.getModel(def.body, (_url, model) => {
+                const drawn = bakeCollisionMeshFromModel(model);
+                if (drawn) {
+                    this.barricadeProfiles.set(def.id, buildAirframeProfile(drawn, def.flight?.gear.points));
+                }
+            });
+        }
+        this.player.updateDisplayTransform();
+        const c = this.barricadeCatchScratch;
+        c.position.copy(this.player.getDisplayPosition());
+        c.quaternion.copy(this.player.getDisplayQuaternion());
+        c.profile = profile;
+        return c;
     }
 
     /**
@@ -3113,6 +3173,11 @@ export class Game {
                         }
                         break;
                     }
+                    case 'k': {
+                        // Deck crew: rig the barricade, or strike it.
+                        this.barricade?.toggle();
+                        break;
+                    }
                 }
             } else if (this.state === GameState.SPAWN_MENU) {
                 switch (event.key) {
@@ -3712,6 +3777,14 @@ export class Game {
             void this.holdUntilStreamed();
         }
 
+        // Fresh sortie: the deck crew has struck the barricade, except for the
+        // barricade arrival, which starts with fresh webbing across the deck.
+        if (at === undefined && spawn === 'carrierBarricade') {
+            this.barricade?.rigNow();
+        } else {
+            this.barricade?.stowNow();
+        }
+        this.syncBarricade(true);
         if (at === undefined && spawn === 'carrierBarricade') {
             // A barricade arrival is a deck exercise, not a sortie: an opponent
             // spawned a few hundred metres ahead would be inside the ship.
@@ -3837,8 +3910,6 @@ export class Game {
             spawn: this.playerSimSpawn(),
             enabled: true,
         });
-        // The drawn airframe, for the barricade webbing to lie on. Separate from
-        // the hitbox above, which stays coarse for bullets and crashes.
         this.pushAircraftMeshes(PLAYER_SIM_ID, this.currentDef);
         this.player.setCombatSimClient(this.combatSim);
         this.player.setHasGun(true);
@@ -5169,6 +5240,16 @@ export class Game {
         );
         scene.add(arrestorCables);
         this.player.setArrestorCarrierPoseProvider(() => this.carrierPose());
+
+        const barricade = new BarricadeEntity(
+            this.materials,
+            () => this.carrierPose(),
+            () => this.playerBarricadeCatch(),
+        );
+        this.barricade = barricade;
+        scene.add(barricade);
+        this.player.setBarricadeStatusProvider(() =>
+            barricade.status(this.playerBarricadeEngagement() !== BarricadeEngagement.NONE));
 
         if (atSea) {
             const shipWake = new ShipWakeEntity(this.materials, () => this.carrierPose());

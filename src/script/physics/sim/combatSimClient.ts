@@ -3,7 +3,7 @@ import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { Faction } from '../../weapons/combatant';
 import { ForceVectorSample } from '../model/flightModel';
 import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
-import { SerializedArrestorCables, SerializedStaticColliders, SerializedWorld } from './serializedWorld';
+import { SerializedArrestorCables, SerializedBarricade, SerializedStaticColliders, SerializedWorld } from './serializedWorld';
 import { HeightTileUpdate, SerializedHeightField } from '../../terrain/heightMirror';
 import { AC_STRIDE, PROJ_STRIDE, SnapshotBuffers } from './simSnapshotCodec';
 import { FrameShift } from '../../terrain/geodesy';
@@ -166,14 +166,10 @@ export class CombatSimClient {
         this.post({ type: 'setArrestorCables', cables });
     }
 
-    /**
-     * The mesh the barricade webbing drapes over.
-     *
-     * Separate from {@link setCollision}, which is the coarse hitbox bullets and
-     * crashes use and wants to stay coarse. The webbing is *drawn* lying on the
-     * airframe, so it has to be solved against the airframe that is drawn —
-     * against the hitbox it reads as threaded through the wings.
-     */
+    setBarricades(barricades: SerializedBarricade[]): void {
+        this.post({ type: 'setBarricades', barricades });
+    }
+
     setCarrierMeshOrigins(origins: { originX: number; originY: number; originZ: number }[]): void {
         this.post({ type: 'setCarrierMeshOrigins', origins });
     }

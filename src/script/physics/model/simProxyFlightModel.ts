@@ -36,6 +36,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
     private simLimitersEnabled = true;
     private simPitchLimiterMode = 0;
     private simArrestorLatch = -1;
+    private simBarricade = 0;
     private readonly simArrestorHook = new THREE.Vector3();
 
     constructor(
@@ -112,6 +113,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
         this.pitchLimiterMode = this.simPitchLimiterMode as FcsPitchLimiter;
         this.limitersEnabled = this.simLimitersEnabled;
         this.simArrestorLatch = buf[base + AC.arrestorLatch] ?? -1;
+        this.simBarricade = buf[base + AC.barricade] ?? 0;
         this.simArrestorHook.set(
             buf[base + AC.hookX] ?? 0,
             buf[base + AC.hookY] ?? 0,
@@ -183,6 +185,11 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
     }
 
     /** Latched arrestor cable index, or -1 when free. */
+    /** Barricade engagement from the sim (see BarricadeEngagement). */
+    getBarricadeEngagement(): number {
+        return this.simBarricade;
+    }
+
     getArrestorLatch(): number {
         return this.simArrestorLatch;
     }

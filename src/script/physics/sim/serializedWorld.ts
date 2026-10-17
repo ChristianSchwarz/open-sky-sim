@@ -75,36 +75,21 @@ export interface SerializedArrestorCables {
     segmentsLocal: [number, number, number, number, number, number][];
 }
 
-/** Structured-clone-safe barricade state (one carrier). */
+/**
+ * Structured-clone-safe barricade state (one carrier). The webbing's place on
+ * the deck is fixed (barricadeSpec.ts); only the ship's pose and the rig state
+ * travel.
+ */
 export interface SerializedBarricade {
     originX: number;
     originY: number;
     originZ: number;
-    /** Unit landing/roll-out direction. */
-    deckAxis: [number, number, number];
-    /** Unit deck +X (stanchion to stanchion). */
-    lateralAxis: [number, number, number];
-    /** World centre of the webbing at the stanchion feet. */
-    center: [number, number, number];
-    halfSpan: number;
-    height: number;
-    /** 0 = folded flush, 1 = fully upright. */
-    deploy: number;
     /** Carrier attitude as [x, y, z, w]. */
     quaternion: [number, number, number, number];
-    /**
-     * The rig as actually fitted to the deck, in carrier-local coordinates.
-     *
-     * Only what the sim needs to lace the same net the main thread drew: the
-     * stanchion stations and the deck they are bolted to. How much of that span
-     * is webbing rather than bare wire is the rig's own business, and both ends
-     * work it out the same way from these.
-     */
-    rigLeftX: number;
-    rigRightX: number;
-    rigDeckY: number;
-    /** Bumped when a fresh webbing assembly goes up; the sim re-laces on it. */
-    rigGeneration: number;
+    /** Webbing fully up and not yet expended. */
+    armed: boolean;
+    /** Bumped each time fresh webbing goes up; a held aircraft is let go on it. */
+    generation: number;
 }
 
 export interface SerializedWorld {

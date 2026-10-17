@@ -380,7 +380,8 @@ export function trySnag(
 
 /**
  * Scrub along-deck speed to reach {@link targetAlong} in {@link remainingDist}
- * metres (constant-decel profile a = v² / 2s, capped by {@link ARRESTOR_MAX_DECEL_MPS2}).
+ * metres (constant-decel profile a = v² / 2s, capped by {@link maxDecel}, the
+ * wires' {@link ARRESTOR_MAX_DECEL_MPS2} unless the barricade passes its own).
  * @returns true while still trapping (relative along-speed above stop threshold).
  */
 export function applyArrestorVelocity(
@@ -389,6 +390,7 @@ export function applyArrestorVelocity(
     dt: number,
     remainingDist: number = ARRESTOR_PULL_OUT_M,
     targetAlong: number = 0,
+    maxDecel: number = ARRESTOR_MAX_DECEL_MPS2,
 ): boolean {
     const along = vel.dot(deckAxis);
     const rel = along - targetAlong;
@@ -400,7 +402,7 @@ export function applyArrestorVelocity(
     }
     // Target stop in remainingDist: a = v_rel² / (2 s).
     const aNeeded = (rel * rel) / (2 * Math.max(remainingDist, 0.25));
-    const a = Math.min(aNeeded, ARRESTOR_MAX_DECEL_MPS2);
+    const a = Math.min(aNeeded, maxDecel);
     const dv = Math.sign(rel) * Math.min(Math.abs(rel), a * dt);
     vel.addScaledVector(deckAxis, -dv);
     return true;

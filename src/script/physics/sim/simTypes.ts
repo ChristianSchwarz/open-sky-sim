@@ -181,7 +181,6 @@ export type SimToWorkerMessage =
     | { type: 'reset'; id: string; position: Vec3; quaternion: Quat; velocity: Vec3; landed: boolean; throttle: number; model: SimFlightModelKind }
     | { type: 'setAircraftConfig'; id: string; aircraftConfig: Fm2AircraftConfig; model: SimFlightModelKind; collision?: AircraftCollisionMesh }
     | { type: 'setCollision'; id: string; collision?: AircraftCollisionMesh }
-    | { type: 'setBarricadeDrape'; id: string; drape?: AircraftCollisionMesh }
     | { type: 'setPosition'; id: string; position: Vec3 }
     | { type: 'setQuaternion'; id: string; quaternion: Quat }
     | { type: 'setVelocity'; id: string; velocity: Vec3 }
