@@ -132,10 +132,10 @@ describe('barricade shape', () => {
         }
     });
 
-    it('sags the upper strap where it spans free off the wingtip', () => {
+    it('keeps the free tail off the wingtip taut', () => {
         const s = caughtAt(10);
         const u = s.upper;
-        // Between the port shackle and the port tip the strap droops below the chord.
+        // Between the port shackle and the port tip: a slight droop at most.
         const tipIdx = u.findIndex(p => p.x > BARRICADE_MID_X - 6.2);
         const a = u[0];
         const b = u[tipIdx];
@@ -144,7 +144,7 @@ describe('barricade shape', () => {
             const t = (u[i].x - a.x) / (b.x - a.x);
             droop = Math.max(droop, a.y + (b.y - a.y) * t - u[i].y);
         }
-        assert.ok(droop > 0.2, `droop ${droop.toFixed(2)} m`);
+        assert.ok(droop > 0 && droop < 0.4, `droop ${droop.toFixed(2)} m`);
     });
 
     it('traps the gear with the lower strap', () => {

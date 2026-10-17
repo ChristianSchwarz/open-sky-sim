@@ -154,17 +154,18 @@ export class BarricadeEntity implements Entity {
     }
 
     /** Rigged and ready at once (the short-final spawn starts that way). */
-    rigNow(): void {
-        this.lace();
-        this.raise = 1;
-        this.target = 1;
-    }
-
-    /** Stowed at once, nothing laced. */
-    stowNow(): void {
-        this.raise = 0;
-        this.target = 0;
-        this.webbing = false;
+    /**
+     * A new spawn: fresh webbing laced (a new generation, so the sim lets go
+     * of anything the old one held), standing at once if `raised`, flush
+     * otherwise and ready for K.
+     */
+    reset(raised: boolean): void {
+        this.generationCounter++;
+        this.webbing = true;
+        this.expended = false;
+        this.raise = raised ? 1 : 0;
+        this.target = this.raise;
+        this.motion.reset();
     }
 
     /** The sim reported a catch: this webbing is spent. */

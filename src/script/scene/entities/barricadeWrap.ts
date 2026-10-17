@@ -11,7 +11,7 @@
  * between them. Caught, it is drawn wrapped on the airframe:
  *  - the upper strap follows each wing's own leading edge, lying on the top
  *    skin just behind it, and crosses the fuselage over the spine at the wing
- *    root; off each wingtip it spans free to its shackle, and there it sags.
+ *    root; off each wingtip it spans free and taut to its shackle.
  *    (Not a taut hull: on a strake or cranked delta the hull from the tips
  *    to the spine bridges clean over the wings and never touches them.);
  *  - the lower strap is pressed against the front of the gear legs;
@@ -24,7 +24,8 @@
  *  - the webbing gloves each wing: a tight sleeve strap round the leading
  *    edge at every edge sample, and a band along the bottom skin answering
  *    the upper strap on top. It is drawn taut, a few centimetres off the
- *    skin; only the free tails off the wingtips droop;
+ *    skin. The free tails off the wingtips run nearly straight to their
+ *    shackles, held taut by the purchase cables;
  *  - both straps end in one shackle per side, which the purchase cable pulls
  *    back toward its deck sheave at the stanchion foot.
  *
@@ -71,8 +72,11 @@ const HOOK_AHEAD_M = 0.04;
 /** The lower strap sits this far up the gear leg from the wheel contact, and ahead of it (m). */
 const GEAR_TRAP_UP_M = 0.55;
 const GEAR_TRAP_AHEAD_M = 0.2;
-/** Upper strap is cut this much longer than the lower (fraction of width): it carries less load and droops. */
-const UPPER_SLACK = 0.04;
+/**
+ * Upper strap slack off the wingtips (fraction of width). The purchase
+ * cables keep the webbing under tension, so this is barely a droop.
+ */
+const UPPER_SLACK = 0.001;
 /** Rigged-net sag of the upper strap between the stanchion tops (fraction of span). */
 const RIGGED_SLACK = 0.012;
 /** Straps the nose pushed aside bunch at the wing root this far apart (m). */
@@ -374,23 +378,22 @@ function wrapOnAirframe(pose: BarricadeCatchPose, profile: BarricadeAirframeProf
     const bandLen = polylineLength(bandPts);
     const remaining = [half + offset - centreArc, half - offset - (bandLen - centreArc)];
     const tips = [bandPts[0], bandPts[bandPts.length - 1]];
+    // Webbing longer than the way to the sheave is not left hanging: the
+    // purchase cable has hauled it in, and the tail runs straight.
     const shackles: V3[] = [];
-    const tipSlack: number[] = [];
     for (let s = 0; s < 2; s++) {
         const toSheave = sheaves[s].clone().sub(tips[s]);
         const reach = toSheave.length();
         const rem = Math.max(0.3, remaining[s]);
         shackles.push(tips[s].clone().addScaledVector(toSheave.normalize(), Math.min(rem, reach)));
-        tipSlack.push(Math.max(0, rem - reach));
     }
     for (const sh of shackles) sh.y = Math.max(sh.y, deckFloor + 0.06);
 
     // Upper strap: shackle, band, shackle. The band lies on the airframe; the
-    // two free spans off the wingtips share the strap's slack and sag.
+    // two free spans off the wingtips share the strap's little slack.
     const freeLens = [shackles[0].distanceTo(tips[0]), shackles[1].distanceTo(tips[1])];
     const slack = BARRICADE_WEBBING_WIDTH_M * UPPER_SLACK;
-    const shareOf = (s: number) =>
-        tipSlack[s] + slack * freeLens[s] / Math.max(1e-6, freeLens[0] + freeLens[1]);
+    const shareOf = (s: number) => slack * freeLens[s] / Math.max(1e-6, freeLens[0] + freeLens[1]);
     const upper: V3[] = sagSpan(shackles[0], tips[0], shareOf(0), SAG_SAMPLES);
     const bandFrom = upper.length - 1;
     for (let i = 1; i < bandPts.length; i++) upper.push(bandPts[i].clone());

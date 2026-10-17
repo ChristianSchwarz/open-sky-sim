@@ -609,6 +609,12 @@ export class Game {
     private kuz: GroundTargetEntity | undefined;
     /** The ship's emergency barricade (K rigs and strikes it). */
     private barricade: BarricadeEntity | undefined;
+    /**
+     * Set by a spawn: the snapshot still carries the last flight's catch
+     * until the sim steps again, which is seconds while the spawn waits for
+     * terrain. Believing it would spend the fresh webbing.
+     */
+    private barricadeStaleAfterSpawn = false;
     /** Rig state last told to the sim, so it is only re-sent on a change. */
     private barricadeSentArmed = false;
     private barricadeSentGeneration = -1;
@@ -2491,7 +2497,13 @@ export class Game {
     /** The player's barricade engagement as the sim last reported it. */
     private playerBarricadeEngagement(): number {
         const fm = this.player.getFlightModel();
-        return fm instanceof SimProxyFlightModel ? fm.getBarricadeEngagement() : BarricadeEngagement.NONE;
+        const engagement = fm instanceof SimProxyFlightModel ? fm.getBarricadeEngagement() : BarricadeEngagement.NONE;
+        if (this.barricadeStaleAfterSpawn) {
+            // Not believed until the sim has reported this aircraft free once.
+            if (engagement === BarricadeEngagement.NONE) this.barricadeStaleAfterSpawn = false;
+            return BarricadeEngagement.NONE;
+        }
+        return engagement;
     }
 
     /**
@@ -3781,11 +3793,8 @@ export class Game {
 
         // Fresh sortie: the deck crew has struck the barricade, except for the
         // barricade arrival, which starts with fresh webbing across the deck.
-        if (at === undefined && spawn === 'carrierBarricade') {
-            this.barricade?.rigNow();
-        } else {
-            this.barricade?.stowNow();
-        }
+        this.barricade?.reset(at === undefined && spawn === 'carrierBarricade');
+        this.barricadeStaleAfterSpawn = true;
         this.syncBarricade(true);
         if (at === undefined && spawn === 'carrierBarricade') {
             // A barricade arrival is a deck exercise, not a sortie: an opponent
