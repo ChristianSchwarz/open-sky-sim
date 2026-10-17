@@ -42,6 +42,9 @@ import {
     BarricadeField,
     BARRICADE_MAX_DECEL_MPS2,
     BARRICADE_PULL_OUT_M,
+    BARRICADE_REBOUND_M,
+    BARRICADE_REBOUND_S,
+    BARRICADE_TILT_RAD,
     buildBarricadeField,
 } from '../../scene/entities/barricadeSpec';
 
@@ -240,6 +243,12 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     barricadeSnagAlong = 0;
     /** Rig generation of the webbing that caught it. */
     barricadeGeneration = 0;
+    /** Seconds into the rebound after the stop. */
+    barricadeReboundT = 0;
+    /** Attitude at the stop, which the lean is applied to. */
+    readonly barricadeRestQuat = new THREE.Quaternion();
+    /** Which way it leans: +1 or −1. */
+    barricadeTiltSign = 1;
 
     // Normalized command buffer, written by the pilot (ai) or the client (external).
     private inPitch = 0;
@@ -1398,21 +1407,55 @@ export class CombatSim implements ProjectileSink {
                 );
                 a.model.snapPhysicsState();
                 if (!stillPulling) {
+                    // Stopped: the stretched webbing now pulls it back, and
+                    // it settles leaning toward the side it was caught off.
                     a.model.setLanded(true);
-                    a.barricadeState = BarricadeEngagement.HELD;
+                    a.barricadeState = BarricadeEngagement.REBOUND;
+                    a.barricadeReboundT = 0;
+                    a.barricadeRestQuat.copy(a.model.quaternion);
+                    const off = this.tmpRel.subVectors(pos, field.center).dot(field.lateralAxis);
+                    a.barricadeTiltSign = Math.abs(off) > 0.05 ? Math.sign(off) : (field.generation % 2 === 0 ? 1 : -1);
                 }
+            } else if (a.barricadeState === BarricadeEngagement.REBOUND) {
+                // Back along the deck on a half sine: BARRICADE_REBOUND_M in BARRICADE_REBOUND_S.
+                a.barricadeReboundT += delta;
+                const t = Math.min(1, a.barricadeReboundT / BARRICADE_REBOUND_S);
+                const back = t < 1
+                    ? ((Math.PI * BARRICADE_REBOUND_M) / (2 * BARRICADE_REBOUND_S)) * Math.sin(Math.PI * t)
+                    : 0;
+                const along = vel.dot(field.deckAxis);
+                vel.addScaledVector(field.deckAxis, shipAlong - back - along);
+                this.leanInNet(a, THREE.MathUtils.smoothstep(t, 0, 1));
+                if (t >= 1) a.barricadeState = BarricadeEngagement.HELD;
             } else {
                 // Tangled in the webbing: no further forward than the ship, at any throttle.
                 const along = vel.dot(field.deckAxis);
                 if (along > shipAlong) {
                     vel.addScaledVector(field.deckAxis, shipAlong - along);
-                    a.model.snapPhysicsState();
                 }
+                this.leanInNet(a, 1);
             }
         }
         a.prevPos.copy(pos);
         a.hasPrevPos = true;
     }
+
+    /**
+     * Lean an aircraft in the net `amount` (0..1) of the way to its full tilt,
+     * about its own fore-and-aft axis, from its attitude at the stop. Set
+     * outright every step, so the gear springs cannot level it back.
+     */
+    private leanInNet(a: SimAircraft, amount: number): void {
+        this.tmpQuat.setFromAxisAngle(this.tmpAxis.set(0, 0, 1), a.barricadeTiltSign * BARRICADE_TILT_RAD * amount);
+        a.model.quaternion = this.tmpQuat2.copy(a.barricadeRestQuat).multiply(this.tmpQuat);
+        a.model.clearAngularVelocity();
+        a.model.snapPhysicsState();
+    }
+
+    private readonly tmpRel = new THREE.Vector3();
+    private readonly tmpAxis = new THREE.Vector3();
+    private readonly tmpQuat = new THREE.Quaternion();
+    private readonly tmpQuat2 = new THREE.Quaternion();
 
     /**
      * Idle on-deck: lock XZ to ship-local offset, match carrier velocity, skip FM2
@@ -1429,7 +1472,9 @@ export class CombatSim implements ProjectileSink {
             return false;
         }
         // Still pulling out — do not freeze pose.
-        if ((a.arrestorLatch >= 0 && !a.arrestorHeld) || a.barricadeState === BarricadeEngagement.PULLING) {
+        if ((a.arrestorLatch >= 0 && !a.arrestorHeld)
+            || a.barricadeState === BarricadeEngagement.PULLING
+            || a.barricadeState === BarricadeEngagement.REBOUND) {
             a.carrierParkLocalValid = false;
             return false;
         }

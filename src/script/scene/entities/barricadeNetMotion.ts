@@ -19,7 +19,7 @@
  */
 import * as THREE from 'three';
 import { BARRICADE_DECK_Y } from './barricadeSpec';
-import { BarricadeNetShape, polylineAtX } from './barricadeWrap';
+import { BarricadeNetShape } from './barricadeWrap';
 
 type V3 = THREE.Vector3;
 
@@ -140,19 +140,27 @@ export class BarricadeNetMotion {
             const u = (j + 1) / (count + 1);
             const tv = target.verticals[j];
             const top = sampleAt(upper, u).add(tv[0].clone().sub(sampleAt(upperTarget, u)));
-            // The bottom joins the moving lower strap where the wrap joins it.
-            const end = tv[tv.length - 1];
-            const bottom = end.clone().add(polylineAtX(lower, end.x).sub(polylineAtX(lowerTarget, end.x)));
-            if (tv.length > 2 && top.distanceTo(tv[0]) < HOOK_SNAP_M) {
-                // A sling round the wing: the wing holds its middle in place.
+            // Both ends stay at their sewn stations on the moving straps.
+            const bottom = sampleAt(lower, u).add(tv[tv.length - 1].clone().sub(sampleAt(lowerTarget, u)));
+            if (target.slung[j] && top.distanceTo(tv[0]) < HOOK_SNAP_M) {
+                // Folded over the wing: the wing holds its middle in place.
                 verticals.push([top, ...tv.slice(1, -1).map(p => p.clone()), bottom]);
-            } else {
+            } else if (target.slung[j]) {
                 verticals.push([top, bottom]);
+            } else {
+                // A free strap hangs from its station on the lower strap and rides it.
+                const d = sampleAt(lower, u).sub(sampleAt(lowerTarget, u));
+                verticals.push(tv.map(p => p.clone().add(d)));
             }
         }
-        const cables = target.cables.map((c, s) => [c[0].clone(), (s === 0 ? upper[0] : upper[upper.length - 1]).clone()]);
+        // The straps' feet ride a resampled lower strap while it moves; keep them on the deck.
+        const floor = BARRICADE_DECK_Y + DECK_CLEARANCE_M;
+        for (const v of verticals) for (const p of v) p.y = Math.max(p.y, floor);
+        // Purchase cables to the lower strap's ends, pendants to the upper's.
+        const ends = [lower[0], lower[lower.length - 1]];
+        const cables = target.cables.map((c, s) => [c[0].clone(), (ends[s] ?? c[1]).clone()]);
         // The glove is held by the wing itself: it goes where the wing goes.
-        return { stanchions: target.stanchions, upper, lower, verticals, cables, glove: target.glove };
+        return { stanchions: target.stanchions, upper, lower, verticals, cables, glove: target.glove, slung: target.slung };
     }
 
     private seed(nodes: StrapNodes, rest: V3[], target: V3[], aircraft: V3, closingVel: V3, halfSpan: number): void {

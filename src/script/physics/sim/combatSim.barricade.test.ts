@@ -13,6 +13,8 @@ import {
     BARRICADE_MAX_DECEL_MPS2,
     BARRICADE_MID_X,
     BARRICADE_PULL_OUT_M,
+    BARRICADE_REBOUND_M,
+    BARRICADE_TILT_RAD,
 } from '../../scene/entities/barricadeSpec';
 import { CombatSim } from './combatSim';
 import { serializeWorld, SerializedBarricade } from './serializedWorld';
@@ -51,8 +53,19 @@ const INPUT = {
 
 type Ac = {
     barricadeState: BarricadeEngagement;
-    model: { position: THREE.Vector3; velocityVector: THREE.Vector3; isLanded: () => boolean };
+    model: { position: THREE.Vector3; quaternion: THREE.Quaternion; velocityVector: THREE.Vector3; isLanded: () => boolean };
 };
+
+/** Bank angle (rad): how far the wings are off level, either way. */
+function bank(q: THREE.Quaternion): number {
+    return Math.asin(Math.min(1, Math.abs(new THREE.Vector3(1, 0, 0).applyQuaternion(q).y)));
+}
+
+/** Signed: positive when the wing on carrier-local +x is the low one. */
+function lowSide(q: THREE.Quaternion): number {
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+    return -Math.sign(right.y) * Math.sign(right.x);
+}
 
 const ID = 'net-test';
 const HEADING_BOW = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
@@ -139,6 +152,36 @@ describe('CombatSim barricade', () => {
         assert.equal(ac(sim).barricadeState, BarricadeEngagement.HELD);
         sim.setBarricades([rig(true, 2)]);
         assert.equal(ac(sim).barricadeState, BarricadeEngagement.NONE);
+    });
+
+    it('rolls back 5 m after the stop, then holds', () => {
+        const sim = rollingAt({ speed: 55 });
+        let stopZ = NaN;
+        for (let i = 0; i < 1200 && ac(sim).barricadeState !== BarricadeEngagement.HELD; i++) {
+            sim.step(DT, { [ID]: { ...INPUT } });
+            if (Number.isNaN(stopZ) && ac(sim).barricadeState === BarricadeEngagement.REBOUND) stopZ = ac(sim).model.position.z;
+        }
+        assert.equal(ac(sim).barricadeState, BarricadeEngagement.HELD);
+        // Landing runs toward −z: rolling back is +z.
+        const back = ac(sim).model.position.z - stopZ;
+        assert.ok(Math.abs(back - BARRICADE_REBOUND_M) < 0.5, `rolled back ${back.toFixed(2)} m`);
+        const heldZ = ac(sim).model.position.z;
+        for (let i = 0; i < 120; i++) sim.step(DT, { [ID]: { ...INPUT } });
+        assert.ok(Math.abs(ac(sim).model.position.z - heldZ) < 0.2, 'kept rolling');
+    });
+
+    it('settles leaning a few degrees, toward the side it was caught off', () => {
+        for (const x of [-3, 3]) {
+            const sim = rollingAt({ speed: 50, x });
+            for (let i = 0; i < 1200 && ac(sim).barricadeState !== BarricadeEngagement.HELD; i++) {
+                sim.step(DT, { [ID]: { ...INPUT } });
+            }
+            for (let i = 0; i < 60; i++) sim.step(DT, { [ID]: { ...INPUT } });
+            const q = ac(sim).model.quaternion;
+            const deg = (bank(q) * 180) / Math.PI;
+            assert.ok(Math.abs(deg - (BARRICADE_TILT_RAD * 180) / Math.PI) < 1, `banked ${deg.toFixed(1)} deg`);
+            assert.equal(lowSide(q), Math.sign(x), `caught at x=${x}, leans the other way`);
+        }
     });
 
     it('lets an aircraft through when the webbing is down', () => {

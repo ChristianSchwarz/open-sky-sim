@@ -31,10 +31,11 @@ export const BARRICADE_HEIGHT_M = 6.1;
 /** Lower load strap rides this high off the deck on its deck ramps. */
 export const BARRICADE_LOWER_LIFT_M = 0.35;
 /**
- * Vertical engaging straps across the webbing: five staggered assemblies of
- * five, so a fighter's wing meets two or three of them, not one.
+ * Vertical engaging straps across the webbing, about 1.2 m apart: the
+ * NAVAIR rigging diagram and deck photographs show them that close, several
+ * staggered assemblies' worth across the span.
  */
-export const BARRICADE_STRAP_COUNT = 25;
+export const BARRICADE_STRAP_COUNT = 30;
 /** Webbing cut width, shackle to shackle, as rigged between the stanchions. */
 export const BARRICADE_WEBBING_WIDTH_M = 2 * BARRICADE_HALF_SPAN_M;
 
@@ -44,6 +45,11 @@ export const BARRICADE_RAISE_S = 6;
 export const BARRICADE_PULL_OUT_M = 75;
 /** Deceleration cap (m/s²), ~5 g — the net arrests harder than a wire. */
 export const BARRICADE_MAX_DECEL_MPS2 = 5 * 9.80665;
+/** After the stop the stretched webbing pulls the aircraft back this far (m), over this long (s). */
+export const BARRICADE_REBOUND_M = 5;
+export const BARRICADE_REBOUND_S = 1.6;
+/** An aircraft in the net ends up leaning this far to one side (rad, ~4°). */
+export const BARRICADE_TILT_RAD = (4 * Math.PI) / 180;
 /** Minimum closing speed on the deck to engage (m/s); below it the net is just pushed. */
 const BARRICADE_MIN_ENGAGE_SPEED_MPS = 3;
 /** CG this high above the stanchion tops still drags the wings through (m). */
@@ -58,6 +64,8 @@ export const enum BarricadeEngagement {
     PULLING = 1,
     /** Stopped and held; stays in the net until the rig is renewed. */
     HELD = 2,
+    /** Just stopped: the stretched webbing pulls it back a few metres. */
+    REBOUND = 3,
 }
 
 /** One carrier's barricade in world space, as the sim tests it. */

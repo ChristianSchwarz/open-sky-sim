@@ -28,6 +28,7 @@ import {
 } from './barricadeSpec';
 import { BarricadeAirframeProfile, BarricadeNetShape, buildBarricadeShape } from './barricadeWrap';
 import { BarricadeNetMotion } from './barricadeNetMotion';
+import { flutterStraps } from './barricadeWind';
 
 /** Load-strap and engaging-strap widths (m). */
 const LOAD_STRAP_W_M = 0.15;
@@ -89,6 +90,8 @@ export class BarricadeEntity implements Entity {
     private readonly motion = new BarricadeNetMotion();
     /** Time not yet given to {@link motion}: update() adds, the first rebuild after it spends. */
     private pendingDelta = 0;
+    /** Clock for the wind in the webbing (s). */
+    private windTime = 0;
     private readonly localVel = new THREE.Vector3();
 
     private readonly invQuat = new THREE.Quaternion();
@@ -213,6 +216,7 @@ export class BarricadeEntity implements Entity {
 
     update(delta: number): void {
         this.pendingDelta += delta;
+        this.windTime += delta;
         const step = delta / BARRICADE_RAISE_S;
         this.raise = this.target > this.raise
             ? Math.min(this.target, this.raise + step)
@@ -303,15 +307,18 @@ export class BarricadeEntity implements Entity {
             m.visible = top.y - base.y > 0.01;
         }
 
+        // Light nylon: the wind over the deck keeps the loose straps moving.
+        const verticals = flutterStraps(shape.verticals, shape.slung, this.windTime);
         const near = !this.useLines;
         this.straps.mesh.visible = near;
         this.cables.mesh.visible = near;
         this.lines.visible = !near;
         if (near) {
             this.straps.begin();
-            this.straps.add(shape.upper, LOAD_STRAP_W_M);
+            // Caught, the upper strap is gone: the lower one holds the webbing.
+            if (!caught) this.straps.add(shape.upper, LOAD_STRAP_W_M);
             this.straps.add(shape.lower, LOAD_STRAP_W_M);
-            for (const v of shape.verticals) this.straps.add(v, ENGAGING_STRAP_W_M);
+            for (const v of verticals) this.straps.add(v, ENGAGING_STRAP_W_M);
             for (const g of shape.glove) this.straps.add(g, GLOVE_STRAP_W_M);
             this.straps.end();
             this.cables.begin();
@@ -325,9 +332,9 @@ export class BarricadeEntity implements Entity {
                     this.linePos.setXYZ(n++, pts[i + 1].x, pts[i + 1].y, pts[i + 1].z);
                 }
             };
-            push(shape.upper);
+            if (!caught) push(shape.upper);
             push(shape.lower);
-            for (const v of shape.verticals) push(v);
+            for (const v of verticals) push(v);
             for (const g of shape.glove) push(g);
             this.lines.geometry.setDrawRange(0, n);
             this.linePos.needsUpdate = true;
