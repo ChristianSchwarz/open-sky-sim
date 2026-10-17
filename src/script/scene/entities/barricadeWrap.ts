@@ -16,11 +16,12 @@
  *    to the spine bridges clean over the wings and never touches them.);
  *  - the lower strap is pressed against the front of the gear legs;
  *  - each vertical strap that meets a wing is a sling around it: from the
- *    upper strap forward over the top skin, round the leading edge, back
- *    under the bottom skin, and only then down to the lower strap, so the
- *    wing sits in the webbing with straps over and under it; the straps in
- *    front of the fuselage are pushed aside by the nose and sling the wing
- *    roots instead;
+ *    upper strap forward over the top skin, round the leading edge, and back
+ *    under the bottom skin, where it ends in the glove (a drop from there to
+ *    the lower strap at the gear read as stray webs pointing at the deck);
+ *    the straps in front of the fuselage are pushed aside by the nose and
+ *    sling the wing roots instead. Only the straps out past the wingtips
+ *    still join the two load straps;
  *  - the webbing gloves each wing: a tight sleeve strap round the leading
  *    edge at every edge sample, and a band along the bottom skin answering
  *    the upper strap on top. It is drawn taut, a few centimetres off the
@@ -442,7 +443,7 @@ function wrapOnAirframe(pose: BarricadeCatchPose, profile: BarricadeAirframeProf
                 top.copy(root.at);
                 top.x = x;
                 bottom.x = x;
-                verticals.push([top, ...sling(root.edge, root.skin, x, aftOf(root.at, root.edge)), bottom]);
+                verticals.push([top, ...sling(root.edge, root.skin, x, aftOf(root.at, root.edge))]);
             } else {
                 top.x = centreX + side * profile.fuselageHalfWidth;
                 bottom.x = top.x;
@@ -452,7 +453,7 @@ function wrapOnAirframe(pose: BarricadeCatchPose, profile: BarricadeAirframeProf
         }
         const held = su >= hookFrom && su <= hookTo ? edgeNear(band, top.x) : undefined;
         if (held?.edge && held.skin) {
-            verticals.push([top, ...sling(held.edge, held.skin, top.x, aftOf(held.at, held.edge)), bottom]);
+            verticals.push([top, ...sling(held.edge, held.skin, top.x, aftOf(held.at, held.edge))]);
         } else {
             verticals.push([top, bottom]);
         }
@@ -514,7 +515,7 @@ function edgeNear(band: Support[], x: number): Support | undefined {
  * The part of a vertical strap that wraps a wing, at lateral x: forward over
  * the top skin from under the upper strap (`topDepth` behind the edge), round
  * the edge, and back under the bottom skin to {@link SLING_UNDER_M}. The
- * caller adds both ends.
+ * caller adds the top end, on the upper strap.
  */
 function sling(edge: V3, skin: BarricadeWingSkin, x: number, topDepth: number): V3[] {
     const out: V3[] = [];

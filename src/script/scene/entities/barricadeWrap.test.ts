@@ -223,6 +223,14 @@ describe('barricade wrap on a cranked delta', () => {
         }
     });
 
+    it('ends every wing sling in the glove, not on the deck', () => {
+        // A drop from under the wing to the lower strap at the gear read as
+        // stray webs pointing at the deck.
+        for (const v of s.verticals.filter(v => v.length > 2)) {
+            for (const p of v) assert.ok(p.y > wingY - 0.1, `sling reaches ${(wingY - p.y).toFixed(2)} m below the wing`);
+        }
+    });
+
     it('draws no glove until something is caught', () => {
         assert.equal(buildBarricadeShape(1, true).glove.length, 0);
     });

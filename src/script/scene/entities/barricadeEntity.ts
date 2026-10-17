@@ -30,7 +30,7 @@ import { BarricadeAirframeProfile, BarricadeNetShape, buildBarricadeShape } from
 import { BarricadeNetMotion } from './barricadeNetMotion';
 
 /** Load-strap and engaging-strap widths (m). */
-const LOAD_STRAP_W_M = 0.3;
+const LOAD_STRAP_W_M = 0.15;
 const ENGAGING_STRAP_W_M = 0.2;
 /** The straps gloving the wing, close together, so a little narrower. */
 const GLOVE_STRAP_W_M = 0.15;

@@ -142,8 +142,9 @@ export class BarricadeNetMotion {
             const top = sampleAt(upper, u).add(tv[0].clone().sub(sampleAt(upperTarget, u)));
             const bottom = sampleAt(lower, u).add(tv[tv.length - 1].clone().sub(sampleAt(lowerTarget, u)));
             if (tv.length > 2 && top.distanceTo(tv[0]) < HOOK_SNAP_M) {
-                // A sling round the wing: the wing holds its middle in place.
-                verticals.push([top, ...tv.slice(1, -1).map(p => p.clone()), bottom]);
+                // A sling round the wing: the wing holds all but its top end,
+                // and it ends in the glove under the wing.
+                verticals.push([top, ...tv.slice(1).map(p => p.clone())]);
             } else {
                 verticals.push([top, bottom]);
             }
