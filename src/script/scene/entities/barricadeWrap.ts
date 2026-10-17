@@ -9,12 +9,22 @@
  * Rigged and empty, the webbing hangs between the stanchion tops: an upper load
  * strap that sags, a lower one on the deck ramps, vertical engaging straps
  * between them. Caught, it is drawn wrapped on the airframe:
- *  - the upper strap is a taut band across the wings' leading edges, lying on
- *    the skin just behind them and resting on the spine over the fuselage; off
- *    each wingtip it spans free to its shackle, and there it sags;
+ *  - the upper strap follows each wing's own leading edge, lying on the top
+ *    skin just behind it, and crosses the fuselage over the spine at the wing
+ *    root; off each wingtip it spans free to its shackle, and there it sags.
+ *    (Not a taut hull: on a strake or cranked delta the hull from the tips
+ *    to the spine bridges clean over the wings and never touches them.);
  *  - the lower strap is pressed against the front of the gear legs;
- *  - each vertical strap that meets a wing is hooked over its leading edge;
- *    the ones in front of the fuselage are pushed aside by the nose;
+ *  - each vertical strap that meets a wing is a sling around it: from the
+ *    upper strap forward over the top skin, round the leading edge, back
+ *    under the bottom skin, and only then down to the lower strap, so the
+ *    wing sits in the webbing with straps over and under it; the straps in
+ *    front of the fuselage are pushed aside by the nose and sling the wing
+ *    roots instead;
+ *  - the webbing gloves each wing: a tight sleeve strap round the leading
+ *    edge at every edge sample, and a band along the bottom skin answering
+ *    the upper strap on top. It is drawn taut, a few centimetres off the
+ *    skin; only the free tails off the wingtips droop;
  *  - both straps end in one shackle per side, which the purchase cable pulls
  *    back toward its deck sheave at the stanchion foot.
  *
@@ -40,12 +50,24 @@ const PROFILE_EDGE_STEP_M = 0.25;
 const PROFILE_BIN_M = 0.5;
 /** Fore/aft window around the wing root in which the spine crest is sampled (m). */
 const CREST_WINDOW_M = 1.0;
-/** Upper strap lies this far above and behind the edge it rests on (m). */
-const STRAP_ON_SKIN_UP_M = 0.06;
-const STRAP_ON_SKIN_AFT_M = 0.2;
-/** A vertical strap hooks this far ahead of and below the leading edge (m). */
-const HOOK_AHEAD_M = 0.12;
-const HOOK_BELOW_M = 0.05;
+/** Webbing lies this far off the skin it rests on, above or below (m): pulled tight onto it. */
+const STRAP_ON_SKIN_UP_M = 0.04;
+/** Upper strap lies on the top skin this far behind the leading edge (m). */
+const UPPER_ON_TOP_M = 2.0;
+/** A sling runs this far back under the wing before it drops to the lower strap (m). */
+const SLING_UNDER_M = 1.5;
+/**
+ * Extra bands along the skin, at these depths behind the edge (m), so the
+ * sleeves and bands read as webbing pressed onto the wing, not a cord on it.
+ */
+const GLOVE_TOP_BANDS_M = [1.0];
+const GLOVE_UNDER_BANDS_M = [0.75, 1.5];
+/** Chordwise skin samples behind each leading-edge point (m), and their fore/aft window. */
+const SKIN_STEPS_M = [0, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
+/** A skin hit this far above or below the leading edge belongs to something else (m). */
+const SKIN_REACH_M = 0.6;
+/** A sling clears the leading edge by this much (m). */
+const HOOK_AHEAD_M = 0.04;
 /** The lower strap sits this far up the gear leg from the wheel contact, and ahead of it (m). */
 const GEAR_TRAP_UP_M = 0.55;
 const GEAR_TRAP_AHEAD_M = 0.2;
@@ -53,21 +75,28 @@ const GEAR_TRAP_AHEAD_M = 0.2;
 const UPPER_SLACK = 0.04;
 /** Rigged-net sag of the upper strap between the stanchion tops (fraction of span). */
 const RIGGED_SLACK = 0.012;
-/**
- * A support this far behind the taut chord still holds the strap (m). The
- * edge samples are the forward-most point per lateral bin, which staircases a
- * straight swept edge; without the allowance the band skips the whole wing.
- */
-const ENVELOPE_TOLERANCE_M = 0.15;
+/** Straps the nose pushed aside bunch at the wing root this far apart (m). */
+const ROOT_BUNCH_M = 0.2;
 /** Samples per sagging span. */
 const SAG_SAMPLES = 8;
 /** Nothing is drawn below this height over the deck (m). */
 const DECK_CLEARANCE_M = 0.04;
 
+/**
+ * Top and bottom skin behind one leading-edge point, at {@link SKIN_STEPS_M}
+ * (as far as the wing reaches); the first sample is the edge itself.
+ */
+export interface BarricadeWingSkin {
+    readonly top: readonly V3[];
+    readonly bottom: readonly V3[];
+}
+
 /** The airframe as the net sees it, in the body frame (+Z forward). */
 export interface BarricadeAirframeProfile {
     /** Leading edge per side (−x, +x), ordered root → tip. */
     readonly leadingEdge: readonly [readonly V3[], readonly V3[]];
+    /** The skin behind each of those points, index for index. */
+    readonly skin: readonly [readonly BarricadeWingSkin[], readonly BarricadeWingSkin[]];
     /** Fuselage top across the wing-root station, ordered −x → +x. */
     readonly crest: readonly V3[];
     /** Gear contact points. */
@@ -94,6 +123,7 @@ export function buildAirframeProfile(
     // Leading edge: the forward-most sample in each lateral bin outside the fuselage.
     const bins = Math.max(1, Math.ceil((halfSpan - fuselageHalfWidth) / PROFILE_BIN_M));
     const sides: V3[][] = [[], []];
+    const skins: BarricadeWingSkin[][] = [[], []];
     for (let s = 0; s < 2; s++) {
         const sign = s === 0 ? -1 : 1;
         const best: (V3 | undefined)[] = new Array(bins);
@@ -103,14 +133,20 @@ export function buildAirframeProfile(
             const b = Math.min(bins - 1, Math.floor((ax - fuselageHalfWidth) / PROFILE_BIN_M));
             if (!best[b] || p.z > best[b]!.z) best[b] = p;
         }
-        for (const p of best) if (p) sides[s].push(p.clone());
+        for (let b = 0; b < bins; b++) {
+            const edge = best[b];
+            if (!edge) continue;
+            sides[s].push(edge.clone());
+            skins[s].push(skinBehind(edge, mesh!.triangles));
+        }
     }
     if (sides[0].length === 0 || sides[1].length === 0) {
         return syntheticProfile(gearPts);
     }
 
     // Spine crest across the fuselage, at the wing-root station.
-    const rootZ = (sides[0][0].z + sides[1][0].z) * 0.5;
+    // Where the upper strap, lying back on the wing, meets the fuselage.
+    const rootZ = (sides[0][0].z + sides[1][0].z) * 0.5 - UPPER_ON_TOP_M;
     const crestBins = Math.max(2, Math.ceil((2 * fuselageHalfWidth) / (PROFILE_BIN_M * 0.5)));
     const crestBest: (V3 | undefined)[] = new Array(crestBins);
     for (const p of pts) {
@@ -120,7 +156,50 @@ export function buildAirframeProfile(
     }
     const crest = crestBest.filter((p): p is V3 => p !== undefined).map(p => p.clone());
 
-    return { leadingEdge: [sides[0], sides[1]], crest, gear: gearPts, fuselageHalfWidth };
+    return { leadingEdge: [sides[0], sides[1]], skin: [skins[0], skins[1]], crest, gear: gearPts, fuselageHalfWidth };
+}
+
+/**
+ * The skin behind `edge` at each chord step: a vertical ray through the
+ * airframe, its highest hit the top and its lowest the bottom. Edge samples
+ * alone miss the inside of a large flat panel. Only hits within
+ * {@link SKIN_REACH_M} of the edge's height count, so a fin or store
+ * further up or down is not taken for the wing.
+ */
+function skinBehind(edge: V3, tris: readonly number[]): BarricadeWingSkin {
+    const top: V3[] = [edge.clone()];
+    const bottom: V3[] = [edge.clone()];
+    for (const d of SKIN_STEPS_M) {
+        if (d <= 0) continue;
+        const z = edge.z - d;
+        let hi = -Infinity;
+        let lo = Infinity;
+        for (let t = 0; t + 8 < tris.length; t += 9) {
+            const y = rayHitY(tris, t, edge.x, z);
+            if (y === undefined || Math.abs(y - edge.y) > SKIN_REACH_M) continue;
+            if (y > hi) hi = y;
+            if (y < lo) lo = y;
+        }
+        // Past the trailing edge: the wing ends here.
+        if (hi === -Infinity) break;
+        top.push(new THREE.Vector3(edge.x, hi, z));
+        bottom.push(new THREE.Vector3(edge.x, lo, z));
+    }
+    return { top, bottom };
+}
+
+/** Height where the vertical line through (x, z) meets triangle `t`, if it does. */
+function rayHitY(tris: readonly number[], t: number, x: number, z: number): number | undefined {
+    const ax = tris[t], ay = tris[t + 1], az = tris[t + 2];
+    const bx = tris[t + 3], by = tris[t + 4], bz = tris[t + 5];
+    const cx = tris[t + 6], cy = tris[t + 7], cz = tris[t + 8];
+    const det = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+    if (Math.abs(det) < 1e-12) return undefined;
+    const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / det;
+    const l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / det;
+    const l3 = 1 - l1 - l2;
+    if (l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9) return undefined;
+    return l1 * ay + l2 * by + l3 * cy;
 }
 
 function sampleSoup(tris: readonly number[]): V3[] {
@@ -158,7 +237,17 @@ function syntheticProfile(gear: V3[]): BarricadeAirframeProfile {
     for (let x = -fh; x <= fh + 1e-6; x += 0.25) {
         crest.push(new THREE.Vector3(x, 0.8 - 0.3 * (x / fh) ** 2, 1.0));
     }
-    return { leadingEdge: [side(-1), side(1)], crest, gear, fuselageHalfWidth: fh };
+    // A thin aerofoil: 10 cm up and 6 cm down within half a metre of the edge.
+    const skinOf = (e: V3): BarricadeWingSkin => ({
+        top: SKIN_STEPS_M.map(d => new THREE.Vector3(e.x, e.y + 0.1 * Math.min(1, d / 0.5), e.z - d)),
+        bottom: SKIN_STEPS_M.map(d => new THREE.Vector3(e.x, e.y - 0.06 * Math.min(1, d / 0.5), e.z - d)),
+    });
+    const left = side(-1);
+    const right = side(1);
+    return {
+        leadingEdge: [left, right], skin: [left.map(skinOf), right.map(skinOf)],
+        crest, gear, fuselageHalfWidth: fh,
+    };
 }
 
 /** Everything drawn for one barricade, carrier-local. */
@@ -172,6 +261,11 @@ export interface BarricadeNetShape {
     readonly verticals: V3[][];
     /** Purchase cables, sheave to shackle; only while caught. */
     readonly cables: V3[][];
+    /**
+     * Webbing hugging the wings while caught: a sleeve round the leading edge
+     * at every edge sample, plus one band per wing along the bottom skin.
+     */
+    readonly glove: V3[][];
 }
 
 /** Aircraft pose in carrier-local space. */
@@ -197,9 +291,9 @@ export function buildBarricadeShape(
         return { stanchions, ...wrapOnAirframe(caught.pose, caught.profile) };
     }
     if (!webbing || raise <= 0) {
-        return { stanchions, upper: [], lower: [], verticals: [], cables: [] };
+        return { stanchions, upper: [], lower: [], verticals: [], cables: [], glove: [] };
     }
-    return { stanchions, ...riggedWebbing(stanchions), cables: [] };
+    return { stanchions, ...riggedWebbing(stanchions), cables: [], glove: [] };
 }
 
 /** Stanchions hinge at the deck and swing up from lying flat, head aft. */
@@ -237,6 +331,8 @@ interface Support {
     readonly at: V3;
     /** The leading-edge point this support rests behind; undefined over the fuselage and off the tips. */
     readonly edge?: V3;
+    /** That edge's skin, carrier-local, for a sling to run over and under. */
+    readonly skin?: BarricadeWingSkin;
 }
 
 function wrapOnAirframe(pose: BarricadeCatchPose, profile: BarricadeAirframeProfile): Omit<BarricadeNetShape, 'stanchions'> {
@@ -246,20 +342,24 @@ function wrapOnAirframe(pose: BarricadeCatchPose, profile: BarricadeAirframeProf
     const deckFloor = BARRICADE_DECK_Y + DECK_CLEARANCE_M;
     const centreX = pose.position.x;
 
-    // Upper strap supports: both leading edges and the spine between them.
+    // Upper strap supports: on the top skin of both wings just behind the
+    // leading edges, and on the spine between them.
     const supports: Support[] = [];
-    for (const side of profile.leadingEdge) {
-        for (const p of side) {
-            const edge = toLocal(p);
-            const at = edge.clone().addScaledVector(_up, STRAP_ON_SKIN_UP_M).addScaledVector(_fwd, -STRAP_ON_SKIN_AFT_M);
-            supports.push({ at, edge });
+    for (let s = 0; s < 2; s++) {
+        const edges = profile.leadingEdge[s];
+        for (let i = 0; i < edges.length; i++) {
+            const edge = toLocal(edges[i]);
+            const body = profile.skin[s][i];
+            const skin = { top: body.top.map(toLocal), bottom: body.bottom.map(toLocal) };
+            const at = skinPointAt(skin.top, edge, UPPER_ON_TOP_M).addScaledVector(_up, STRAP_ON_SKIN_UP_M);
+            supports.push({ at, edge, skin });
         }
     }
     for (const p of profile.crest) {
         supports.push({ at: toLocal(p).addScaledVector(_up, STRAP_ON_SKIN_UP_M) });
     }
     supports.sort((a, b) => a.at.x - b.at.x);
-    const band = frontEnvelope(supports);
+    const band = supports;
 
     // Shackles: what is left of the webbing beyond each tip, laid off toward
     // the sheaves. The webbing's middle met the aircraft where it crossed.
@@ -320,16 +420,26 @@ function wrapOnAirframe(pose: BarricadeCatchPose, profile: BarricadeAirframeProf
         const bottom = pointAtArc(lower, lowerArc, u * lowerArc[lowerArc.length - 1]);
         const dx = top.x - centreX;
         if (Math.abs(dx) < profile.fuselageHalfWidth) {
-            const push = Math.sign(dx || 1) * profile.fuselageHalfWidth;
-            top.x = centreX + push;
-            bottom.x = centreX + push;
-            verticals.push([top, bottom]);
+            // The nose came through here: the strap slid out to the wing
+            // root on its side and slings that, next to its neighbours.
+            const side = Math.sign(dx || 1);
+            const root = wingRoot(band, centreX, side);
+            if (root?.edge && root.skin) {
+                const x = root.edge.x + side * ROOT_BUNCH_M * (1 - Math.abs(dx) / profile.fuselageHalfWidth);
+                top.copy(root.at);
+                top.x = x;
+                bottom.x = x;
+                verticals.push([top, ...sling(root.edge, root.skin, x, aftOf(root.at, root.edge)), bottom]);
+            } else {
+                top.x = centreX + side * profile.fuselageHalfWidth;
+                bottom.x = top.x;
+                verticals.push([top, bottom]);
+            }
             continue;
         }
-        const edge = su >= hookFrom && su <= hookTo ? edgeNear(band, top.x) : undefined;
-        if (edge) {
-            const hook = edge.clone().addScaledVector(_fwd, HOOK_AHEAD_M).addScaledVector(_up, -HOOK_BELOW_M);
-            verticals.push([top, hook, bottom]);
+        const held = su >= hookFrom && su <= hookTo ? edgeNear(band, top.x) : undefined;
+        if (held?.edge && held.skin) {
+            verticals.push([top, ...sling(held.edge, held.skin, top.x, aftOf(held.at, held.edge)), bottom]);
         } else {
             verticals.push([top, bottom]);
         }
@@ -337,35 +447,43 @@ function wrapOnAirframe(pose: BarricadeCatchPose, profile: BarricadeAirframeProf
     for (const v of verticals) clampToDeck(v);
 
     const cables = [[sheaves[0].clone(), shackles[0].clone()], [sheaves[1].clone(), shackles[1].clone()]];
-    return { upper, lower, verticals, cables };
-}
-
-/**
- * The band a taut strap makes when pulled aft at both ends: the forward
- * convex hull of the supports in plan. Concavities —
- * a cranked wing, the wing-root notch — are bridged as straight spans.
- */
-function frontEnvelope(sorted: Support[]): Support[] {
-    // Toward the bow is −z: that is the way the purchase cables do not pull.
-    const ahead = (s: Support) => -s.at.z;
-    const hull: Support[] = [];
-    for (const s of sorted) {
-        while (hull.length >= 2) {
-            const a = hull[hull.length - 2];
-            const b = hull[hull.length - 1];
-            // Keep b only if it sticks out ahead of the chord a → s.
-            const t = (b.at.x - a.at.x) / Math.max(1e-6, s.at.x - a.at.x);
-            const chord = ahead(a) + (ahead(s) - ahead(a)) * t;
-            if (ahead(b) >= chord - ENVELOPE_TOLERANCE_M) break;
-            hull.pop();
-        }
-        hull.push(s);
+    // The glove: a sleeve at every edge sample, and bands along the skin
+    // through them, top and bottom, one per wing and depth.
+    const glove: V3[][] = [];
+    const bandDepths = [
+        ...GLOVE_TOP_BANDS_M.map(d => ({ d, skin: 'top' as const, sign: 1 })),
+        ...GLOVE_UNDER_BANDS_M.map(d => ({ d, skin: 'bottom' as const, sign: -1 })),
+    ];
+    const skinBands: V3[][][] = bandDepths.map(() => [[], []]);
+    for (const s of band) {
+        if (!s.edge || !s.skin) continue;
+        glove.push([s.at.clone(), ...sling(s.edge, s.skin, s.at.x, aftOf(s.at, s.edge))]);
+        const side = s.at.x < centreX ? 0 : 1;
+        bandDepths.forEach((b, i) => {
+            const p = skinPointAt(s.skin![b.skin], s.edge!, b.d).addScaledVector(_up, b.sign * STRAP_ON_SKIN_UP_M);
+            skinBands[i][side].push(p);
+        });
     }
-    return hull;
+    for (const sides of skinBands) {
+        for (const pts of sides) {
+            if (pts.length >= 2) glove.push(pts);
+        }
+    }
+    return { upper, lower, verticals, cables, glove };
 }
 
-/** The leading-edge point under the band at lateral x, if the band rests on a wing there. */
-function edgeNear(band: Support[], x: number): V3 | undefined {
+/** The innermost wing support on one side of the centreline (side −1 or +1). */
+function wingRoot(band: Support[], centreX: number, side: number): Support | undefined {
+    let best: Support | undefined;
+    for (const s of band) {
+        if (!s.edge || Math.sign(s.at.x - centreX) !== side) continue;
+        if (!best || Math.abs(s.at.x - centreX) < Math.abs(best.at.x - centreX)) best = s;
+    }
+    return best;
+}
+
+/** The wing support under the band at lateral x, if the band rests on a wing there. */
+function edgeNear(band: Support[], x: number): Support | undefined {
     let best: Support | undefined;
     let bestD = Infinity;
     for (const s of band) {
@@ -376,7 +494,46 @@ function edgeNear(band: Support[], x: number): V3 | undefined {
             best = s;
         }
     }
-    return best && bestD < 0.6 ? best.edge : undefined;
+    return best && bestD < 0.6 ? best : undefined;
+}
+
+/**
+ * The part of a vertical strap that wraps a wing, at lateral x: forward over
+ * the top skin from under the upper strap (`topDepth` behind the edge), round
+ * the edge, and back under the bottom skin to {@link SLING_UNDER_M}. The
+ * caller adds both ends.
+ */
+function sling(edge: V3, skin: BarricadeWingSkin, x: number, topDepth: number): V3[] {
+    const out: V3[] = [];
+    const lift = (p: V3, sign: number) => {
+        const q = p.clone().addScaledVector(_up, sign * STRAP_ON_SKIN_UP_M);
+        q.x = x;
+        return q;
+    };
+    for (let k = skin.top.length - 1; k >= 0; k--) {
+        if (aftOf(skin.top[k], edge) < topDepth - 1e-3) out.push(lift(skin.top[k], 1));
+    }
+    const nose = edge.clone().addScaledVector(_fwd, HOOK_AHEAD_M);
+    nose.x = x;
+    out.push(nose);
+    for (const p of skin.bottom) {
+        if (aftOf(p, edge) > 1e-6 && aftOf(p, edge) <= SLING_UNDER_M + 1e-6) out.push(lift(p, -1));
+    }
+    return out;
+}
+
+/** How far behind the edge a skin point lies, along the airframe's own axis. */
+function aftOf(p: V3, edge: V3): number {
+    return -_fwd.dot(new THREE.Vector3().subVectors(p, edge));
+}
+
+/** The skin sample `aft` metres behind the edge, or the last one the wing has. */
+function skinPointAt(skin: readonly V3[], edge: V3, aft: number): V3 {
+    let best = skin[0] ?? edge;
+    for (const p of skin) {
+        if (aftOf(p, edge) <= aft + 1e-6) best = p;
+    }
+    return best.clone();
 }
 
 /** a → b hanging with `surplus` metres more strap than the chord: parabola of sag s, L + 8s²/3L. */

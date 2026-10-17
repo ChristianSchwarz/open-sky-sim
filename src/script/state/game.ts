@@ -617,6 +617,7 @@ export class Game {
     private readonly barricadeCatchScratch: BarricadeCatch = {
         position: new THREE.Vector3(),
         quaternion: new THREE.Quaternion(),
+        velocity: new THREE.Vector3(),
         profile: undefined as unknown as BarricadeAirframeProfile,
     };
     private readonly syncedCarrierPos = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
@@ -2540,6 +2541,7 @@ export class Game {
         const c = this.barricadeCatchScratch;
         c.position.copy(this.player.getDisplayPosition());
         c.quaternion.copy(this.player.getDisplayQuaternion());
+        c.velocity.copy(this.player.getFlightModel().velocityVector).sub(this.carrierVelocity);
         c.profile = profile;
         return c;
     }

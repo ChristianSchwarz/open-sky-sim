@@ -79,13 +79,14 @@ describe('barricade shape', () => {
             assert.ok(p.y >= deck, 'below the deck');
         }
         // Straps hooked on each wing.
-        const hooked = s.verticals.filter(v => v.length === 3);
+        const hooked = s.verticals.filter(v => v.length > 2);
         assert.ok(hooked.some(v => v[1].x < BARRICADE_MID_X - 2), 'nothing hooked on the port wing');
         assert.ok(hooked.some(v => v[1].x > BARRICADE_MID_X + 2), 'nothing hooked on the starboard wing');
         for (const v of hooked) {
-            // The hook is on the edge: ahead of where the strap lies, at wing height.
-            assert.ok(v[1].z < v[0].z, 'hook behind the upper strap');
-            assert.ok(Math.abs(v[1].y - (deck + 1.7)) < 0.3, `hook at y=${v[1].y.toFixed(2)}`);
+            // Round the edge: ahead of where the upper strap lies, at wing height.
+            const nose = v.slice(1, -1).reduce((m, p) => (p.z < m.z ? p : m));
+            assert.ok(nose.z < v[0].z, 'sling never reaches the leading edge');
+            assert.ok(Math.abs(nose.y - (deck + 1.7)) < 0.3, `edge at y=${nose.y.toFixed(2)}`);
         }
         // Nothing threads the fuselage.
         for (const v of s.verticals) {
@@ -106,9 +107,29 @@ describe('barricade shape', () => {
         for (const p of onWing) {
             assert.ok(p.y > wingY && p.y < wingY + 0.2, `strap at y=${(p.y - BARRICADE_DECK_Y).toFixed(2)}`);
         }
-        const hooked = s.verticals.filter(v => v.length === 3);
+        const hooked = s.verticals.filter(v => v.length > 2);
         assert.ok(hooked.filter(v => v[1].x < BARRICADE_MID_X).length >= 2, 'port wing hooks');
         assert.ok(hooked.filter(v => v[1].x > BARRICADE_MID_X).length >= 2, 'starboard wing hooks');
+    });
+
+    it('slings each hooked strap over and under the wing', () => {
+        const s = caughtAt(20);
+        const wingY = BARRICADE_DECK_Y + 1.7;
+        const hooked = s.verticals.filter(v => v.length > 2);
+        assert.ok(hooked.length >= 4);
+        for (const v of hooked) {
+            const nose = v.slice(1, -1).reduce((m, p) => (p.z < m.z ? p : m));
+            // Behind the edge (aft is +z here) and within the wing's chord.
+            const onChord = v.filter(p => p.z > nose.z + 0.05 && p.z < nose.z + 1.3);
+            const over = onChord.filter(p => p.y > wingY + 0.03);
+            const under = onChord.filter(p => p.y < wingY - 0.03);
+            assert.ok(over.length >= 1, `nothing over the wing at x=${(nose.x - BARRICADE_MID_X).toFixed(1)}`);
+            assert.ok(under.length >= 2, `nothing under the wing at x=${(nose.x - BARRICADE_MID_X).toFixed(1)}`);
+            // Over first, then round the edge, then under: the strap does not cut through.
+            const iNose = v.indexOf(nose);
+            assert.ok(v.slice(1, iNose).every(p => p.y >= wingY), 'top run dips into the wing');
+            assert.ok(v.slice(iNose + 1, -1).every(p => p.y <= wingY), 'bottom run rises into the wing');
+        }
     });
 
     it('sags the upper strap where it spans free off the wingtip', () => {
@@ -140,6 +161,76 @@ describe('barricade shape', () => {
         const pts = [...s.upper, ...s.lower, ...s.verticals.flat()];
         assert.ok(pts.every(p => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)));
         assert.equal(s.verticals.length, BARRICADE_STRAP_COUNT);
+    });
+});
+
+/**
+ * A cranked arrow like the F-16XL: a long strake reaching far forward beside
+ * the cockpit, then the main wing swept hard back to the tips. A taut hull
+ * from the tips to the strake bridged clean over this wing.
+ */
+function crankedArrow(): number[] {
+    const t: number[] = [];
+    const quad = (a: number[], b: number[], c: number[], d: number[]) => {
+        t.push(...a, ...b, ...c, ...a, ...c, ...d);
+    };
+    for (const s of [-1, 1]) {
+        quad([s * 0.9, 0, 5], [s * 2, 0, 1], [s * 2, 0, -4], [s * 0.9, 0, -4]); // strake + inner wing
+        quad([s * 2, 0, 1], [s * 5, 0, -3], [s * 5, 0, -4.5], [s * 2, 0, -4]); // outer wing
+    }
+    quad([-0.9, 0.9, -7], [0.9, 0.9, -7], [0.9, 0.9, 7], [-0.9, 0.9, 7]); // fuselage top
+    return t;
+}
+
+describe('barricade wrap on a cranked delta', () => {
+    const arrow = buildAirframeProfile({ triangles: crankedArrow() }, GEAR);
+    const position = new THREE.Vector3(BARRICADE_MID_X, BARRICADE_DECK_Y + 1.7, BARRICADE_LOCAL_Z - 20);
+    const s = buildBarricadeShape(1, true, { pose: { position, quaternion: BOW }, profile: arrow });
+    const wingY = BARRICADE_DECK_Y + 1.7;
+
+    it('lays the upper strap on the outer wing instead of bridging over it', () => {
+        const onOuter = s.upper.filter(p => {
+            const ax = Math.abs(p.x - BARRICADE_MID_X);
+            return ax > 2.6 && ax < 4.6;
+        });
+        assert.ok(onOuter.length >= 4, `${onOuter.length} points over the outer wings`);
+        for (const p of onOuter) {
+            // Outer leading edge in body z: 1 - 4(ax - 2)/3; local z = CG z - body z.
+            const ax = Math.abs(p.x - BARRICADE_MID_X);
+            const edgeZ = position.z - (1 - (4 * (ax - 2)) / 3);
+            assert.ok(p.y > wingY && p.y < wingY + 0.2, `strap ${(p.y - wingY).toFixed(2)} m off the wing`);
+            // Folded back over the wing, up to 2 m behind the edge where the chord allows.
+            assert.ok(p.z > edgeZ && p.z < edgeZ + 2.05, `strap ${(p.z - edgeZ).toFixed(2)} m behind the edge`);
+        }
+    });
+
+    it('gloves both wings tight, over and under', () => {
+        const sleeves = s.glove.filter(g => g.some(p => p.y > wingY) && g.some(p => p.y < wingY));
+        const edgeSamples = arrow.leadingEdge[0].length + arrow.leadingEdge[1].length;
+        assert.equal(sleeves.length, edgeSamples, 'a sleeve at every edge sample');
+        for (const g of sleeves) {
+            // Tight: nothing on the sleeve stands more than a few cm off the plate wing.
+            for (const p of g) assert.ok(Math.abs(p.y - wingY) < 0.06, `sleeve ${(p.y - wingY).toFixed(3)} m off the skin`);
+        }
+        const under = s.glove.filter(g => g.every(p => p.y < wingY));
+        const over = s.glove.filter(g => g.every(p => p.y > wingY));
+        assert.equal(under.length, 4, 'two under-wing bands per side');
+        assert.equal(over.length, 2, 'one top-skin band per side');
+        for (const b of [...under, ...over]) {
+            assert.ok(b.length >= 4);
+            const xs = b.map(p => p.x - BARRICADE_MID_X);
+            assert.ok(xs.every(x => Math.sign(x) === Math.sign(xs[0])), 'band crosses the fuselage');
+        }
+    });
+
+    it('draws no glove until something is caught', () => {
+        assert.equal(buildBarricadeShape(1, true).glove.length, 0);
+    });
+
+    it('slings straps round both outer wings', () => {
+        const slung = s.verticals.filter(v => v.length > 2).map(v => v.slice(1, -1).reduce((m, p) => (p.z < m.z ? p : m)));
+        assert.ok(slung.filter(p => p.x - BARRICADE_MID_X < -2.4).length >= 2, 'port outer wing');
+        assert.ok(slung.filter(p => p.x - BARRICADE_MID_X > 2.4).length >= 2, 'starboard outer wing');
     });
 });
 

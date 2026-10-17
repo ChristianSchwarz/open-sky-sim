@@ -27,10 +27,13 @@ import {
     BARRICADE_RAISE_S,
 } from './barricadeSpec';
 import { BarricadeAirframeProfile, BarricadeNetShape, buildBarricadeShape } from './barricadeWrap';
+import { BarricadeNetMotion } from './barricadeNetMotion';
 
 /** Load-strap and engaging-strap widths (m). */
 const LOAD_STRAP_W_M = 0.3;
 const ENGAGING_STRAP_W_M = 0.2;
+/** The straps gloving the wing, close together, so a little narrower. */
+const GLOVE_STRAP_W_M = 0.15;
 const CABLE_W_M = 0.05;
 /** Stanchion cross-section (m). */
 const STANCHION_SIDE_M = 0.45;
@@ -53,10 +56,11 @@ export const enum BarricadeRigPhase {
     LOWERING,
 }
 
-/** The aircraft in the net, as drawn: world pose and its profile. */
+/** The aircraft in the net, as drawn: world pose, velocity relative to the ship, and its profile. */
 export interface BarricadeCatch {
     position: THREE.Vector3;
     quaternion: THREE.Quaternion;
+    velocity: THREE.Vector3;
     profile: BarricadeAirframeProfile;
 }
 
@@ -80,6 +84,12 @@ export class BarricadeEntity implements Entity {
     private readonly linePos: THREE.BufferAttribute;
     private readonly stanchions: THREE.Mesh[] = [];
     private useLines = false;
+
+    /** Springs that carry the webbing from curtain to wrap (drawing only). */
+    private readonly motion = new BarricadeNetMotion();
+    /** Time not yet given to {@link motion}: update() adds, the first rebuild after it spends. */
+    private pendingDelta = 0;
+    private readonly localVel = new THREE.Vector3();
 
     private readonly invQuat = new THREE.Quaternion();
     private readonly localPos = new THREE.Vector3();
@@ -201,6 +211,7 @@ export class BarricadeEntity implements Entity {
     }
 
     update(delta: number): void {
+        this.pendingDelta += delta;
         const step = delta / BARRICADE_RAISE_S;
         this.raise = this.target > this.raise
             ? Math.min(this.target, this.raise + step)
@@ -257,15 +268,27 @@ export class BarricadeEntity implements Entity {
     private rebuild(): void {
         const caught = this.getCatch();
         let shape: BarricadeNetShape;
+        // Render passes can call this more than once a frame; only the first moves the net.
+        // A stalled frame (hidden tab, load) is not a reason to fling the net.
+        const dt = Math.min(this.pendingDelta, 0.1);
+        this.pendingDelta = 0;
         if (caught) {
             this.invQuat.copy(this.root.quaternion).invert();
             this.localPos.copy(caught.position).sub(this.root.position).applyQuaternion(this.invQuat);
             this.localQuat.copy(this.invQuat).multiply(caught.quaternion);
-            shape = buildBarricadeShape(this.raise, true, {
+            const target = buildBarricadeShape(this.raise, true, {
                 pose: { position: this.localPos, quaternion: this.localQuat },
                 profile: caught.profile,
             });
+            const halfSpan = profileHalfSpan(caught.profile);
+            if (!this.motion.active) {
+                // From the curtain as it hung the instant before.
+                this.localVel.copy(caught.velocity).applyQuaternion(this.invQuat);
+                this.motion.begin(buildBarricadeShape(this.raise, true), target, this.localPos, this.localVel, halfSpan);
+            }
+            shape = this.motion.step(dt, target, this.localPos, halfSpan);
         } else {
+            this.motion.reset();
             shape = buildBarricadeShape(this.raise, this.webbing && !this.expended);
         }
 
@@ -288,6 +311,7 @@ export class BarricadeEntity implements Entity {
             this.straps.add(shape.upper, LOAD_STRAP_W_M);
             this.straps.add(shape.lower, LOAD_STRAP_W_M);
             for (const v of shape.verticals) this.straps.add(v, ENGAGING_STRAP_W_M);
+            for (const g of shape.glove) this.straps.add(g, GLOVE_STRAP_W_M);
             this.straps.end();
             this.cables.begin();
             for (const c of shape.cables) this.cables.add(c, CABLE_W_M);
@@ -303,10 +327,20 @@ export class BarricadeEntity implements Entity {
             push(shape.upper);
             push(shape.lower);
             for (const v of shape.verticals) push(v);
+            for (const g of shape.glove) push(g);
             this.lines.geometry.setDrawRange(0, n);
             this.linePos.needsUpdate = true;
         }
     }
+}
+
+/** Wingtip distance from the centreline, from the profile's leading edges. */
+function profileHalfSpan(profile: BarricadeAirframeProfile): number {
+    let half = 0;
+    for (const side of profile.leadingEdge) {
+        for (const p of side) half = Math.max(half, Math.abs(p.x));
+    }
+    return half;
 }
 
 const _t = new THREE.Vector3();
