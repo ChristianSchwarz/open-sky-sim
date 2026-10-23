@@ -354,6 +354,8 @@ function profileHalfSpan(profile: BarricadeAirframeProfile): number {
 const _t = new THREE.Vector3();
 const _side = new THREE.Vector3();
 const _z = new THREE.Vector3(0, 0, 1);
+/** A strap point this close to the deck (m) is drawn lying flat on it. */
+const RIBBON_FLAT_ON_DECK_M = 0.1;
 const _y = new THREE.Vector3(0, 1, 0);
 
 /**
@@ -395,10 +397,14 @@ class RibbonBuffer {
             const a = pts[Math.max(0, i - 1)];
             const b = pts[Math.min(pts.length - 1, i + 1)];
             _t.subVectors(b, a);
-            _side.crossVectors(_t, _z);
-            if (_side.lengthSq() < 1e-6 * Math.max(1e-6, _t.lengthSq())) _side.crossVectors(_t, _y);
-            _side.normalize().multiplyScalar(width * 0.5);
             const p = pts[i];
+            // Webbing lying on the deck lies flat on it; anything else across
+            // the deck axis (a strap fore and aft on the deck would otherwise
+            // stand up on edge as a blade).
+            const flat = p.y < BARRICADE_DECK_Y + RIBBON_FLAT_ON_DECK_M;
+            _side.crossVectors(_t, flat ? _y : _z);
+            if (_side.lengthSq() < 1e-6 * Math.max(1e-6, _t.lengthSq())) _side.crossVectors(_t, flat ? _z : _y);
+            _side.normalize().multiplyScalar(width * 0.5);
             this.pos.setXYZ(this.verts++, p.x - _side.x, p.y - _side.y, p.z - _side.z);
             this.pos.setXYZ(this.verts++, p.x + _side.x, p.y + _side.y, p.z + _side.z);
         }

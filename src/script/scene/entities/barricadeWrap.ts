@@ -17,19 +17,18 @@
  *  - the lower strap is held up off the deck by the airframe: across the
  *    front of the gear legs at strut height, and in under each wing a little
  *    below the glove, out to the shackles;
- *  - caught, only the lower strap holds the webbing: the upper strap and
- *    its pendants are not drawn. Every vertical strap keeps its station on
- *    the lower strap, matched section by section (the two tails and the
- *    stretch across the airframe) to where it hung from the upper one; one
- *    that meets a wing still drapes over it from there, and the rest fall
- *    to the deck and trail aft along it. Caught, it runs from its upper station along its path: one
+ *  - caught, the upper strap and its pendants are not drawn. Every vertical
+ *    strap runs from where the upper strap held it (draped over a wing,
+ *    beside the fuselage, or off a tail) to the joint on its own side of
+ *    the webbing, where the lower strap meets the purchase cable: they fan
+ *    out from the jet to those two points. Caught, it runs from its upper station along its path: one
  *    that meets a wing folds over it (forward over the top skin and round
  *    the leading edge), one in front of the fuselage, where the nose came
  *    through, goes out beside it, and from there it runs to its lower
  *    station. From the catch on it is drawn three times as long (the load has
- *    pulled the webbing out), and the spare bows the free part into a hoop,
- *    as in the photographs of an A-6E caught aboard USS Enterprise in 1978,
- *    or hangs it in a loop that lies along the deck where it reaches it;
+ *    pulled the webbing out). Nylon that long does not stand up in hoops:
+ *    the free part sags under its own weight, down to the deck where it
+ *    reaches it, and what is left lies on the deck in loose folds;
  *  - the webbing gloves each wing: a tight sleeve strap round the leading
  *    edge at every edge sample, and a band along the bottom skin answering
  *    the upper strap on top. It is drawn taut, a few centimetres off the
@@ -85,19 +84,24 @@ const HOOK_AHEAD_M = 0.04;
 const UPPER_SLACK = 0.001;
 /** Rigged-net sag of the upper strap between the stanchion tops (fraction of span). */
 const RIGGED_SLACK = 0.012;
-/** Spare strap length bows its free run this way (forward, a little up off the deck), sampled this finely. */
-const HOOP_BOW = new THREE.Vector3(0, 0.3, -1).normalize();
-const HOOP_SAMPLES = 12;
 /**
  * Caught, the engaging straps are drawn this many times their rigged length,
  * from the catch on: the load has pulled the webbing out, and it hangs loose.
  */
 const CAUGHT_STRAP_STRETCH = 3;
-/** Slack too long for an arch hangs as a loop, this way: down and forward. */
-const LOOP_DROOP = new THREE.Vector3(0, -1, -0.7).normalize();
-const LOOP_LEG_SAMPLES = 6;
-/** A free run steeper than this (|sin| of its slope) drops its slack straight down. */
-const STEEP_STRAP = 0.7;
+/** Samples along a strap's free run. */
+const DRAPE_SAMPLES = 24;
+/** Spare strap lying on the deck folds from side to side: at most this far (m), at least this wavelength (m). */
+const FOLD_AMPLITUDE_M = 0.35;
+const FOLD_WAVELENGTH_M = [1.2, 3];
+/**
+ * Folded, a strap lies on at most this much of its own length per metre of
+ * deck run; a run too short for that lays its folds out aft first, the way
+ * the webbing was dragged.
+ */
+const FOLD_PER_RUN = 1.4;
+/** Radius of the turn where a strap laid out aft comes back (m). */
+const FOLD_TURN_M = 1.0;
 /** The lower strap is caught this far up each gear leg from the wheel contact, and this far ahead of it (m). */
 const GEAR_TRAP_UP_M = 0.55;
 const GEAR_TRAP_AHEAD_M = 0.25;
@@ -472,47 +476,51 @@ function wrapOnAirframe(
     }
     const lower = [lowerEnds[0].clone(), ...[...underWing, ...legs].sort((a, b) => a.x - b.x), lowerEnds[1].clone()];
     const lowerArc = cumulative(lower);
-    // The belts are shaped nothing alike (one on the wings and out to the
-    // stanchion heads, the other across the gear), so a station is matched
-    // section by section: each tail of the upper strap to the same tail of
-    // the lower, the stretch on the airframe to the stretch under it.
-    // Matched over the whole length instead, the lower strap's long middle
-    // crowded the tail straps' feet together at its ends.
-    const upperTotal = upperArc[upperArc.length - 1];
-    const lowerTotal = lowerArc[lowerArc.length - 1];
-    const upperBreaks = [0, upperArc[bandFrom] / upperTotal, upperArc[bandTo] / upperTotal, 1];
-    const lowerBreaks = [0, lowerArc[1], lowerArc[lowerArc.length - 2], lowerTotal];
-    const lowerStation = (u: number) => {
-        const k = u < upperBreaks[1] ? 0 : u < upperBreaks[2] ? 1 : 2;
-        const span = upperBreaks[k + 1] - upperBreaks[k];
-        const t = span > 1e-9 ? (u - upperBreaks[k]) / span : 0;
-        return pointAtArc(lower, lowerArc, lowerBreaks[k] + t * (lowerBreaks[k + 1] - lowerBreaks[k]));
-    };
     const verticals: V3[][] = [];
     const slung: boolean[] = [];
     for (let j = 0; j < BARRICADE_STRAP_COUNT; j++) {
         const u = (j + 1) / (BARRICADE_STRAP_COUNT + 1);
         const su = u * upperArc[upperArc.length - 1];
         const top = pointAtArc(upper, upperArc, su);
-        const bottom = lowerStation(u);
+        // Caught, every strap runs to the joint on its own side, where the
+        // lower strap meets the purchase cable.
+        const bottom = lowerEnds[j < BARRICADE_STRAP_COUNT / 2 ? 0 : 1].clone();
         const dx = top.x - centreX;
         let path: V3[];
         if (Math.abs(dx) < profile.fuselageHalfWidth) {
+            // Out beside the fuselage, forward of the wing root and down to
+            // the lower strap's height there, so it runs on to its joint under
+            // the wing, not through it.
+            const sign = Math.sign(dx || 1);
             const beside = top.clone();
-            beside.x = centreX + Math.sign(dx || 1) * profile.fuselageHalfWidth;
+            beside.x = centreX + sign * profile.fuselageHalfWidth;
             path = [top, beside];
+            const root = band
+                .filter(b => b.edge && Math.sign(b.edge.x - centreX) === sign)
+                .reduce<Support | undefined>((m, b) => (!m || Math.abs(b.edge!.x - centreX) < Math.abs(m.edge!.x - centreX) ? b : m), undefined);
+            if (root?.edge) {
+                const ahead = root.edge.clone().addScaledVector(_fwd, HOOK_AHEAD_M);
+                if (aftOf(beside, ahead) > 0) path.push(new THREE.Vector3(beside.x, beside.y, ahead.z));
+            }
+            const last = path[path.length - 1];
+            path.push(last.clone().setY(Math.min(last.y, trapY)));
+            slung.push(false);
+        } else if (su < hookFrom || su > hookTo) {
+            // Off a wingtip: the upper strap that held its top is gone, so it
+            // has fallen, and lies on the deck from below its station to its joint.
+            path = [top.clone().setY(deckFloor)];
             slung.push(false);
         } else {
-            const held = su >= hookFrom && su <= hookTo ? edgeNear(band, top.x) : undefined;
+            const held = edgeNear(band, top.x);
             slung.push(!!(held?.edge && held.skin));
             path = held?.edge && held.skin
-                ? [top, ...sling(held.edge, held.skin, top.x, aftOf(held.at, held.edge), false)]
+                // Round the edge and back under the wing: from there it runs
+                // to its joint below the wing; straight from the leading edge
+                // it would cut back through the wing to a joint aft of it.
+                ? [top, ...sling(held.edge, held.skin, top.x, aftOf(held.at, held.edge))]
                 : [top];
         }
-        const length = lengths[j] * CAUGHT_STRAP_STRETCH;
-        // Only the lower strap holds the straps now: one the wing does not
-        // hold falls from its station to the deck and trails aft along it.
-        verticals.push(slung[j] ? strapOfLength(path, bottom, length) : lyingStrap(bottom, length));
+        verticals.push(strapOfLength(path, bottom, lengths[j] * CAUGHT_STRAP_STRETCH));
     }
     for (const v of verticals) clampToDeck(v);
 
@@ -554,143 +562,137 @@ function riggedStrapLengths(): number[] {
 
 /**
  * A strap of length `length` from `path[0]` along `path` and on to `bottom`,
- * its station on the lower strap. Spare length goes into the last, free run
- * and hangs, down and forward: an arch of exactly that length while it fits
- * in a half circle and clears the deck, a loop when there is more. A
- * loop that reaches the deck carries on along it the way it was hanging,
- * closing in a half circle on the deck, so the strap keeps its length. A
- * strap that cannot
- * reach is drawn straight.
+ * the joint it ends at. The spare length goes into the last, free run, which
+ * hangs under gravity: a sag straight down from the chord (a hanging strap
+ * sags down, not sideways), resting on the deck where it reaches it. When it
+ * has sagged onto the deck all the way across and is still long, the rest
+ * lies on the deck in folds from side to side. A strap that cannot reach is
+ * drawn straight.
  */
 function strapOfLength(path: V3[], bottom: V3, length: number): V3[] {
     const out = path.map(p => p.clone());
     const end = out[out.length - 1];
-    const run = end.distanceTo(bottom);
     const free = length - polylineLength(out);
-    if (free <= run + 1e-6 || run < 1e-6) {
+    if (free <= end.distanceTo(bottom) + 1e-6) {
         out.push(bottom.clone());
         return out;
     }
-    const chord = bottom.clone().sub(end).divideScalar(run);
-    const across = (dir: V3, fallback: V3) => {
-        const d = dir.clone().addScaledVector(chord, -dir.dot(chord));
-        if (d.lengthSq() < 1e-9) d.copy(fallback).addScaledVector(chord, -fallback.dot(chord));
-        return d.normalize();
-    };
     const floor = BARRICADE_DECK_Y + DECK_CLEARANCE_M;
-    // Slack hangs: an arch, or a loop, down and forward. Between two points
-    // nearly one above the other it falls straight down toward the deck:
-    // square to the strap, "down" there would be sideways, a loop held up in
-    // the air.
-    const steep = Math.abs(chord.y) > STEEP_STRAP;
-    const g = steep ? LOOP_DROOP.clone() : across(LOOP_DROOP, HOOP_BOW);
-    let arch: V3[] | undefined;
-    if (!steep && run / free >= 2 / Math.PI) {
-        // Arch of half-angle θ with sin θ / θ = run / free, if it clears the deck.
-        const theta = halfAngleForChord(run / free);
-        const r = run / (2 * Math.sin(theta));
-        const centre = end.clone().lerp(bottom, 0.5).addScaledVector(g, -r * Math.cos(theta));
-        arch = [];
-        for (let k = 1; k < HOOP_SAMPLES; k++) {
-            const a = -theta + (2 * theta * k) / HOOP_SAMPLES;
-            arch.push(centre.clone().addScaledVector(chord, r * Math.sin(a)).addScaledVector(g, r * Math.cos(a)));
-        }
-        if (arch.some(p => p.y < floor)) arch = undefined;
-    }
-    if (arch) {
-        out.push(...arch);
-    } else {
-        // Loop: two legs hanging along g, joined by a half circle.
-        const leg = Math.max(0, (free - (Math.PI * run) / 2) / 2);
-        // How far each leg can hang before it reaches the deck.
-        const toDeck = (p: V3) => (g.y < -1e-6 ? Math.max(0, p.y - floor) / -g.y : Infinity);
-        const down = [toDeck(end), toDeck(bottom)];
-        // Both legs down to the deck, on along it the same way by the same
-        // distance, and a half circle lying on the deck between them, when
-        // the strap is long enough for that; otherwise a loop in the air.
-        const along = new THREE.Vector3(g.x, 0, g.z);
-        if (along.lengthSq() < 1e-9) along.set(0, 0, -1);
-        along.normalize();
-        const feet = Number.isFinite(down[0]) && Number.isFinite(down[1])
-            ? [end.clone().addScaledVector(g, down[0]), bottom.clone().addScaledVector(g, down[1])]
-            : undefined;
-        const gap = feet ? feet[0].distanceTo(feet[1]) : 0;
-        const on = feet ? (free - down[0] - down[1] - (Math.PI * gap) / 2) / 2 : -1;
-        if (feet && on >= 0) {
-            const tips = feet.map(f => f.clone().addScaledVector(along, on));
-            out.push(feet[0]);
-            for (let k = 1; k <= LOOP_LEG_SAMPLES; k++) out.push(feet[0].clone().lerp(tips[0], k / LOOP_LEG_SAMPLES));
-            halfCircle(out, tips[0], tips[1], along);
-            for (let k = LOOP_LEG_SAMPLES; k >= 0; k--) out.push(feet[1].clone().lerp(tips[1], k / LOOP_LEG_SAMPLES));
-        } else {
-            // Legs of a common length ℓ (each stopping at the deck), and the
-            // half circle between their ends taking the rest: ℓ by bisection.
-            const footAt = (l: number) => [
-                end.clone().addScaledVector(g, Math.min(l, down[0])),
-                bottom.clone().addScaledVector(g, Math.min(l, down[1])),
-            ];
-            const total = (l: number) => {
-                const f = footAt(l);
-                return Math.min(l, down[0]) + Math.min(l, down[1]) + (Math.PI * f[0].distanceTo(f[1])) / 2;
-            };
-            let lo = 0;
-            let hi = Math.max(leg, free);
-            for (let i = 0; i < 40; i++) {
-                const m = (lo + hi) / 2;
-                if (total(m) < free) lo = m;
-                else hi = m;
+    // Fully sagged: straight down to the deck at each end, and along it between.
+    const feet = [end.clone().setY(floor), bottom.clone().setY(floor)];
+    const flatLen = Math.max(0, end.y - floor) + feet[0].distanceTo(feet[1]) + Math.max(0, bottom.y - floor);
+    if (free < flatLen) {
+        // Parabolic sag s below the chord, resting on the deck: the length
+        // grows with s, so s by bisection.
+        const sagged = (sag: number) => {
+            const pts: V3[] = [];
+            for (let k = 1; k < DRAPE_SAMPLES; k++) {
+                const t = k / DRAPE_SAMPLES;
+                const q = end.clone().lerp(bottom, t);
+                q.y = Math.max(floor, q.y - sag * 4 * t * (1 - t));
+                pts.push(q);
             }
-            const l = (lo + hi) / 2;
-            const f = footAt(l);
-            const l0 = Math.min(l, down[0]);
-            const l1 = Math.min(l, down[1]);
-            for (let k = 1; k <= LOOP_LEG_SAMPLES; k++) out.push(end.clone().addScaledVector(g, (l0 * k) / LOOP_LEG_SAMPLES));
-            // A foot on the deck: turn flat, so the half circle never dips into it.
-            const onDeck = l0 >= down[0] - 1e-6 || l1 >= down[1] - 1e-6;
-            halfCircle(out, f[0], f[1], onDeck ? along : g);
-            for (let k = LOOP_LEG_SAMPLES; k >= 1; k--) out.push(bottom.clone().addScaledVector(g, (l1 * k) / LOOP_LEG_SAMPLES));
+            return pts;
+        };
+        const lengthOf = (pts: V3[]) => polylineLength([end, ...pts, bottom]);
+        let lo = 0;
+        let hi = 1;
+        while (hi < 1e4 && lengthOf(sagged(hi)) < free) hi *= 2;
+        for (let i = 0; i < 40; i++) {
+            const m = (lo + hi) / 2;
+            if (lengthOf(sagged(m)) < free) lo = m;
+            else hi = m;
         }
+        out.push(...sagged((lo + hi) / 2), bottom.clone());
+        return out;
     }
+    // On the deck from foot to foot; a run too short for its folds lays out
+    // aft first, out and back.
+    const onDeck = free - Math.max(0, end.y - floor) - Math.max(0, bottom.y - floor);
+    const direct = feet[0].distanceTo(feet[1]);
+    // Out aft and back as a U, never a hairpin (a drawn ribbon spikes at one).
+    const runOf = (need: number) => {
+        if (direct >= need) return [feet[0], feet[1]];
+        const mid = feet[0].clone().lerp(feet[1], 0.5);
+        const side = feet[1].clone().sub(feet[0]).setY(0);
+        if (side.lengthSq() < 1e-9) side.set(1, 0, 0);
+        side.normalize();
+        const r = Math.max(FOLD_TURN_M, direct / 2);
+        const aft = new THREE.Vector3(0, 0, 1);
+        // Legs out, a half circle between them: need ≈ 2 · legs + π r.
+        const leg = Math.max(0.5, (need - Math.PI * r) / 2);
+        const a = mid.clone().addScaledVector(side, -r).addScaledVector(aft, leg);
+        const b = mid.clone().addScaledVector(side, r).addScaledVector(aft, leg);
+        const pts = [feet[0], a];
+        for (let k = 1; k < 8; k++) {
+            const t = Math.PI * (1 - k / 8);
+            pts.push(mid.clone().addScaledVector(aft, leg).addScaledVector(side, r * Math.cos(t)).addScaledVector(aft, r * Math.sin(t)));
+        }
+        pts.push(b, feet[1]);
+        return pts;
+    };
+    // Lay it out further aft until the folds hold it all.
+    let need = onDeck / FOLD_PER_RUN;
+    let run = runOf(need);
+    let folds = folded(run, onDeck);
+    for (let i = 0; i < 8 && polylineLength([run[0], ...folds, run[run.length - 1]]) < onDeck * 0.99; i++) {
+        need *= 1.25;
+        run = runOf(need);
+        folds = folded(run, onDeck);
+    }
+    if (end.y > floor + 1e-6) out.push(feet[0].clone());
+    out.push(...folds);
+    if (bottom.y > floor + 1e-6) out.push(feet[1].clone());
     out.push(bottom.clone());
     return out;
 }
 
-/** A strap of `length` hanging from `station` on the lower strap: down to the deck, then aft along it. */
-function lyingStrap(station: V3, length: number): V3[] {
-    const floor = BARRICADE_DECK_Y + DECK_CLEARANCE_M;
-    const drop = Math.min(length, Math.max(0, station.y - floor));
-    const foot = station.clone().setY(station.y - drop);
-    return [station.clone(), foot, foot.clone().add(new THREE.Vector3(0, 0, length - drop))];
-}
-
-/** A half circle from `a` to `b`, bulging along `bulge`, pushed onto `pts` (both ends included). */
-function halfCircle(pts: V3[], a: V3, b: V3, bulge: V3): void {
-    const d = a.distanceTo(b);
-    if (d < 1e-6) {
-        pts.push(a.clone());
-        return;
+/**
+ * The interior points of `run` (on the deck) folded from side to side so
+ * that it is `length` long, as near as amplitude and wavelength allow: the
+ * amplitude first, at the longest wavelength, then the wavelength down.
+ */
+function folded(run: V3[], length: number): V3[] {
+    const arc = cumulative(run);
+    const total = arc[arc.length - 1];
+    if (total < 1e-6) return [];
+    const shape = (amp: number, wave: number) => {
+        const n = Math.max(1, Math.round(total / wave));
+        const samples = Math.max(DRAPE_SAMPLES, n * 12);
+        const pts: V3[] = [];
+        for (let k = 1; k < samples; k++) {
+            const sArc = (total * k) / samples;
+            const p = pointAtArc(run, arc, sArc);
+            // Folded square to the run's tangent, smoothed over its corners.
+            const dir = pointAtArc(run, arc, Math.min(total, sArc + FOLD_TURN_M))
+                .sub(pointAtArc(run, arc, Math.max(0, sArc - FOLD_TURN_M))).setY(0);
+            const side = new THREE.Vector3(-dir.z, 0, dir.x);
+            if (side.lengthSq() > 1e-12) side.normalize();
+            const u = sArc / total;
+            // Out and back n times, easing to nothing at both feet.
+            const ease = Math.min(1, u / 0.1, (1 - u) / 0.1);
+            p.addScaledVector(side, amp * ease * Math.sin(2 * Math.PI * n * u));
+            pts.push(p);
+        }
+        return pts;
+    };
+    const lengthOf = (pts: V3[]) => polylineLength([run[0], ...pts, run[run.length - 1]]);
+    const [minWave, maxWave] = FOLD_WAVELENGTH_M;
+    const bisect = (f: (x: number) => number, lo: number, hi: number) => {
+        // f grows from lo to hi.
+        for (let i = 0; i < 30; i++) {
+            const m = (lo + hi) / 2;
+            if (f(m) < length) lo = m;
+            else hi = m;
+        }
+        return (lo + hi) / 2;
+    };
+    if (lengthOf(shape(FOLD_AMPLITUDE_M, maxWave)) >= length) {
+        return shape(bisect(a => lengthOf(shape(a, maxWave)), 0, FOLD_AMPLITUDE_M), maxWave);
     }
-    const u = b.clone().sub(a).divideScalar(d);
-    const n = bulge.clone().addScaledVector(u, -bulge.dot(u));
-    if (n.lengthSq() < 1e-9) n.set(0, 1, 0).addScaledVector(u, -u.y);
-    n.normalize();
-    const c = a.clone().lerp(b, 0.5);
-    for (let k = 0; k <= HOOP_SAMPLES; k++) {
-        const t = -Math.PI / 2 + (Math.PI * k) / HOOP_SAMPLES;
-        pts.push(c.clone().addScaledVector(u, (d / 2) * Math.sin(t)).addScaledVector(n, (d / 2) * Math.cos(t)));
-    }
-}
-
-/** θ in (0, π) with sin θ / θ = ratio (chord over arc length), by bisection. */
-function halfAngleForChord(ratio: number): number {
-    let lo = 1e-6;
-    let hi = Math.PI - 1e-6;
-    for (let i = 0; i < 50; i++) {
-        const m = (lo + hi) / 2;
-        if (Math.sin(m) / m > ratio) lo = m;
-        else hi = m;
-    }
-    return (lo + hi) / 2;
+    // Shorter waves fold more strap into the run (rounding n makes it stepwise, near enough).
+    const wave = maxWave - bisect(d => lengthOf(shape(FOLD_AMPLITUDE_M, maxWave - d)), 0, maxWave - minWave);
+    return shape(FOLD_AMPLITUDE_M, wave);
 }
 
 /** The wing support under the band at lateral x, if the band rests on a wing there. */

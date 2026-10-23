@@ -128,9 +128,12 @@ export class BarricadeNetMotion {
         }
         const upper = this.upper.offset.map(o => o.clone().add(aircraft));
         const lower = this.lower.offset.map(o => o.clone().add(aircraft));
-        // Both straps end in the one shackle per side.
-        lower[0].copy(upper[0]);
-        lower[lower.length - 1].copy(upper[upper.length - 1]);
+        // Both straps end in the one shackle per side, the lower strap's end
+        // (the joint) as far below the upper's as the wrap holds it: caught,
+        // that is off the deck at the gear, not up at the shackle.
+        for (const [lo, up] of [[0, 0], [lower.length - 1, upper.length - 1]]) {
+            lower[lo].copy(upper[up]).setY(upper[up].y + lowerTarget[lo].y - upperTarget[up].y);
+        }
 
         // Vertical straps ride the moving straps at their stations, keeping
         // whatever the wrap did to them (pushed aside by the nose, hooked).
@@ -140,17 +143,21 @@ export class BarricadeNetMotion {
             const u = (j + 1) / (count + 1);
             const tv = target.verticals[j];
             const top = sampleAt(upper, u).add(tv[0].clone().sub(sampleAt(upperTarget, u)));
-            // Both ends stay at their sewn stations on the moving straps.
-            const bottom = sampleAt(lower, u).add(tv[tv.length - 1].clone().sub(sampleAt(lowerTarget, u)));
+            // The top rides the moving upper strap; the bottom its side's joint,
+            // the moving lower strap's end.
+            const side = j < count / 2 ? 0 : lower.length - 1;
+            const bottom = tv[tv.length - 1].clone().add(lower[side].clone().sub(lowerTarget[side]));
             if (target.slung[j] && top.distanceTo(tv[0]) < HOOK_SNAP_M) {
                 // Folded over the wing: the wing holds its middle in place.
                 verticals.push([top, ...tv.slice(1, -1).map(p => p.clone()), bottom]);
             } else if (target.slung[j]) {
                 verticals.push([top, bottom]);
             } else {
-                // A free strap hangs from its station on the lower strap and rides it.
-                const d = sampleAt(lower, u).sub(sampleAt(lowerTarget, u));
-                verticals.push(tv.map(p => p.clone().add(d)));
+                // A free strap keeps its shape and rides its two ends.
+                const dTop = top.clone().sub(tv[0]);
+                const dBottom = bottom.clone().sub(tv[tv.length - 1]);
+                const n = tv.length - 1;
+                verticals.push(tv.map((p, i) => p.clone().add(dTop.clone().lerp(dBottom, n > 0 ? i / n : 0))));
             }
         }
         // The straps' feet ride a resampled lower strap while it moves; keep them on the deck.

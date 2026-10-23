@@ -31,6 +31,8 @@ const SWAY_RATE = 2.3;
 /** A strap is drawn with at least this many points, so it can bend. */
 const MIN_POINTS = 10;
 const DECK_CLEARANCE_M = 0.04;
+/** Webbing within this height of the deck (m) moves less in the wind, and none on it. */
+const DECK_HOLD_M = 0.3;
 
 /**
  * The straps as the wind leaves them at `timeS`. Straps marked in `held` (the
@@ -55,7 +57,9 @@ function flutterOne(strap: readonly V3[], j: number, t: number): V3[] {
     const floor = BARRICADE_DECK_Y + DECK_CLEARANCE_M;
     for (let i = 1; i < pts.length - 1; i++) {
         const s = arc[i] / total;
-        const envelope = Math.sin(Math.PI * s);
+        // Webbing lying on the deck is held there by friction; the wind takes what hangs.
+        const lift = Math.min(1, Math.max(0, (pts[i].y - floor) / DECK_HOLD_M));
+        const envelope = Math.sin(Math.PI * s) * lift;
         const ripple = RIPPLE_M * Math.sin(RIPPLE_RATE * t + phase - 2 * Math.PI * RIPPLE_WAVES * s);
         pts[i].addScaledVector(DOWNWIND, envelope * (billow + ripple)).addScaledVector(ACROSS, envelope * sway);
         pts[i].y = Math.max(pts[i].y, floor);
