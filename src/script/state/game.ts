@@ -1498,13 +1498,56 @@ export class Game {
      * thing the player sees is the finished view rather than it popping in.
      * Needs the kernel running: LOD is chosen in render3D, which keeps
      * drawing while update() sits out the hold.
+     *
+     * With `stream` false (a respawn into terrain that is all resident) the
+     * overlay and the wait are skipped and only the countdown runs.
      */
-    async holdUntilStreamed(): Promise<void> {
+    async holdUntilStreamed(stream = true): Promise<void> {
         const token = ++this.streamHoldToken;
         this.streamHeld = true;
         this.kernelRunning = true;
         const wasPaused = !this.player.controlsEnabled;
         this.player.setSimulationPaused(true);
+        if (stream) {
+            await this.waitForStreamBacklog(token);
+        }
+        // A newer hold (another spawn) took over; it releases the game.
+        if (token !== this.streamHoldToken) {
+            return;
+        }
+        // The blur clears over the first second of a "get ready" count,
+        // still paused; the flight starts on "Go". Unconditional: a resident
+        // respawn can interrupt a hold whose blur is still up.
+        fadeOutBootProgress();
+        for (let n = STREAM_COUNTDOWN_FROM; n > 0; n--) {
+            showCountdown(String(n));
+            await new Promise(r => setTimeout(r, 1000));
+            if (token !== this.streamHoldToken) {
+                return;
+            }
+        }
+        showCountdown('Go');
+        setTimeout(() => {
+            if (token === this.streamHoldToken) {
+                hideCountdown();
+            }
+        }, STREAM_GO_SHOWN_MS);
+        this.streamHeld = false;
+        // Something else (a fixed camera from the URL, the menu) may have
+        // wanted the flight paused all along; only undo our own pause.
+        if (!wasPaused && this.state === GameState.PLAYER && !this.menuPaused) {
+            this.player.setSimulationPaused(false);
+        }
+    }
+
+    /** Whether the spawn's pin rings (see terrainSeedPlan) are all resident. */
+    private isSeedAreaResident(x: number, z: number, spawn: SpawnMode): boolean {
+        return this.terrainSeedPlan(spawn).rings.every(ring => this.planetTerrain.isAreaResident(
+            x, z, ring.radiusM, ring.zoom ?? this.planetTerrain.maxZoom));
+    }
+
+    /** The streaming bar: resolves once the LOD backlog stays empty. */
+    private async waitForStreamBacklog(token: number): Promise<void> {
         setBootStreaming(0, 'Streaming terrain... 0%');
         const start = performance.now();
         let idleSince: number | undefined;
@@ -1549,32 +1592,6 @@ export class Game {
             };
             requestAnimationFrame(tick);
         });
-        // A newer hold (another spawn) took over; it releases the game.
-        if (token !== this.streamHoldToken) {
-            return;
-        }
-        // The blur clears over the first second of a "get ready" count,
-        // still paused; the flight starts on "Go".
-        fadeOutBootProgress();
-        for (let n = STREAM_COUNTDOWN_FROM; n > 0; n--) {
-            showCountdown(String(n));
-            await new Promise(r => setTimeout(r, 1000));
-            if (token !== this.streamHoldToken) {
-                return;
-            }
-        }
-        showCountdown('Go');
-        setTimeout(() => {
-            if (token === this.streamHoldToken) {
-                hideCountdown();
-            }
-        }, STREAM_GO_SHOWN_MS);
-        this.streamHeld = false;
-        // Something else (a fixed camera from the URL, the menu) may have
-        // wanted the flight paused all along; only undo our own pause.
-        if (!wasPaused && this.state === GameState.PLAYER && !this.menuPaused) {
-            this.player.setSimulationPaused(false);
-        }
     }
 
     private reportTerrainBootProgress(meshed: number, total: number, min: number, max: number): void {
@@ -3699,7 +3716,13 @@ export class Game {
         this.state = GameState.PLAYER;
         this.stopReplay();
         this.recorder.clear();
-        if (this.kernelRunning) {
+        const seedMode: SpawnMode = at !== undefined ? 'approach' : spawn;
+        const center = at !== undefined ? this.locationSpawnPosition(at) : this.spawnCenterEnu(spawn);
+        // Respawning where the last flight was finds the whole pinned ring
+        // still resident (pins are never released): nothing to stream, so no
+        // blur and no streaming wait, only the countdown.
+        const resident = this.kernelRunning && this.isSeedAreaResident(center.x, center.z, seedMode);
+        if (this.kernelRunning && !resident) {
             // A respawn: blur the old view straight away rather than showing
             // the aircraft jump and the terrain around it fill in.
             this.streamHeld = true;
@@ -3775,8 +3798,7 @@ export class Game {
             }
         };
         place();
-        const center = at !== undefined ? this.locationSpawnPosition(at) : this.spawnCenterEnu(spawn);
-        await this.preloadTerrainAroundPlane(center.x, center.z, at !== undefined ? 'approach' : spawn);
+        await this.preloadTerrainAroundPlane(center.x, center.z, seedMode);
         // Again, now that the DEM under the spawn is resident: a runway or
         // final picked at another airfield was placed above whatever height
         // the coarse tier answered.
@@ -3787,7 +3809,7 @@ export class Game {
         this.syncSpawnCameraUrl(spawnHeading);
         this.player.setSimulationPaused(false);
         if (this.kernelRunning) {
-            void this.holdUntilStreamed();
+            void this.holdUntilStreamed(!resident);
         }
 
         // Fresh sortie: the deck crew has struck the barricade, except for the

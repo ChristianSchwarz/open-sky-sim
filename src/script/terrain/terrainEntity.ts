@@ -1365,6 +1365,16 @@ export class TerrainEntity implements Entity {
         await this.heights.ensureLoadedAroundWorld(x, z, radiusM);
     }
 
+    /**
+     * Whether every tile `pinArea` would pin here is already uploaded or
+     * known absent: pinning it again then streams nothing.
+     */
+    isAreaResident(x: number, z: number, radiusM: number, zoom: number): boolean {
+        const span = 180 / (1 << zoom);
+        return tilesAround(this.basis, x, z, radiusM, zoom, span)
+            .every(id => this.streamer.has(id) || this.meshStore.isAbsent(id));
+    }
+
     /** Keys of pinned tiles that are still neither uploaded nor known absent. */
     outstandingPinned(): string[] {
         const out: string[] = [];
