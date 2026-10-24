@@ -17,6 +17,8 @@ import { CombatSim } from '../sim/combatSim';
 import { serializeWorld } from '../sim/serializedWorld';
 import { loadWebAirframe, WebFixture } from './webFixtures.testkit.test';
 import { buildRiggedWeb } from './webLayout';
+import { WebSolver } from './webSolver';
+import { deckAndPayoutFails } from './webHarness.testkit.test';
 
 const DT = 1 / 60;
 const G0 = 9.80665;
@@ -24,6 +26,8 @@ const ID = 'web-sim';
 /** The MK-7 Mod 3's longest run-out, 344 ft (m). */
 const MAX_RUN_OUT_M = 105;
 const MAX_WEB_MS = 5;
+/** Caught and slower than this (m/s), the pilot is on the brakes. */
+const BRAKE_BELOW_MPS = 5;
 
 function flatDeck(): CarrierMeshCollider {
     const y = BARRICADE_DECK_Y;
@@ -75,8 +79,13 @@ describe('barricade webbing in the sim', () => {
                 const a = (sim as unknown as { aircraft: Map<string, Ac> }).aircraft.get(ID)!;
                 let caughtZ = NaN, peak = 0, webMs = 0, webMax = 0, frames = 0;
                 let prev = a.model.velocityVector.clone();
-                for (let f = 0; f < 60 * 20 && a.barricadeState !== BarricadeEngagement.HELD; f++) {
-                    sim.step(DT, { [ID]: { ...INPUT } });
+                // 30 s: in the shackle rig the stretched belts roll the stopped jet back several metres
+                // and it rocks a while before it is still enough to count as held.
+                for (let f = 0; f < 60 * 30 && a.barricadeState !== BarricadeEngagement.HELD; f++) {
+                    // The pilot brakes once the net has the jet down to walking pace: unbraked, the
+                    // shackle rig's stretched belts rolled a stopped F-22 back up to 50 m (1 run in 3).
+                    const braking = a.barricadeState !== BarricadeEngagement.NONE && a.model.velocityVector.length() < BRAKE_BELOW_MPS;
+                    sim.step(DT, { [ID]: { ...INPUT, wheelBrakesApplied: braking } });
                     const web = sim.barricadeWebSnapshot()!;
                     webMs += web.stepMs;
                     webMax = Math.max(webMax, web.stepMs);
@@ -87,12 +96,15 @@ describe('barricade webbing in the sim', () => {
                     prev = v.clone();
                 }
                 const runOut = BARRICADE_LOCAL_Z - a.model.position.z;
-                const line = `${fixture} x ${x}: ${JSON.stringify({ state: a.barricadeState, caughtZ: +caughtZ.toFixed(1), runOut: +runOut.toFixed(1), peakG: +(peak / G0).toFixed(2), webMs: +(webMs / frames).toFixed(2), webMax: +webMax.toFixed(2), speed: +a.model.velocityVector.length().toFixed(2) })}`;
+                const solver = (sim as unknown as { barricadeWebs: { solver: WebSolver }[] }).barricadeWebs[0].solver;
+                const deckPay = deckAndPayoutFails(solver);
+                const line = `${fixture} x ${x}: ${JSON.stringify({ state: a.barricadeState, caughtZ: +caughtZ.toFixed(1), runOut: +runOut.toFixed(1), peakG: +(peak / G0).toFixed(2), webMs: +(webMs / frames).toFixed(2), webMax: +webMax.toFixed(2), speed: +a.model.velocityVector.length().toFixed(2), payout: Math.max(...solver.stats.payout).toFixed(1), aboveDeck: +(solver.stats.lowestY - BARRICADE_DECK_Y).toFixed(3) })}`;
                 console.log(line);
                 assert.equal(a.barricadeState, BarricadeEngagement.HELD, line);
                 assert.ok(runOut > 20 && runOut <= MAX_RUN_OUT_M, line);
                 assert.ok(peak / G0 < 5, line);
                 assert.ok(webMs / frames < MAX_WEB_MS, line);
+                assert.deepEqual(deckPay, [], line);
             });
         }
     }
@@ -107,12 +119,15 @@ describe('barricade webbing in the sim', () => {
 describe('barricade webbing rigged in the sim', () => {
     const SAG_MAX_M = 0.35;
     const PAYOUT_MAX_M = 0.05;
-    const upper = buildRiggedWeb().upperBelt;
+    // Measured from the upper belt's corners at the stanchion heads (its ends are down at the shackles).
+    const rig = buildRiggedWeb();
+    const heads = rig.upperHeads;
+    const midUpper = rig.upperBelt[rig.upperBelt.length >> 1];
     function riggedSag(sim: CombatSim): { sag: number; payout: number; ready: boolean } {
         const web = sim.barricadeWebSnapshot()!;
         const y = (i: number) => web.positions[3 * i + 1];
-        const ends = Math.max(y(upper[0]), y(upper[upper.length - 1]));
-        return { sag: ends - y(upper[upper.length >> 1]), payout: Math.max(...web.payout.map(Math.abs)), ready: web.warm };
+        const ends = Math.max(y(heads[0]), y(heads[1]));
+        return { sag: ends - y(midUpper), payout: Math.max(...web.payout.map(Math.abs)), ready: web.warm };
     }
     function lace(sim: CombatSim, generation: number): void {
         sim.setBarricades([{ originX: 0, originY: 0, originZ: 0, quaternion: [0, 0, 0, 1], armed: true, generation, webbing: true }]);
@@ -138,8 +153,9 @@ describe('barricade webbing rigged in the sim', () => {
     it('hangs taut again after a catch, laced fresh', () => {
         const sim = rolling('f22', 45, 0);
         const a = (sim as unknown as { aircraft: Map<string, Ac> }).aircraft.get(ID)!;
-        for (let f = 0; f < 60 * 20 && a.barricadeState !== BarricadeEngagement.HELD; f++) sim.step(DT, { [ID]: { ...INPUT } });
-        assert.equal(a.barricadeState, BarricadeEngagement.HELD);
+        // Caught (held, or still settling in the net: this test is about the lacing after it).
+        for (let f = 0; f < 60 * 30 && a.barricadeState !== BarricadeEngagement.HELD; f++) sim.step(DT, { [ID]: { ...INPUT } });
+        assert.notEqual(a.barricadeState, BarricadeEngagement.NONE);
         sim.removeAircraft(ID);
         lace(sim, 2);
         let r = riggedSag(sim);

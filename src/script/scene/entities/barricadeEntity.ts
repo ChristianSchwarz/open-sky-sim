@@ -72,6 +72,8 @@ export interface BarricadeWebState {
     /** Settled and warmed up (BarricadeWeb.ready), and how far each tether has paid out (m). */
     warm?: boolean;
     payout?: readonly number[];
+    /** Whether each tensioning pendant still holds the upper belt at its stanchion head. */
+    pendantsHeld?: readonly boolean[];
 }
 
 /** The solver's net hung and still before anything touched it: what the stanchions swing up and down (see curtain). */
@@ -134,6 +136,7 @@ export class BarricadeEntity implements Entity {
     /** Per engaging strap, its two plies (see PLY_GAP_M). */
     private webPlies: THREE.Vector3[][] = [];
     private webCables: THREE.Vector3[][] = [];
+    private webPendants: THREE.Vector3[][] = [];
     private curtainPos = new Float32Array(0);
 
     constructor(
@@ -320,7 +323,7 @@ export class BarricadeEntity implements Entity {
                 restWeb = web.positions.slice();
             }
             this.lastWebDrawn = this.webToDrawn(web);
-            this.drawWeb(this.lastWebDrawn, stanchions, 1);
+            this.drawWeb(this.lastWebDrawn, stanchions, 1, web.pendantsHeld);
             return;
         }
         // Flush, unlaced, or cut away after a catch: the stanchions alone.
@@ -379,7 +382,8 @@ export class BarricadeEntity implements Entity {
             const w = 1 - t * t * (3 - 2 * t);
             b.applyQuaternion(qd).add(pd);
             out[i] = x + w * (b.x - x);
-            out[i + 1] = y + w * (b.y - y);
+            // Carried with the drawn aircraft, still not into the deck.
+            out[i + 1] = Math.max(BARRICADE_DECK_Y + DECK_CLEARANCE_M, y + w * (b.y - y));
             out[i + 2] = z + w * (b.z - z);
         }
         return out;
@@ -388,7 +392,8 @@ export class BarricadeEntity implements Entity {
     /** The webbing's particles as last drawn (carrier-local), for the dev hook. */
     lastWebDrawn: Float32Array | undefined;
 
-    private drawWeb(positions: Float32Array | undefined, stanchions: [StanchionPose, StanchionPose], raise: number): void {
+    private drawWeb(positions: Float32Array | undefined, stanchions: [StanchionPose, StanchionPose], raise: number,
+        pendantsHeld: readonly boolean[] = [true, true]): void {
         for (let i = 0; i < 2; i++) {
             const { base, top } = stanchions[i];
             const m = this.stanchions[i];
@@ -408,6 +413,7 @@ export class BarricadeEntity implements Entity {
             this.webLines = chains.map(c => c.map(() => new THREE.Vector3()));
             this.webPlies = layout.straps.flatMap(c => [c.map(() => new THREE.Vector3()), c.map(() => new THREE.Vector3())]);
             this.webCables = layout.tethers.map(() => [new THREE.Vector3(), new THREE.Vector3()]);
+            this.webPendants = layout.pendants.map(() => [new THREE.Vector3(), new THREE.Vector3()]);
         }
         const chains = [layout.upperBelt, layout.lowerBelt, ...layout.straps];
         chains.forEach((c, k) => {
@@ -418,13 +424,18 @@ export class BarricadeEntity implements Entity {
             }
         });
         this.buildPlies();
+        // The purchase cables, deck sheave to shackle, where both belts meet.
         layout.tethers.forEach((t, k) => {
             const i = 3 * t.i;
-            // The head pendants' anchors go up and down with the stanchion heads; the sheaves stay on the deck.
-            const [ax, ay, az] = t.anchor;
-            if (ay > BARRICADE_DECK_Y + 0.1) swing(this.webCables[k][0], ax, ay, az, raise);
-            else this.webCables[k][0].set(ax, ay, az);
+            // From the deck sheave (at deck level: drawn on, not in, the deck).
+            this.webCables[k][0].set(t.anchor[0], Math.max(t.anchor[1], BARRICADE_DECK_Y + DECK_CLEARANCE_M), t.anchor[2]);
             this.webCables[k][1].set(positions[i], positions[i + 1], positions[i + 2]);
+        });
+        // The tensioning pendants, stanchion head to the upper belt's corner, until they let go.
+        layout.upperHeads.forEach((corner, k) => {
+            const i = 3 * corner;
+            this.webPendants[k][0].copy(stanchions[k].top);
+            this.webPendants[k][1].set(positions[i], positions[i + 1], positions[i + 2]);
         });
         const near = !this.useLines;
         this.straps.mesh.visible = near;
@@ -438,6 +449,7 @@ export class BarricadeEntity implements Entity {
             this.straps.end();
             this.cables.begin();
             for (const c of this.webCables) this.cables.add(c, CABLE_W_M);
+            this.webPendants.forEach((p, k) => { if (pendantsHeld[k]) this.cables.add(p, CABLE_W_M); });
             this.cables.end();
         } else {
             let n = 0;

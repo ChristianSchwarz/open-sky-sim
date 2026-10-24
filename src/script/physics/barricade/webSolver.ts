@@ -83,6 +83,28 @@ const ENGINE_MIN_LEFT_M = 5;
 const SLING_SLIDE = 0.05;
 /** Nylon webbing on nylon: an eye holds its place on the belt against a pull along it up to this share of the pull across it. */
 const SLING_MU = 0.5;
+/**
+ * The most a purchase cable pays out (m): there the engine's ram has run
+ * its stroke and the cable stops paying out. From then on it is an end
+ * stop that only stretches, END_STOP_COMPLIANCE m/N, with a buffer
+ * (END_STOP_BUFFER_S). Measured with the engines set for a third of an
+ * F-22 at 60 m/s (it reaches the stop at 26 m/s):
+ *  - the bare wire rope in series with the engine's reeving (1-7/16 in
+ *    rope, EA about 1.5e8 N, some 400 m of it) would be about 3e-6. At 6e-7
+ *    and 2e-6 the load straps went past 28 % strain against the nose and
+ *    the solver pumped their end links to 400-480 m/s;
+ *  - at 1e-5, 140 m/s; at 2e-5 the fastest particle stayed at 114 m/s
+ *    (under twice the jet's speed), the peak 4.8 g, the jet stopped 29 m
+ *    further on, on cable stretch.
+ * So 2e-5: softer than the wire alone, a compromise for the solver's sake.
+ * A normal catch never reaches it (the 65 m cam stops it by about 75 m).
+ * Not rigid in any case: a rigid hold met through the sim's one-step-late
+ * coupling threw a jet back off the net.
+ */
+export const PAYOUT_MAX_M = 90;
+const END_STOP_COMPLIANCE = 2e-5;
+/** The end-of-stroke buffer's time constant (s): see bufferEndStops. */
+const END_STOP_BUFFER_S = 0.02;
 /** A step's deadline is judged at its substeps' mean pace times this (see step). */
 const DEADLINE_PACE_MARGIN = 1.15;
 /** Substeps per step (a 60 Hz frame gives 0.52 ms substeps). */
@@ -224,6 +246,8 @@ export interface WebStats {
     /** Airframe contacts that pushed in the last substep. */
     contacts: number;
     tieDownsBroken: number;
+    /** The lowest any particle has been (m, carrier-local y), over the solver's life. */
+    lowestY: number;
     /** Payout of each tether so far (m). */
     payout: number[];
     /** Each tether's holding force in the last substep (N). */
@@ -332,6 +356,9 @@ export class WebSolver {
 
     /** Where each strap's eye is on the upper belt, link plus fraction (see solveSlings). */
     private readonly slingAt: Float64Array;
+    /** The eyes' particles, and the upper belt's, as typed arrays for the substep loops. */
+    private readonly slingEyes: Int32Array;
+    private readonly upperBeltIds: Int32Array;
 
     /** 1 for each tie-down that has let go. */
     readonly tieBroken: Uint8Array;
@@ -524,6 +551,8 @@ export class WebSolver {
         this.tetherCapped = new Uint8Array(layout.tethers.length);
         this.tetherHold = Float64Array.from(layout.tethers, t => t.holdN);
         this.slingAt = Float64Array.from(layout.slings, s => s.link);
+        this.slingEyes = Int32Array.from(layout.slings, s => s.eye);
+        this.upperBeltIds = Int32Array.from(layout.upperBelt);
         this.tetherRate = new Float64Array(layout.tethers.length);
         this.tetherHeld = new Uint8Array(layout.tethers.length);
         this.buildChains(layout);
@@ -588,7 +617,7 @@ export class WebSolver {
         this.ecL = new Float64Array(ecap);
         this.ecFt = new Float64Array(3 * ecap);
         this.stats = {
-            maxSpeed: 0, maxBeltStrain: 0, maxStrapStrain: 0, contacts: 0, tieDownsBroken: 0,
+            maxSpeed: 0, maxBeltStrain: 0, maxStrapStrain: 0, contacts: 0, tieDownsBroken: 0, lowestY: Infinity,
             payout: layout.tethers.map(() => 0), tetherForce: layout.tethers.map(t => t.holdN), tetherWork: 0, tieWork: 0, bodyWork: 0, frictionWork: 0, dragWork: 0, materialWork: 0, contactResetLoss: 0, reaction: [0, 0, 0], reactionMoment: [0, 0, 0], pointQueries: 0, listOverflows: 0, edgeQueries: 0, edgeQueryOverflows: 0,
         };
     }
@@ -642,11 +671,18 @@ export class WebSolver {
                 tetherLast: nodes[nodes.length - 1] < 0 ? -1 - nodes[nodes.length - 1] : -1,
             });
         };
-        const tetherAt = (i: number) => layout.tethers.findIndex(t => t.i === i);
-        for (const belt of [layout.upperBelt, layout.lowerBelt]) {
+        // A tether ends the first belt that ends on its particle: both belts end on each side's
+        // shackle, and its purchase cable is the lower belt's end link (the upper belt meets it there).
+        const used = new Set<number>();
+        const tetherAt = (i: number) => {
+            const t = layout.tethers.findIndex((tt, k) => tt.i === i && !used.has(k));
+            if (t >= 0) used.add(t);
+            return t;
+        };
+        for (const belt of [layout.lowerBelt, layout.upperBelt]) {
             const tl = tetherAt(belt[0]);
             const tr = tetherAt(belt[belt.length - 1]);
-            chain([-1 - tl, ...belt, -1 - tr]);
+            chain([...(tl >= 0 ? [-1 - tl] : []), ...belt, ...(tr >= 0 ? [-1 - tr] : [])]);
         }
         for (const strap of layout.straps) chain(strap);
         this.chainRest = Float64Array.from(rest);
@@ -923,9 +959,11 @@ export class WebSolver {
         this.solveSlings(SLING_SLIDE);
         this.projCount.fill(0);
         this.solveContacts(h);
+        this.keepAboveDeck();
         this.payOut(h);
         this.updateVelocities(h);
         this.dampLinks(h);
+        this.bufferEndStops(h);
         this.slingVelocities();
         this.collectReaction(h);
         this.substepCount++;
@@ -1520,10 +1558,12 @@ export class WebSolver {
                 const k = 3 * tether.i;
                 const an = tether.anchor;
                 const d = len3(x[k] - an[0], x[k + 1] - an[1], x[k + 2] - an[2]);
-                paid = Math.max(0, d - this.chainRest[li]);
+                // Not past the engine's stroke (PAYOUT_MAX_M).
+                paid = Math.min(Math.max(0, d - this.chainRest[li]), Math.max(0, PAYOUT_MAX_M - this.stats.payout[t]));
                 if (paid > 0) {
-                    this.tetherHeld[t] = 1;
-                    this.chainRest[li] = d;
+                    // Paying out, its row starts the next substep at the cap; at the stop it is not.
+                    this.tetherHeld[t] = this.stats.payout[t] + paid < PAYOUT_MAX_M ? 1 : 0;
+                    this.chainRest[li] += paid;
                     this.stats.payout[t] += paid;
                     this.stats.tetherWork += paid * this.tetherHold[t];
                 }
@@ -1574,6 +1614,13 @@ export class WebSolver {
                 continue;
             }
             const m = this.engineSetKg > 0 ? this.engineSetKg : e.setMassKg;
+            if (this.stats.payout[t] >= PAYOUT_MAX_M) {
+                // At the end of its stroke: the cable no longer pays out, it stretches (END_STOP_COMPLIANCE).
+                const li = this.tetherLinks[t];
+                this.chainCompliance[li] = END_STOP_COMPLIANCE;
+                this.tetherHold[t] = 1e12;
+                continue;
+            }
             if (this.enginesLocked) {
                 this.tetherHold[t] = e.maxN * (m / e.setMassKg);
                 continue;
@@ -1582,7 +1629,17 @@ export class WebSolver {
             const left = Math.max(e.runOutM - this.stats.payout[t], ENGINE_MIN_LEFT_M);
             this.tetherHold[t] = Math.min(e.maxN * (m / e.setMassKg), tether.holdN + (e.share * m * v * v) / (2 * left));
         }
-        for (let t = 0; t < tethers.length; t++) this.stats.tetherForce[t] = this.tetherHold[t];
+        for (let t = 0; t < tethers.length; t++) {
+            if (this.tetherHold[t] < 1e12) {
+                this.stats.tetherForce[t] = this.tetherHold[t];
+                continue;
+            }
+            // At the stop: the cable's pull from its stretch.
+            const tether = tethers[t];
+            const k = 3 * tether.i, an = tether.anchor, li = this.tetherLinks[t];
+            const d = len3(this.x[k] - an[0], this.x[k + 1] - an[1], this.x[k + 2] - an[2]);
+            this.stats.tetherForce[t] = Math.max(0, d - this.chainRest[li]) / END_STOP_COMPLIANCE;
+        }
     }
 
     /**
@@ -1605,11 +1662,11 @@ export class WebSolver {
      */
     private solveSlings(slide: number): void {
         const { x, w } = this;
-        const belt = this.layout.upperBelt;
+        const belt = this.upperBeltIds;
         const last = belt.length - 2;
-        const slings = this.layout.slings;
-        for (let s = 0; s < slings.length; s++) {
-            const e = 3 * slings[s].eye;
+        const eyes = this.slingEyes;
+        for (let s = 0; s < eyes.length; s++) {
+            const e = 3 * eyes[s];
             let at = this.slingAt[s];
             let j = Math.min(last, Math.floor(at));
             let t = at - j;
@@ -1661,11 +1718,11 @@ export class WebSolver {
      */
     private slingVelocities(): void {
         const { v } = this;
-        const belt = this.layout.upperBelt;
+        const belt = this.upperBeltIds;
         const last = belt.length - 2;
-        const slings = this.layout.slings;
-        for (let s = 0; s < slings.length; s++) {
-            const e = 3 * slings[s].eye;
+        const eyes = this.slingEyes;
+        for (let s = 0; s < eyes.length; s++) {
+            const e = 3 * eyes[s];
             const at = this.slingAt[s];
             const j = Math.min(last, Math.floor(at));
             const t = at - j;
@@ -1729,6 +1786,47 @@ export class WebSolver {
         this.ctLn[c] = 0;
         this.ctFt[3 * c] = this.ctFt[3 * c + 1] = this.ctFt[3 * c + 2] = 0;
         this.ctBody[c] = body ? 1 : 0;
+    }
+
+    /**
+     * Nothing of the webbing below the deck: a hard floor for every particle
+     * after the substep's last contact pass. The deck's contacts are only
+     * made for particles near it as the substep starts, so a chain solve
+     * that pulled one down from higher up could leave it under the deck.
+     */
+    /**
+     * A cable at its stop (PAYOUT_MAX_M) is buffered: the shackle's speed
+     * along the cable decays with END_STOP_BUFFER_S, the engine's end-of-
+     * stroke buffer taking it. Undamped, the stiff end and the airframe's nose
+     * pinched the lower belt's end links between them and pumped them up
+     * past 400 m/s.
+     */
+    private bufferEndStops(h: number): void {
+        const { x, v } = this;
+        const tethers = this.layout.tethers;
+        const keep = Math.exp(-h / END_STOP_BUFFER_S);
+        for (let t = 0; t < tethers.length; t++) {
+            if (this.stats.payout[t] < PAYOUT_MAX_M) continue;
+            const tether = tethers[t];
+            const k = 3 * tether.i, an = tether.anchor;
+            const dx = x[k] - an[0], dy = x[k + 1] - an[1], dz = x[k + 2] - an[2];
+            const d = len3(dx, dy, dz);
+            if (d <= 0) continue;
+            const ux = dx / d, uy = dy / d, uz = dz / d;
+            const along = v[k] * ux + v[k + 1] * uy + v[k + 2] * uz;
+            const cut = along * (1 - keep);
+            v[k] -= cut * ux;
+            v[k + 1] -= cut * uy;
+            v[k + 2] -= cut * uz;
+        }
+    }
+
+    private keepAboveDeck(): void {
+        const floor = BARRICADE_DECK_Y + SKIN_M;
+        const x = this.x;
+        for (let i = 0; i < this.count; i++) {
+            if (this.w[i] !== 0 && x[3 * i + 1] < floor) x[3 * i + 1] = floor;
+        }
     }
 
     private contactDeck(): void {
@@ -2610,11 +2708,13 @@ export class WebSolver {
 
     private measure(): void {
         const { x, v } = this;
-        let maxSpeed = 0;
+        let maxSpeed = 0, lowest = this.stats.lowestY;
         for (let i = 0; i < this.count; i++) {
             const k = 3 * i;
             maxSpeed = Math.max(maxSpeed, len3(v[k], v[k + 1], v[k + 2]));
+            if (x[k + 1] < lowest) lowest = x[k + 1];
         }
+        this.stats.lowestY = lowest;
         let belt = 0;
         let strap = 0;
         for (let k = 0; k < this.linkRest.length; k++) {

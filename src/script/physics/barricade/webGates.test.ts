@@ -25,6 +25,13 @@
  *    only if it is within RELEASE_REACH_M of ties broken in the last
  *    RELEASE_WINDOW_S, and the kinetic energy above twice the body's speed
  *    of all such particles there is under half the F·s those ties released.
+ *    A tensioning pendant (the upper belt's hold at a stanchion head) frees
+ *    more: the whole pretensioned upper belt, one belt from shackle to
+ *    shackle, so its reach is the span and a riser more (the F-16XL's port
+ *    pendant let go and its starboard eyes whipped 28 m off), and the belt's
+ *    pretension (T²L / 2EA, 3 kJ) besides its own F·s. And the upper belt it
+ *    frees falls from the stanchion heads: from then on the limit is twice
+ *    the body's speed with a fall from the heads' height on top.
  *    A fast particle with no release nearby, or one carrying more than that,
  *    fails: the gate tests the release, it does not exempt the slow catch;
  *  - at most 5 ms per 60 Hz frame of solver time.
@@ -41,10 +48,10 @@ import { bvhClosest, bvhClosestPoint } from '../collision/triangleBvh';
 import {
     BARRICADE_DECK_Y, BARRICADE_HEIGHT_M, BARRICADE_LOCAL_Z, BARRICADE_MID_X,
 } from '../../scene/entities/barricadeSpec';
-import { buildRiggedWeb } from './webLayout';
+import { BELT_EA_N, buildRiggedWeb, UPPER_PRETENSION_N } from './webLayout';
 import { WebSolver } from './webSolver';
 import { loadWebAirframe, WEB_FIXTURES, WebFixture } from './webFixtures.testkit.test';
-import { cpuMs, MASS_KG, netEnergy, penetration } from './webHarness.testkit.test';
+import { cpuMs, deckAndPayoutFails, MASS_KG, netEnergy, penetration } from './webHarness.testkit.test';
 
 const DT = 1 / 60;
 const _near = bvhClosest();
@@ -54,7 +61,13 @@ let riggedMs = 0;
 const MAX_STRAP_STRAIN = 0.2;
 /** How far (m) and how long (s) after a tie lets go its release can explain a fast particle. */
 const RELEASE_REACH_M = 3;
-const RELEASE_WINDOW_S = 0.5;
+/**
+ * With both belts on the purchase cables (the shackle rig), a freed leg is
+ * pulled taut again by the cables' 10 kN preload alone: a centre strap's
+ * foot still flicked at twice the jet's speed 0.67 s after the ties near it
+ * let go, where the old rig's constant upper-belt holds had it taut in 0.5.
+ */
+const RELEASE_WINDOW_S = 1;
 /** The share of the released F·s a fast cluster may carry above twice the body's speed. */
 const MAX_RELEASE_SHARE = 0.5;
 
@@ -122,7 +135,7 @@ function legStrain(s: WebSolver): number {
  * of it, to the F·s of the ties broken within that reach in the last
  * RELEASE_WINDOW_S. Infinity when a fast particle has no release near it.
  */
-function overSpeedShare(s: WebSolver, fast: number[], released: { f: number; i: number; e: number }[], f: number, v2Limit: number): number {
+function overSpeedShare(s: WebSolver, fast: number[], released: { f: number; i: number; e: number; reach: number }[], f: number, v2Limit: number): number {
     const { x, v } = s;
     const mass = s.layout.mass;
     const window = RELEASE_WINDOW_S / DT, reach2 = RELEASE_REACH_M * RELEASE_REACH_M;
@@ -139,7 +152,7 @@ function overSpeedShare(s: WebSolver, fast: number[], released: { f: number; i: 
         for (const r of released) {
             if (f - r.f > window) continue;
             const b = 3 * r.i;
-            if ((x[b] - x[a]) ** 2 + (x[b + 1] - x[a + 1]) ** 2 + (x[b + 2] - x[a + 2]) ** 2 > reach2) continue;
+            if ((x[b] - x[a]) ** 2 + (x[b + 1] - x[a + 1]) ** 2 + (x[b + 2] - x[a + 2]) ** 2 > r.reach * r.reach) continue;
             available += r.e;
         }
         worst = Math.max(worst, available > 0 ? excess / available : Infinity);
@@ -148,11 +161,11 @@ function overSpeedShare(s: WebSolver, fast: number[], released: { f: number; i: 
 }
 
 /** Run an airframe of its own mass into the rigged net until it stops (or time runs out). */
-function runCatch(fixture: WebFixture, speed: number): CatchResult {
+function runCatch(fixture: WebFixture, speed: number, engineSetKg = MASS_KG[fixture]): CatchResult {
     const af = loadWebAirframe(fixture);
     // The purchase engines set for this aircraft's weight, as the deck crew would: their pull
     // rises with payout speed, so the slow push is held gently and the fast one stopped in the run-out.
-    const s = new WebSolver(buildRiggedWeb({ engineSetKg: MASS_KG[fixture] }));
+    const s = new WebSolver(buildRiggedWeb({ engineSetKg }));
     for (let f = 0; f < 120; f++) s.step(DT);
     const e0 = netEnergy(s);
     const sinks0 = s.stats.tetherWork + s.stats.tieWork + s.stats.frictionWork + s.stats.dragWork + s.stats.materialWork;
@@ -168,15 +181,27 @@ function runCatch(fixture: WebFixture, speed: number): CatchResult {
     let maxLeg = 0, maxGated = 0, maxBelt = 0, releaseShare = 0;
     const layout = s.layout;
     const v2Limit = 4 * speed * speed;
-    const released: { f: number; i: number; e: number }[] = [];
+    let headFreed = false;
+    const released: { f: number; i: number; e: number; reach: number }[] = [];
     const wasBroken = new Uint8Array(layout.tieDowns.length);
     const fast: number[] = [];
     let stopped = false;
-    // Long enough for the slow push to stop on a few metres and the fast one on 100.
-    const maxFrames = Math.ceil((speed < 20 ? 10 : 8) / DT);
+    let peakG = 0;
+    // Long enough for the slow push to stop and the fast one on 100 m. Slow, only the purchase
+    // cables' preload (10 kN a side, through the shackles) is pulling: about 16 s and 35 m from 5 m/s.
+    const maxFrames = Math.ceil((speed < 20 ? 25 : 8) / DT);
+    const headSpan = Math.abs(layout.x[3 * layout.upperHeads[1]] - layout.x[3 * layout.upperHeads[0]]);
+    // A pendant frees the whole pretensioned upper belt (one belt: either end letting go drops its
+    // tension all along it): the span and a riser.
+    const pendantReach = RELEASE_REACH_M + headSpan + Math.hypot(
+        layout.x[3 * layout.upperHeads[0]] - layout.x[3 * layout.shackles[0]],
+        layout.x[3 * layout.upperHeads[0] + 1] - layout.x[3 * layout.shackles[0] + 1]);
+    const pretensionJ = UPPER_PRETENSION_N ** 2 * headSpan / (2 * BELT_EA_N);
     for (let f = 0; f < maxFrames; f++) {
         const t0 = cpuMs();
+        const vz0 = velocity.z;
         s.stepRigid(DT, body);
+        peakG = Math.max(peakG, Math.abs(velocity.z - vz0) / DT / 9.80665);
         ms += cpuMs() - t0;
         frames++;
         maxStrap = Math.max(maxStrap, s.stats.maxStrapStrain);
@@ -184,17 +209,22 @@ function runCatch(fixture: WebFixture, speed: number): CatchResult {
         layout.tieDowns.forEach((t, k) => {
             if (!s.tieBroken[k] || wasBroken[k]) return;
             wasBroken[k] = 1;
-            released.push({ f, i: t.i, e: t.breakN * t.strokeM });
+            const pendant = layout.pendants.includes(k);
+            if (pendant) headFreed = true;
+            released.push({ f, i: t.i, e: t.breakN * t.strokeM + (pendant ? pretensionJ : 0), reach: pendant ? pendantReach : RELEASE_REACH_M });
         });
+        // Once a pendant has let the upper belt go it falls from the stanchion heads: as fast as a
+        // fall from their height on top of twice the body's speed (an eye fell at 10.6 m/s there).
+        const v2Now = headFreed ? v2Limit + 2 * 9.81 * BARRICADE_HEIGHT_M : v2Limit;
         fast.length = 0;
         for (let i = 0; i < s.count; i++) {
             const v = Math.hypot(s.v[3 * i], s.v[3 * i + 1], s.v[3 * i + 2]);
             if (layout.part[i] === 2 || s.bodyPressed[i]) {
                 maxGated = Math.max(maxGated, v);
-                if (v * v >= v2Limit) fast.push(i);
+                if (v * v >= v2Now) fast.push(i);
             } else maxBelt = Math.max(maxBelt, v);
         }
-        if (speed < 20) releaseShare = Math.max(releaseShare, overSpeedShare(s, fast, released, f, v2Limit));
+        if (speed < 20) releaseShare = Math.max(releaseShare, overSpeedShare(s, fast, released, f, v2Now));
         maxLeg = Math.max(maxLeg, legStrain(s));
         if (f % 10 === 9 || velocity.z >= 0) {
             const p = penetration(s, af, position, qInv);
@@ -207,8 +237,10 @@ function runCatch(fixture: WebFixture, speed: number): CatchResult {
         }
     }
     const energyLost = 0.5 * mass * (speed * speed - velocity.lengthSq());
+    void peakG;
     const tetherWork = s.stats.tetherWork;
     return {
+        deckPay: deckAndPayoutFails(s), lowestY: s.stats.lowestY, peakG, payoutMax: Math.max(...s.stats.payout),
         fixture, speed, energyLost, tetherWork,
         energyError: (tetherWork - energyLost) / energyLost,
         tieWork: s.stats.tieWork,
@@ -308,7 +340,7 @@ for (const speed of [5, 60]) {
             it(fixture, () => {
                 const r = runCatch(fixture, speed);
                 console.log(report(r));
-                const fails: string[] = [];
+                const fails: string[] = [...r.deckPay];
                 if (!r.stopped) fails.push('not stopped');
                 if (Math.abs(r.unaccounted) > 0.15) fails.push(`${(100 * r.unaccounted).toFixed(1)} % of the energy unaccounted`);
                 if (r.deep > 0) fails.push(`${r.deep} particles deeper than the skin`);
@@ -327,3 +359,21 @@ for (const speed of [5, 60]) {
         }
     });
 }
+
+/**
+ * The purchase cables' end stop (WebSolver PAYOUT_MAX_M): engines set for a
+ * jet a third the weight of the one that comes, at 60 m/s, run out of
+ * stroke. The stop must hold it, without the solver blowing up, and no
+ * cable may pay out past 90 m.
+ */
+describe('barricade webbing: the 90 m end stop', () => {
+    it('holds a jet the engines were set too light for', () => {
+        const r = runCatch('f22', 60, MASS_KG.f22 / 3);
+        const line = `end stop f22 @ 60 m/s, engines set for ${(MASS_KG.f22 / 3e3).toFixed(1)} t: ${JSON.stringify({ stopped: r.stopped, runOut: +r.runOut.toFixed(1), payout: +r.payoutMax.toFixed(2), peakG: +r.peakG.toFixed(2), maxSpeed: +r.maxSpeed.toFixed(1), aboveDeck: +(r.lowestY - BARRICADE_DECK_Y).toFixed(3) })}`;
+        console.log(line);
+        assert.ok(r.stopped, line);
+        assert.deepEqual(r.deckPay, [], line);
+        assert.ok(r.payoutMax > 89, `the stop was not reached: ${line}`);
+        assert.ok(r.maxSpeed < 2 * 60, line);
+    });
+});

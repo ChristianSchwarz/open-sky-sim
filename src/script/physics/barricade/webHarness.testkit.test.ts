@@ -10,7 +10,7 @@ import {
 } from '../collision/triangleBvh';
 import { BARRICADE_DECK_Y } from '../../scene/entities/barricadeSpec';
 import { windingNumber } from './webCollider';
-import { SKIN_M, WebSolver } from './webSolver';
+import { PAYOUT_MAX_M, SKIN_M, WebSolver } from './webSolver';
 import { WebAirframe, WebFixture } from './webFixtures.testkit.test';
 
 /** Arrival masses (kg): landing weights, kept inside the 15–30 t the gates were set for. */
@@ -61,6 +61,22 @@ export function penetration(s: WebSolver, af: WebAirframe, pos: THREE.Vector3, q
         if (bvhSegmentHit(af.bvh, _a.x, _a.y, _a.z, _b.x, _b.y, _b.z, _hit)) { through++; throughLinks.push(s.layout.links.indexOf(l)); }
     }
     return { deep, through, throughLinks };
+}
+
+/** No part of the webbing more than this below the deck (m). */
+export const DECK_TOLERANCE_M = 0.01;
+
+/**
+ * The two hard limits of a catch: nothing of the webbing below the deck
+ * (its lowest point over the run), no purchase cable past its 90 m stop.
+ */
+export function deckAndPayoutFails(s: WebSolver): string[] {
+    const fails: string[] = [];
+    const below = BARRICADE_DECK_Y - s.stats.lowestY;
+    if (below > DECK_TOLERANCE_M) fails.push(`webbing ${below.toFixed(3)} m below the deck`);
+    const most = Math.max(...s.stats.payout);
+    if (most > PAYOUT_MAX_M + 1e-6) fails.push(`payout ${most.toFixed(2)} m, past the ${PAYOUT_MAX_M} m stop`);
+    return fails;
 }
 
 /** The net's kinetic, potential (above the deck) and elastic energy (J). */

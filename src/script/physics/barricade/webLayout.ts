@@ -8,9 +8,15 @@
  * lower belt at its station (a particle the belt shares with the strap), and
  * its eye is slung over the upper belt, free to slide along it (see
  * WebSling). Its two plies hang together and move as one, so the strap is
- * one chain, station to eye, with the loop's mass and stiffness. Each belt end is tethered: the upper ones by their tensioning
- * pendants to the stanchion heads, the lower ones by the purchase cables to
- * the deck sheaves at the stanchion feet. The lower belt is also tied down to
+ * one chain, station to eye, with the loop's mass and stiffness.
+ *
+ * On each side both load straps end in one shackle near the deck, and the
+ * shackle is on the purchase cable to the deck sheave at the stanchion foot
+ * (the one tether a side, the hydraulic engine). The upper belt runs from
+ * its shackle up a riser to the stanchion head, across, and down again;
+ * at the head a tensioning pendant holds it (a breakaway tie, see
+ * PENDANT_BREAK_N) until the catch's pull frees it, and both belts then
+ * pull through the same shackle and cable. The lower belt is also tied down to
  * the deck along its length, which is what keeps a rigged net from bellying
  * (a belt held only at its ends is pulled up by the straps until they go
  * slack again).
@@ -46,8 +52,7 @@ const STRAP_KG_PER_M = 0.5;
 /** Axial stiffness EA (N): load straps barely stretch, engaging straps do. */
 export const BELT_EA_N = 2e6;
 export const STRAP_EA_N = 4e5;
-/** Holding force where a tether pays out (N): pendant at the head, purchase cable at the foot. */
-export const PENDANT_HOLD_N = 40e3;
+/** Holding force where a purchase cable pays out (N), when its engine is not set for an aircraft (tests). */
 export const ENGINE_HOLD_N = 220e3;
 /**
  * The purchase engines as hydraulic dampers, like the carrier's MK-7: a ram
@@ -74,30 +79,37 @@ export interface PurchaseEngine {
 }
 /** Static pull at each lower belt end (N): the accumulator's, all that holds the rigged net on its ramps. */
 export const ENGINE_PRELOAD_N = 10e3;
-/**
- * With the engines set, the upper belt's ends slip at this constant pull
- * (N): just over the 20 kN it is rigged at, so it hangs as before. Two
- * alternatives were measured on the free, turning jet (webCoupled stage B):
- *  - the head pendants' 40 kN: with the lower ends' preload the jet felt
- *    120 kN aft for good, high on the airframe, and the F-22 (its nose
- *    wheel carrying 8-12 % of the weight) sat back on its tail;
- *  - the upper ends on the engines too, a quarter of the orifice each: the
- *    upper belt then pulled as hard as the lower (168 kN an end at 60 m/s),
- *    and the centre strap draped along the F-22's nose ran at 24 % (12.5 %
- *    with this hold).
- * The lower belt, low on the gear, takes the arrest; the upper keeps the
- * straps up.
+/*
+ * Before the shackle rig (see the header), the upper belt's ends had tethers
+ * of their own at the stanchion heads. Measured on the free, turning jet
+ * (webCoupled stage B): held at the heads' 40 kN, the jet felt 120 kN aft
+ * for good, high on the airframe, and the F-22 sat back on its tail; on
+ * engines of their own the upper belt pulled as hard as the lower (168 kN
+ * an end at 60 m/s) and the centre strap on the F-22's nose ran at 24 %; a
+ * constant 25 kN slip at the heads was what was kept. Now the upper belt
+ * runs from the heads down to the shackle, so its pull reaches the
+ * airframe low, toward the deck sheave, through the same engine.
  */
-export const ENGINE_PRELOAD_UPPER_N = 25e3;
-export const ENGINE_RUN_OUT_M = BARRICADE_PULL_OUT_M;
+/**
+ * The payout the engines' constant-run-out valve is cammed for (m): less than the
+ * jet's run-out (BARRICADE_PULL_OUT_M), since the cable pays out more slowly than the
+ * jet travels while the belts swing from across the deck into a V. With both belts on
+ * the engines through the shackles it is all the stop there is: cammed for 75 m,
+ * the F-22 ran 108 m at 45 and 60 m/s (the MK-7 allows 105); for 65, 98 m in the
+ * harness (from 2 m short of the net) and about 80 m in the sim, as before.
+ */
+export const ENGINE_RUN_OUT_M = 65;
 /** Relief at this many g on the set mass, both engines together. */
 export const ENGINE_RELIEF_G = 5;
 /**
  * The upper belt is cut short for this tension (N) when rigged between the
  * stanchion heads. Cut to the span it stretches under its own weight and the
  * straps' — 0.4 % is over a metre of sag on 36 m; real rigging is tensioned.
+ * 24 kN in the shackle rig: held at the heads by pendants that give a little
+ * and with untensioned risers below them, 20 kN hung it 0.31-0.35 m (the
+ * rig's limit is 0.35); sag goes as 1/T. The pendants (40 kN) keep 1.7x.
  */
-const UPPER_PRETENSION_N = 20e3;
+export const UPPER_PRETENSION_N = 24e3;
 /** Every this many lower-belt particles is tied to the deck. */
 const TIE_DOWN_EVERY = BELT_SEGMENTS_PER_BAY;
 /**
@@ -116,6 +128,14 @@ const TIE_DOWN_BREAK_N = 1e3;
 const TIE_DOWN_STROKE_M = 0.03;
 /** Tie-down compliance (m/N): firm, not rigid. */
 const TIE_DOWN_COMPLIANCE = 1e-6;
+/**
+ * A tensioning pendant's breaking load (N), and how far it yields at it
+ * before it lets go (m). It holds the upper belt at the stanchion head
+ * against the belt's 24 kN pretension (UPPER_PRETENSION_N) with a 1.7x
+ * margin, and lets the belt go to its shackle under the catch's pull.
+ */
+const PENDANT_BREAK_N = 40e3;
+const PENDANT_STROKE_M = 0.1;
 /**
  * The belts stop this far inboard of the stanchions (m), so every tether
  * has a length: a zero-length one has no direction to pull along, and
@@ -185,13 +205,18 @@ export interface WebLayout {
     readonly straps: number[][];
     /** Per strap: its eye on the upper belt. */
     readonly slings: WebSling[];
+    /** The upper belt's corners at the stanchion heads (port, starboard), where the pendants hold it. */
+    readonly upperHeads: [number, number];
+    /** Each side's shackle (port, starboard): both belts' end, on the purchase cable. */
+    readonly shackles: [number, number];
+    /** The pendants' tie-downs (indices into tieDowns), port then starboard. */
+    readonly pendants: [number, number];
     readonly upperBelt: number[];
     readonly lowerBelt: number[];
 }
 
 /** Overrides for tests: the tethers' holding forces. */
 export interface WebRigOptions {
-    pendantHoldN?: number;
     engineHoldN?: number;
     /** Purchase engines set for an aircraft of this mass (kg) instead of a constant hold. */
     engineSetKg?: number;
@@ -203,11 +228,6 @@ function engineHold(opts: WebRigOptions): { holdN: number; engine?: PurchaseEngi
     return { holdN: opts.engineHoldN ?? ENGINE_PRELOAD_N, engine: purchase(opts.engineSetKg) };
 }
 
-/** The upper belt's ends: a constant slip hold (see ENGINE_PRELOAD_UPPER_N), the head pendants' when the engines are not set. */
-function headHold(opts: WebRigOptions): { holdN: number; engine?: PurchaseEngine } {
-    if (opts.engineSetKg === undefined) return { holdN: opts.pendantHoldN ?? PENDANT_HOLD_N };
-    return { holdN: opts.pendantHoldN ?? ENGINE_PRELOAD_UPPER_N };
-}
 
 /** One side's engine on its lower belt end: half the set mass, half the relief. */
 function purchase(setMassKg: number): PurchaseEngine {
@@ -250,8 +270,29 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
         }
         return ids;
     };
-    const upperBelt = belt(yTop, WebPart.UPPER_BELT, UPPER_PRETENSION_N);
+    const upperSpan = belt(yTop, WebPart.UPPER_BELT, UPPER_PRETENSION_N);
     const lowerBelt = belt(yLow, WebPart.LOWER_BELT, 0);
+    // Each end of the upper belt runs down a riser from the stanchion head to its shackle (the
+    // lower belt's end): cut to length, not pretensioned, so the span's 20 kN does not lift the
+    // shackle off its purchase cable's 10 kN preload.
+    const riserSegs = Math.max(1, Math.round((yTop - yLow) / beltSeg));
+    const riser = (shackle: number, head: number) => {
+        const ids = [shackle];
+        const x0 = pos[3 * head];
+        const seg = (yTop - yLow) / riserSegs;
+        for (let n = 1; n < riserSegs; n++) ids.push(add(x0, yLow + n * seg, z, BELT_KG_PER_M * seg, WebPart.UPPER_BELT));
+        ids.push(head);
+        for (let n = 1; n < ids.length; n++) link(ids[n - 1], ids[n], seg, BELT_EA_N);
+        mass[shackle] += BELT_KG_PER_M * seg * 0.5;
+        mass[head] += BELT_KG_PER_M * seg * 0.5;
+        return ids;
+    };
+    const shackles: [number, number] = [lowerBelt[0], lowerBelt[beltSegs]];
+    const upperHeads: [number, number] = [upperSpan[0], upperSpan[beltSegs]];
+    const riserL = riser(shackles[0], upperHeads[0]);
+    const riserR = riser(shackles[1], upperHeads[1]);
+    const upperBelt = [...riserL, ...upperSpan.slice(1, -1), ...riserR.slice().reverse()];
+    const riserNodes = riserL.length - 1;
 
     const straps: number[][] = [];
     const slings: WebSling[] = [];
@@ -261,7 +302,7 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
         const px = xL + k * beltSeg;
         // The eye, on the upper belt at its station (and the link to its right, where it starts).
         const top = add(px, yTop, z, 0, WebPart.STRAP);
-        slings.push({ eye: top, link: k });
+        slings.push({ eye: top, link: riserNodes + k });
         const ids = [top];
         for (let n = 1; n < STRAP_SEGMENTS; n++) {
             ids.push(add(px, yTop - n * strapSeg, z, STRAP_KG_PER_M * strapSeg, WebPart.STRAP));
@@ -275,25 +316,27 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
     }
 
     const xR = xS + 2 * BARRICADE_HALF_SPAN_M;
+    // One tether a side: the purchase cable, shackle to deck sheave.
     const tethers: WebTether[] = [
-        { i: upperBelt[0], anchor: [xS, yTop, z], ...headHold(opts) },
-        { i: upperBelt[beltSegs], anchor: [xR, yTop, z], ...headHold(opts) },
-        { i: lowerBelt[0], anchor: [xS, BARRICADE_DECK_Y, z], ...engineHold(opts) },
-        { i: lowerBelt[beltSegs], anchor: [xR, BARRICADE_DECK_Y, z], ...engineHold(opts) },
+        { i: shackles[0], anchor: [xS, BARRICADE_DECK_Y, z], ...engineHold(opts) },
+        { i: shackles[1], anchor: [xR, BARRICADE_DECK_Y, z], ...engineHold(opts) },
     ];
     const tieDowns: WebTieDown[] = [];
     for (let k = TIE_DOWN_EVERY; k < beltSegs; k += TIE_DOWN_EVERY) {
         const i = lowerBelt[k];
         tieDowns.push({ i, at: [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]], compliance: TIE_DOWN_COMPLIANCE, breakN: TIE_DOWN_BREAK_N, strokeM: TIE_DOWN_STROKE_M });
     }
+    // The tensioning pendants: the upper belt's corners held at the stanchion heads.
+    const pendants: [number, number] = [tieDowns.length, tieDowns.length + 1];
+    for (const i of upperHeads) {
+        tieDowns.push({ i, at: [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]], compliance: TIE_DOWN_COMPLIANCE, breakN: PENDANT_BREAK_N, strokeM: PENDANT_STROKE_M });
+    }
 
     // Mirror: belts by index, straps by strap and node.
     const count = mass.length;
     const mirror = new Int32Array(count).fill(-1);
-    for (let k = 0; k <= beltSegs; k++) {
-        mirror[upperBelt[k]] = upperBelt[beltSegs - k];
-        mirror[lowerBelt[k]] = lowerBelt[beltSegs - k];
-    }
+    for (let k = 0; k < upperBelt.length; k++) mirror[upperBelt[k]] = upperBelt[upperBelt.length - 1 - k];
+    for (let k = 0; k <= beltSegs; k++) mirror[lowerBelt[k]] = lowerBelt[beltSegs - k];
     for (let s = 0; s < straps.length; s++) {
         const other = straps[straps.length - 1 - s];
         for (let n = 0; n < straps[s].length; n++) mirror[straps[s][n]] = other[n];
@@ -312,5 +355,8 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
         slings,
         upperBelt,
         lowerBelt,
+        upperHeads,
+        shackles,
+        pendants,
     };
 }

@@ -888,6 +888,7 @@ export class CombatSim implements ProjectileSink {
                 body: Number.isNaN(web.bodyPose[0]) ? undefined : Array.from(web.bodyPose),
                 bodyBox: Number.isNaN(web.bodyPose[0]) ? undefined : this.barricadeCollider(this.barricadeWebHeld[i] ?? '')?.box,
                 warm: web.ready && [...this.barricadeAirframes.values(), ...this.barricadeHulls.values()].every(af => web.isWarm(af)),
+                pendantsHeld: web.layout.pendants.map(k => !web.solver.tieBroken[k]),
                 scriptedCatch: [...this.aircraft.values()].some(a => a.barricadeState !== BarricadeEngagement.NONE
                     && a.barricadeFieldIndex === i && !a.barricadeWebCoupled),
             };

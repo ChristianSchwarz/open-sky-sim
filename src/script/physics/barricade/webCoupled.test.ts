@@ -25,7 +25,7 @@ import { BARRICADE_DECK_Y, BARRICADE_LOCAL_Z, BARRICADE_MID_X } from '../../scen
 import { buildRiggedWeb } from './webLayout';
 import { WebSolver } from './webSolver';
 import { loadWebAirframe, WEB_FIXTURES, WebAirframe, WebFixture } from './webFixtures.testkit.test';
-import { cpuMs, MASS_KG, netEnergy, penetration } from './webHarness.testkit.test';
+import { cpuMs, deckAndPayoutFails, MASS_KG, netEnergy, penetration } from './webHarness.testkit.test';
 
 const DT = 1 / 60;
 const G0 = 9.80665;
@@ -165,6 +165,7 @@ function runCoupled(fixture: WebFixture, speed: number, offset: number): Coupled
     const energyLost = 0.5 * mass * (speed * speed - velocity.lengthSq());
     const unaccounted = (energyLost - (sinks() - sinks0) - rollWork - (netEnergy(s) - e0)) / energyLost;
     return {
+        deckPay: deckAndPayoutFails(s), lowestY: s.stats.lowestY,
         fixture, speed, offset, stopped: stopF >= 0,
         runOut: z0 - stopZ, rollBack: maxBackZ - stopZ, peakG: peak / G0, stopS: stopF * DT,
         deep, through, maxStrapStrain: maxStrap, unaccounted,
@@ -504,6 +505,7 @@ function runTurning(fixture: WebFixture, speed: number, offset: number): Turning
     // The body's books: what it lost is what it gave the net and what the deck took.
     const bodyCreated = (bodyEnergy() - eBody0 + work - extWork) / Math.max(work, 1);
     return {
+        deckPay: deckAndPayoutFails(s), lowestY: s.stats.lowestY,
         fixture, speed, offset, stopped: stopF >= 0,
         runOut: z0 - stopZ, rollBack: maxBackZ - stopZ, peakG: peak / G0, stopS: stopF * DT,
         deep, through, maxStrapStrain: maxStrap,
@@ -543,7 +545,7 @@ for (const speed of SPEEDS) {
                         ms: +r.msPerFrame.toFixed(2), vsRigged: riggedMs > 0 ? +(r.msPerFrame / riggedMs).toFixed(2) : null,
                     })}`;
                     console.log(line);
-                    const fails: string[] = [];
+                    const fails: string[] = [...r.deckPay];
                     if (!r.stopped) fails.push('not stopped');
                     if (r.runOut > MAX_RUN_OUT_M) fails.push(`run-out ${r.runOut.toFixed(1)} m`);
                     if (r.peakG >= MAX_DECEL_G) fails.push(`peak ${r.peakG.toFixed(2)} g`);
@@ -578,7 +580,7 @@ for (const speed of SPEEDS) {
                         ms: +r.msPerFrame.toFixed(2), vsRigged: riggedMs > 0 ? +(r.msPerFrame / riggedMs).toFixed(2) : null,
                     })}`;
                     console.log(line);
-                    const fails: string[] = [];
+                    const fails: string[] = [...r.deckPay];
                     if (!r.stopped) fails.push('not stopped');
                     if (r.runOut > MAX_RUN_OUT_M) fails.push(`run-out ${r.runOut.toFixed(1)} m`);
                     if (r.peakG >= MAX_DECEL_G) fails.push(`peak ${r.peakG.toFixed(2)} g`);

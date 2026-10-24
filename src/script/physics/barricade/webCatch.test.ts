@@ -41,7 +41,7 @@ import { serializeWorld } from '../sim/serializedWorld';
 import { BELT_EA_N, buildRiggedWeb } from './webLayout';
 import { WebSolver } from './webSolver';
 import { loadWebAirframe, WEB_FIXTURES, WebAirframe, WebFixture } from './webFixtures.testkit.test';
-import { cpuMs, MASS_KG, netEnergy, penetration } from './webHarness.testkit.test';
+import { cpuMs, deckAndPayoutFails, MASS_KG, netEnergy, penetration } from './webHarness.testkit.test';
 
 /*
  * Diagnostics, off unless set (node only; this file is outside the app's typecheck):
@@ -523,6 +523,7 @@ function runCatch(fixture: WebFixture, speed: number, offset: number, arrest: Ar
     const bodyWork = st.bodyWork - body0;
     const created = ((netEnergy(s) - e0) - (bodyWork - (sinks() - sinks0))) / Math.max(bodyWork, 1);
     return {
+        deckPay: deckAndPayoutFails(s), lowestY: s.stats.lowestY,
         fixture, speed, offset, frames: arrest.length - 1, deep, through, maxStrapStrain: maxStrap, strainAt,
         payoutExcess, payoutAt, loMargin, hiMargin, finalPayout: st.payout.slice(),
         settleTime: lastMoving, holdPowerW: holdPower, drape, drapeLeft, drapeRight, created, bodyWorkKJ: bodyWork / 1e3, settledSpeed, substepSpeed,
@@ -608,7 +609,7 @@ for (const speed of SPEEDS) {
                         pullPeakG: +r.pullPeakG.toFixed(2), pullMeanG: +r.pullMeanG.toFixed(2), simPeakG: +r.simPeakG.toFixed(2),
                     })}`;
                     console.log(line);
-                    const fails: string[] = [];
+                    const fails: string[] = [...r.deckPay];
                     if (r.deep > 0) fails.push(`${r.deep} particles deeper than the skin`);
                     if (r.through > 0) fails.push(`${r.through} links through the skin`);
                     if (r.maxStrapStrain >= MAX_STRAP_STRAIN) fails.push(`strap strain ${(100 * r.maxStrapStrain).toFixed(1)} %`);
