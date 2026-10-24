@@ -47,8 +47,6 @@ const MAX_SUBSTEP_S = 1 / 240;
 const ACCEL_SMOOTH_S = 0.05;
 /** Deck friction on a node lying on it, per substep. */
 const DECK_FRICTION = 0.9;
-/** A vertical strap is drawn hooked once its top is this close to where the wrap puts it (m). */
-const HOOK_SNAP_M = 0.8;
 const DECK_CLEARANCE_M = 0.04;
 
 /** One strap's nodes: offsets from the aircraft CG and their velocities. */
@@ -135,39 +133,30 @@ export class BarricadeNetMotion {
             lower[lo].copy(upper[up]).setY(upper[up].y + lowerTarget[lo].y - upperTarget[up].y);
         }
 
-        // Vertical straps ride the moving straps at their stations, keeping
-        // whatever the wrap did to them (pushed aside by the nose, hooked).
-        const verticals: V3[][] = [];
+        // Everything on the airframe is drawn as the wrap has it (routed
+        // round the skin): the springs only move the two joints, and with
+        // them the webbing near each, fading out along it. A strap redrawn
+        // from its spring-borne ends instead cut straight through the wing
+        // until it settled.
+        const shift = [lower[0].clone().sub(lowerTarget[0]), lower[lower.length - 1].clone().sub(lowerTarget[lowerTarget.length - 1])];
         const count = target.verticals.length;
-        for (let j = 0; j < count; j++) {
-            const u = (j + 1) / (count + 1);
-            const tv = target.verticals[j];
-            const top = sampleAt(upper, u).add(tv[0].clone().sub(sampleAt(upperTarget, u)));
-            // The top rides the moving upper strap; the bottom its side's joint,
-            // the moving lower strap's end.
-            const side = j < count / 2 ? 0 : lower.length - 1;
-            const bottom = tv[tv.length - 1].clone().add(lower[side].clone().sub(lowerTarget[side]));
-            if (target.slung[j] && top.distanceTo(tv[0]) < HOOK_SNAP_M) {
-                // Folded over the wing: the wing holds its middle in place.
-                verticals.push([top, ...tv.slice(1, -1).map(p => p.clone()), bottom]);
-            } else if (target.slung[j]) {
-                verticals.push([top, bottom]);
-            } else {
-                // A free strap keeps its shape and rides its two ends.
-                const dTop = top.clone().sub(tv[0]);
-                const dBottom = bottom.clone().sub(tv[tv.length - 1]);
-                const n = tv.length - 1;
-                verticals.push(tv.map((p, i) => p.clone().add(dTop.clone().lerp(dBottom, n > 0 ? i / n : 0))));
-            }
-        }
-        // The straps' feet ride a resampled lower strap while it moves; keep them on the deck.
+        const verticals = target.verticals.map((tv, j) => {
+            // A strap's foot rides the joint only as far as its station is near it.
+            const side = j < count / 2 ? 0 : 1;
+            const joint = side === 0 ? lowerTarget[0] : lowerTarget[lowerTarget.length - 1];
+            const w = Math.max(0, 1 - tv[tv.length - 1].distanceTo(joint) / JOINT_REACH_M);
+            return nearJoint(tv, shift[side].clone().multiplyScalar(w), false);
+        });
+        const lowerOut = nearJoint(nearJoint(target.lower, shift[0], true), shift[1], false);
+        // The straps' feet ride the moving joints; keep them on the deck.
         const floor = BARRICADE_DECK_Y + DECK_CLEARANCE_M;
         for (const v of verticals) for (const p of v) p.y = Math.max(p.y, floor);
+        for (const p of lowerOut) p.y = Math.max(p.y, floor);
         // Purchase cables to the lower strap's ends, pendants to the upper's.
-        const ends = [lower[0], lower[lower.length - 1]];
+        const ends = [lowerOut[0], lowerOut[lowerOut.length - 1]];
         const cables = target.cables.map((c, s) => [c[0].clone(), (ends[s] ?? c[1]).clone()]);
         // The glove is held by the wing itself: it goes where the wing goes.
-        return { stanchions: target.stanchions, upper, lower, verticals, cables, glove: target.glove, slung: target.slung };
+        return { stanchions: target.stanchions, upper, lower: lowerOut, verticals, cables, glove: target.glove, slung: target.slung };
     }
 
     private seed(nodes: StrapNodes, rest: V3[], target: V3[], aircraft: V3, closingVel: V3, halfSpan: number): void {
@@ -232,6 +221,28 @@ function setStiffness(nodes: StrapNodes, target: V3[], aircraft: V3, halfSpan: n
 }
 
 /** `count` points evenly spaced by arc length along a polyline. */
+/** How far along the webbing (m) a joint's movement carries, fading to nothing. */
+const JOINT_REACH_M = 3;
+
+/**
+ * `pts` with the end at the joint (its last point, or its first if
+ * `fromStart`) moved by `shift`, and the points near it along the polyline
+ * moved with it, less the further they are.
+ */
+function nearJoint(pts: readonly V3[], shift: V3, fromStart: boolean): V3[] {
+    const out = pts.map(p => p.clone());
+    const n = out.length;
+    let along = 0;
+    for (let k = 0; k < n; k++) {
+        const i = fromStart ? k : n - 1 - k;
+        if (k > 0) along += pts[i].distanceTo(pts[fromStart ? i - 1 : i + 1]);
+        const w = 1 - along / JOINT_REACH_M;
+        if (w <= 0) break;
+        out[i].addScaledVector(shift, w);
+    }
+    return out;
+}
+
 export function resample(pts: readonly V3[], count: number): V3[] {
     const out: V3[] = [];
     if (pts.length === 0) {

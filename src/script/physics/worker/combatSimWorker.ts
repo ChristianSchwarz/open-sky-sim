@@ -62,6 +62,9 @@ function handleMessage(data: SimToWorkerMessage): void {
         case 'setBarricades':
             sim.setBarricades(data.barricades);
             break;
+        case 'setBarricadeAirframe':
+            sim.setBarricadeAirframe(data.id, data.triangles, data.prepared);
+            break;
         case 'setCarrierMeshOrigins':
             sim.setCarrierMeshOrigins(data.origins);
             break;
@@ -163,6 +166,7 @@ function handleMessage(data: SimToWorkerMessage): void {
             const t0 = performance.now();
             sim.step(data.delta, data.inputs);
             const workerStepMs = performance.now() - t0;
+            const web = sim.barricadeWebSnapshot();
             if (shared) {
                 const back = sharedBackBank(shared);
                 const snapshot = sim.encodeSnapshotInto(
@@ -181,15 +185,17 @@ function handleMessage(data: SimToWorkerMessage): void {
                     maneuverLabels: snapshot.maneuverLabels,
                     hits: snapshot.hits,
                     workerStepMs,
-                });
+                    web,
+                }, { transfer: web ? [web.positions.buffer as ArrayBuffer] : [] });
             } else {
                 const snapshot = sim.encodeSnapshot();
                 self.postMessage(
-                    { type: 'state', shared: false, ...snapshot, workerStepMs },
+                    { type: 'state', shared: false, ...snapshot, workerStepMs, web },
                     {
                         transfer: [
                             snapshot.aircraft.buffer,
                             snapshot.projectiles.buffer,
+                            ...(web ? [web.positions.buffer] : []),
                         ] as Transferable[],
                     });
             }

@@ -12,6 +12,7 @@ import {
     buildBarricadeField,
 } from './barricadeSpec';
 import { buildAirframeProfile, buildBarricadeShape } from './barricadeWrap';
+import { buildTriangleBvh, bvhHit, bvhSegmentHit } from '../../physics/collision/triangleBvh';
 
 /** Swept wings on a box fuselage, body frame (+Z forward), span 12 m. */
 function testAirframe(): number[] {
@@ -44,9 +45,9 @@ const GEAR: [number, number, number][] = [[0, -1.7, 3], [-1.5, -1.7, -1], [1.5, 
 const profile = buildAirframeProfile({ triangles: testAirframe() }, GEAR);
 const BOW = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 
-function caughtAt(pastNet: number, x = BARRICADE_MID_X) {
+function caughtAt(pastNet: number, x = BARRICADE_MID_X, slack = 0) {
     const position = new THREE.Vector3(x, BARRICADE_DECK_Y + 1.7, BARRICADE_LOCAL_Z - pastNet);
-    return buildBarricadeShape(1, true, { pose: { position, quaternion: BOW }, profile });
+    return buildBarricadeShape(1, true, { pose: { position, quaternion: BOW, slack }, profile });
 }
 
 describe('barricade profile', () => {
@@ -95,13 +96,28 @@ describe('barricade shape', () => {
                 'sling never reaches the leading edge');
         }
         const [cL, cR] = s.cables;
-        // Every strap runs to the joint on its own side, where the lower
-        // strap meets the purchase cable.
+        // Every strap is sewn to the lower strap at its own station, in its
+        // rigged order along it; the lower strap's ends are on the purchase cables.
+        const arcOn = (p: THREE.Vector3) => {
+            let best = Infinity, at = 0, run = 0;
+            for (let i = 1; i < s.lower.length; i++) {
+                const seg = new THREE.Line3(s.lower[i - 1], s.lower[i]);
+                const q = new THREE.Vector3();
+                seg.closestPointToPoint(p, true, q);
+                const d = q.distanceTo(p);
+                if (d < best) { best = d; at = run + s.lower[i - 1].distanceTo(q); }
+                run += seg.distance();
+            }
+            return { off: best, at };
+        };
+        let last = -Infinity;
         s.verticals.forEach((v, j) => {
-            const joint = j < s.verticals.length / 2 ? s.lower[0] : s.lower[s.lower.length - 1];
-            assert.ok(v[v.length - 1].distanceTo(joint) < 1e-6, `strap ${j} not at its joint`);
-            assert.ok(joint.distanceTo(cR[1]) < 1e-6 || joint.distanceTo(cL[1]) < 1e-6, 'joint off the purchase cable');
+            const { off, at } = arcOn(v[v.length - 1]);
+            assert.ok(off < 1e-3, `strap ${j} ends ${off.toFixed(3)} m off the lower strap`);
+            assert.ok(at > last + 0.05, `strap ${j} shares a station with its neighbour`);
+            last = at;
         });
+        assert.ok(s.lower[0].distanceTo(cL[1]) < 1e-6 && s.lower[s.lower.length - 1].distanceTo(cR[1]) < 1e-6, 'lower strap ends off the purchase cables');
         // Shackles trail aft of the wingtips toward their sheaves.
         assert.ok(cL[1].z > BARRICADE_LOCAL_Z - 20 && cL[1].x < BARRICADE_MID_X - 6);
         assert.ok(cR[1].z > BARRICADE_LOCAL_Z - 20 && cR[1].x > BARRICADE_MID_X + 6);
@@ -160,37 +176,62 @@ describe('barricade shape', () => {
         assert.ok(nose.z < cgZ - 3 && nose.z > cgZ - 3.5, `lower strap at z=${nose.z.toFixed(2)}`);
     });
 
-    it('draws every vertical strap three times its rigged length once caught', () => {
+    it('draws every vertical strap up to three times its rigged length once slack', () => {
         const rigged = buildBarricadeShape(1, true).verticals.map(polylineLength);
-        for (const past of [5, 20, 40]) {
-            const caught = caughtAt(past).verticals;
+        // Just through the net the webbing has not been pulled out yet.
+        for (const past of [20, 40]) {
+            const caught = caughtAt(past, BARRICADE_MID_X, 1).verticals;
+            let long = 0;
             caught.forEach((v, j) => {
                 const len = polylineLength(v);
                 const want = rigged[j] * 3;
-                // Never short of three times the rigged length (a few per cent);
-                // longer only where its joint is out of reach and it runs taut.
-                assert.ok(len > want * 0.95, `strap ${j} ${len.toFixed(2)} m, want ${want.toFixed(2)} at ${past} m`);
+                // Longer than rigged; three times where the pull leaves it the
+                // room, longer only where its joint is out of reach and it runs taut.
+                assert.ok(len > rigged[j] * 1.2, `strap ${j} ${len.toFixed(2)} m, rigged ${rigged[j].toFixed(2)} at ${past} m`);
+                if (len > want * 0.95) long++;
                 if (len > want * 1.05) {
-                    // Out of reach: the last run goes straight to the joint, no bow.
                     assert.ok(v[v.length - 2].distanceTo(v[v.length - 1]) > 0.5, `strap ${j} long but not taut at ${past} m`);
                 }
             });
+            assert.ok(long >= caught.length / 4, `only ${long} straps at full length at ${past} m`);
         }
     });
 
-    it('lays spare strap on the deck in folds, never a hairpin', () => {
-        const floor = BARRICADE_DECK_Y + 0.05;
+    it('runs every strap straight to its joint while the pull holds it taut', () => {
         for (const past of [5, 20, 40]) {
-            caughtAt(past).verticals.forEach((v, j) => {
-                for (let i = 1; i + 1 < v.length; i++) {
-                    if (v[i - 1].y > floor || v[i].y > floor || v[i + 1].y > floor) continue;
-                    const a = v[i].clone().sub(v[i - 1]);
-                    const b = v[i + 1].clone().sub(v[i]);
-                    if (a.lengthSq() < 1e-8 || b.lengthSq() < 1e-8) continue;
-                    const turn = (a.angleTo(b) * 180) / Math.PI;
-                    assert.ok(turn < 120, `strap ${j} turns ${turn.toFixed(0)} deg on the deck at ${past} m`);
+            const taut = caughtAt(past).verticals;
+            const slack = caughtAt(past, BARRICADE_MID_X, 1).verticals;
+            let sagging = 0;
+            taut.forEach((v, j) => {
+                const w = slack[j];
+                let k = 0;
+                while (k < v.length && k < w.length && v[k].distanceTo(w[k]) < 1e-9) k++;
+                if (k >= v.length) return;
+                sagging++;
+                // From where it leaves the airframe to the joint: a straight line.
+                const a = v[Math.max(0, k - 1)];
+                const b = v[v.length - 1];
+                const line = new THREE.Line3(a, b);
+                const on = new THREE.Vector3();
+                for (let i = k; i < v.length; i++) {
+                    line.closestPointToPoint(v[i], true, on);
+                    assert.ok(on.distanceTo(v[i]) < 0.01, `strap ${j} sags ${on.distanceTo(v[i]).toFixed(3)} m while taut at ${past} m`);
                 }
             });
+            // Slack only ever lets a strap out, never takes it in.
+            taut.forEach((v, j) => assert.ok(polylineLength(slack[j]) >= polylineLength(v) - 1e-6, `strap ${j} shorter once slack`));
+            void sagging;
+        }
+    });
+
+    it('keeps the webbing off the deck, taut or slack', () => {
+        const clear = BARRICADE_DECK_Y + 0.25;
+        for (const [past, slack] of [[5, 0], [20, 0], [40, 0], [5, 1], [20, 1], [40, 1]]) {
+            const s = caughtAt(past, BARRICADE_MID_X, slack);
+            s.verticals.forEach((v, j) => {
+                for (const p of v) assert.ok(p.y > clear, `strap ${j} ${(p.y - BARRICADE_DECK_Y).toFixed(2)} m up at ${past} m`);
+            });
+            for (const p of s.lower) assert.ok(p.y > clear, `lower strap ${(p.y - BARRICADE_DECK_Y).toFixed(2)} m up at ${past} m`);
         }
     });
 
@@ -200,6 +241,29 @@ describe('barricade shape', () => {
         for (const past of [5, 20, 40]) {
             caughtAt(past).verticals.forEach((v, j) => {
                 for (const p of v) assert.ok(p.y < top, `strap ${j} ${(p.y - BARRICADE_DECK_Y).toFixed(2)} m up at ${past} m`);
+            });
+        }
+    });
+
+    it('never cuts a strap, the lower strap or the glove through the airframe, taut or slack', () => {
+        const hull = buildTriangleBvh(testAirframe());
+        const hit = bvhHit();
+        for (const [past, slack] of [[10, 0], [30, 0], [30, 1]]) {
+            const pos = new THREE.Vector3(BARRICADE_MID_X, BARRICADE_DECK_Y + 1.7, BARRICADE_LOCAL_Z - past);
+            const inv = BOW.clone().invert();
+            const body = (p: THREE.Vector3) => p.clone().sub(pos).applyQuaternion(inv);
+            const s = caughtAt(past, BARRICADE_MID_X, slack);
+            const all = [...s.verticals, s.lower, ...s.glove];
+            all.forEach((v, j) => {
+                for (let i = 1; i < v.length; i++) {
+                    const a = body(v[i - 1]);
+                    const b = body(v[i]);
+                    const len = a.distanceTo(b);
+                    // Lying on the skin is not cutting through it: only a crossing
+                    // well clear of both ends counts.
+                    const through = bvhSegmentHit(hull, a.x, a.y, a.z, b.x, b.y, b.z, hit) && hit.t * len > 0.15 && (1 - hit.t) * len > 0.15;
+                    assert.ok(!through, `polyline ${j} span ${i} cuts the airframe at ${past} m, slack ${slack}`);
+                }
             });
         }
     });

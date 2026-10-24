@@ -19,16 +19,17 @@
  *    below the glove, out to the shackles;
  *  - caught, the upper strap and its pendants are not drawn. Every vertical
  *    strap runs from where the upper strap held it (draped over a wing,
- *    beside the fuselage, or off a tail) to the joint on its own side of
- *    the webbing, where the lower strap meets the purchase cable: they fan
- *    out from the jet to those two points. Caught, it runs from its upper station along its path: one
+ *    beside the fuselage, or off a tail) to its own station on the lower
+ *    strap, in its rigged order along it; the lower strap runs on to the
+ *    joints where the purchase cables take it. Caught, it runs from its upper station along its path: one
  *    that meets a wing folds over it (forward over the top skin and round
  *    the leading edge), one in front of the fuselage, where the nose came
  *    through, goes out beside it, and from there it runs to its lower
- *    station. From the catch on it is drawn three times as long (the load has
- *    pulled the webbing out). Nylon that long does not stand up in hoops:
- *    the free part sags under its own weight, down to the deck where it
- *    reaches it, and what is left lies on the deck in loose folds;
+ *    station. While the jet pulls against the purchase cables the whole
+ *    webbing is in tension and the strap runs straight to its joint; once
+ *    the jet rolls back in the net the tension goes, and the strap (pulled
+ *    out to three times its rigged length) sags, clear of the deck. A strap off a wingtip, its top no longer held, lies along the
+ *    taut lower strap to its joint;
  *  - the webbing gloves each wing: a tight sleeve strap round the leading
  *    edge at every edge sample, and a band along the bottom skin answering
  *    the upper strap on top. It is drawn taut, a few centimetres off the
@@ -50,6 +51,7 @@ import {
     BARRICADE_STRAP_COUNT,
     BARRICADE_WEBBING_WIDTH_M,
 } from './barricadeSpec';
+import { buildTriangleBvh, bvhHit, bvhSegmentHit, TriangleBvh } from '../../physics/collision/triangleBvh';
 
 type V3 = THREE.Vector3;
 
@@ -91,17 +93,14 @@ const RIGGED_SLACK = 0.012;
 const CAUGHT_STRAP_STRETCH = 3;
 /** Samples along a strap's free run. */
 const DRAPE_SAMPLES = 24;
-/** Spare strap lying on the deck folds from side to side: at most this far (m), at least this wavelength (m). */
-const FOLD_AMPLITUDE_M = 0.35;
-const FOLD_WAVELENGTH_M = [1.2, 3];
 /**
- * Folded, a strap lies on at most this much of its own length per metre of
- * deck run; a run too short for that lays its folds out aft first, the way
- * the webbing was dragged.
+ * The purchase cables keep the webbing under tension: a strap's free run to
+ * its joint sags no lower than this over the deck (m), and the rest of its
+ * length is taken up by the pull, not laid on the deck.
  */
-const FOLD_PER_RUN = 1.4;
-/** Radius of the turn where a strap laid out aft comes back (m). */
-const FOLD_TURN_M = 1.0;
+const TAUT_CLEARANCE_M = 0.3;
+/** A strap lying along the lower strap rides this far above it (m). */
+const ON_BELT_M = 0.03;
 /** The lower strap is caught this far up each gear leg from the wheel contact, and this far ahead of it (m). */
 const GEAR_TRAP_UP_M = 0.55;
 const GEAR_TRAP_AHEAD_M = 0.25;
@@ -133,6 +132,8 @@ export interface BarricadeAirframeProfile {
     readonly gear: readonly V3[];
     /** Half-width of the band the fuselage occupies, which no strap hooks. */
     readonly fuselageHalfWidth: number;
+    /** The drawn airframe, body frame, for keeping straps out of it. */
+    readonly hull?: TriangleBvh;
 }
 
 /** Collision soup + gear points → the profile; synthesised when the mesh is missing. */
@@ -186,7 +187,8 @@ export function buildAirframeProfile(
     }
     const crest = crestBest.filter((p): p is V3 => p !== undefined).map(p => p.clone());
 
-    return { leadingEdge: [sides[0], sides[1]], skin: [skins[0], skins[1]], crest, gear: gearPts, fuselageHalfWidth };
+    const hull = buildTriangleBvh(mesh!.triangles);
+    return { leadingEdge: [sides[0], sides[1]], skin: [skins[0], skins[1]], crest, gear: gearPts, fuselageHalfWidth, hull };
 }
 
 /**
@@ -314,6 +316,13 @@ export interface BarricadeNetShape {
 export interface BarricadeCatchPose {
     readonly position: V3;
     readonly quaternion: THREE.Quaternion;
+    /**
+     * How far the pull has let go, 0..1. While the jet pulls against the
+     * purchase cables (0, the default) the whole webbing is in tension and
+     * every strap runs straight to its joint; rolled back in the net, it
+     * slackens (1) and the straps sag with their full length.
+     */
+    readonly slack?: number;
 }
 
 /**
@@ -323,6 +332,8 @@ export interface BarricadeCatchPose {
  *        go down after a catch, or before fresh webbing is laced).
  * @param caught the aircraft in the net, if any — the webbing goes with it.
  */
+let wrapCache: { profile: BarricadeAirframeProfile; key: string; shape: BarricadeNetShape } | undefined;
+
 export function buildBarricadeShape(
     raise: number,
     webbing: boolean,
@@ -330,7 +341,14 @@ export function buildBarricadeShape(
 ): BarricadeNetShape {
     const stanchions = stanchionPoses(raise);
     if (caught) {
-        return { stanchions, ...wrapOnAirframe(caught.pose, caught.profile, stanchions) };
+        // Held in the net the pose stops changing; the wrap (with its hull
+        // queries) is then the same frame after frame.
+        const { position: p, quaternion: q } = caught.pose;
+        const key = [raise, p.x, p.y, p.z, q.x, q.y, q.z, q.w, caught.pose.slack ?? 0].map(v => v.toFixed(4)).join(',');
+        if (wrapCache && wrapCache.profile === caught.profile && wrapCache.key === key) return wrapCache.shape;
+        const shape = { stanchions, ...wrapOnAirframe(caught.pose, caught.profile, stanchions) };
+        wrapCache = { profile: caught.profile, key, shape };
+        return shape;
     }
     if (!webbing || raise <= 0) {
         return { stanchions, upper: [], lower: [], verticals: [], cables: [], glove: [], slung: [] };
@@ -388,6 +406,7 @@ function wrapOnAirframe(
     _up.set(0, 1, 0).applyQuaternion(pose.quaternion);
     const deckFloor = BARRICADE_DECK_Y + DECK_CLEARANCE_M;
     const centreX = pose.position.x;
+    const letGo = THREE.MathUtils.clamp(pose.slack ?? 0, 0, 1);
 
     // Upper strap supports: on the top skin of both wings just behind the
     // leading edges, and on the spine between them.
@@ -424,9 +443,13 @@ function wrapOnAirframe(
     const bandLen = polylineLength(bandPts);
     const remaining = [half + offset - centreArc, half - offset - (bandLen - centreArc)];
     const tips = [bandPts[0], bandPts[bandPts.length - 1]];
-    // Webbing longer than the way there is not left hanging: the pendant and
-    // purchase cable have hauled it in, and the tail runs straight.
-    const anchors = stanchions.map((st, s) => (st.top.y - st.base.y > 1 ? st.top : sheaves[s]));
+    // Webbing longer than the way there is not left hanging: the purchase
+    // cable has hauled it in, and the tail runs straight. Caught, the upper
+    // strap's pendants have let go and nothing holds the webbing but the
+    // purchase cables: the pull runs in one straight line from the airframe
+    // through the joint to the deck sheave.
+    const anchors = sheaves;
+    void stanchions;
     const shackles: V3[] = [];
     for (let s = 0; s < 2; s++) {
         const toward = anchors[s].clone().sub(tips[s]);
@@ -435,7 +458,7 @@ function wrapOnAirframe(
         shackles.push(tips[s].clone().addScaledVector(toward.normalize(), Math.min(rem, reach)));
     }
     for (const sh of shackles) sh.y = Math.max(sh.y, deckFloor + 0.06);
-    const lowerEnds = shackles.map(sh => sh.clone().setY(BARRICADE_DECK_Y + GEAR_TRAP_UP_M));
+
 
     // Upper strap: shackle, band, shackle. The band lies on the airframe; the
     // two free spans off the wingtips share the strap's little slack.
@@ -474,7 +497,17 @@ function wrapOnAirframe(
         const end = skinPointAt(s.skin.bottom, s.edge, SLING_UNDER_M);
         underWing.push(new THREE.Vector3(s.at.x, Math.max(trapY, end.y - LOWER_BELOW_WING_M), end.z));
     }
-    const lower = [lowerEnds[0].clone(), ...[...underWing, ...legs].sort((a, b) => a.x - b.x), lowerEnds[1].clone()];
+    // The joint, where the lower strap meets the purchase cable: out at the
+    // shackle, as low as the lower strap runs under that wing, so every strap
+    // pulled straight to it passes under the wing, not through it.
+    const lowerEnds = shackles.map((sh, s) => {
+        const side = underWing.filter(p => (s === 0 ? p.x < centreX : p.x > centreX)).map(p => p.y);
+        const y = Math.min(sh.y, ...side, ...(side.length ? [] : [trapY]));
+        return sh.clone().setY(Math.max(trapY, y));
+    });
+    let lower = [lowerEnds[0].clone(), ...[...underWing, ...legs].sort((a, b) => a.x - b.x), lowerEnds[1].clone()];
+    // Routed round the airframe before the straps' stations are put on it.
+    if (profile.hull) lower = clearOfHull(lower, profile.hull, pose, true);
     const lowerArc = cumulative(lower);
     const verticals: V3[][] = [];
     const slung: boolean[] = [];
@@ -482,9 +515,9 @@ function wrapOnAirframe(
         const u = (j + 1) / (BARRICADE_STRAP_COUNT + 1);
         const su = u * upperArc[upperArc.length - 1];
         const top = pointAtArc(upper, upperArc, su);
-        // Caught, every strap runs to the joint on its own side, where the
-        // lower strap meets the purchase cable.
-        const bottom = lowerEnds[j < BARRICADE_STRAP_COUNT / 2 ? 0 : 1].clone();
+        // Every strap stays sewn to the lower strap at its own station, in
+        // its rigged order along it; the lower strap runs on to the joints.
+        const bottom = pointAtArc(lower, lowerArc, u * lowerArc[lowerArc.length - 1]);
         const dx = top.x - centreX;
         let path: V3[];
         if (Math.abs(dx) < profile.fuselageHalfWidth) {
@@ -506,10 +539,12 @@ function wrapOnAirframe(
             path.push(last.clone().setY(Math.min(last.y, trapY)));
             slung.push(false);
         } else if (su < hookFrom || su > hookTo) {
-            // Off a wingtip: the upper strap that held its top is gone, so it
-            // has fallen, and lies on the deck from below its station to its joint.
-            path = [top.clone().setY(deckFloor)];
+            // Off a wingtip: the upper strap that held its top is gone, and the
+            // strap lies along the taut lower strap out from its station.
+            const port = j < BARRICADE_STRAP_COUNT / 2;
+            verticals.push(alongBelt(lower, lowerArc, u * lowerArc[lowerArc.length - 1], port, lengths[j] * CAUGHT_STRAP_STRETCH, sheaves[port ? 0 : 1]));
             slung.push(false);
+            continue;
         } else {
             const held = edgeNear(band, top.x);
             slung.push(!!(held?.edge && held.skin));
@@ -520,7 +555,14 @@ function wrapOnAirframe(
                 ? [top, ...sling(held.edge, held.skin, top.x, aftOf(held.at, held.edge))]
                 : [top];
         }
-        verticals.push(strapOfLength(path, bottom, lengths[j] * CAUGHT_STRAP_STRETCH));
+        // Taut, the strap is as long as its way to the joint (the pull has
+        // stretched it straight); slack, it has its whole length to sag with.
+        const taut = polylineLength(path) + path[path.length - 1].distanceTo(bottom);
+        const full = lengths[j] * CAUGHT_STRAP_STRETCH;
+        verticals.push(strapOfLength(path, bottom, taut + letGo * Math.max(0, full - taut)));
+    }
+    if (profile.hull) {
+        for (let j = 0; j < verticals.length; j++) verticals[j] = clearOfHull(verticals[j], profile.hull, pose);
     }
     for (const v of verticals) clampToDeck(v);
 
@@ -548,6 +590,9 @@ function wrapOnAirframe(
             if (pts.length >= 2) glove.push(pts);
         }
     }
+    if (profile.hull) {
+        for (let k = 0; k < glove.length; k++) glove[k] = clearOfHull(glove[k], profile.hull, pose);
+    }
     return { upper, lower, verticals, cables, glove, slung };
 }
 
@@ -561,12 +606,11 @@ function riggedStrapLengths(): number[] {
 }
 
 /**
- * A strap of length `length` from `path[0]` along `path` and on to `bottom`,
+ * A strap of up to `length` from `path[0]` along `path` and on to `bottom`,
  * the joint it ends at. The spare length goes into the last, free run, which
- * hangs under gravity: a sag straight down from the chord (a hanging strap
- * sags down, not sideways), resting on the deck where it reaches it. When it
- * has sagged onto the deck all the way across and is still long, the rest
- * lies on the deck in folds from side to side. A strap that cannot reach is
+ * sags straight down from the chord (a hanging strap sags down, not
+ * sideways), but only as far as {@link TAUT_CLEARANCE_M} over the deck: the
+ * purchase cable's pull takes up the rest. A strap that cannot reach is
  * drawn straight.
  */
 function strapOfLength(path: V3[], bottom: V3, length: number): V3[] {
@@ -577,122 +621,132 @@ function strapOfLength(path: V3[], bottom: V3, length: number): V3[] {
         out.push(bottom.clone());
         return out;
     }
-    const floor = BARRICADE_DECK_Y + DECK_CLEARANCE_M;
-    // Fully sagged: straight down to the deck at each end, and along it between.
-    const feet = [end.clone().setY(floor), bottom.clone().setY(floor)];
-    const flatLen = Math.max(0, end.y - floor) + feet[0].distanceTo(feet[1]) + Math.max(0, bottom.y - floor);
-    if (free < flatLen) {
-        // Parabolic sag s below the chord, resting on the deck: the length
-        // grows with s, so s by bisection.
-        const sagged = (sag: number) => {
-            const pts: V3[] = [];
-            for (let k = 1; k < DRAPE_SAMPLES; k++) {
-                const t = k / DRAPE_SAMPLES;
-                const q = end.clone().lerp(bottom, t);
-                q.y = Math.max(floor, q.y - sag * 4 * t * (1 - t));
-                pts.push(q);
-            }
-            return pts;
-        };
-        const lengthOf = (pts: V3[]) => polylineLength([end, ...pts, bottom]);
+    const floor = BARRICADE_DECK_Y + TAUT_CLEARANCE_M;
+    // The deepest sag that keeps every point of the run over the floor.
+    let maxSag = Infinity;
+    for (let k = 1; k < DRAPE_SAMPLES; k++) {
+        const t = k / DRAPE_SAMPLES;
+        const y = end.y + (bottom.y - end.y) * t;
+        maxSag = Math.min(maxSag, Math.max(0, y - floor) / (4 * t * (1 - t)));
+    }
+    const sagged = (sag: number) => {
+        const pts: V3[] = [];
+        for (let k = 1; k < DRAPE_SAMPLES; k++) {
+            const t = k / DRAPE_SAMPLES;
+            const q = end.clone().lerp(bottom, t);
+            q.y -= sag * 4 * t * (1 - t);
+            pts.push(q);
+        }
+        return pts;
+    };
+    const lengthOf = (pts: V3[]) => polylineLength([end, ...pts, bottom]);
+    let sag = maxSag;
+    if (lengthOf(sagged(maxSag)) > free) {
+        // Long enough to sag less than the floor allows: s by bisection.
         let lo = 0;
-        let hi = 1;
-        while (hi < 1e4 && lengthOf(sagged(hi)) < free) hi *= 2;
+        let hi = maxSag;
         for (let i = 0; i < 40; i++) {
             const m = (lo + hi) / 2;
             if (lengthOf(sagged(m)) < free) lo = m;
             else hi = m;
         }
-        out.push(...sagged((lo + hi) / 2), bottom.clone());
-        return out;
+        sag = (lo + hi) / 2;
     }
-    // On the deck from foot to foot; a run too short for its folds lays out
-    // aft first, out and back.
-    const onDeck = free - Math.max(0, end.y - floor) - Math.max(0, bottom.y - floor);
-    const direct = feet[0].distanceTo(feet[1]);
-    // Out aft and back as a U, never a hairpin (a drawn ribbon spikes at one).
-    const runOf = (need: number) => {
-        if (direct >= need) return [feet[0], feet[1]];
-        const mid = feet[0].clone().lerp(feet[1], 0.5);
-        const side = feet[1].clone().sub(feet[0]).setY(0);
-        if (side.lengthSq() < 1e-9) side.set(1, 0, 0);
-        side.normalize();
-        const r = Math.max(FOLD_TURN_M, direct / 2);
-        const aft = new THREE.Vector3(0, 0, 1);
-        // Legs out, a half circle between them: need ≈ 2 · legs + π r.
-        const leg = Math.max(0.5, (need - Math.PI * r) / 2);
-        const a = mid.clone().addScaledVector(side, -r).addScaledVector(aft, leg);
-        const b = mid.clone().addScaledVector(side, r).addScaledVector(aft, leg);
-        const pts = [feet[0], a];
-        for (let k = 1; k < 8; k++) {
-            const t = Math.PI * (1 - k / 8);
-            pts.push(mid.clone().addScaledVector(aft, leg).addScaledVector(side, r * Math.cos(t)).addScaledVector(aft, r * Math.sin(t)));
-        }
-        pts.push(b, feet[1]);
-        return pts;
-    };
-    // Lay it out further aft until the folds hold it all.
-    let need = onDeck / FOLD_PER_RUN;
-    let run = runOf(need);
-    let folds = folded(run, onDeck);
-    for (let i = 0; i < 8 && polylineLength([run[0], ...folds, run[run.length - 1]]) < onDeck * 0.99; i++) {
-        need *= 1.25;
-        run = runOf(need);
-        folds = folded(run, onDeck);
-    }
-    if (end.y > floor + 1e-6) out.push(feet[0].clone());
-    out.push(...folds);
-    if (bottom.y > floor + 1e-6) out.push(feet[1].clone());
-    out.push(bottom.clone());
+    out.push(...sagged(sag), bottom.clone());
     return out;
 }
 
 /**
- * The interior points of `run` (on the deck) folded from side to side so
- * that it is `length` long, as near as amplitude and wavelength allow: the
- * amplitude first, at the longest wavelength, then the wavelength down.
+ * A strap of up to `length` lying along the lower strap out from its station
+ * (arc `at`) to the port (`port`) or starboard end, and on along the
+ * purchase cable toward its sheave, ending at the station it is sewn to:
+ * with nothing holding its top, the pull has laid it out along the line of
+ * the pull, clear of the airframe.
  */
-function folded(run: V3[], length: number): V3[] {
-    const arc = cumulative(run);
+function alongBelt(lower: readonly V3[], arc: readonly number[], at: number, port: boolean, length: number, sheave: V3): V3[] {
     const total = arc[arc.length - 1];
-    if (total < 1e-6) return [];
-    const shape = (amp: number, wave: number) => {
-        const n = Math.max(1, Math.round(total / wave));
-        const samples = Math.max(DRAPE_SAMPLES, n * 12);
-        const pts: V3[] = [];
-        for (let k = 1; k < samples; k++) {
-            const sArc = (total * k) / samples;
-            const p = pointAtArc(run, arc, sArc);
-            // Folded square to the run's tangent, smoothed over its corners.
-            const dir = pointAtArc(run, arc, Math.min(total, sArc + FOLD_TURN_M))
-                .sub(pointAtArc(run, arc, Math.max(0, sArc - FOLD_TURN_M))).setY(0);
-            const side = new THREE.Vector3(-dir.z, 0, dir.x);
-            if (side.lengthSq() > 1e-12) side.normalize();
-            const u = sArc / total;
-            // Out and back n times, easing to nothing at both feet.
-            const ease = Math.min(1, u / 0.1, (1 - u) / 0.1);
-            p.addScaledVector(side, amp * ease * Math.sin(2 * Math.PI * n * u));
-            pts.push(p);
-        }
-        return pts;
-    };
-    const lengthOf = (pts: V3[]) => polylineLength([run[0], ...pts, run[run.length - 1]]);
-    const [minWave, maxWave] = FOLD_WAVELENGTH_M;
-    const bisect = (f: (x: number) => number, lo: number, hi: number) => {
-        // f grows from lo to hi.
-        for (let i = 0; i < 30; i++) {
-            const m = (lo + hi) / 2;
-            if (f(m) < length) lo = m;
-            else hi = m;
-        }
-        return (lo + hi) / 2;
-    };
-    if (lengthOf(shape(FOLD_AMPLITUDE_M, maxWave)) >= length) {
-        return shape(bisect(a => lengthOf(shape(a, maxWave)), 0, FOLD_AMPLITUDE_M), maxWave);
+    const toEnd = port ? at : total - at;
+    const onBelt = Math.min(length, toEnd);
+    const end = port ? lower[0] : lower[lower.length - 1];
+    // Along the cable only as far as it stays clear of the deck.
+    const floor = BARRICADE_DECK_Y + TAUT_CLEARANCE_M;
+    const cableLen = end.distanceTo(sheave);
+    const drop = end.y - sheave.y;
+    const clearOnCable = drop > 1e-6 ? cableLen * Math.min(1, Math.max(0, (end.y - floor) / drop)) : cableLen;
+    const onCable = Math.min(length - onBelt, clearOnCable);
+    // From the far end of the strap back to its station.
+    const out: V3[] = [];
+    if (onCable > 1e-3) out.push(end.clone().addScaledVector(sheave.clone().sub(end).normalize(), onCable));
+    const lo = port ? at - onBelt : at;
+    const hi = port ? at : at + onBelt;
+    const inner: V3[] = [];
+    for (let i = 0; i < lower.length; i++) {
+        if (arc[i] >= lo - 1e-9 && arc[i] < hi + 1e-9 && Math.abs(arc[i] - at) > 1e-9) inner.push(lower[i].clone());
     }
-    // Shorter waves fold more strap into the run (rounding n makes it stepwise, near enough).
-    const wave = maxWave - bisect(d => lengthOf(shape(FOLD_AMPLITUDE_M, maxWave - d)), 0, maxWave - minWave);
-    return shape(FOLD_AMPLITUDE_M, wave);
+    if (!port) inner.reverse();
+    out.push(...inner);
+    for (const p of out) p.addScaledVector(_up, ON_BELT_M);
+    out.push(pointAtArc(lower, arc, at));
+    return out;
+}
+
+/** A strap rerouted round the airframe clears its skin by this much (m), and is rerouted at most this many times per span. */
+const HULL_CLEARANCE_M = 0.06;
+const HULL_REROUTES = 6;
+const _hit = bvhHit();
+
+/**
+ * `pts` with every span that passes through the drawn airframe rerouted
+ * round it: over the skin it crossed when the span runs nearer the top of
+ * the airframe there, under it otherwise. A strap pulled straight, or
+ * sagging, to its joint otherwise cuts through a tailplane, a flap or a gear
+ * leg on its way.
+ */
+function clearOfHull(pts: V3[], hull: TriangleBvh, pose: BarricadeCatchPose, roundFront = false): V3[] {
+    const inv = pose.quaternion.clone().invert();
+    const toBody = (p: V3) => p.clone().sub(pose.position).applyQuaternion(inv);
+    const toLocal = (p: V3) => p.clone().applyQuaternion(pose.quaternion).add(pose.position);
+    const floor = BARRICADE_DECK_Y + DECK_CLEARANCE_M;
+    const body = pts.map(toBody);
+    const top = hull.bounds[4] + 1;
+    const bottom = hull.bounds[1] - 1;
+    // The next skin straight up or down from (x, y, z), body frame: through
+    // the part a span hit, not to the far side of everything in that column
+    // (under a wing that would be the wheel on the deck).
+    const skinFrom = (x: number, y: number, z: number, up: boolean) =>
+        bvhSegmentHit(hull, x, y + (up ? 0.005 : -0.005), z, x, up ? top : bottom, z, _hit) ? _hit.y : undefined;
+    // The next skin straight ahead (+z, the nose) from (x, y, z).
+    const front = hull.bounds[5] + 1;
+    const skinAhead = (x: number, y: number, z: number) =>
+        bvhSegmentHit(hull, x, y, z + 0.005, x, y, front, _hit) ? _hit.z : undefined;
+    const out: V3[] = [body[0]];
+    const route = (a: V3, b: V3, depth: number) => {
+        if (depth >= HULL_REROUTES || !bvhSegmentHit(hull, a.x, a.y, a.z, b.x, b.y, b.z, _hit)) {
+            out.push(b);
+            return;
+        }
+        const hx = _hit.x, hy = _hit.y, hz = _hit.z;
+        // The part's skin above and below the crossing: round the thinner
+        // way, never under the deck.
+        const hi = skinFrom(hx, hy, hz, true) ?? hy;
+        const lo = skinFrom(hx, hy, hz, false) ?? hy;
+        const under = new THREE.Vector3(hx, lo - HULL_CLEARANCE_M, hz);
+        const overIt = new THREE.Vector3(hx, hi + HULL_CLEARANCE_M, hz);
+        let via = hi - hy < hy - lo ? overIt : under;
+        if (via === under && toLocal(under).y < floor) {
+            // A part standing on the deck (a gear leg): the lower strap,
+            // running across it, goes round its front, the way it is caught,
+            // unless that is a long way; anything else over the top.
+            const ahead = roundFront ? skinAhead(hx, hy, hz) : undefined;
+            via = ahead !== undefined && ahead - hz < hi - hy
+                ? new THREE.Vector3(hx, hy, ahead + HULL_CLEARANCE_M)
+                : overIt;
+        }
+        route(a, via, depth + 1);
+        route(via, b, depth + 1);
+    };
+    for (let i = 1; i < body.length; i++) route(body[i - 1], body[i], 0);
+    return out.map(toLocal);
 }
 
 /** The wing support under the band at lateral x, if the band rests on a wing there. */

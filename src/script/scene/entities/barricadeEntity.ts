@@ -28,7 +28,7 @@ import {
 } from './barricadeSpec';
 import { BarricadeAirframeProfile, BarricadeNetShape, buildBarricadeShape } from './barricadeWrap';
 import { BarricadeNetMotion } from './barricadeNetMotion';
-import { flutterStraps } from './barricadeWind';
+import { buildRiggedWeb, WebLayout } from '../../physics/barricade/webLayout';
 
 /** Load-strap and engaging-strap widths (m). */
 const LOAD_STRAP_W_M = 0.15;
@@ -45,6 +45,8 @@ const STANCHION_COLOR = '#7c8186';
 /** Camera distance at which ribbons give way to lines, with hysteresis (m). */
 const LOD_LINE_M = 350;
 const LOD_HYSTERESIS_M = 25;
+/** Rolled back this far (m) from the furthest it ran, the jet has let the webbing go slack. */
+const ROLLBACK_SLACK_M = 2;
 /** Vertex budget for every ribbon of one frame. */
 const MAX_RIBBON_VERTS = 4096;
 const MAX_LINE_VERTS = 2048;
@@ -55,6 +57,19 @@ export const enum BarricadeRigPhase {
     RAISING,
     RIGGED,
     LOWERING,
+}
+
+/** The sim's rigid-body webbing for one rig generation: particle positions, carrier-local (xyz interleaved). */
+export interface BarricadeWebState {
+    generation: number;
+    positions: Float32Array;
+    /** The aircraft in reach as the web met it (carrier-local position xyz, quaternion xyzw), and its bounds (body frame). */
+    body?: ArrayLike<number>;
+    bodyBox?: ArrayLike<number>;
+    /** That aircraft where it is drawn this frame (world). */
+    drawn?: { position: THREE.Vector3; quaternion: THREE.Quaternion };
+    /** A catch on the scripted run-out, the webbing not meeting the aircraft. */
+    scriptedCatch?: boolean;
 }
 
 /** The aircraft in the net, as drawn: world pose, velocity relative to the ship, and its profile. */
@@ -90,19 +105,25 @@ export class BarricadeEntity implements Entity {
     private readonly motion = new BarricadeNetMotion();
     /** Time not yet given to {@link motion}: update() adds, the first rebuild after it spends. */
     private pendingDelta = 0;
-    /** Clock for the wind in the webbing (s). */
-    private windTime = 0;
     private readonly localVel = new THREE.Vector3();
 
     private readonly invQuat = new THREE.Quaternion();
     private readonly localPos = new THREE.Vector3();
+    /** The furthest the caught jet has run into the net (carrier-local z, m). */
+    private furthestZ = 0;
     private readonly localQuat = new THREE.Quaternion();
     private readonly lodAnchor = new THREE.Vector3();
+
+    /** The webbing's topology, the same layout the sim's solver steps (see drawWeb). */
+    private webLayout: WebLayout | undefined;
+    private webLines: THREE.Vector3[][] = [];
+    private webCables: THREE.Vector3[][] = [];
 
     constructor(
         materials: SceneMaterialManager,
         private readonly getCarrierPose: () => ArrestorCarrierPose,
         private readonly getCatch: () => BarricadeCatch | undefined,
+        private readonly getWeb: () => BarricadeWebState | undefined = () => undefined,
     ) {
         const flat = (color: string) => materials.build({
             type: SceneMaterialPrimitiveType.MESH,
@@ -176,6 +197,11 @@ export class BarricadeEntity implements Entity {
         this.expended = true;
     }
 
+    /** Laced and standing, used or not: the sim keeps its webbing while this holds. */
+    get webbingUp(): boolean {
+        return this.raise >= 1 && this.webbing;
+    }
+
     /** Fully up, laced and unused. */
     get armed(): boolean {
         return this.raise >= 1 && this.webbing && !this.expended;
@@ -216,7 +242,6 @@ export class BarricadeEntity implements Entity {
 
     update(delta: number): void {
         this.pendingDelta += delta;
-        this.windTime += delta;
         const step = delta / BARRICADE_RAISE_S;
         this.raise = this.target > this.raise
             ? Math.min(this.target, this.raise + step)
@@ -271,7 +296,19 @@ export class BarricadeEntity implements Entity {
     }
 
     private rebuild(): void {
+        // Rigged, the sim's webbing is the net, from the moment it stands to the moment it is
+        // struck: one representation, so nothing changes shape at the catch. Except a jet the
+        // sim caught on its scripted run-out, without the webbing meeting it (its drawn airframe
+        // not baked in time, see Game.syncBarricadeAirframe): that one is wrapped from its pose.
+        const web = this.getWeb();
         const caught = this.getCatch();
+        if (web && this.webbingUp && web.generation === this.generationCounter && !(caught && web.scriptedCatch)) {
+            this.pendingDelta = 0;
+            this.motion.reset();
+            this.lastWebDrawn = this.webToDrawn(web);
+            this.drawWeb(this.lastWebDrawn, buildBarricadeShape(this.raise, false));
+            return;
+        }
         let shape: BarricadeNetShape;
         // Render passes can call this more than once a frame; only the first moves the net.
         // A stalled frame (hidden tab, load) is not a reason to fling the net.
@@ -281,8 +318,13 @@ export class BarricadeEntity implements Entity {
             this.invQuat.copy(this.root.quaternion).invert();
             this.localPos.copy(caught.position).sub(this.root.position).applyQuaternion(this.invQuat);
             this.localQuat.copy(this.invQuat).multiply(caught.quaternion);
+            // The pull holds the webbing taut until the jet rolls back from
+            // the furthest it got (landing runs toward −z).
+            if (!this.motion.active) this.furthestZ = this.localPos.z;
+            this.furthestZ = Math.min(this.furthestZ, this.localPos.z);
+            const slack = (this.localPos.z - this.furthestZ) / ROLLBACK_SLACK_M;
             const target = buildBarricadeShape(this.raise, true, {
-                pose: { position: this.localPos, quaternion: this.localQuat },
+                pose: { position: this.localPos, quaternion: this.localQuat, slack },
                 profile: caught.profile,
             });
             const halfSpan = profileHalfSpan(caught.profile);
@@ -307,8 +349,7 @@ export class BarricadeEntity implements Entity {
             m.visible = top.y - base.y > 0.01;
         }
 
-        // Light nylon: the wind over the deck keeps the loose straps moving.
-        const verticals = flutterStraps(shape.verticals, shape.slung, this.windTime);
+        const verticals = shape.verticals;
         const near = !this.useLines;
         this.straps.mesh.visible = near;
         this.cables.mesh.visible = near;
@@ -317,9 +358,11 @@ export class BarricadeEntity implements Entity {
             this.straps.begin();
             // Caught, the upper strap is gone: the lower one holds the webbing.
             if (!caught) this.straps.add(shape.upper, LOAD_STRAP_W_M);
-            this.straps.add(shape.lower, LOAD_STRAP_W_M);
-            for (const v of verticals) this.straps.add(v, ENGAGING_STRAP_W_M);
-            for (const g of shape.glove) this.straps.add(g, GLOVE_STRAP_W_M);
+            // Caught, the webbing lies on the airframe: drawn flat along it.
+            const flat = !!caught;
+            this.straps.add(shape.lower, LOAD_STRAP_W_M, flat);
+            for (const v of verticals) this.straps.add(v, ENGAGING_STRAP_W_M, flat);
+            for (const g of shape.glove) this.straps.add(g, GLOVE_STRAP_W_M, flat);
             this.straps.end();
             this.cables.begin();
             for (const c of shape.cables) this.cables.add(c, CABLE_W_M);
@@ -340,6 +383,108 @@ export class BarricadeEntity implements Entity {
             this.linePos.needsUpdate = true;
         }
     }
+
+    /**
+     * The sim's webbing as ribbons: both load straps, every engaging strap
+     * and the purchase cables from their anchors to the load straps' ends,
+     * through the particles the sim stepped. The stanchions stand as the rig
+     * drew them.
+     */
+    /**
+     * The webbing moved onto the aircraft as drawn. The sim met the aircraft
+     * at its physics pose, while the aircraft is drawn interpolated between
+     * physics steps, or, stopped on the deck, frozen to the ship (Player's
+     * carrier ride): 0.3-0.5 m apart in a 45 m/s catch. Drawn as stepped, the
+     * webbing then ran through the drawn skin, 4-25 links a frame, though the
+     * sim had none through its collider. So the particles near the aircraft
+     * go with it, from the pose the sim met to the pose drawn, fading to the
+     * ship's frame WEB_DRAWN_FADE_M from its bounds, where the anchors are.
+     */
+    private webToDrawn(web: BarricadeWebState): Float32Array {
+        const { positions, body, bodyBox: box, drawn } = web;
+        if (!body || !box || !drawn) return positions;
+        const out = this.webDrawn.length === positions.length ? this.webDrawn : (this.webDrawn = new Float32Array(positions.length));
+        // The drawn pose in the ship's frame.
+        this.invQuat.copy(this.root.quaternion).invert();
+        const pd = _dp.copy(drawn.position).sub(this.root.position).applyQuaternion(this.invQuat);
+        const qd = _dq.copy(this.invQuat).multiply(drawn.quaternion);
+        const ps = _sp.set(body[0], body[1], body[2]);
+        const qsInv = _sq.set(body[3], body[4], body[5], body[6]).invert();
+        // A respawn or reset between the two is not a lag to follow.
+        if (pd.distanceTo(ps) > WEB_DRAWN_MAX_LAG_M) return positions;
+        for (let i = 0; i < positions.length; i += 3) {
+            const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+            const b = _b.set(x - ps.x, y - ps.y, z - ps.z).applyQuaternion(qsInv);
+            const dx = Math.max(box[0] - b.x, 0, b.x - box[3]);
+            const dy = Math.max(box[1] - b.y, 0, b.y - box[4]);
+            const dz = Math.max(box[2] - b.z, 0, b.z - box[5]);
+            const d = Math.hypot(dx, dy, dz);
+            const t = Math.min(1, Math.max(0, (d - WEB_DRAWN_FULL_M) / (WEB_DRAWN_FADE_M - WEB_DRAWN_FULL_M)));
+            const w = 1 - t * t * (3 - 2 * t);
+            b.applyQuaternion(qd).add(pd);
+            out[i] = x + w * (b.x - x);
+            out[i + 1] = y + w * (b.y - y);
+            out[i + 2] = z + w * (b.z - z);
+        }
+        return out;
+    }
+    private webDrawn = new Float32Array(0);
+    /** The webbing's particles as last drawn (carrier-local), for the dev hook. */
+    lastWebDrawn: Float32Array | undefined;
+
+    private drawWeb(positions: Float32Array, rig: BarricadeNetShape): void {
+        const layout = this.webLayout ??= buildRiggedWeb();
+        if (positions.length !== 3 * layout.count) return;
+        if (this.webLines.length === 0) {
+            const chains = [layout.upperBelt, layout.lowerBelt, ...layout.straps];
+            this.webLines = chains.map(c => c.map(() => new THREE.Vector3()));
+            this.webCables = layout.tethers.map(() => [new THREE.Vector3(), new THREE.Vector3()]);
+        }
+        const chains = [layout.upperBelt, layout.lowerBelt, ...layout.straps];
+        chains.forEach((c, k) => {
+            const line = this.webLines[k];
+            for (let n = 0; n < c.length; n++) {
+                const i = 3 * c[n];
+                line[n].set(positions[i], positions[i + 1], positions[i + 2]);
+            }
+        });
+        layout.tethers.forEach((t, k) => {
+            const i = 3 * t.i;
+            this.webCables[k][0].set(t.anchor[0], t.anchor[1], t.anchor[2]);
+            this.webCables[k][1].set(positions[i], positions[i + 1], positions[i + 2]);
+        });
+        for (let i = 0; i < 2; i++) {
+            const { base, top } = rig.stanchions[i];
+            const m = this.stanchions[i];
+            m.position.copy(base);
+            m.rotation.set(Math.atan2(top.z - base.z, top.y - base.y), 0, 0);
+            m.visible = top.y - base.y > 0.01;
+        }
+        const near = !this.useLines;
+        this.straps.mesh.visible = near;
+        this.cables.mesh.visible = near;
+        this.lines.visible = !near;
+        if (near) {
+            this.straps.begin();
+            this.straps.add(this.webLines[0], LOAD_STRAP_W_M);
+            this.straps.add(this.webLines[1], LOAD_STRAP_W_M);
+            for (let k = 2; k < this.webLines.length; k++) this.straps.add(this.webLines[k], ENGAGING_STRAP_W_M);
+            this.straps.end();
+            this.cables.begin();
+            for (const c of this.webCables) this.cables.add(c, CABLE_W_M);
+            this.cables.end();
+        } else {
+            let n = 0;
+            for (const pts of this.webLines) {
+                for (let i = 0; i + 1 < pts.length && n + 2 <= MAX_LINE_VERTS; i++) {
+                    this.linePos.setXYZ(n++, pts[i].x, pts[i].y, pts[i].z);
+                    this.linePos.setXYZ(n++, pts[i + 1].x, pts[i + 1].y, pts[i + 1].z);
+                }
+            }
+            this.lines.geometry.setDrawRange(0, n);
+            this.linePos.needsUpdate = true;
+        }
+    }
 }
 
 /** Wingtip distance from the centreline, from the profile's leading edges. */
@@ -351,6 +496,19 @@ function profileHalfSpan(profile: BarricadeAirframeProfile): number {
     return half;
 }
 
+/**
+ * Webbing within WEB_DRAWN_FULL_M of the aircraft's bounds moves wholly with
+ * it as drawn (see webToDrawn), none past WEB_DRAWN_FADE_M (m); past
+ * WEB_DRAWN_MAX_LAG_M between the two poses it is not a lag but a jump.
+ */
+const WEB_DRAWN_FULL_M = 0.75;
+const WEB_DRAWN_FADE_M = 4;
+const WEB_DRAWN_MAX_LAG_M = 3;
+const _dp = new THREE.Vector3();
+const _sp = new THREE.Vector3();
+const _b = new THREE.Vector3();
+const _dq = new THREE.Quaternion();
+const _sq = new THREE.Quaternion();
 const _t = new THREE.Vector3();
 const _side = new THREE.Vector3();
 const _z = new THREE.Vector3(0, 0, 1);
@@ -390,7 +548,13 @@ class RibbonBuffer {
         this.indices = 0;
     }
 
-    add(pts: readonly THREE.Vector3[], width: number): void {
+    /**
+     * `flat` lays the width along the deck plane (webbing on a wing or the
+     * deck) instead of across the deck axis (a belt standing on edge between
+     * the stanchions): on edge, a strap running spanwise over a wing stood
+     * half its width down through the skin it lies on.
+     */
+    add(pts: readonly THREE.Vector3[], width: number, flat = false): void {
         if (pts.length < 2 || this.verts + pts.length * 2 > this.maxVerts) return;
         const first = this.verts;
         for (let i = 0; i < pts.length; i++) {
@@ -401,9 +565,9 @@ class RibbonBuffer {
             // Webbing lying on the deck lies flat on it; anything else across
             // the deck axis (a strap fore and aft on the deck would otherwise
             // stand up on edge as a blade).
-            const flat = p.y < BARRICADE_DECK_Y + RIBBON_FLAT_ON_DECK_M;
-            _side.crossVectors(_t, flat ? _y : _z);
-            if (_side.lengthSq() < 1e-6 * Math.max(1e-6, _t.lengthSq())) _side.crossVectors(_t, flat ? _z : _y);
+            const lying = flat || p.y < BARRICADE_DECK_Y + RIBBON_FLAT_ON_DECK_M;
+            _side.crossVectors(_t, lying ? _y : _z);
+            if (_side.lengthSq() < 1e-6 * Math.max(1e-6, _t.lengthSq())) _side.crossVectors(_t, lying ? _z : _y);
             _side.normalize().multiplyScalar(width * 0.5);
             this.pos.setXYZ(this.verts++, p.x - _side.x, p.y - _side.y, p.z - _side.z);
             this.pos.setXYZ(this.verts++, p.x + _side.x, p.y + _side.y, p.z + _side.z);

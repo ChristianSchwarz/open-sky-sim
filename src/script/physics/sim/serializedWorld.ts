@@ -90,6 +90,11 @@ export interface SerializedBarricade {
     armed: boolean;
     /** Bumped each time fresh webbing goes up; a held aircraft is let go on it. */
     generation: number;
+    /**
+     * Webbing laced and standing (expended or not): the sim keeps its
+     * rigid-body web while this holds. Absent: the same as `armed`.
+     */
+    webbing?: boolean;
 }
 
 export interface SerializedWorld {

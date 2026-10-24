@@ -52,7 +52,7 @@ import {
 import { WGS84_A, WGS84_B, cloneEnuBasis, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, seaLevelSceneY, worldToGeodetic } from '../terrain/geodesy';
 import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
-import { BarricadeCatch, BarricadeEntity } from '../scene/entities/barricadeEntity';
+import { BarricadeCatch, BarricadeEntity, BarricadeRigPhase } from '../scene/entities/barricadeEntity';
 import { BarricadeEngagement, BARRICADE_LOCAL_Z } from '../scene/entities/barricadeSpec';
 import { BarricadeAirframeProfile, buildAirframeProfile } from '../scene/entities/barricadeWrap';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
@@ -369,6 +369,8 @@ const CARRIER_SPEED_MPS = CARRIER_SPEED_KMH / 3.6;
 
 /** Carrier landing: final toward the ski-jump bow along -Z. */
 const PLAYER_CARRIER_HEADING = Math.PI;
+/** Within this of the ship (m), with the barricade going up or standing, the player's drawn airframe goes to the sim for the webbing. */
+const BARRICADE_AIRFRAME_BAKE_M = 3000;
 
 /**
  * Barricade spawn: in the groove, {@link CARRIER_GROOVE_DISTANCE_M} astern of
@@ -618,6 +620,9 @@ export class Game {
     /** Rig state last told to the sim, so it is only re-sent on a change. */
     private barricadeSentArmed = false;
     private barricadeSentGeneration = -1;
+    private barricadeSentWebbing = false;
+    /** Which aircraft and rig generation the sim has the drawn airframe of, for the webbing. */
+    private barricadeAirframeKey = '';
     /** The airframe profile the net is drawn on, built once per catch from the drawn aircraft. */
     private barricadeCatchProfile: BarricadeAirframeProfile | undefined;
     private readonly barricadeCatchScratch: BarricadeCatch = {
@@ -2171,6 +2176,7 @@ export class Game {
             this.scene.update(delta);
             this.pumpCombatSim(delta);
             this.syncBarricade(false);
+            this.syncBarricadeAirframe();
             this.updateAiStraightTimer(delta);
             this.followFlightCameraInUrl(delta);
 
@@ -2534,11 +2540,14 @@ export class Game {
             rig.markExpended();
         }
         const armed = rig.armed;
-        if (!shipMoved && armed === this.barricadeSentArmed && rig.generation === this.barricadeSentGeneration) {
+        const webbing = rig.webbingUp;
+        if (!shipMoved && armed === this.barricadeSentArmed && rig.generation === this.barricadeSentGeneration
+            && webbing === this.barricadeSentWebbing) {
             return;
         }
         this.barricadeSentArmed = armed;
         this.barricadeSentGeneration = rig.generation;
+        this.barricadeSentWebbing = webbing;
         const p = this.kuz.position;
         const q = this.kuz.quaternion;
         this.combatSim.setBarricades([{
@@ -2546,8 +2555,38 @@ export class Game {
             quaternion: [q.x, q.y, q.z, q.w],
             armed,
             generation: rig.generation,
+            webbing,
         }]);
     }
+
+    /**
+     * Give the sim the player's airframe as drawn, for the barricade webbing
+     * to meet it with: once per aircraft and rig generation, while the net is
+     * going up or standing and the jet is within reach of the ship. Baked on
+     * the approach, not at the catch, so the catch costs no frame.
+     */
+    private syncBarricadeAirframe(): void {
+        const rig = this.barricade;
+        if (!rig || !this.kuz || rig.phase === BarricadeRigPhase.STOWED || rig.phase === BarricadeRigPhase.LOWERING) return;
+        if (!this.player.isAlive() || this.player.position.distanceTo(this.kuz.position) > BARRICADE_AIRFRAME_BAKE_M) return;
+        const key = `${this.currentDef.id}:${rig.generation}`;
+        if (key === this.barricadeAirframeKey) return;
+        const drawn = this.player.bakeDrawnAirframe() ?? this.currentDef.collisionMesh;
+        if (!drawn) return;
+        this.barricadeAirframeKey = key;
+        // Decimated in a worker of its own (a second or two for a detailed airframe), then to the sim.
+        const worker = this.barricadeAirframeWorker ??= new Worker(new URL('../physics/barricade/webAirframeWorker.ts', import.meta.url));
+        worker.onmessage = (e: MessageEvent<{ key: string; triangles: Float32Array; coverageP99: number }>) => {
+            if (e.data.key !== this.barricadeAirframeKey) return;
+            console.info(`[barricade] airframe for the webbing: ${e.data.triangles.length / 9} triangles, coverage p99 ${e.data.coverageP99.toFixed(3)} m`);
+            this.combatSim.setBarricadeAirframe(PLAYER_SIM_ID, e.data.triangles, { coverageP99: e.data.coverageP99 });
+        };
+        const triangles = Float32Array.from(drawn.triangles);
+        worker.onerror = e => console.error('[barricade] airframe worker', e.message);
+        worker.postMessage({ key, triangles }, [triangles.buffer]);
+        console.info(`[barricade] baking the webbing's airframe: ${triangles.length / 9} drawn triangles`);
+    }
+    private barricadeAirframeWorker: Worker | undefined;
 
     /** The player in the net, if they are: drawn pose and airframe profile. */
     private playerBarricadeCatch(): BarricadeCatch | undefined {
@@ -5277,8 +5316,31 @@ export class Game {
             this.materials,
             () => this.carrierPose(),
             () => this.playerBarricadeCatch(),
+            () => {
+                const w = this.combatSim.getBarricadeWeb();
+                // With the player where it is drawn, for the webbing to go with it (BarricadeEntity.webToDrawn).
+                return w && { ...w, drawn: { position: this.player.getDisplayPosition(), quaternion: this.player.getDisplayQuaternion() } };
+            },
         );
         this.barricade = barricade;
+        // Debug: the sim's barricade webbing (particle count, solver ms of the last step).
+        (globalThis as Record<string, unknown>).__barricadeWeb = (full = false) => {
+            const w = this.combatSim.getBarricadeWeb();
+            if (!w) return undefined;
+            const layout = (barricade as unknown as { webLayout?: { upperBelt: number[]; lowerBelt: number[]; straps: number[][] } }).webLayout;
+            return {
+                generation: w.generation, particles: w.positions.length / 3, stepMs: w.stepMs,
+                tetherKN: w.tetherForce?.map(f => +(f / 1e3).toFixed(0)), payout: w.payout?.map(p => +p.toFixed(1)),
+                contacts: w.contacts, substeps: w.substeps, reactionKN: w.reaction?.map(r => +(r * 60 / 1e3).toFixed(0)),
+                positions: full ? Array.from(w.positions) : undefined,
+                drawnPositions: full && barricade.lastWebDrawn ? Array.from(barricade.lastWebDrawn) : undefined,
+                warm: w.warm,
+                // The dearest web step since the last call, every sim step counted.
+                peakMs: this.combatSim.takeBarricadeWebPeakMs(),
+                body: w.body,
+                chains: full && layout ? [layout.upperBelt, layout.lowerBelt, ...layout.straps] : undefined,
+            };
+        };
         scene.add(barricade);
         this.player.setBarricadeStatusProvider(() =>
             barricade.status(this.playerBarricadeEngagement() !== BarricadeEngagement.NONE));

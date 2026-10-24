@@ -18,7 +18,7 @@ import { AiPilotOptions } from '../../ai/aiPilot';
 import {
     SimAircraftDesc, SimAircraftSpawn, SimControlInputs,
     SimControlMode, SimFlightModelKind, SimHitEvent, SimToWorkerMessage, WorkerToSimMessage,
-    AircraftCollisionMesh,
+    AircraftCollisionMesh, BarricadeWebSnapshot,
 } from './simTypes';
 
 const EMPTY_FORCE_VECTORS: ForceVectorSample[] = [];
@@ -73,6 +73,8 @@ export class CombatSimClient {
         this.worker.onmessage = (event: MessageEvent<WorkerToSimMessage>) => {
             const data = event.data;
             if (data.type === 'state') {
+                this.barricadeWeb = data.web;
+                if (data.web) this.barricadeWebPeakMs = Math.max(this.barricadeWebPeakMs, data.web.peakMs);
                 if (data.shared) {
                     this.sharedIds = data.ids;
                     this.sharedForceVectors = data.forceVectors ?? {};
@@ -169,6 +171,26 @@ export class CombatSimClient {
     setBarricades(barricades: SerializedBarricade[]): void {
         this.post({ type: 'setBarricades', barricades });
     }
+
+    /** The drawn airframe (body frame) the barricade webbing is to meet this aircraft with; null forgets it. */
+    setBarricadeAirframe(id: string, triangles: Float32Array | null, prepared?: { coverageP99: number }): void {
+        this.worker.postMessage({ type: 'setBarricadeAirframe', id, triangles, prepared } satisfies SimToWorkerMessage,
+            triangles ? [triangles.buffer as ArrayBuffer] : []);
+    }
+
+    /** The rigged barricade's webbing as of the last snapshot, if one is rigged. */
+    getBarricadeWeb(): BarricadeWebSnapshot | undefined {
+        return this.barricadeWeb;
+    }
+    private barricadeWeb: BarricadeWebSnapshot | undefined;
+
+    /** The webbing's dearest step since the last call (ms), every sim step counted (a dev diagnostic). */
+    takeBarricadeWebPeakMs(): number {
+        const peak = this.barricadeWebPeakMs;
+        this.barricadeWebPeakMs = 0;
+        return peak;
+    }
+    private barricadeWebPeakMs = 0;
 
     setCarrierMeshOrigins(origins: { originX: number; originY: number; originZ: number }[]): void {
         this.post({ type: 'setCarrierMeshOrigins', origins });

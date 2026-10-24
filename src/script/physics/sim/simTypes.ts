@@ -190,6 +190,8 @@ export type SimToWorkerMessage =
     | { type: 'clearExternalState'; id: string }
     | { type: 'step'; delta: number; inputs: Record<string, SimControlInputs> }
     | { type: 'setBarricades'; barricades: SerializedBarricade[] }
+    /** An aircraft's drawn airframe (body frame) for the barricade webbing to meet it with; null forgets it. */
+    | { type: 'setBarricadeAirframe'; id: string; triangles: Float32Array | null; prepared?: { coverageP99: number } }
     | { type: 'keyDown'; id: string; key: string; repeat: boolean }
     | { type: 'keyUp'; id: string; key: string }
     | { type: 'setKeyboardLayout'; layoutId: KeyboardControlLayoutId }
@@ -211,9 +213,34 @@ type WorkerSharedStateMessage = {
     maneuverLabels: import('./simSnapshotCodec').SnapshotBuffers['maneuverLabels'];
     hits: import('./simSnapshotCodec').SnapshotBuffers['hits'];
     workerStepMs?: number;
+    web?: BarricadeWebSnapshot;
 };
 
+/** One rigged barricade's webbing as the sim stepped it: particle positions, carrier-local. */
+export interface BarricadeWebSnapshot {
+    field: number;
+    generation: number;
+    positions: Float32Array;
+    /** The web's share of the worker's step (ms), and its dearest step since the last snapshot. */
+    stepMs: number;
+    peakMs: number;
+    /** Diagnostics: tether pulls (N) and payouts (m), airframe contacts, substeps, the reaction on the held body (N s, carrier-local). */
+    tetherForce: number[];
+    payout: number[];
+    contacts: number;
+    substeps: number;
+    reaction: [number, number, number];
+    /** The held body's pose as the web met it (carrier-local position, quaternion), or none. */
+    body?: number[];
+    /** That body's collision bounds (body frame: min xyz, max xyz). */
+    bodyBox?: readonly number[];
+    /** Settled and warmed up (also with each airframe the sim has), ready for a catch at full speed (BarricadeWeb.ready). */
+    warm: boolean;
+    /** An aircraft is held by the scripted run-out instead (no airframe at its catch): drawn wrapped from its pose. */
+    scriptedCatch: boolean;
+}
+
 export type WorkerToSimMessage =
-    | ({ type: 'state'; shared?: false } & import('./simSnapshotCodec').SnapshotBuffers & { workerStepMs?: number })
+    | ({ type: 'state'; shared?: false } & import('./simSnapshotCodec').SnapshotBuffers & { workerStepMs?: number; web?: BarricadeWebSnapshot })
     | WorkerSharedStateMessage
     | { type: 'error'; message: string; stack?: string };
