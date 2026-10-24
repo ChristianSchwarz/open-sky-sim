@@ -52,9 +52,9 @@ import {
 import { WGS84_A, WGS84_B, cloneEnuBasis, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, seaLevelSceneY, worldToGeodetic } from '../terrain/geodesy';
 import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
-import { BarricadeCatch, BarricadeEntity, BarricadeRigPhase } from '../scene/entities/barricadeEntity';
+import { BarricadeEntity, BarricadeRigPhase } from '../scene/entities/barricadeEntity';
+import type { AirframeCollider } from '../physics/barricade/webBarricade';
 import { BarricadeEngagement, BARRICADE_LOCAL_Z } from '../scene/entities/barricadeSpec';
-import { BarricadeAirframeProfile, buildAirframeProfile } from '../scene/entities/barricadeWrap';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
 import { ShipWakeEntity } from '../scene/entities/shipWake';
 import {
@@ -623,14 +623,6 @@ export class Game {
     private barricadeSentWebbing = false;
     /** Which aircraft and rig generation the sim has the drawn airframe of, for the webbing. */
     private barricadeAirframeKey = '';
-    /** The airframe profile the net is drawn on, built once per catch from the drawn aircraft. */
-    private barricadeCatchProfile: BarricadeAirframeProfile | undefined;
-    private readonly barricadeCatchScratch: BarricadeCatch = {
-        position: new THREE.Vector3(),
-        quaternion: new THREE.Quaternion(),
-        velocity: new THREE.Vector3(),
-        profile: undefined as unknown as BarricadeAirframeProfile,
-    };
     private readonly syncedCarrierPos = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
     private readonly syncedCarrierQuat = new THREE.Quaternion(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
     /** World bow direction and velocity for the steaming carrier. */
@@ -1062,6 +1054,8 @@ export class Game {
     /** Hand the sim the hitbox for a given airframe. */
     private pushAircraftMeshes(simId: string, def: FlyableAircraftDef): void {
         this.combatSim.setCollision(simId, def.collisionMesh);
+        // And the barricade webbing's hull for it (see pushBarricadeHull).
+        this.pushBarricadeHull(simId, def);
     }
 
     /** The physics the combat sim should run for the player: the active sim-owned model's. */
@@ -2561,57 +2555,73 @@ export class Game {
 
     /**
      * Give the sim the player's airframe as drawn, for the barricade webbing
-     * to meet it with: once per aircraft and rig generation, while the net is
-     * going up or standing and the jet is within reach of the ship. Baked on
-     * the approach, not at the catch, so the catch costs no frame.
+     * to meet it with: whenever the jet is within reach of the ship, rigged
+     * or not (so it is there before any net goes up), and again for a new
+     * rig generation, another aircraft or the gear going up or down. Until it
+     * is in (a second or two in the airframe worker) the webbing meets the
+     * player with its type's hull (pushAircraftMeshes), so there is no catch
+     * the webbing does not take.
      */
     private syncBarricadeAirframe(): void {
         const rig = this.barricade;
-        if (!rig || !this.kuz || rig.phase === BarricadeRigPhase.STOWED || rig.phase === BarricadeRigPhase.LOWERING) return;
+        if (!rig || !this.kuz) return;
         if (!this.player.isAlive() || this.player.position.distanceTo(this.kuz.position) > BARRICADE_AIRFRAME_BAKE_M) return;
-        const key = `${this.currentDef.id}:${rig.generation}`;
+        const fm = this.player.getFlightModel();
+        const gear = fm instanceof SimProxyFlightModel ? fm.getSimGearDeployed() !== false : true;
+        const key = `${this.currentDef.id}:${rig.generation}:${gear ? 'gear' : 'clean'}`;
         if (key === this.barricadeAirframeKey) return;
-        const drawn = this.player.bakeDrawnAirframe() ?? this.currentDef.collisionMesh;
+        const drawn = this.player.bakeDrawnAirframe();
         if (!drawn) return;
         this.barricadeAirframeKey = key;
-        // Decimated in a worker of its own (a second or two for a detailed airframe), then to the sim.
-        const worker = this.barricadeAirframeWorker ??= new Worker(new URL('../physics/barricade/webAirframeWorker.ts', import.meta.url));
-        worker.onmessage = (e: MessageEvent<{ key: string; triangles: Float32Array; coverageP99: number }>) => {
-            if (e.data.key !== this.barricadeAirframeKey) return;
-            console.info(`[barricade] airframe for the webbing: ${e.data.triangles.length / 9} triangles, coverage p99 ${e.data.coverageP99.toFixed(3)} m`);
-            this.combatSim.setBarricadeAirframe(PLAYER_SIM_ID, e.data.triangles, { coverageP99: e.data.coverageP99 });
-        };
         const triangles = Float32Array.from(drawn.triangles);
-        worker.onerror = e => console.error('[barricade] airframe worker', e.message);
-        worker.postMessage({ key, triangles }, [triangles.buffer]);
+        this.barricadeAirframeBaker().postMessage({ key, kind: 'drawn', triangles }, [triangles.buffer]);
         console.info(`[barricade] baking the webbing's airframe: ${triangles.length / 9} drawn triangles`);
     }
-    private barricadeAirframeWorker: Worker | undefined;
 
-    /** The player in the net, if they are: drawn pose and airframe profile. */
-    private playerBarricadeCatch(): BarricadeCatch | undefined {
-        if (this.playerBarricadeEngagement() === BarricadeEngagement.NONE) {
-            this.barricadeCatchProfile = undefined;
-            return undefined;
+    /**
+     * The webbing's hull for an aircraft type (its collision mesh), for every
+     * aircraft of it: the AI's, and the player's until its drawn airframe is
+     * in. Built once per type in the airframe worker.
+     */
+    private pushBarricadeHull(simId: string, def: FlyableAircraftDef): void {
+        const hull = this.barricadeHulls.get(def.id);
+        if (hull) {
+            this.combatSim.setBarricadeAirframe(simId, hull, true);
+            return;
         }
-        const def = this.currentDef;
-        let profile = this.barricadeCatchProfile;
-        if (!profile) {
-            // The airframe as drawn at the catch, wings at their sweep; the
-            // hitbox only if nothing is drawn (the webbing sits inside drawn
-            // wings when laid on the coarse collider).
-            const drawn = this.player.bakeDrawnAirframe() ?? def.collisionMesh;
-            profile = buildAirframeProfile(drawn, def.flight?.gear.points);
-            this.barricadeCatchProfile = profile;
+        const waiting = this.barricadeHullWaiting.get(def.id);
+        if (waiting) {
+            waiting.add(simId);
+            return;
         }
-        this.player.updateDisplayTransform();
-        const c = this.barricadeCatchScratch;
-        c.position.copy(this.player.getDisplayPosition());
-        c.quaternion.copy(this.player.getDisplayQuaternion());
-        c.velocity.copy(this.player.getFlightModel().velocityVector).sub(this.carrierVelocity);
-        c.profile = profile;
-        return c;
+        if (!def.collisionMesh || def.collisionMesh.triangles.length < 9) return;
+        this.barricadeHullWaiting.set(def.id, new Set([simId]));
+        const triangles = Float32Array.from(def.collisionMesh.triangles);
+        this.barricadeAirframeBaker().postMessage({ key: def.id, kind: 'hull', triangles }, [triangles.buffer]);
     }
+    private readonly barricadeHulls = new Map<string, AirframeCollider>();
+    private readonly barricadeHullWaiting = new Map<string, Set<string>>();
+
+    /** The worker that turns airframes into the webbing's colliders (webAirframeWorker.ts). */
+    private barricadeAirframeBaker(): Worker {
+        if (this.barricadeAirframeWorker) return this.barricadeAirframeWorker;
+        const worker = new Worker(new URL('../physics/barricade/webAirframeWorker.ts', import.meta.url));
+        worker.onmessage = (e: MessageEvent<{ key: string; kind: 'drawn' | 'hull'; airframe: AirframeCollider }>) => {
+            const { key, kind, airframe } = e.data;
+            if (kind === 'hull') {
+                this.barricadeHulls.set(key, airframe);
+                for (const simId of this.barricadeHullWaiting.get(key) ?? []) this.combatSim.setBarricadeAirframe(simId, airframe, true);
+                this.barricadeHullWaiting.delete(key);
+                return;
+            }
+            if (key !== this.barricadeAirframeKey) return;
+            console.info(`[barricade] airframe for the webbing: ${airframe.triangles} triangles, coverage p99 ${airframe.coverageP99.toFixed(3)} m`);
+            this.combatSim.setBarricadeAirframe(PLAYER_SIM_ID, airframe, false, true);
+        };
+        worker.onerror = e => console.error('[barricade] airframe worker', e.message);
+        return this.barricadeAirframeWorker = worker;
+    }
+    private barricadeAirframeWorker: Worker | undefined;
 
     /**
      * Pump one frame into the combat sim worker after entities have latched their
@@ -5315,7 +5325,6 @@ export class Game {
         const barricade = new BarricadeEntity(
             this.materials,
             () => this.carrierPose(),
-            () => this.playerBarricadeCatch(),
             () => {
                 const w = this.combatSim.getBarricadeWeb();
                 // With the player where it is drawn, for the webbing to go with it (BarricadeEntity.webToDrawn).

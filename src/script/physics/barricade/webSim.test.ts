@@ -16,6 +16,7 @@ import { BarricadeEngagement, BARRICADE_DECK_Y, BARRICADE_LOCAL_Z, BARRICADE_MID
 import { CombatSim } from '../sim/combatSim';
 import { serializeWorld } from '../sim/serializedWorld';
 import { loadWebAirframe, WebFixture } from './webFixtures.testkit.test';
+import { buildRiggedWeb } from './webLayout';
 
 const DT = 1 / 60;
 const G0 = 9.80665;
@@ -95,4 +96,60 @@ describe('barricade webbing in the sim', () => {
             });
         }
     }
+});
+
+/**
+ * The webbing as the game laces it, through the sim (its settling in slices,
+ * the cached rigged state): taut between the stanchion heads, its sag the
+ * rigged gate's (0.29 m, webGates), nothing paid out. A settling cut short
+ * by the step deadline once left every net of a session 2.3 m slack.
+ */
+describe('barricade webbing rigged in the sim', () => {
+    const SAG_MAX_M = 0.35;
+    const PAYOUT_MAX_M = 0.05;
+    const upper = buildRiggedWeb().upperBelt;
+    function riggedSag(sim: CombatSim): { sag: number; payout: number; ready: boolean } {
+        const web = sim.barricadeWebSnapshot()!;
+        const y = (i: number) => web.positions[3 * i + 1];
+        const ends = Math.max(y(upper[0]), y(upper[upper.length - 1]));
+        return { sag: ends - y(upper[upper.length >> 1]), payout: Math.max(...web.payout.map(Math.abs)), ready: web.warm };
+    }
+    function lace(sim: CombatSim, generation: number): void {
+        sim.setBarricades([{ originX: 0, originY: 0, originZ: 0, quaternion: [0, 0, 0, 1], armed: true, generation, webbing: true }]);
+    }
+    for (const fps of [60, 40]) {
+        it(`hangs taut at ${fps} fps, laced and laced again`, () => {
+            const sim = new CombatSim();
+            sim.setWorld(serializeWorld([], [], [], [], [flatDeck()]));
+            for (const generation of [1, 2]) {
+                lace(sim, generation);
+                let r = riggedSag(sim);
+                for (let f = 0; f < 600 && !(r.ready && f > 120); f++) {
+                    sim.step(1 / fps, {});
+                    r = riggedSag(sim);
+                }
+                const line = `${fps} fps, generation ${generation}: ${JSON.stringify({ sag: +r.sag.toFixed(3), payout: +r.payout.toFixed(3), ready: r.ready })}`;
+                console.log(line);
+                assert.ok(r.sag <= SAG_MAX_M, line);
+                assert.ok(r.payout <= PAYOUT_MAX_M, line);
+            }
+        });
+    }
+    it('hangs taut again after a catch, laced fresh', () => {
+        const sim = rolling('f22', 45, 0);
+        const a = (sim as unknown as { aircraft: Map<string, Ac> }).aircraft.get(ID)!;
+        for (let f = 0; f < 60 * 20 && a.barricadeState !== BarricadeEngagement.HELD; f++) sim.step(DT, { [ID]: { ...INPUT } });
+        assert.equal(a.barricadeState, BarricadeEngagement.HELD);
+        sim.removeAircraft(ID);
+        lace(sim, 2);
+        let r = riggedSag(sim);
+        for (let f = 0; f < 300; f++) {
+            sim.step(DT, {});
+            r = riggedSag(sim);
+        }
+        const line = `after a catch, generation 2: ${JSON.stringify({ sag: +r.sag.toFixed(3), payout: +r.payout.toFixed(3) })}`;
+        console.log(line);
+        assert.ok(r.sag <= SAG_MAX_M, line);
+        assert.ok(r.payout <= PAYOUT_MAX_M, line);
+    });
 });

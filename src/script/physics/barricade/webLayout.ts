@@ -4,9 +4,11 @@
  *
  * Two load straps (belts) run between the stanchions, the upper one at the
  * stanchion heads and the lower one on its deck ramps. Thirty nylon engaging
- * straps hang between them at fixed stations; every station is a particle the
- * belt shares with its strap, so a strap is sewn to its belts by
- * construction. Each belt end is tethered: the upper ones by their tensioning
+ * straps hang between them. Each is a loop: both its ends are sewn to the
+ * lower belt at its station (a particle the belt shares with the strap), and
+ * its eye is slung over the upper belt, free to slide along it (see
+ * WebSling). Its two plies hang together and move as one, so the strap is
+ * one chain, station to eye, with the loop's mass and stiffness. Each belt end is tethered: the upper ones by their tensioning
  * pendants to the stanchion heads, the lower ones by the purchase cables to
  * the deck sheaves at the stanchion feet. The lower belt is also tied down to
  * the deck along its length, which is what keeps a rigged net from bellying
@@ -146,6 +148,18 @@ export interface WebTether {
     readonly engine?: PurchaseEngine;
 }
 
+/**
+ * An engaging strap's eye, slung over the upper belt: it stays on the belt
+ * but slides along it freely. The belt cannot leave the eye, the eye cannot
+ * leave the belt (its ends are the belt's tethers).
+ */
+export interface WebSling {
+    /** The eye particle (the strap's top node). */
+    readonly eye: number;
+    /** The upper-belt link it is rigged on (between upperBelt[link] and upperBelt[link + 1]). */
+    readonly link: number;
+}
+
 /** A lower-belt particle held to its rigged spot on the deck until it is pulled off. */
 export interface WebTieDown {
     readonly i: number;
@@ -167,8 +181,10 @@ export interface WebLayout {
     readonly tieDowns: WebTieDown[];
     /** Particle index of the mirror image across the centreline. */
     readonly mirror: Int32Array;
-    /** Per strap: its particle indices from upper station to lower station. */
+    /** Per strap: its particle indices from its eye on the upper belt down to its station on the lower. */
     readonly straps: number[][];
+    /** Per strap: its eye on the upper belt. */
+    readonly slings: WebSling[];
     readonly upperBelt: number[];
     readonly lowerBelt: number[];
 }
@@ -238,18 +254,21 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
     const lowerBelt = belt(yLow, WebPart.LOWER_BELT, 0);
 
     const straps: number[][] = [];
+    const slings: WebSling[] = [];
     for (let s = 0; s < BARRICADE_STRAP_COUNT; s++) {
         const k = (s + 1) * BELT_SEGMENTS_PER_BAY;
-        const top = upperBelt[k];
         const bottom = lowerBelt[k];
         const px = xL + k * beltSeg;
+        // The eye, on the upper belt at its station (and the link to its right, where it starts).
+        const top = add(px, yTop, z, 0, WebPart.STRAP);
+        slings.push({ eye: top, link: k });
         const ids = [top];
         for (let n = 1; n < STRAP_SEGMENTS; n++) {
             ids.push(add(px, yTop - n * strapSeg, z, STRAP_KG_PER_M * strapSeg, WebPart.STRAP));
         }
         ids.push(bottom);
         for (let n = 1; n < ids.length; n++) link(ids[n - 1], ids[n], strapSeg, STRAP_EA_N);
-        // The stations carry half of the strap's end segments too.
+        // The eye and the station carry half of the strap's end segments.
         mass[top] += STRAP_KG_PER_M * strapSeg * 0.5;
         mass[bottom] += STRAP_KG_PER_M * strapSeg * 0.5;
         straps.push(ids);
@@ -290,6 +309,7 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
         tieDowns,
         mirror,
         straps,
+        slings,
         upperBelt,
         lowerBelt,
     };

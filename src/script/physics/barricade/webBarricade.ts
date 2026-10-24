@@ -83,6 +83,18 @@ export function prepareAirframeSoup(drawn: ArrayLike<number>): { triangles: Floa
     return best!;
 }
 
+/**
+ * The buffers of an airframe's collider, to transfer it between workers: it
+ * is plain typed arrays, so the airframe worker builds it whole and the sim
+ * only stores it (the edge build cost the sim's worker 10-25 ms a frame).
+ */
+export function airframeBuffers(a: AirframeCollider): ArrayBuffer[] {
+    const c = a.collider, b = c.bvh;
+    return [b.tri, b.triIndex, b.bounds, b.leftFirst, b.triCount, c.edges, c.edgeBounds, c.edgeLeftFirst, c.edgeCount, c.edgeIndex]
+        .map(t => t.buffer as ArrayBuffer)
+        .filter((buf, i, all) => all.indexOf(buf) === i);
+}
+
 /** The cheap half: the webbing's collider from a prepared collision soup (10-25 ms). */
 export function colliderFromPrepared(triangles: Float32Array, coverageP99: number): AirframeCollider {
     const box = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
@@ -126,42 +138,41 @@ const BODY_STILL_M = 1e-3;
 const BODY_STILL_ROT = 1e-8;
 
 /**
- * The worker's budget for the web (ms a step): over it, the governor drops
- * BUDGET_STEP substeps, not below BUDGET_MIN_SUBSTEPS (the lowest the catch
- * was tried at: 16 stopped the F-22 and F-14 at 45 m/s in the same 80 m);
- * under BUDGET_RELAX_MS it adds them back. Smoothed over about 10 steps.
+ * The web's budget a frame (ms, whatever the step's length). Each step chooses its substeps up front from the cost a substep
+ * has been taking (PACE_SMOOTHING): as many as fit, up to the airframe's
+ * quality (substepsFor), never fewer than MIN_SUBSTEPS. A step that still
+ * runs late finishes in fewer, longer substeps (WebSolver.step's deadline,
+ * at the same budget). An averaged governor before it never acted: the
+ * deadline cut every heavy frame to its floor, longer substeps bunched at
+ * the frame's end.
+ *
+ * MIN_SUBSTEPS: whole catches held at a fixed count (F-22, F-14, 45 and
+ * 60 m/s, 0 and 3 m off): at 12 no link crossed the drawn skin and the
+ * run-outs were within 5 m of 24's; at 10-11 the F-14 at 60 m/s put 3-8
+ * links through it, at 8 everything did and it ran out 114 m, past the
+ * MK-7's 105. Below 25 m/s, 8 still let 1-2 through. A still body (held,
+ * stopped) sweeps nothing through the webbing: MIN_SUBSTEPS_STILL.
  */
-const BUDGET_MS = 4.5;
-const BUDGET_RELAX_MS = 2.5;
-const BUDGET_STEP = 8;
-const BUDGET_MIN_SUBSTEPS = 16;
-/**
- * The hard limit on one step (ms): a step that would run past it finishes
- * in fewer, longer substeps (WebSolver.step's deadline), never fewer than
- * DEADLINE_MIN_SUBSTEPS. Whole catches held at a fixed count (F-22, F-14,
- * 45 and 60 m/s, 3 m off): at 12 no link crossed the drawn skin and the
- * run-outs were within 5 m of 24's; at 8 links crossed it (3-4 a frame) and
- * the F-14 ran out 114 m at 60 m/s, past the MK-7's 105. The smoothed governor alone let single
- * steps reach 7-13 ms: the contact code's first runs (cold, before the JIT
- * has it; see warmUp) and bursts of new contacts as the jet hit the belts.
- */
-const DEADLINE_MS = 4;
-const DEADLINE_MIN_SUBSTEPS = 12;
-/** With the body standing still (held, stopped) nothing sweeps through the webbing: fewer will do. */
-const DEADLINE_MIN_SUBSTEPS_STILL = 8;
-const BUDGET_SMOOTHING = 0.1;
+const BUDGET_MS = 4;
+const MIN_SUBSTEPS = 12;
+const MIN_SUBSTEPS_STILL = 8;
+const PACE_SMOOTHING = 0.3;
+/** Substeps for a web with nothing in reach (a 1/60 s step), the solver's own default. */
+const SUBSTEPS_ALONE = 32;
 
 /**
  * A new web hangs itself under its own weight in SETTLE_STEPS steps, as
- * many a frame as fit in SETTLE_BUDGET_MS (each under that deadline, so a
- * cold first one takes fewer substeps): done at once in the constructor it
- * stalled the sim's worker 200 ms at every rigging. The rigged net is the
- * same every time it is laced, so the first web's settled state starts
- * every later one.
+ * many a frame as fit in SETTLE_BUDGET_MS (at least one): done at once in
+ * the constructor it stalled the sim's worker 200 ms at every rigging. The
+ * rigged net is the same every time it is laced, so the first web's settled
+ * state starts every later one. Each settling step is a full one: cut short
+ * by a deadline (down to 4 substeps) the stiff upper belt overshot its
+ * pendants' 25 kN slip as it took up its load, they paid out 0.4-0.9 m,
+ * and the cached net hung 2.3 m slack in the middle (rigged, 0.29 m) at
+ * every spawn and K, worse at each catch.
  */
 const SETTLE_STEPS = 120;
 const SETTLE_BUDGET_MS = 3;
-const SETTLE_MIN_SUBSTEPS = 4;
 let settledRig: WebSolverState | undefined;
 
 /**
@@ -248,7 +259,8 @@ export class BarricadeWeb {
     lastStepMs = 0;
     /** The dearest step since {@link takePeakMs} last read it (ms). */
     private peakMs = 0;
-    private smoothMs = 0;
+    /** What a substep has been costing (ms), for the next step's count. */
+    private paceMs = 0;
     /** The pose (carrier-local position, quaternion) of the body last stepped with, or NaN without one. */
     readonly bodyPose = new Float64Array(7).fill(NaN);
 
@@ -287,14 +299,21 @@ export class BarricadeWeb {
 
     /**
      * Advance by dt with `body` in the net, or alone (asleep once still).
-     * `maxSubsteps` is the quality the airframe asks for (substepsFor); the
-     * budget governor steps it down by BUDGET_STEP while the web's smoothed
-     * cost is over BUDGET_MS, to BUDGET_MIN_SUBSTEPS at the least, and back up
-     * once it is well under.
+     * `maxSubsteps` is the quality the airframe asks for (substepsFor), per
+     * 1/60 s; the step takes as many of them as fit in BUDGET_MS, and no fewer
+     * than MIN_SUBSTEPS.
      */
     step(dt: number, body: BarricadeWebBody | null, maxSubsteps = 32): void {
+        // Dev trace (set globalThis.__webTrace = [] in the worker): one row a step.
+        const trace = (globalThis as { __webTrace?: number[][] }).__webTrace;
+        const st = this.solver.stats;
+        const t0 = trace ? performance.now() : 0, pq = st.pointQueries, eq = st.edgeQueries, lo = st.listOverflows;
         this.stepOnce(dt, body, maxSubsteps);
         this.peakMs = Math.max(this.peakMs, this.lastStepMs);
+        if (trace) {
+            trace.push([t0, this.lastStepMs, this.solver.lastSubsteps, this.solver.substeps, st.contacts,
+                st.pointQueries - pq, st.edgeQueries - eq, st.listOverflows - lo, body ? 1 : 0, this.asleep ? 1 : 0, warming ? 1 : 0, dt]);
+        }
     }
 
     private stepOnce(dt: number, body: BarricadeWebBody | null, maxSubsteps: number): void {
@@ -302,9 +321,10 @@ export class BarricadeWeb {
             // An aircraft already in reach finds it hung: the rest of the settling at once.
             const t0 = performance.now();
             let spent = 0, last = 0;
-            while (this.settleLeft > 0 && (body || spent + last < SETTLE_BUDGET_MS)) {
+            while (this.settleLeft > 0 && (body || spent + last < SETTLE_BUDGET_MS || last === 0)) {
                 const s0 = performance.now();
-                this.solver.step(1 / 60, undefined, body ? Infinity : SETTLE_BUDGET_MS - spent, SETTLE_MIN_SUBSTEPS);
+                // At full quality: no deadline on a settling step (see SETTLE_STEPS).
+                this.solver.step(1 / 60);
                 this.settleLeft--;
                 const now = performance.now();
                 last = now - s0;
@@ -336,19 +356,24 @@ export class BarricadeWeb {
             st.reactionMoment[0] = st.reactionMoment[1] = st.reactionMoment[2] = 0;
             return;
         }
-        let n = this.solver.substeps;
-        if (n > maxSubsteps) n = maxSubsteps;
-        else if (this.smoothMs > BUDGET_MS && n > BUDGET_MIN_SUBSTEPS) n = Math.max(BUDGET_MIN_SUBSTEPS, n - BUDGET_STEP);
-        else if (this.smoothMs < BUDGET_RELAX_MS && n < maxSubsteps) n = Math.min(maxSubsteps, n + BUDGET_STEP);
-        if (n !== this.solver.substeps) {
-            this.solver.setSubsteps(n);
-            // Judged afresh at the new quality.
-            this.smoothMs = (BUDGET_MS + BUDGET_RELAX_MS) / 2;
-        }
+        // The counts for this step's length: a longer step (the main thread slower than 60 fps, the
+        // sim's step following its frame) needs as many substeps a second, or links go through the
+        // skin (13-14 at 1/30 s with 1/60 s's 12). The budget stays a frame's: the web's share of a
+        // slow frame does not grow with it, unless the floor alone costs more.
+        const scale = Math.max(1, dt * 60);
+        const most = Math.round(maxSubsteps * scale);
+        const least = Math.ceil((still ? MIN_SUBSTEPS_STILL : MIN_SUBSTEPS) * scale);
+        const budget = BUDGET_MS;
+        const fit = this.paceMs > 0 ? Math.floor(budget / this.paceMs) : most;
+        // Alone, it takes the full count, with no deadline: it costs little and soon sleeps, and
+        // fewer let the upper belt's pretension (20 kN) pull its pendants past their 25 kN slip.
+        const n = body ? Math.min(most, Math.max(least, fit)) : Math.round(SUBSTEPS_ALONE * scale);
+        if (n !== this.solver.substeps) this.solver.setSubsteps(n);
         const t0 = performance.now();
-        this.solver.step(dt, body ?? undefined, DEADLINE_MS, still ? DEADLINE_MIN_SUBSTEPS_STILL : DEADLINE_MIN_SUBSTEPS);
+        this.solver.step(dt, body ?? undefined, body ? budget : Infinity, least);
         this.lastStepMs = performance.now() - t0;
-        this.smoothMs += (this.lastStepMs - this.smoothMs) * BUDGET_SMOOTHING;
+        const pace = this.lastStepMs / Math.max(1, this.solver.lastSubsteps);
+        this.paceMs = this.paceMs > 0 ? this.paceMs + (pace - this.paceMs) * PACE_SMOOTHING : pace;
         this.quiet = still && (this.solver.stats.maxSpeed < SLEEP_SPEED_MPS || this.bodyStill >= HELD_SETTLE_STEPS) ? this.quiet + 1 : 0;
         if ((!warmDone || warming || (this.warmWith && !this.isWarm(this.warmWith)))
             && this.solver.stats.contacts === 0 && this.lastStepMs < WARM_WHEN_UNDER_MS) {

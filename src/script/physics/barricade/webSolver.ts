@@ -73,6 +73,16 @@ const ENGINE_LAG_S = 0.005;
  */
 const ENGINE_MIN_LEFT_M = 5;
 /** A locked engine's hold (N): far past anything the webbing or a jet's thrust can pull. */
+/**
+ * The share of the way to where its strap pulls it that an eye slides along
+ * the upper belt each substep: the loop's friction on the belt, as a drag on
+ * its sliding (see solveSlings). 1 is frictionless, 0 sewn on. Free, the
+ * eyes bunched where the nose pushed and 1-4 links crossed the drawn skin in
+ * 16 of the 30 and 60 m/s catches (none sewn).
+ */
+const SLING_SLIDE = 0.05;
+/** Nylon webbing on nylon: an eye holds its place on the belt against a pull along it up to this share of the pull across it. */
+const SLING_MU = 0.5;
 /** A step's deadline is judged at its substeps' mean pace times this (see step). */
 const DEADLINE_PACE_MARGIN = 1.15;
 /** Substeps per step (a 60 Hz frame gives 0.52 ms substeps). */
@@ -256,6 +266,7 @@ export interface WebSolverState {
     readonly tieBroken: Uint8Array;
     readonly tetherRate: Float64Array;
     readonly payout: number[];
+    readonly slingAt: Float64Array;
 }
 
 /** A chain: node particle ids (−1 − t for tether t's anchor), and where its links sit in the chain arrays. */
@@ -318,6 +329,9 @@ export class WebSolver {
     private cD = new Float64Array(0);
     private cActive = new Uint8Array(0);
     private cW = new Float64Array(0);
+
+    /** Where each strap's eye is on the upper belt, link plus fraction (see solveSlings). */
+    private readonly slingAt: Float64Array;
 
     /** 1 for each tie-down that has let go. */
     readonly tieBroken: Uint8Array;
@@ -432,6 +446,7 @@ export class WebSolver {
 
     /** The webbing's damping for substeps of h (s). */
     private setSubstepDamping(h: number): void {
+        this.dampH = h;
         const links = this.layout.links;
         for (let k = 0; k < links.length; k++) {
             const l = links[k];
@@ -451,7 +466,7 @@ export class WebSolver {
         return {
             x: this.x.slice(), prev: this.prev.slice(), v: this.v.slice(),
             tieSlack: this.tieSlack.slice(), tieBroken: this.tieBroken.slice(),
-            tetherRate: this.tetherRate.slice(), payout: this.stats.payout.slice(),
+            tetherRate: this.tetherRate.slice(), payout: this.stats.payout.slice(), slingAt: this.slingAt.slice(),
         };
     }
 
@@ -462,8 +477,12 @@ export class WebSolver {
         this.tieSlack.set(s.tieSlack);
         this.tieBroken.set(s.tieBroken);
         this.tetherRate.set(s.tetherRate);
+        this.slingAt.set(s.slingAt);
         for (let t = 0; t < s.payout.length; t++) this.stats.payout[t] = s.payout[t];
     }
+
+    /** The substep length the damping table is for (s). */
+    private dampH = 0;
 
     /** Substeps the last step took (fewer than {@link substeps} when its deadline cut it short). */
     lastSubsteps = 0;
@@ -501,8 +520,10 @@ export class WebSolver {
                 this.linkDampFactor[k] = Math.exp(-2 * WEBBING_ZETA * omega * (1 / 60 / this.substeps));
             }
         });
+        this.dampH = 1 / 60 / this.substeps;
         this.tetherCapped = new Uint8Array(layout.tethers.length);
         this.tetherHold = Float64Array.from(layout.tethers, t => t.holdN);
+        this.slingAt = Float64Array.from(layout.slings, s => s.link);
         this.tetherRate = new Float64Array(layout.tethers.length);
         this.tetherHeld = new Uint8Array(layout.tethers.length);
         this.buildChains(layout);
@@ -666,6 +687,8 @@ export class WebSolver {
     step(dt: number, body?: WebBody, budgetMs = Infinity, minSubsteps = 1): void {
         const n = this.substeps;
         let h = dt / n;
+        // Damping to the substep this step takes (a step longer than 1/60 s, or a new count).
+        if (Math.abs(h - this.dampH) > 1e-12) this.setSubstepDamping(h);
         this.stats.reaction[0] = this.stats.reaction[1] = this.stats.reaction[2] = 0;
         this.stats.reactionMoment[0] = this.stats.reactionMoment[1] = this.stats.reactionMoment[2] = 0;
         const t0 = budgetMs < Infinity ? performance.now() : 0;
@@ -702,7 +725,6 @@ export class WebSolver {
                 }
             }
         }
-        if (h !== dt / n) this.setSubstepDamping(1 / 60 / n);
         this.lastSubsteps = taken;
         this.crossflowDrag(dt);
         this.measure();
@@ -894,13 +916,17 @@ export class WebSolver {
                     else this.solveChain(this.chains[idx], h);
                 }
             }
+            this.solveSlings(0);
             this.solveTieDowns(h);
         }
+        // The eyes slide along the belt once a substep (in the rounds they hold their place on it).
+        this.solveSlings(SLING_SLIDE);
         this.projCount.fill(0);
         this.solveContacts(h);
         this.payOut(h);
         this.updateVelocities(h);
         this.dampLinks(h);
+        this.slingVelocities();
         this.collectReaction(h);
         this.substepCount++;
     }
@@ -1564,6 +1590,92 @@ export class WebSolver {
      * yielded some). Past its rating it holds at the rating and yields,
      * like the tethers; once it has yielded its stroke it lets go.
      */
+    /**
+     * Each strap's eye back onto the upper belt, where along it the eye now
+     * lies nearest: rigid across the belt, free along it (a frictionless
+     * sling). The eye's place is a belt coordinate, link plus fraction
+     * (slingAt), followed as it slides. Kept a strap's width from its
+     * neighbours' eyes by clamping, the centre strap's eye was forced under
+     * an F-14's belly and its top links through the skin. Friction (nylon on nylon, mu 0.5) as
+     * a position-level stick toward the substep's start was tried, once per
+     * round and once per substep: it pinned the eye against the belt running
+     * through it at tens of m/s in the pull, and the webbing blew up
+     * (particles at 500-990 m/s); a velocity-level friction would be the
+     * way to add it.
+     */
+    private solveSlings(slide: number): void {
+        const { x, w } = this;
+        const belt = this.layout.upperBelt;
+        const last = belt.length - 2;
+        const slings = this.layout.slings;
+        for (let s = 0; s < slings.length; s++) {
+            const e = 3 * slings[s].eye;
+            let at = this.slingAt[s];
+            let j = Math.min(last, Math.floor(at));
+            let t = at - j;
+            let a = 3 * belt[j], b = 3 * belt[j + 1];
+            let abx = x[b] - x[a], aby = x[b + 1] - x[a + 1], abz = x[b + 2] - x[a + 2];
+            if (slide > 0) {
+                // Where along the belt the strap pulls the eye: the nearest point, link by link.
+                for (let hop = 0; hop <= last; hop++) {
+                    a = 3 * belt[j];
+                    b = 3 * belt[j + 1];
+                    abx = x[b] - x[a]; aby = x[b + 1] - x[a + 1]; abz = x[b + 2] - x[a + 2];
+                    const l2 = abx * abx + aby * aby + abz * abz;
+                    t = l2 > 0 ? ((x[e] - x[a]) * abx + (x[e + 1] - x[a + 1]) * aby + (x[e + 2] - x[a + 2]) * abz) / l2 : 0;
+                    if (t < 0 && j > 0) j--;
+                    else if (t > 1 && j < last) j++;
+                    else break;
+                }
+                t = t < 0 ? 0 : t > 1 ? 1 : t;
+                // Held by friction up to SLING_MU times what presses it on the belt (the correction
+                // across it), past that a part of the way there (see SLING_SLIDE).
+                const len = Math.sqrt(abx * abx + aby * aby + abz * abz);
+                const px = x[e] - (x[a] + t * abx), py = x[e + 1] - (x[a + 1] + t * aby), pz = x[e + 2] - (x[a + 2] + t * abz);
+                const hold = len > 0 ? SLING_MU * Math.sqrt(px * px + py * py + pz * pz) / len : 0;
+                const want = j + t - at;
+                if (Math.abs(want) > hold) at += (want - Math.sign(want) * hold) * slide;
+                this.slingAt[s] = at;
+                j = Math.min(last, Math.floor(at));
+                t = at - j;
+                a = 3 * belt[j];
+                b = 3 * belt[j + 1];
+                abx = x[b] - x[a]; aby = x[b + 1] - x[a + 1]; abz = x[b + 2] - x[a + 2];
+            }
+            const cx = x[e] - (x[a] + t * abx), cy = x[e + 1] - (x[a + 1] + t * aby), cz = x[e + 2] - (x[a + 2] + t * abz);
+            const we = w[e / 3], wa = w[a / 3] * (1 - t), wb = w[b / 3] * t;
+            const den = we + wa * (1 - t) + wb * t;
+            if (den <= 0) continue;
+            const ke = we / den, ka = wa / den, kb = wb / den;
+            x[e] -= ke * cx; x[e + 1] -= ke * cy; x[e + 2] -= ke * cz;
+            x[a] += ka * cx; x[a + 1] += ka * cy; x[a + 2] += ka * cz;
+            x[b] += kb * cx; x[b + 1] += kb * cy; x[b + 2] += kb * cz;
+        }
+    }
+
+    /**
+     * Each eye moves with the belt at its place on it. Its velocity left as
+     * the link damping set it, the eye came off the belt each prediction and
+     * was put back by the next solve: the outer eyes rang at 0.16 m/s in a
+     * rigged net that had otherwise stopped.
+     */
+    private slingVelocities(): void {
+        const { v } = this;
+        const belt = this.layout.upperBelt;
+        const last = belt.length - 2;
+        const slings = this.layout.slings;
+        for (let s = 0; s < slings.length; s++) {
+            const e = 3 * slings[s].eye;
+            const at = this.slingAt[s];
+            const j = Math.min(last, Math.floor(at));
+            const t = at - j;
+            const a = 3 * belt[j], b = 3 * belt[j + 1];
+            v[e] = v[a] + t * (v[b] - v[a]);
+            v[e + 1] = v[a + 1] + t * (v[b + 1] - v[a + 1]);
+            v[e + 2] = v[a + 2] + t * (v[b + 2] - v[a + 2]);
+        }
+    }
+
     private solveTieDowns(h: number): void {
         const { x, w } = this;
         const h2 = h * h;

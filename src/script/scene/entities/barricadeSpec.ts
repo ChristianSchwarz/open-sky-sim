@@ -11,9 +11,11 @@
  * arresting engine below deck. It is stowed and only rigged for an aircraft
  * that cannot take a wire, and the webbing is thrown away after one catch.
  *
- * Here the physics is the same shape as the wires' (see arrestorCables.ts): a
- * crossing test and a deck-axis scrub to a fixed run-out. Everything the net
- * looks like is drawn from pose in barricadeWrap.ts, and never feeds back.
+ * The catch itself is the same shape as the wires' (see arrestorCables.ts): a
+ * crossing test. What stops the aircraft and what the net looks like is the
+ * rigid-body webbing (physics/barricade), stepped in the sim with the aircraft
+ * it holds; the deck-axis scrub to a fixed run-out here is only for an
+ * aircraft the sim has no collider for.
  */
 import * as THREE from 'three';
 import { ARRESTOR_DECK_MID_X } from './arrestorCables';

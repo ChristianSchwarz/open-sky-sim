@@ -1,3 +1,4 @@
+import { AirframeCollider, airframeBuffers } from '../barricade/webBarricade';
 import * as THREE from 'three';
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import { Faction } from '../../weapons/combatant';
@@ -173,9 +174,14 @@ export class CombatSimClient {
     }
 
     /** The drawn airframe (body frame) the barricade webbing is to meet this aircraft with; null forgets it. */
-    setBarricadeAirframe(id: string, triangles: Float32Array | null, prepared?: { coverageP99: number }): void {
-        this.worker.postMessage({ type: 'setBarricadeAirframe', id, triangles, prepared } satisfies SimToWorkerMessage,
-            triangles ? [triangles.buffer as ArrayBuffer] : []);
+    /**
+     * The collider the barricade webbing meets aircraft `id` with (see
+     * webAirframeWorker): its airframe as drawn, or its type's hull until
+     * then; `transfer` hands its buffers over (only for one not kept here).
+     */
+    setBarricadeAirframe(id: string, airframe: AirframeCollider | null, hull = false, transfer = false): void {
+        this.worker.postMessage({ type: 'setBarricadeAirframe', id, airframe, hull } satisfies SimToWorkerMessage,
+            airframe && transfer ? airframeBuffers(airframe) : []);
     }
 
     /** The rigged barricade's webbing as of the last snapshot, if one is rigged. */

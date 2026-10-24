@@ -191,7 +191,7 @@ export type SimToWorkerMessage =
     | { type: 'step'; delta: number; inputs: Record<string, SimControlInputs> }
     | { type: 'setBarricades'; barricades: SerializedBarricade[] }
     /** An aircraft's drawn airframe (body frame) for the barricade webbing to meet it with; null forgets it. */
-    | { type: 'setBarricadeAirframe'; id: string; triangles: Float32Array | null; prepared?: { coverageP99: number } }
+    | { type: 'setBarricadeAirframe'; id: string; airframe: import('../barricade/webBarricade').AirframeCollider | null; hull?: boolean }
     | { type: 'keyDown'; id: string; key: string; repeat: boolean }
     | { type: 'keyUp'; id: string; key: string }
     | { type: 'setKeyboardLayout'; layoutId: KeyboardControlLayoutId }

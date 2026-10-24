@@ -65,7 +65,7 @@ import {
 } from './simTypes';
 import { fm2UsesAfterburner, SimPlayerInput, SimPlayerInputSink } from './simPlayerInput';
 import { FrameShift } from '../../terrain/geodesy';
-import { AirframeCollider, BarricadeWeb, buildAirframeCollider, colliderFromPrepared, substepsFor } from '../barricade/webBarricade';
+import { AirframeCollider, BarricadeWeb, buildAirframeCollider, substepsFor } from '../barricade/webBarricade';
 import type { BarricadeWebSnapshot } from './simTypes';
 
 /** Seconds a tracer lives before self-destructing (mirrors WeaponsField). */
@@ -640,6 +640,8 @@ class ExternalCombatant implements Combatant {
  */
 /** An aircraft this close to a rigged barricade's centre (m) is stepped with its webbing. */
 const BARRICADE_WEB_REACH_M = 60;
+/** Faster than this over the deck (m/s), an aircraft in reach is coming at the webbing, not parked by it. */
+const BARRICADE_WEB_MOVING_MPS = 1;
 /** Moving more than this in a step (m) is a teleport, not a motion through the net. */
 const BARRICADE_WEB_JUMP_M = 10;
 /** Slower than this along the deck (m/s) for this long (s), a web-held aircraft is stopped: HELD. */
@@ -665,6 +667,8 @@ export class CombatSim implements ProjectileSink {
     private barricadeFrames: { origin: THREE.Vector3; quaternion: THREE.Quaternion; inverse: THREE.Quaternion }[] = [];
     /** Aircraft the webbing can hold: their collision meshes for it, from the drawn airframe. */
     private readonly barricadeAirframes = new Map<string, AirframeCollider>();
+    /** Aircraft types' collision hulls, per aircraft: what the webbing meets an aircraft with until (or without) its drawn airframe. */
+    private readonly barricadeHulls = new Map<string, AirframeCollider>();
     /** World velocity of the moving carrier (m/s); trap scrub is relative to this. */
     private readonly carrierVel = new THREE.Vector3();
     private readonly aircraft = new Map<string, SimAircraft>();
@@ -856,15 +860,19 @@ export class CombatSim implements ProjectileSink {
      * its drawn airframe (body frame), or none: without one it is held by the
      * scripted run-out as before.
      */
-    setBarricadeAirframe(id: string, triangles: ArrayLike<number> | null, prepared?: { coverageP99: number }): void {
-        if (!triangles || triangles.length < 9) {
-            this.barricadeAirframes.delete(id);
+    setBarricadeAirframe(id: string, airframe: AirframeCollider | ArrayLike<number> | null, hull = false): void {
+        const into = hull ? this.barricadeHulls : this.barricadeAirframes;
+        if (!airframe || ('length' in airframe && airframe.length < 9)) {
+            into.delete(id);
             return;
         }
-        // Prepared (decimated off the sim's thread, see prepareAirframeSoup), only the edges are left to find.
-        this.barricadeAirframes.set(id, prepared
-            ? colliderFromPrepared(Float32Array.from(triangles), prepared.coverageP99)
-            : buildAirframeCollider(triangles));
+        // Built off the sim's thread (webAirframeWorker), or here from a soup (the tests).
+        into.set(id, 'collider' in airframe ? airframe : buildAirframeCollider(airframe));
+    }
+
+    /** What the webbing meets aircraft `id` with: its drawn airframe, else its type's hull. */
+    private barricadeCollider(id: string): AirframeCollider | undefined {
+        return this.barricadeAirframes.get(id) ?? this.barricadeHulls.get(id);
     }
 
     /** The webbing as the main thread draws it: one rigged barricade's particles, carrier-local, and its solver time. */
@@ -878,8 +886,8 @@ export class CombatSim implements ProjectileSink {
                 tetherForce: st.tetherForce.slice(), payout: st.payout.slice(), contacts: st.contacts,
                 substeps: web.solver.lastSubsteps, reaction: [st.reaction[0], st.reaction[1], st.reaction[2]],
                 body: Number.isNaN(web.bodyPose[0]) ? undefined : Array.from(web.bodyPose),
-                bodyBox: Number.isNaN(web.bodyPose[0]) ? undefined : this.barricadeAirframes.get(this.barricadeWebHeld[i] ?? '')?.box,
-                warm: web.ready && [...this.barricadeAirframes.values()].every(af => web.isWarm(af)),
+                bodyBox: Number.isNaN(web.bodyPose[0]) ? undefined : this.barricadeCollider(this.barricadeWebHeld[i] ?? '')?.box,
+                warm: web.ready && [...this.barricadeAirframes.values(), ...this.barricadeHulls.values()].every(af => web.isWarm(af)),
                 scriptedCatch: [...this.aircraft.values()].some(a => a.barricadeState !== BarricadeEngagement.NONE
                     && a.barricadeFieldIndex === i && !a.barricadeWebCoupled),
             };
@@ -923,6 +931,7 @@ export class CombatSim implements ProjectileSink {
         this.aircraft.delete(id);
         this.playerInputs.delete(id);
         this.barricadeAirframes.delete(id);
+        this.barricadeHulls.delete(id);
         const i = this.order.indexOf(id);
         if (i >= 0) this.order.splice(i, 1);
     }
@@ -1464,7 +1473,7 @@ export class CombatSim implements ProjectileSink {
                         a.barricadeSnagAlong = barricadeAlong(field, pos);
                         a.barricadeGeneration = field.generation;
                         // With its webbing and a mesh to meet it with, the net itself stops it.
-                        a.barricadeWebCoupled = !!this.barricadeWebs[fi] && this.barricadeAirframes.has(a.id);
+                        a.barricadeWebCoupled = !!this.barricadeWebs[fi] && !!this.barricadeCollider(a.id);
                         a.barricadeStillS = 0;
                         field.armed = false;
                         this.barricadeExpended[fi] = field.generation;
@@ -1553,9 +1562,11 @@ export class CombatSim implements ProjectileSink {
             const frame = this.barricadeFrames[i];
             const field = this.barricadeFields[i];
             if (!web || !frame || !field) continue;
-            let held: SimAircraft | undefined, best = BARRICADE_WEB_REACH_M + 1e-9;
+            // The aircraft it holds, else the nearest in reach that is moving over the deck (one parked
+            // near the webbing must not stand in for the one rolling at it), else the nearest.
+            let held: SimAircraft | undefined, best = Infinity;
             for (const a of this.aircraft.values()) {
-                const collider = this.barricadeAirframes.get(a.id);
+                const collider = this.barricadeCollider(a.id);
                 // Caught on the scripted run-out (no airframe at the catch), it stays out of the webbing
                 // it went through, even once its airframe comes.
                 const scripted = a.barricadeState !== BarricadeEngagement.NONE && !a.barricadeWebCoupled;
@@ -1563,20 +1574,23 @@ export class CombatSim implements ProjectileSink {
                     a.barricadeLocalValid = false;
                     continue;
                 }
-                // One it already holds stays held however far it runs out; otherwise the nearest in reach.
-                const d = a.barricadeState !== BarricadeEngagement.NONE && a.barricadeFieldIndex === i
-                    ? 0 : a.model.position.distanceTo(field.center);
-                if (d < best) {
-                    best = d;
-                    held = a;
-                } else if (d > BARRICADE_WEB_REACH_M) {
+                const engaged = a.barricadeState !== BarricadeEngagement.NONE && a.barricadeFieldIndex === i;
+                const d = a.model.position.distanceTo(field.center);
+                if (!engaged && d > BARRICADE_WEB_REACH_M) {
                     a.barricadeLocalValid = false;
+                    continue;
+                }
+                const moving = this.webRel.copy(a.model.velocityVector).sub(this.carrierVel).lengthSq() > BARRICADE_WEB_MOVING_MPS ** 2;
+                const rank = engaged ? -1 : moving ? d : BARRICADE_WEB_REACH_M + d;
+                if (rank < best) {
+                    best = rank;
+                    held = a;
                 }
             }
             this.barricadeWebHeld[i] = held?.id;
             // The airframe its idle frames warm up with (BarricadeWeb.warmWith).
             web.warmWith = undefined;
-            for (const airframe of this.barricadeAirframes.values()) {
+            for (const airframe of [...this.barricadeAirframes.values(), ...this.barricadeHulls.values()]) {
                 if (!web.isWarm(airframe)) {
                     web.warmWith = airframe;
                     break;
@@ -1586,7 +1600,7 @@ export class CombatSim implements ProjectileSink {
                 web.step(delta, null);
                 continue;
             }
-            const airframe = this.barricadeAirframes.get(held.id)!;
+            const airframe = this.barricadeCollider(held.id)!;
             const collider = airframe.collider;
             web.solver.setEngineMass(held.model.getMassKg());
             const pos = this.webPos.copy(held.model.position).sub(frame.origin).applyQuaternion(frame.inverse);
@@ -1611,6 +1625,7 @@ export class CombatSim implements ProjectileSink {
         }
     }
     private readonly webPos = new THREE.Vector3();
+    private readonly webRel = new THREE.Vector3();
     private readonly webQuat = new THREE.Quaternion();
     private readonly webImpulse = new THREE.Vector3();
     private readonly webMoment = new THREE.Vector3();

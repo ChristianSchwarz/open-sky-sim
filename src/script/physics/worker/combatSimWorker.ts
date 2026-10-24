@@ -63,7 +63,7 @@ function handleMessage(data: SimToWorkerMessage): void {
             sim.setBarricades(data.barricades);
             break;
         case 'setBarricadeAirframe':
-            sim.setBarricadeAirframe(data.id, data.triangles, data.prepared);
+            sim.setBarricadeAirframe(data.id, data.airframe, data.hull);
             break;
         case 'setCarrierMeshOrigins':
             sim.setCarrierMeshOrigins(data.origins);
@@ -166,6 +166,8 @@ function handleMessage(data: SimToWorkerMessage): void {
             const t0 = performance.now();
             sim.step(data.delta, data.inputs);
             const workerStepMs = performance.now() - t0;
+            // Dev trace beside the webbing's (BarricadeWeb.step): the whole step, its delta.
+            (globalThis as { __simTrace?: number[][] }).__simTrace?.push([t0, workerStepMs, data.delta]);
             const web = sim.barricadeWebSnapshot();
             if (shared) {
                 const back = sharedBackBank(shared);
