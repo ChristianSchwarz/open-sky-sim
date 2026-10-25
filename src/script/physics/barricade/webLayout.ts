@@ -16,7 +16,9 @@
  * its shackle up a riser to the stanchion head, across, and down again;
  * at the head a tensioning pendant holds it (a breakaway tie, see
  * PENDANT_BREAK_N) until the catch's pull frees it, and both belts then
- * pull through the same shackle and cable. The lower belt is also tied down to
+ * pull through the same shackle and cable. The lower belt is pretensioned
+ * a little and its ends held at the stanchion bases by lower tensioning
+ * pendants (LOWER_PRETENSION_N), which let go the same way. It is also tied down to
  * the deck along its length, which is what keeps a rigged net from bellying
  * (a belt held only at its ends is pulled up by the straps until they go
  * slack again).
@@ -51,7 +53,14 @@ const BELT_KG_PER_M = 1.5;
 const STRAP_KG_PER_M = 0.5;
 /** Axial stiffness EA (N): load straps barely stretch, engaging straps do. */
 export const BELT_EA_N = 2e6;
-export const STRAP_EA_N = 4e5;
+/**
+ * Each engaging strap is a loop of two plies (see the header): 4e5 N a ply of
+ * heavy nylon webbing (about 90 kN at 22 % stretch), so 8e5 for the strap. It
+ * was left at one ply's 4e5 when the straps became loops, while the mass per
+ * metre already was the loop's (0.25 kg/m a ply); at one ply the centre
+ * straps took 39 % strain at 60 m/s once the gear no longer caught the belt.
+ */
+export const STRAP_EA_N = 8e5;
 /** Holding force where a purchase cable pays out (N), when its engine is not set for an aircraft (tests). */
 export const ENGINE_HOLD_N = 220e3;
 /**
@@ -137,6 +146,17 @@ const TIE_DOWN_COMPLIANCE = 1e-6;
 const PENDANT_BREAK_N = 40e3;
 const PENDANT_STROKE_M = 0.1;
 /**
+ * The lower belt is cut short for this tension (N), and a lower tensioning
+ * pendant at each stanchion base holds its end there (the NAVAIR rigging
+ * drawing has one each side, webbing's lower end to the stanchion foot),
+ * breaking at LOWER_PENDANT_BREAK_N (2x) under the catch's pull. The
+ * pretension keeps the strap straight along the deck between its ties. It
+ * stays under the purchase cable's 10 kN preload (ENGINE_PRELOAD_N): the
+ * shackle is held by the cable too, and past the preload the cable pays out.
+ */
+export const LOWER_PRETENSION_N = 5e3;
+const LOWER_PENDANT_BREAK_N = 10e3;
+/**
  * The belts stop this far inboard of the stanchions (m), so every tether
  * has a length: a zero-length one has no direction to pull along, and
  * repeated chain solves flipped it back and forth (a 5 m/s two-cycle).
@@ -211,6 +231,10 @@ export interface WebLayout {
     readonly shackles: [number, number];
     /** The pendants' tie-downs (indices into tieDowns), port then starboard. */
     readonly pendants: [number, number];
+    /** The lower tensioning pendants' tie-downs, shackle to stanchion base, port then starboard. */
+    readonly lowerPendants: [number, number];
+    /** The deck height it was rigged on (carrier-local m). */
+    readonly deckY: number;
     readonly upperBelt: number[];
     readonly lowerBelt: number[];
 }
@@ -220,6 +244,8 @@ export interface WebRigOptions {
     engineHoldN?: number;
     /** Purchase engines set for an aircraft of this mass (kg) instead of a constant hold. */
     engineSetKg?: number;
+    /** The deck's height at the barricade line (carrier-local m; WebDeck), else BARRICADE_DECK_Y. */
+    deckY?: number;
 }
 
 /** A purchase engine's hold: hydraulic when set for an aircraft, else constant. */
@@ -239,8 +265,9 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
     const xL = xS + TETHER_LEAD_M;
     const span = 2 * (BARRICADE_HALF_SPAN_M - TETHER_LEAD_M);
     const z = BARRICADE_LOCAL_Z;
-    const yTop = BARRICADE_DECK_Y + BARRICADE_HEIGHT_M;
-    const yLow = BARRICADE_DECK_Y + BARRICADE_LOWER_LIFT_M;
+    const deckY = opts.deckY ?? BARRICADE_DECK_Y;
+    const yTop = deckY + BARRICADE_HEIGHT_M;
+    const yLow = deckY + BARRICADE_LOWER_LIFT_M;
     const beltSegs = (BARRICADE_STRAP_COUNT + 1) * BELT_SEGMENTS_PER_BAY;
     const beltSeg = span / beltSegs;
     const strapLen = yTop - yLow;
@@ -271,7 +298,7 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
         return ids;
     };
     const upperSpan = belt(yTop, WebPart.UPPER_BELT, UPPER_PRETENSION_N);
-    const lowerBelt = belt(yLow, WebPart.LOWER_BELT, 0);
+    const lowerBelt = belt(yLow, WebPart.LOWER_BELT, LOWER_PRETENSION_N);
     // Each end of the upper belt runs down a riser from the stanchion head to its shackle (the
     // lower belt's end): cut to length, not pretensioned, so the span's 20 kN does not lift the
     // shackle off its purchase cable's 10 kN preload.
@@ -318,8 +345,8 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
     const xR = xS + 2 * BARRICADE_HALF_SPAN_M;
     // One tether a side: the purchase cable, shackle to deck sheave.
     const tethers: WebTether[] = [
-        { i: shackles[0], anchor: [xS, BARRICADE_DECK_Y, z], ...engineHold(opts) },
-        { i: shackles[1], anchor: [xR, BARRICADE_DECK_Y, z], ...engineHold(opts) },
+        { i: shackles[0], anchor: [xS, deckY, z], ...engineHold(opts) },
+        { i: shackles[1], anchor: [xR, deckY, z], ...engineHold(opts) },
     ];
     const tieDowns: WebTieDown[] = [];
     for (let k = TIE_DOWN_EVERY; k < beltSegs; k += TIE_DOWN_EVERY) {
@@ -330,6 +357,11 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
     const pendants: [number, number] = [tieDowns.length, tieDowns.length + 1];
     for (const i of upperHeads) {
         tieDowns.push({ i, at: [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]], compliance: TIE_DOWN_COMPLIANCE, breakN: PENDANT_BREAK_N, strokeM: PENDANT_STROKE_M });
+    }
+    // The lower tensioning pendants: each shackle (the lower belt's end) held at its stanchion base.
+    const lowerPendants: [number, number] = [tieDowns.length, tieDowns.length + 1];
+    for (const i of shackles) {
+        tieDowns.push({ i, at: [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]], compliance: TIE_DOWN_COMPLIANCE, breakN: LOWER_PENDANT_BREAK_N, strokeM: PENDANT_STROKE_M });
     }
 
     // Mirror: belts by index, straps by strap and node.
@@ -358,5 +390,7 @@ export function buildRiggedWeb(opts: WebRigOptions = {}): WebLayout {
         upperHeads,
         shackles,
         pendants,
+        lowerPendants,
+        deckY,
     };
 }

@@ -7,11 +7,12 @@
  */
 import * as THREE from 'three';
 import { buildTriangleBvh, bvhClosest, bvhClosestPoint } from '../collision/triangleBvh';
-import { buildWebCollider, closeGearGaps, WebCollider } from './webCollider';
+import { buildWebCollider, WebCollider, withoutGear } from './webCollider';
 import { decimateSoup } from './webDecimate';
 import { BARRICADE_DECK_Y, BARRICADE_LOCAL_Z, BARRICADE_MID_X } from '../../scene/entities/barricadeSpec';
 import { buildRiggedWeb, WebLayout } from './webLayout';
 import { WebSolver, WebSolverState } from './webSolver';
+import { WebDeck } from './webDeck';
 
 /**
  * Collision-mesh sizes tried, smallest first (triangles). 3,000 covered the
@@ -50,8 +51,8 @@ export interface AirframeCollider {
  * closed (struts up to floating gear, hanging wheels let down to the deck),
  * then decimated to the smallest size that still covers the drawn skin.
  */
-export function buildAirframeCollider(drawn: ArrayLike<number>): AirframeCollider {
-    const prepared = prepareAirframeSoup(drawn);
+export function buildAirframeCollider(drawn: ArrayLike<number>, gearDown = true): AirframeCollider {
+    const prepared = prepareAirframeSoup(drawn, gearDown);
     return colliderFromPrepared(prepared.triangles, prepared.coverageP99);
 }
 
@@ -61,10 +62,12 @@ export function buildAirframeCollider(drawn: ArrayLike<number>): AirframeCollide
  * 2.2 s), so the game runs it in its own worker (webAirframeWorker.ts), not
  * in the sim's, which it stalled.
  */
-export function prepareAirframeSoup(drawn: ArrayLike<number>): { triangles: Float32Array; coverageP99: number } {
-    const soup = closeGearGaps(Float32Array.from(drawn));
+export function prepareAirframeSoup(drawn: ArrayLike<number>, gearDown = true): { triangles: Float32Array; coverageP99: number } {
+    // The webbing does not meet the gear (withoutGear), so neither is its coverage measured on it.
+    // Gear up there is none, and what stands lowest (a ventral fin, a tank) is airframe.
+    const soup = gearDown ? withoutGear(Float32Array.from(drawn)) : Float32Array.from(drawn);
     const near = bvhClosest();
-    const vertices = drawn.length / 3;
+    const vertices = soup.length / 3;
     const stride = Math.max(1, Math.floor(vertices / COVERAGE_SAMPLES));
     let best: { triangles: Float32Array; coverageP99: number } | undefined;
     for (const target of COLLIDER_TRIS) {
@@ -73,7 +76,7 @@ export function prepareAirframeSoup(drawn: ArrayLike<number>): { triangles: Floa
         const d: number[] = [];
         for (let v = 0; v < vertices; v += stride) {
             const k = 3 * v;
-            d.push(bvhClosestPoint(bvh, drawn[k], drawn[k + 1], drawn[k + 2], 1, near) ? Math.sqrt(near.distSq) : 1);
+            d.push(bvhClosestPoint(bvh, soup[k], soup[k + 1], soup[k + 2], 1, near) ? Math.sqrt(near.distSq) : 1);
         }
         d.sort((a, b) => a - b);
         const p99 = d[Math.floor(0.99 * (d.length - 1))] ?? 0;
@@ -173,7 +176,8 @@ const SUBSTEPS_ALONE = 32;
  */
 const SETTLE_STEPS = 120;
 const SETTLE_BUDGET_MS = 3;
-let settledRig: WebSolverState | undefined;
+/** Per deck height (mm): the rig sits on the deck where the barricade is. */
+const settledRigs = new Map<number, WebSolverState>();
 
 /**
  * A warm-up catch, once per worker: a throwaway copy of the webbing with a
@@ -227,9 +231,10 @@ function warmUpStep(layout: WebLayout, dt: number, airframe?: AirframeCollider):
         // Heading aft (-z), wheels on the deck, nose a metre short of the webbing.
         const quaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
         const solver = new WebSolver(layout, { substeps: WARM_SUBSTEPS });
-        if (settledRig) solver.restoreState(settledRig);
+        const rig = settledRigs.get(Math.round(layout.deckY * 1000));
+        if (rig) solver.restoreState(rig);
         const box = warmDone ? airframe!.box : [-6, 0, -8, 6, 5, 8];
-        const at = new THREE.Vector3(BARRICADE_MID_X + 1, BARRICADE_DECK_Y - box[1], BARRICADE_LOCAL_Z + box[5] + 1);
+        const at = new THREE.Vector3(BARRICADE_MID_X + 1, layout.deckY - box[1], BARRICADE_LOCAL_Z + box[5] + 1);
         warming = { solver, collider: warmDone ? airframe!.collider : warmAirframe(), substeps: 0, at, prevAt: at.clone(), quaternion };
         // Built this frame, flown from the next.
         return performance.now() - t0;
@@ -264,13 +269,24 @@ export class BarricadeWeb {
     /** The pose (carrier-local position, quaternion) of the body last stepped with, or NaN without one. */
     readonly bodyPose = new Float64Array(7).fill(NaN);
 
-    constructor(readonly generation: number, substeps?: number) {
-        // Engines set for a mid-weight fighter until an aircraft is in reach (setEngineMass).
-        this.layout = buildRiggedWeb({ engineSetKg: 20e3 });
+    constructor(readonly generation: number, substeps?: number, deck?: WebDeck) {
+        // Engines set for a mid-weight fighter until an aircraft is in reach (setEngineMass); the rig
+        // on the deck where it stands.
+        this.layout = buildRiggedWeb({ engineSetKg: 20e3, deckY: deck?.reference });
         this.solver = new WebSolver(this.layout, { substeps });
+        this.solver.setDeck(deck);
+        this.deck = deck;
         // Hung under its own weight, as the crew leaves it rigged (see SETTLE_STEPS).
-        if (settledRig) this.solver.restoreState(settledRig);
+        const rig = settledRigs.get(this.rigKey);
+        if (rig) this.solver.restoreState(rig);
         else this.settleLeft = SETTLE_STEPS;
+    }
+
+    /** The deck under it (WebDeck), sampled ahead while the web is idle. */
+    readonly deck: WebDeck | undefined;
+
+    private get rigKey(): number {
+        return Math.round(this.layout.deckY * 1000);
     }
 
     /** Settled, and the contact code warm (see WARM_STEPS): ready for a catch at full speed. */
@@ -330,7 +346,7 @@ export class BarricadeWeb {
                 last = now - s0;
                 spent = now - t0;
             }
-            if (this.settleLeft === 0) settledRig ??= this.solver.saveState();
+            if (this.settleLeft === 0 && !settledRigs.has(this.rigKey)) settledRigs.set(this.rigKey, this.solver.saveState());
             if (!body) {
                 this.lastStepMs = performance.now() - t0;
                 this.bodyPose.fill(NaN);

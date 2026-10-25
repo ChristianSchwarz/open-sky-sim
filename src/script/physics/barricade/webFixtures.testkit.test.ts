@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { buildTriangleBvh, TriangleBvh } from '../collision/triangleBvh';
-import { buildWebCollider, closeGearGaps, WebCollider } from './webCollider';
+import { buildWebCollider, WebCollider, withoutGear } from './webCollider';
 import { decimateSoup } from './webDecimate';
 
 export const WEB_FIXTURES = ['f22', 'f16a', 'f16xl', 'f14a'] as const;
@@ -19,11 +19,14 @@ export interface WebAirframe {
     readonly name: WebFixture;
     readonly triangles: Float32Array;
     readonly bvh: TriangleBvh;
-    /** Body-frame bounds [minX, minY, minZ, maxX, maxY, maxZ]. */
+    /** The drawn soup without its landing gear (withoutGear): the skin the webbing meets, and its tree. */
+    readonly skin: Float32Array;
+    readonly skinBvh: TriangleBvh;
+    /** Body-frame bounds [minX, minY, minZ, maxX, maxY, maxZ], gear and all (its lowest point is the tyres). */
     readonly bounds: Float32Array;
     /** What the webbing collides with. */
     readonly collider: WebCollider;
-    /** The collision mesh it was built from: the drawn soup decimated to {@link COLLIDER_TRIS}. */
+    /** The collision mesh it was built from: the skin decimated to {@link COLLIDER_TRIS}. */
     readonly collisionTriangles: Float32Array;
 }
 
@@ -47,8 +50,9 @@ export function loadWebAirframe(name: WebFixture): WebAirframe {
     // Copied out: a view straight onto the buffer need not be 4-byte aligned.
     const triangles = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
     const bvh = buildTriangleBvh(triangles);
-    const collisionTriangles = decimateSoup(closeGearGaps(triangles), COLLIDER_TRIS[name]);
-    const out = { name, triangles, bvh, bounds: bvh.bounds, collider: buildWebCollider(collisionTriangles), collisionTriangles };
+    const skin = withoutGear(triangles);
+    const collisionTriangles = decimateSoup(skin, COLLIDER_TRIS[name]);
+    const out = { name, triangles, bvh, skin, skinBvh: buildTriangleBvh(skin), bounds: bvh.bounds, collider: buildWebCollider(collisionTriangles), collisionTriangles };
     cache.set(name, out);
     return out;
 }

@@ -48,7 +48,7 @@ import { bvhClosest, bvhClosestPoint } from '../collision/triangleBvh';
 import {
     BARRICADE_DECK_Y, BARRICADE_HEIGHT_M, BARRICADE_LOCAL_Z, BARRICADE_MID_X,
 } from '../../scene/entities/barricadeSpec';
-import { BELT_EA_N, buildRiggedWeb, UPPER_PRETENSION_N } from './webLayout';
+import { BELT_EA_N, buildRiggedWeb, LOWER_PRETENSION_N, UPPER_PRETENSION_N } from './webLayout';
 import { WebSolver } from './webSolver';
 import { loadWebAirframe, WEB_FIXTURES, WebFixture } from './webFixtures.testkit.test';
 import { cpuMs, deckAndPayoutFails, MASS_KG, netEnergy, penetration } from './webHarness.testkit.test';
@@ -197,6 +197,7 @@ function runCatch(fixture: WebFixture, speed: number, engineSetKg = MASS_KG[fixt
         layout.x[3 * layout.upperHeads[0]] - layout.x[3 * layout.shackles[0]],
         layout.x[3 * layout.upperHeads[0] + 1] - layout.x[3 * layout.shackles[0] + 1]);
     const pretensionJ = UPPER_PRETENSION_N ** 2 * headSpan / (2 * BELT_EA_N);
+    const lowerPretensionJ = LOWER_PRETENSION_N ** 2 * headSpan / (2 * BELT_EA_N);
     for (let f = 0; f < maxFrames; f++) {
         const t0 = cpuMs();
         const vz0 = velocity.z;
@@ -210,8 +211,10 @@ function runCatch(fixture: WebFixture, speed: number, engineSetKg = MASS_KG[fixt
             if (!s.tieBroken[k] || wasBroken[k]) return;
             wasBroken[k] = 1;
             const pendant = layout.pendants.includes(k);
+            const lower = layout.lowerPendants.includes(k);
             if (pendant) headFreed = true;
-            released.push({ f, i: t.i, e: t.breakN * t.strokeM + (pendant ? pretensionJ : 0), reach: pendant ? pendantReach : RELEASE_REACH_M });
+            // A lower pendant frees the pretensioned lower belt, all along it.
+            released.push({ f, i: t.i, e: t.breakN * t.strokeM + (pendant ? pretensionJ : lower ? lowerPretensionJ : 0), reach: pendant ? pendantReach : lower ? RELEASE_REACH_M + headSpan : RELEASE_REACH_M });
         });
         // Once a pendant has let the upper belt go it falls from the stanchion heads: as fast as a
         // fall from their height on top of twice the body's speed (an eye fell at 10.6 m/s there).
@@ -287,11 +290,11 @@ function report(r: CatchResult): string {
 }
 
 describe('barricade webbing: collision meshes', () => {
-    // Every drawn vertex and face centre against the decimated mesh the webbing collides with.
+    // Every drawn vertex and face centre (the gear left out, withoutGear) against the decimated mesh the webbing collides with.
     for (const fixture of WEB_FIXTURES) {
         it(`${fixture} covers the drawn skin`, () => {
             const af = loadWebAirframe(fixture);
-            const t = af.triangles;
+            const t = af.skin;
             const d: number[] = [];
             for (let o = 0; o < t.length; o += 9) {
                 for (const [x, y, z] of [[t[o], t[o + 1], t[o + 2]],

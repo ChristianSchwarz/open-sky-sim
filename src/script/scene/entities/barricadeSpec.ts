@@ -30,8 +30,13 @@ export const BARRICADE_LOCAL_Z = 40;
 export const BARRICADE_DECK_Y = 13.55;
 /** Stanchion and upper-strap height above the deck (20 ft). */
 export const BARRICADE_HEIGHT_M = 6.1;
-/** Lower load strap rides this high off the deck on its deck ramps. */
-export const BARRICADE_LOWER_LIFT_M = 0.35;
+/**
+ * The lower load strap lies across the deck (this high: its skin's), its ends
+ * at the deck ramps, so the wheels roll over it and the vertical straps take
+ * the wings. Held 0.35 m up it met the gear, above the axles, and the jet was
+ * stopped through its legs (see withoutGear in webCollider.ts).
+ */
+export const BARRICADE_LOWER_LIFT_M = 0.04;
 /**
  * Vertical engaging straps across the webbing, about 1.2 m apart: the
  * NAVAIR rigging diagram and deck photographs show them that close, several

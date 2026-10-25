@@ -72,7 +72,7 @@ export interface BarricadeWebState {
     /** Settled and warmed up (BarricadeWeb.ready), and how far each tether has paid out (m). */
     warm?: boolean;
     payout?: readonly number[];
-    /** Whether each tensioning pendant still holds the upper belt at its stanchion head. */
+    /** Whether each tensioning pendant still holds: upper (port, starboard), then lower (port, starboard). */
     pendantsHeld?: readonly boolean[];
 }
 
@@ -82,10 +82,17 @@ let restWeb: Float32Array | undefined;
 /** Stanchion foot and head, port then starboard: hinged at the deck, swinging up from lying flat with the head aft. */
 interface StanchionPose { base: THREE.Vector3; top: THREE.Vector3 }
 
-function stanchionPoses(raise: number): [StanchionPose, StanchionPose] {
+/** The deck under the barricade (WebDeck in the game): its height at (x, z), and at the barricade line. */
+export interface BarricadeDeck {
+    heightAt(x: number, z: number): number;
+    readonly reference: number;
+}
+const FLAT_DECK: BarricadeDeck = { heightAt: () => BARRICADE_DECK_Y, reference: BARRICADE_DECK_Y };
+
+function stanchionPoses(raise: number, deck: BarricadeDeck): [StanchionPose, StanchionPose] {
     const theta = THREE.MathUtils.clamp(raise, 0, 1) * Math.PI * 0.5;
     const make = (x: number) => {
-        const base = new THREE.Vector3(x, BARRICADE_DECK_Y, BARRICADE_LOCAL_Z);
+        const base = new THREE.Vector3(x, deck.heightAt(x, BARRICADE_LOCAL_Z), BARRICADE_LOCAL_Z);
         const top = base.clone().add(new THREE.Vector3(0, BARRICADE_HEIGHT_M * Math.sin(theta), BARRICADE_HEIGHT_M * Math.cos(theta)));
         return { base, top };
     };
@@ -97,11 +104,13 @@ function stanchionPoses(raise: number): [StanchionPose, StanchionPose] {
  * about their hinge line at the deck, the way their heads go, kept clear of
  * the deck.
  */
-function swing(out: THREE.Vector3, x: number, y: number, z: number, raise: number): THREE.Vector3 {
+function swing(out: THREE.Vector3, x: number, y: number, z: number, raise: number, deck: BarricadeDeck): THREE.Vector3 {
     const theta = THREE.MathUtils.clamp(raise, 0, 1) * Math.PI * 0.5;
-    const a = y - BARRICADE_DECK_Y, b = z - BARRICADE_LOCAL_Z;
+    const hinge = deck.reference;
+    const a = y - hinge, b = z - BARRICADE_LOCAL_Z;
     const s = Math.sin(theta), c = Math.cos(theta);
-    return out.set(x, Math.max(BARRICADE_DECK_Y + DECK_CLEARANCE_M, BARRICADE_DECK_Y + a * s - b * c), BARRICADE_LOCAL_Z + a * c + b * s);
+    const nz = BARRICADE_LOCAL_Z + a * c + b * s;
+    return out.set(x, Math.max(deck.heightAt(x, nz) + DECK_CLEARANCE_M, hinge + a * s - b * c), nz);
 }
 
 export class BarricadeEntity implements Entity {
@@ -143,6 +152,7 @@ export class BarricadeEntity implements Entity {
         materials: SceneMaterialManager,
         private readonly getCarrierPose: () => ArrestorCarrierPose,
         private readonly getWeb: () => BarricadeWebState | undefined = () => undefined,
+        private readonly getDeck: () => BarricadeDeck | undefined = () => undefined,
     ) {
         const flat = (color: string) => materials.build({
             type: SceneMaterialPrimitiveType.MESH,
@@ -313,7 +323,8 @@ export class BarricadeEntity implements Entity {
     }
 
     private rebuild(): void {
-        const stanchions = stanchionPoses(this.raise);
+        const deck = this.deck = this.getDeck() ?? FLAT_DECK;
+        const stanchions = stanchionPoses(this.raise, deck);
         // Rigged, the sim's webbing is the net, from the moment it stands to the moment it is
         // struck: one representation, so nothing changes shape at the catch.
         const web = this.getWeb();
@@ -338,10 +349,12 @@ export class BarricadeEntity implements Entity {
     private curtain(raise: number): Float32Array {
         const layout = this.webLayout ??= buildRiggedWeb();
         const src = restWeb ?? layout.x;
+        // The layout's own rig stands on the flat deck; the sim's on the real one.
+        const lift = restWeb ? 0 : this.deck.reference - layout.deckY;
         if (this.curtainPos.length !== src.length) this.curtainPos = new Float32Array(src.length);
         const out = this.curtainPos;
         for (let i = 0; i < src.length; i += 3) {
-            swing(_t, src[i], src[i + 1], src[i + 2], raise);
+            swing(_t, src[i], src[i + 1] + lift, src[i + 2], raise, this.deck);
             out[i] = _t.x;
             out[i + 1] = _t.y;
             out[i + 2] = _t.z;
@@ -382,18 +395,21 @@ export class BarricadeEntity implements Entity {
             const w = 1 - t * t * (3 - 2 * t);
             b.applyQuaternion(qd).add(pd);
             out[i] = x + w * (b.x - x);
-            // Carried with the drawn aircraft, still not into the deck.
-            out[i + 1] = Math.max(BARRICADE_DECK_Y + DECK_CLEARANCE_M, y + w * (b.y - y));
             out[i + 2] = z + w * (b.z - z);
+            // Carried with the drawn aircraft, still not into the deck.
+            out[i + 1] = Math.max(this.deck.heightAt(out[i], out[i + 2]) + DECK_CLEARANCE_M, y + w * (b.y - y));
         }
         return out;
     }
     private webDrawn = new Float32Array(0);
+    /** The deck this frame (getDeck, or the flat plane), and its height for the ribbons. */
+    private deck: BarricadeDeck = FLAT_DECK;
+    private readonly floorAt = (x: number, z: number) => this.deck.heightAt(x, z);
     /** The webbing's particles as last drawn (carrier-local), for the dev hook. */
     lastWebDrawn: Float32Array | undefined;
 
     private drawWeb(positions: Float32Array | undefined, stanchions: [StanchionPose, StanchionPose], raise: number,
-        pendantsHeld: readonly boolean[] = [true, true]): void {
+        pendantsHeld: readonly boolean[] = [true, true, true, true]): void {
         for (let i = 0; i < 2; i++) {
             const { base, top } = stanchions[i];
             const m = this.stanchions[i];
@@ -413,7 +429,7 @@ export class BarricadeEntity implements Entity {
             this.webLines = chains.map(c => c.map(() => new THREE.Vector3()));
             this.webPlies = layout.straps.flatMap(c => [c.map(() => new THREE.Vector3()), c.map(() => new THREE.Vector3())]);
             this.webCables = layout.tethers.map(() => [new THREE.Vector3(), new THREE.Vector3()]);
-            this.webPendants = layout.pendants.map(() => [new THREE.Vector3(), new THREE.Vector3()]);
+            this.webPendants = [...layout.pendants, ...layout.lowerPendants].map(() => [new THREE.Vector3(), new THREE.Vector3()]);
         }
         const chains = [layout.upperBelt, layout.lowerBelt, ...layout.straps];
         chains.forEach((c, k) => {
@@ -428,28 +444,36 @@ export class BarricadeEntity implements Entity {
         layout.tethers.forEach((t, k) => {
             const i = 3 * t.i;
             // From the deck sheave (at deck level: drawn on, not in, the deck).
-            this.webCables[k][0].set(t.anchor[0], Math.max(t.anchor[1], BARRICADE_DECK_Y + DECK_CLEARANCE_M), t.anchor[2]);
+            this.webCables[k][0].set(t.anchor[0], Math.max(t.anchor[1], this.deck.heightAt(t.anchor[0], t.anchor[2]) + DECK_CLEARANCE_M), t.anchor[2]);
             this.webCables[k][1].set(positions[i], positions[i + 1], positions[i + 2]);
         });
-        // The tensioning pendants, stanchion head to the upper belt's corner, until they let go.
+        // The tensioning pendants, until they let go: stanchion head to the upper belt's corner,
+        // and stanchion base to the lower belt's end (the shackle).
         layout.upperHeads.forEach((corner, k) => {
             const i = 3 * corner;
             this.webPendants[k][0].copy(stanchions[k].top);
             this.webPendants[k][1].set(positions[i], positions[i + 1], positions[i + 2]);
+        });
+        layout.shackles.forEach((shackle, k) => {
+            const i = 3 * shackle;
+            const base = stanchions[k].base;
+            this.webPendants[2 + k][0].set(base.x, Math.max(base.y, this.deck.heightAt(base.x, base.z) + DECK_CLEARANCE_M), base.z);
+            this.webPendants[2 + k][1].set(positions[i], positions[i + 1], positions[i + 2]);
         });
         const near = !this.useLines;
         this.straps.mesh.visible = near;
         this.cables.mesh.visible = near;
         this.lines.visible = !near;
         if (near) {
+            const floor = this.floorAt;
             this.straps.begin();
-            this.straps.add(this.webLines[0], LOAD_STRAP_W_M);
-            this.straps.add(this.webLines[1], LOAD_STRAP_W_M);
-            for (const ply of this.webPlies) this.straps.add(ply, ENGAGING_STRAP_W_M);
+            this.straps.add(this.webLines[0], LOAD_STRAP_W_M, false, floor);
+            this.straps.add(this.webLines[1], LOAD_STRAP_W_M, false, floor);
+            for (const ply of this.webPlies) this.straps.add(ply, ENGAGING_STRAP_W_M, false, floor);
             this.straps.end();
             this.cables.begin();
-            for (const c of this.webCables) this.cables.add(c, CABLE_W_M);
-            this.webPendants.forEach((p, k) => { if (pendantsHeld[k]) this.cables.add(p, CABLE_W_M); });
+            for (const c of this.webCables) this.cables.add(c, CABLE_W_M, false, floor);
+            this.webPendants.forEach((p, k) => { if (pendantsHeld[k]) this.cables.add(p, CABLE_W_M, false, floor); });
             this.cables.end();
         } else {
             let n = 0;
@@ -515,6 +539,8 @@ const _side = new THREE.Vector3();
 const _z = new THREE.Vector3(0, 0, 1);
 /** A strap point this close to the deck (m) is drawn lying flat on it. */
 const RIBBON_FLAT_ON_DECK_M = 0.1;
+/** No ribbon vertex lower than this above the deck (m). */
+const RIBBON_DECK_CLEARANCE_M = 0.005;
 const _y = new THREE.Vector3(0, 1, 0);
 
 /**
@@ -555,7 +581,7 @@ class RibbonBuffer {
      * the stanchions): on edge, a strap running spanwise over a wing stood
      * half its width down through the skin it lies on.
      */
-    add(pts: readonly THREE.Vector3[], width: number, flat = false): void {
+    add(pts: readonly THREE.Vector3[], width: number, flat = false, floorAt: (x: number, z: number) => number = () => BARRICADE_DECK_Y): void {
         if (pts.length < 2 || this.verts + pts.length * 2 > this.maxVerts) return;
         const first = this.verts;
         for (let i = 0; i < pts.length; i++) {
@@ -566,12 +592,15 @@ class RibbonBuffer {
             // Webbing lying on the deck lies flat on it; anything else across
             // the deck axis (a strap fore and aft on the deck would otherwise
             // stand up on edge as a blade).
-            const lying = flat || p.y < BARRICADE_DECK_Y + RIBBON_FLAT_ON_DECK_M;
+            const floor = floorAt(p.x, p.z);
+            const lying = flat || p.y < floor + RIBBON_FLAT_ON_DECK_M;
             _side.crossVectors(_t, lying ? _y : _z);
             if (_side.lengthSq() < 1e-6 * Math.max(1e-6, _t.lengthSq())) _side.crossVectors(_t, lying ? _z : _y);
             _side.normalize().multiplyScalar(width * 0.5);
-            this.pos.setXYZ(this.verts++, p.x - _side.x, p.y - _side.y, p.z - _side.z);
-            this.pos.setXYZ(this.verts++, p.x + _side.x, p.y + _side.y, p.z + _side.z);
+            // Neither edge of the ribbon into the deck (one standing on edge reached half its width down).
+            const lo = floor + RIBBON_DECK_CLEARANCE_M;
+            this.pos.setXYZ(this.verts++, p.x - _side.x, Math.max(lo, p.y - _side.y), p.z - _side.z);
+            this.pos.setXYZ(this.verts++, p.x + _side.x, Math.max(lo, p.y + _side.y), p.z + _side.z);
         }
         for (let i = 0; i + 1 < pts.length; i++) {
             const v = first + i * 2;

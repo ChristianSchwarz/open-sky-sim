@@ -238,7 +238,7 @@ export interface BarricadeWebSnapshot {
     warm: boolean;
     /** An aircraft is held by the scripted run-out instead (no airframe at its catch): drawn wrapped from its pose. */
     scriptedCatch: boolean;
-    /** Whether each tensioning pendant (port, starboard) still holds the upper belt at its stanchion head. */
+    /** Whether each tensioning pendant still holds: the upper ones at the stanchion heads (port, starboard), then the lower ones at their bases. */
     pendantsHeld: boolean[];
 }
 

@@ -252,10 +252,12 @@ const NOSE_SHARE = 0.12;
  * starts at rest on its tyres. Also returns the centre of mass.
  */
 function gearOf(af: WebAirframe, mass: number): { wheels: Wheel[]; com: THREE.Vector3 } {
-    const t = af.collisionTriangles, b = af.bounds;
+    // From the drawn mesh: the collision mesh has no gear (withoutGear).
+    const t = af.triangles, b = af.bounds;
     const groups = [{ x: 0, z: 0, n: 0 }, { x: 0, z: 0, n: 0 }, { x: 0, z: 0, n: 0 }];
     for (let k = 0; k < t.length; k += 3) {
-        if (t[k + 1] > b[1] + 0.15) continue;
+        // The tyres: the F-14's nose wheels hang 20 cm above the mains' (only x and z are taken).
+        if (t[k + 1] > b[1] + 0.3) continue;
         const g = t[k + 2] > 0 ? groups[0] : t[k] > 0 ? groups[1] : groups[2];
         g.x += t[k]; g.z += t[k + 2]; g.n++;
     }
