@@ -106,6 +106,16 @@ export interface Airfield {
     decks?: AirfieldDeck[];
     /** Ski-jump ramps; absent on the fields that have none. */
     skiJumps?: AirfieldSkiJump[];
+    /** OSM `man_made=embankment`; absent on the fields that have none. */
+    embankments?: AirfieldEmbankment[];
+}
+
+/** An earth bank - a revetment round a hardstand, a blast wall - drawn as a berm. */
+export interface AirfieldEmbankment {
+    /** `[lat, lon]` along the crest; a closed ring repeats its first point. */
+    points: number[][];
+    /** OSM `height`, where tagged believably; the renderer has a default. */
+    heightM?: number;
 }
 
 /** A ski-jump ramp at the end of its run-up (Saki's T2), as the bake placed it. */

@@ -161,6 +161,9 @@ SKI_JUMP_RUNWAY_REACH_M = 30.0
 # Rise of a ramp OSM gives no height for.
 SKI_JUMP_DEFAULT_HEIGHT_M = 6.0
 SKI_JUMP_NAMES = ('ski-jump', 'ski jump', 'skijump', 'трамплин')
+# Heights an embankment's `height` tag is believed between; outside them the
+# runtime's default stands. A revetment round a hardstand is a few metres.
+EMBANKMENT_HEIGHT_RANGE_M = (0.5, 20.0)
 
 # A runway way with no aerodrome polygon around it attaches to the nearest
 # aerodrome node within this. Node-only aerodromes are common - plenty of
@@ -435,6 +438,10 @@ class Airfield:
     decks: List[dict] = field(default_factory=list)
     #: Ski-jump ramps (`ski_jump_tags`), placed by `attach_ski_jumps`.
     ski_jumps: List[dict] = field(default_factory=list)
+    #: `man_made=embankment` ways (revetments, blast walls, the platform's
+    #: edge): `{'points'}` `[lat, lon]` along the crest, plus `heightM` where
+    #: OSM tags one believably.
+    embankments: List[dict] = field(default_factory=list)
     #: Runways under MIN_RUNWAY_LENGTH_M, held until `attach_ski_jumps` has
     #: kept the ones that are a ramp's run-up.
     short_runways: List[Runway] = field(default_factory=list)
@@ -851,6 +858,7 @@ AREA_PHASES: Tuple[Tuple[str, str, float], ...] = (
     ('taxiways', 'fetching OSM taxiways', 6),
     ('aprons', 'fetching OSM aprons and buildings', 6),
     ('wires', 'fetching OSM arresting gear, decks and ski-jumps', 2),
+    ('embankments', 'fetching OSM embankments', 3),
     ('assemble', 'assembling airfields', 4),
     ('sample', 'sampling platforms', 20),
 )
@@ -911,6 +919,10 @@ def gear_tags(tags: dict) -> bool:
     return wires_tags(tags) or deck_tags(tags) or ski_jump_tags(tags)
 
 
+def embankments_tags(tags: dict) -> bool:
+    return tags.get('man_made') == 'embankment'
+
+
 # Cache key and tag test of each group, as overpass_airports reads them from
 # a local extract - what osm_prefetch.py fills the cache under.
 PBF_GROUPS = (
@@ -919,6 +931,7 @@ PBF_GROUPS = (
     ('taxiways', taxiways_tags),
     ('aprons', aprons_tags),
     ('wires', gear_tags),
+    ('embankments', embankments_tags),
 )
 
 
@@ -990,6 +1003,13 @@ def overpass_airports(
             + [f'way["{k}"="0"]["roof:shape"="skillion"]({c.as_overpass()})'
                for k in ('building:levels', 'height')])
 
+    # Earth banks: Saki's hardstands are ringed by ninety-odd revetments, a
+    # shelter area at Buchel by closed rings of them. Mapped everywhere along
+    # roads and rivers too, which the assembly drops as belonging to no field
+    # - so the standard grid and the sea skip, like the other bulk groups.
+    def embankments(c: Bounds) -> str:
+        return _aeroway_query([f'way["man_made"="embankment"]({c.as_overpass()})'])
+
     # Same tag test as the query closures above, for the PBF path.
 
     groups = (
@@ -998,6 +1018,7 @@ def overpass_airports(
         ('taxiways', 'taxiways', taxiways, taxiways_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
         ('aprons', 'aprons and buildings', aprons, aprons_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
         ('wires', 'arresting gear, decks and ski-jumps', wires, gear_tags, OVERPASS_LIGHT_CELL_ZOOM, True, None),
+        ('embankments', 'embankments', embankments, embankments_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
     )
 
     # One pass over the file covers all four groups - see pbf_elements_groups's
@@ -1223,6 +1244,20 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
                     pad = pavement_pad(el, nodes, 0.0)
                     if pad is not None:
                         host.extra_pads.append(pad)
+            continue
+        if embankments_tags(tags) and el.get('type') == 'way' and 'aeroway' not in tags:
+            # Belongs to the field its middle lies in, as a wire does; one
+            # along a road outside every field is simply not kept.
+            crest = [nodes[nid] for nid in el.get('nodes', []) if nid in nodes]
+            if len(crest) >= 2:
+                host = owner(sum(c[0] for c in crest) / len(crest), sum(c[1] for c in crest) / len(crest))
+                if host is not None:
+                    height = tagged_number(tags.get('height'))
+                    lo, hi = EMBANKMENT_HEIGHT_RANGE_M
+                    host.embankments.append({
+                        'points': [[c[1], c[0]] for c in crest],
+                        **({'heightM': height} if height is not None and lo <= height <= hi else {}),
+                    })
             continue
         aeroway = tags.get('aeroway')
         if aeroway is None or aeroway == 'aerodrome':
@@ -1725,6 +1760,7 @@ def airfield_to_json(airfield: Airfield) -> dict:
         **({'arrestingWires': airfield.arresting_wires} if airfield.arresting_wires else {}),
         **({'decks': airfield.decks} if airfield.decks else {}),
         **({'skiJumps': airfield.ski_jumps} if airfield.ski_jumps else {}),
+        **({'embankments': airfield.embankments} if airfield.embankments else {}),
     }
 
 
@@ -1842,7 +1878,8 @@ def report_airfield(airfield: Airfield, rejected: str = '') -> None:
           f'{len(airfield.aprons)} aprons, {len(airfield.buildings)} buildings'
           + (f', {len(airfield.arresting_wires)} arresting wires' if airfield.arresting_wires else '')
           + (f', {len(airfield.decks)} steel decks' if airfield.decks else '')
-          + (f', {len(airfield.ski_jumps)} ski-jumps' if airfield.ski_jumps else ''))
+          + (f', {len(airfield.ski_jumps)} ski-jumps' if airfield.ski_jumps else '')
+          + (f', {len(airfield.embankments)} embankments' if airfield.embankments else ''))
 
 
 def evaluate_airfield(

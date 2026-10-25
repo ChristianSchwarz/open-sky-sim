@@ -7,7 +7,8 @@ import {
 } from '../../terrain/geodesy';
 import { SceneMaterialManager } from '../materials/materials';
 import {
-    AIRFIELD_SURFACE_EPS_M, GROUND_STRIP_LIGHTEN, buildAirfieldModel, buildingHeightM, repaintGroundStrip, smoothCentreline,
+    AIRFIELD_SURFACE_EPS_M, GROUND_STRIP_LIGHTEN, buildAirfieldModel, buildingHeightM, embankmentLine,
+    repaintGroundStrip, smoothCentreline,
 } from './airfieldModel';
 
 /**
@@ -889,5 +890,127 @@ describe('airfield model', () => {
         const spanZ = Math.max(...flat.map(v => v.z)) - Math.min(...flat.map(v => v.z));
         assert.ok(Math.abs(spanX - 3103) < 2, `runway spans ${spanX.toFixed(0)} m east-west`);
         assert.ok(Math.abs(spanZ - 45) < 2, `runway spans ${spanZ.toFixed(0)} m north-south`);
+    });
+});
+
+describe('airfield embankments', () => {
+    // 40 m running north, 200 m east of the runway's centre.
+    const LAT = 27.931904;
+    const LON = -15.384550;
+    const bank = (heightM?: number) => ({
+        points: [[LAT - 0.00018, LON], [LAT + 0.00018, LON]],
+        ...(heightM !== undefined ? { heightM } : {}),
+    });
+    const grassOf = (objects: THREE.Object3D[]) =>
+        objects.filter(o => materialOf(o).category === 'TERRAIN_GRASS');
+
+    it('stands a 3 m grass berm on the ground, 10 m across, faces up', () => {
+        const built = buildAirfieldModel(gclp({ embankments: [bank()] }), BASIS, MATERIALS, () => 0)!;
+        const grass = grassOf(built.model.lod[0].volumes);
+        assert.equal(grass.length, 1);
+        const vs = vertices(grass);
+        const heights = vs.map(v => elevationOf(v, built.origin));
+        assert.ok(Math.abs(Math.max(...heights) - 3) < 0.05, `crest at ${Math.max(...heights).toFixed(2)} m`);
+        assert.ok(Math.abs(Math.min(...heights)) < 0.05, `toe at ${Math.min(...heights).toFixed(2)} m`);
+        const spanX = Math.max(...vs.map(v => v.x)) - Math.min(...vs.map(v => v.x));
+        assert.ok(Math.abs(spanX - 10) < 0.3, `berm is ${spanX.toFixed(2)} m across`);
+        const spanZ = Math.max(...vs.map(v => v.z)) - Math.min(...vs.map(v => v.z));
+        // 40 m of crest plus each end's 4.5 m slope.
+        assert.ok(Math.abs(spanZ - 49) < 0.5, `berm is ${spanZ.toFixed(2)} m long`);
+        for (let i = 0; i < vs.length; i += 3) {
+            const normal = vs[i + 1].clone().sub(vs[i]).cross(vs[i + 2].clone().sub(vs[i]));
+            assert.ok(normal.y > 0, `triangle ${i / 3} faces down`);
+        }
+    });
+
+    it('takes the tagged height', () => {
+        const built = buildAirfieldModel(gclp({ embankments: [bank(5)] }), BASIS, MATERIALS, () => 0)!;
+        const heights = vertices(grassOf(built.model.lod[0].volumes)).map(v => elevationOf(v, built.origin));
+        assert.ok(Math.abs(Math.max(...heights) - 5) < 0.05);
+    });
+
+    it('is solid ground at the finest level and gone at the coarsest', () => {
+        const without = buildAirfieldModel(gclp(), BASIS, MATERIALS, () => 0)!;
+        const built = buildAirfieldModel(gclp({ embankments: [bank()] }), BASIS, MATERIALS, () => 0)!;
+        const drawn = triangles(grassOf(built.model.lod[0].volumes));
+        assert.equal(built.solidPavement.length - without.solidPavement.length, drawn * 9);
+        assert.equal(grassOf(built.model.lod[2].volumes).length, 0);
+    });
+
+    it('is the colour of the ground it stands on, and repaints with it', () => {
+        const bare = { cls: 6 /* TerrainClass.Bare */, rgb: 0x807050, zoom: 10 };
+        const built = buildAirfieldModel(
+            gclp({ embankments: [bank(), bank(5)] }), BASIS, MATERIALS, () => 0, () => bare)!;
+        const banks = built.model.lod[0].volumes.filter(o => materialOf(o).rawColor === '#807050');
+        assert.equal(banks.length, 1, 'the banks are not the observed ground colour');
+        assert.equal(materialOf(banks[0]).category, 'TERRAIN_BARE');
+        const strip = built.groundStrips.find(s => s.shaded)!;
+        assert.ok(strip, 'the banks are not handed back to be repainted');
+        assert.equal(strip.paintedZoom, 10);
+        // Both levels that draw them, one mesh each.
+        assert.equal(strip.meshes.length, 2);
+        repaintGroundStrip(strip, { cls: 2 /* TerrainClass.Grass */, rgb: 0x406030, zoom: 12 }, MATERIALS);
+        assert.ok(strip.meshes.every(m => materialOf(m).rawColor === '#406030'));
+        assert.equal(strip.paintedZoom, 12);
+    });
+
+    it('waits for the ground in grass, and adds no strip to a field without banks', () => {
+        const built = buildAirfieldModel(gclp({ embankments: [bank()] }), BASIS, MATERIALS, () => 0)!;
+        assert.equal(grassOf(built.model.lod[0].volumes).length, 1);
+        assert.equal(built.groundStrips.find(s => s.shaded)?.paintedZoom, -1);
+        const none = buildAirfieldModel(gclp(), BASIS, MATERIALS, () => 0)!;
+        assert.equal(none.groundStrips.filter(s => s.shaded).length, 0);
+    });
+
+    // A 10 m by 40 m wall outlined round its foot, as Saki's revetments are.
+    const loop = (clockwise: boolean) => {
+        const dLat = 20 / 111_132.954;
+        const dLon = 5 / (111_412.84 * Math.cos(LAT * Math.PI / 180));
+        const ring = [[LAT - dLat, LON - dLon], [LAT - dLat, LON + dLon],
+            [LAT + dLat, LON + dLon], [LAT + dLat, LON - dLon]];
+        const ordered = clockwise ? [...ring].reverse() : ring;
+        return { points: [...ordered, ordered[0]] };
+    };
+
+    for (const clockwise of [false, true]) {
+        it(`fills a closed loop into one bank, listed ${clockwise ? 'clockwise' : 'counter-clockwise'}`, () => {
+            const built = buildAirfieldModel(gclp({ embankments: [loop(clockwise)] }), BASIS, MATERIALS, () => 0)!;
+            const vs = vertices(grassOf(built.model.lod[0].volumes));
+            const heights = vs.map(v => elevationOf(v, built.origin));
+            assert.ok(Math.abs(Math.max(...heights) - 3) < 0.05, `top at ${Math.max(...heights).toFixed(2)} m`);
+            // Never wider than the outline: it is the foot, not the crest.
+            const spanX = Math.max(...vs.map(v => v.x)) - Math.min(...vs.map(v => v.x));
+            assert.ok(spanX < 10.3, `bank is ${spanX.toFixed(2)} m across`);
+            for (let i = 0; i < vs.length; i += 3) {
+                const normal = vs[i + 1].clone().sub(vs[i]).cross(vs[i + 2].clone().sub(vs[i]));
+                assert.ok(normal.y > 0, `triangle ${i / 3} faces down`);
+            }
+            // The middle is the top, not a trench: some triangle covers the
+            // centre line at full height.
+            const mid = vs.reduce((m, v) => m.add(v), new THREE.Vector3()).divideScalar(vs.length);
+            let covered = false;
+            for (let i = 0; i < vs.length; i += 3) {
+                const [a, b, c] = [vs[i], vs[i + 1], vs[i + 2]];
+                const flat = [a, b, c].every(v => Math.abs(elevationOf(v, built.origin) - 3) < 0.05);
+                const d = (p: THREE.Vector3, q: THREE.Vector3) =>
+                    (mid.x - q.x) * (p.z - q.z) - (p.x - q.x) * (mid.z - q.z);
+                const s1 = d(a, b), s2 = d(b, c), s3 = d(c, a);
+                const inside = !((s1 < 0 || s2 < 0 || s3 < 0) && (s1 > 0 || s2 > 0 || s3 > 0));
+                covered ||= flat && inside;
+            }
+            assert.ok(covered, 'the middle of the loop is not filled at the top');
+        });
+    }
+
+    it('closes a ring and cuts long sides to follow the ground', () => {
+        const square = [{ e: 0, n: 0 }, { e: 50, n: 0 }, { e: 50, n: 50 }, { e: 0, n: 50 }, { e: 0, n: 0 }];
+        const ring = embankmentLine(square)!;
+        assert.equal(ring.closed, true);
+        // Each 50 m side in three pieces, the closing point not repeated.
+        assert.equal(ring.points.length, 12);
+        const open = embankmentLine([{ e: 0, n: 0 }, { e: 0, n: 0 }, { e: 10, n: 0 }])!;
+        assert.equal(open.closed, false);
+        assert.deepEqual(open.points, [{ e: 0, n: 0 }, { e: 10, n: 0 }]);
+        assert.equal(embankmentLine([{ e: 3, n: 4 }, { e: 3, n: 4 }]), undefined);
     });
 });

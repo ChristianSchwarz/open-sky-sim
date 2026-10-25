@@ -90,6 +90,22 @@ const DEGENERATE_SEGMENT_M = 0.01;
 const TAXIWAY_STEP_M = 20;
 
 /**
+ * An embankment OSM gives no height for. Saki's revetments and the shelter
+ * banks at Buchel stand about this high round an aircraft-sized hardstand.
+ */
+const EMBANKMENT_HEIGHT_M = 3;
+/** Flat top of the berm, centred on the mapped crest. */
+const EMBANKMENT_CREST_M = 1;
+/** Horizontal run of each side per metre of height: a 1:1.5 earth slope. */
+const EMBANKMENT_RUN = 1.5;
+/** How far a mitred corner may push the berm out, in multiples of its half-width. */
+const EMBANKMENT_MITRE_LIMIT = 2;
+/** Most of a closed embankment's mean width its sloping sides may take, each side. */
+const EMBANKMENT_FILL_INSET = 0.35;
+/** Most points a field's embankment colour is read at - see embankmentSamplePoints. */
+const EMBANKMENT_COLOUR_SAMPLES = 12;
+
+/**
  * What each surface fogs as, and what it is drawn in before the terrain
  * under it has streamed in (see {@link GroundStrip}).
  *
@@ -195,6 +211,17 @@ function flatMaterial(materials: SceneMaterialManager, paint: Paint): THREE.Mate
         rawColor: typeof paint === 'string' ? undefined : paint.rawColor,
         maxFootprintM: typeof paint === 'string' ? undefined : paint.maxFootprintM,
         opacity: typeof paint === 'string' ? undefined : paint.opacity,
+    });
+}
+
+/** The material for a lit, solid part in one paint; a raw colour is kept, a lift is not. */
+function volumeMaterial(materials: SceneMaterialManager, paint: Paint): THREE.Material {
+    return materials.build({
+        type: SceneMaterialPrimitiveType.MESH,
+        category: typeof paint === 'string' ? paint : paint.category,
+        depthWrite: true,
+        shaded: true,
+        rawColor: typeof paint === 'string' ? undefined : paint.rawColor,
     });
 }
 
@@ -543,12 +570,7 @@ class MeshParts {
                 geometry.computeVertexNormals();
             }
             const material = own ?? (this.shaded
-                ? materials.build({
-                    type: SceneMaterialPrimitiveType.MESH,
-                    category: typeof paint === 'string' ? paint : paint.category,
-                    depthWrite: true,
-                    shaded: true,
-                })
+                ? volumeMaterial(materials, paint)
                 : flatMaterial(materials, paint));
             const mesh = new THREE.Mesh(geometry, material);
             mesh.onBeforeRender = updateUniforms;
@@ -574,14 +596,19 @@ class MeshParts {
  * {@link repaintGroundStrip}, each time a deeper tile is drawn under it.
  */
 export interface GroundStrip {
-    /** Scene positions to read the cover at: low threshold, midpoint, high threshold. */
+    /**
+     * Scene positions to read the cover at: a runway's low threshold, midpoint
+     * and high threshold, or the middles of a field's embankments.
+     */
     samples: { x: number; z: number }[];
-    /** Its pavement, one mesh per LOD level. */
+    /** Its pavement (or banks), one mesh per LOD level. */
     meshes: THREE.Mesh[];
     /** Worst zoom among the samples last painted from; -1 for the stand-in. */
     paintedZoom: number;
     /** How far above the sampled ground colour this surface is lifted - see {@link runwayLighten}. */
     lighten: number;
+    /** Lit solid rather than flat paint: an airfield's embankments. */
+    shaded?: boolean;
 }
 
 /**
@@ -598,7 +625,8 @@ export function sampleGroundStrip(
 export function repaintGroundStrip(
     strip: GroundStrip, cover: TileCover, materials: SceneMaterialManager,
 ): void {
-    const material = flatMaterial(materials, groundPaint(cover, strip.lighten));
+    const paint = groundPaint(cover, strip.lighten);
+    const material = strip.shaded ? volumeMaterial(materials, paint) : flatMaterial(materials, paint);
     for (const mesh of strip.meshes) {
         mesh.material = material;
     }
@@ -760,8 +788,17 @@ export function buildAirfieldModel(
         }
         return material;
     };
+    // The embankments are the ground they stand on, piled up: one colour
+    // for all of a field's banks, read where they stand and repainted as
+    // deeper tiles come in, as the unpaved runways are.
+    const bankPoints = embankmentSamplePoints(airfield).map(p => toEnu(p.lat, p.lon));
+    const bankCover = combineCover(bankPoints.map(p => groundCoverAt?.(p.e, p.n)));
+    const bankPaint: Paint = bankCover !== undefined
+        ? groundPaint(bankCover, 1)
+        : { category: PaletteCategory.TERRAIN_GRASS, lighten: 1 };
     const levels: Model['lod'] = [];
     const flatsPerLevel: MeshParts[] = [];
+    const volumesPerLevel: MeshParts[] = [];
     const solidPavement: number[] = [];
     let maxSize = 0;
     for (let level = 0; level < LOD_KINDS.length; level++) {
@@ -769,6 +806,7 @@ export function buildAirfieldModel(
         const parts = new MeshParts();
         const solids = new MeshParts(true);
         flatsPerLevel.push(parts);
+        volumesPerLevel.push(solids);
 
         if (level <= LOD_WITH_SURROUNDS) {
             // Drawn under the runways, so a taxiway crossing one loses.
@@ -778,6 +816,11 @@ export function buildAirfieldModel(
             addTaxiways(parts, airfield, toEnu, drape, kinds.has('centreline'), pavement, platedPavement);
             parts.solid = undefined;
             addBuildings(solids, airfield, toEnu, drape);
+            // Solid at the finest level, like the pavement: an aircraft
+            // taxiing into a revetment rolls up it rather than through.
+            solids.solid = level === 0 ? solidPavement : undefined;
+            addEmbankments(solids, airfield, toEnu, drape, bankPaint);
+            solids.solid = undefined;
         }
         // Every runway's pavement before any runway's paint, so where two
         // cross, the second one's pavement does not cover the first's paint.
@@ -811,6 +854,19 @@ export function buildAirfieldModel(
             lighten: runwayLighten(runway.surface),
         };
     });
+    if (bankPoints.length > 0) {
+        const key = paintKey(bankPaint);
+        groundStrips.push({
+            samples: bankPoints.map(p => sceneAt(basis, p.e, p.n, elevationAt(p.e, p.n))),
+            meshes: volumesPerLevel.flatMap(parts => {
+                const mesh = parts.meshes.get(key);
+                return mesh === undefined ? [] : [mesh];
+            }),
+            paintedZoom: bankCover?.zoom ?? -1,
+            lighten: 1,
+            shaded: true,
+        });
+    }
     return {
         model: {
             lod: levels,
@@ -1402,6 +1458,262 @@ function addBuildings(
         }
         parts.addQuad(category, high[0], high[1], high[2], high[3]);
     }
+}
+
+/**
+ * Where a field's embankments read their colour: the middle of each, thinned
+ * evenly to EMBANKMENT_COLOUR_SAMPLES - each is a fetch of the finest tile
+ * once the field is built, and sixty-six revetments at Saki stand on the
+ * same few facets.
+ */
+function embankmentSamplePoints(airfield: Airfield): { lat: number; lon: number }[] {
+    const banks = (airfield.embankments ?? []).filter(b => b.points.length > 0);
+    const step = Math.max(1, banks.length / EMBANKMENT_COLOUR_SAMPLES);
+    const out: { lat: number; lon: number }[] = [];
+    for (let i = 0; i < banks.length; i += step) {
+        const points = banks[Math.floor(i)].points;
+        const [lat, lon] = points[Math.floor(points.length / 2)];
+        out.push({ lat, lon });
+    }
+    return out;
+}
+
+/**
+ * Embankments as earth berms in the ground's own colour: a flat crest
+ * EMBANKMENT_CREST_M wide on the mapped line, sloping down 1:EMBANKMENT_RUN
+ * to the ground on both sides.
+ *
+ * OSM draws an embankment along its top with the low side on the right, but
+ * at an airfield the ground on both sides is the same cut plane, and what is
+ * mapped is mostly revetments - banked on both sides round a hardstand. A
+ * one-sided slope would leave a vertical wall on the left. A closed one is
+ * filled instead - see addFilledEmbankment.
+ *
+ * Draped like the buildings, since a bank at the field's edge stands outside
+ * the flattened pads; the crest is its height over the highest ground under
+ * its cross-section, so neither side is buried on a slope.
+ */
+function addEmbankments(
+    parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place, paint: Paint,
+): void {
+    for (const bank of airfield.embankments ?? []) {
+        const line = embankmentLine(bank.points.map(([lat, lon]) => toEnu(lat, lon)));
+        if (line === undefined) {
+            continue;
+        }
+        const { points, closed } = line;
+        const height = bank.heightM ?? EMBANKMENT_HEIGHT_M;
+        if (closed) {
+            addFilledEmbankment(parts, points, height, place, paint);
+            continue;
+        }
+        const crest = EMBANKMENT_CREST_M / 2;
+        const toe = crest + height * EMBANKMENT_RUN;
+
+        // Left toe, left crest, right crest, right toe across every point.
+        const sections = points.map((p, i) => {
+            const [ne, nn] = mitredNormal(points, i, closed);
+            const at = (d: number) => place(p.e + ne * d, p.n + nn * d, 0);
+            const row = [at(toe), at(crest), at(-crest), at(-toe)];
+            const top = Math.max(...row.map(v => v.y)) + height;
+            row[1].setY(top);
+            row[2].setY(top);
+            return row;
+        });
+
+        for (let i = 0; i + 1 < points.length; i++) {
+            const a = sections[i];
+            const b = sections[i + 1];
+            for (let k = 0; k < 3; k++) {
+                addUpQuad(parts, paint, a[k], b[k], b[k + 1], a[k + 1]);
+            }
+        }
+        // Each open end slopes down ahead of itself as the sides do.
+        for (const [end, prev] of [[0, 1], [points.length - 1, points.length - 2]]) {
+            const p = points[end];
+            const q = points[prev];
+            const len = Math.hypot(p.e - q.e, p.n - q.n);
+            const te = (p.e - q.e) / len;
+            const tn = (p.n - q.n) / len;
+            const [ne, nn] = mitredNormal(points, end, false);
+            const run = toe - crest;
+            const cap = [crest, -crest].map(d =>
+                place(p.e + ne * d + te * run, p.n + nn * d + tn * run, 0));
+            const s = sections[end];
+            addUpQuad(parts, paint, s[1], s[2], cap[1], cap[0]);
+            addUpTriangle(parts, paint, s[0], s[1], cap[0]);
+            addUpTriangle(parts, paint, s[3], s[2], cap[1]);
+        }
+    }
+}
+
+/**
+ * A closed embankment as one solid bank: the ring is its foot, and the whole
+ * of it is filled to a flat top `height` up, inset from the foot by the
+ * slope's run.
+ *
+ * Mappers outline a wide revetment wall as a closed way round its base -
+ * Saki's are about 8 m across - and drawing that outline as a berm put two
+ * parallel ridges with a trench between them where one wall stands. The
+ * inset is held to EMBANKMENT_FILL_INSET of the ring's mean width
+ * (2 x area / perimeter), so a narrow wall gets steeper sides rather than
+ * a top that folds over itself.
+ */
+function addFilledEmbankment(
+    parts: MeshParts, ring: readonly { e: number; n: number }[], height: number,
+    place: Place, paint: Paint,
+): void {
+    // Twice the area, so over the perimeter it is the mean width.
+    const area = signedArea(ring);
+    let perimeter = 0;
+    for (let i = 0; i < ring.length; i++) {
+        const a = ring[i];
+        const b = ring[(i + 1) % ring.length];
+        perimeter += Math.hypot(b.e - a.e, b.n - a.n);
+    }
+    if (Math.abs(area) < 1 || perimeter <= 0) {
+        return;
+    }
+    const inset = Math.min(height * EMBANKMENT_RUN,
+        EMBANKMENT_FILL_INSET * Math.abs(area) / perimeter);
+    // Counter-clockwise, the left-hand normal points in.
+    const inward = Math.sign(area);
+    const top2d: THREE.Vector2[] = [];
+    const feet: THREE.Vector3[] = [];
+    const tops: THREE.Vector3[] = [];
+    for (let i = 0; i < ring.length; i++) {
+        const p = ring[i];
+        const [ne, nn] = mitredNormal(ring, i, true);
+        const te = p.e + ne * inset * inward;
+        const tn = p.n + nn * inset * inward;
+        const foot = place(p.e, p.n, 0);
+        const top = place(te, tn, 0);
+        top.setY(Math.max(foot.y, top.y) + height);
+        feet.push(foot);
+        tops.push(top);
+        top2d.push(new THREE.Vector2(te, tn));
+    }
+    for (let i = 0; i < ring.length; i++) {
+        const j = (i + 1) % ring.length;
+        addUpQuad(parts, paint, feet[i], feet[j], tops[j], tops[i]);
+    }
+    for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(top2d, [])) {
+        // The sides are cut into TAXIWAY_STEP_M pieces, so three points in a
+        // row are common, and the triangulator can join them.
+        const [p, q, r] = [top2d[a], top2d[b], top2d[c]];
+        if (Math.abs((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)) < 1e-3) {
+            continue;
+        }
+        addUpTriangle(parts, paint, tops[a], tops[b], tops[c]);
+    }
+}
+
+/**
+ * An embankment's crest in ENU, without repeated points, cut into pieces no
+ * longer than TAXIWAY_STEP_M so it follows the ground; `closed` when it
+ * comes back to where it started. Undefined when nothing is left to draw.
+ */
+export function embankmentLine(
+    raw: readonly { e: number; n: number }[],
+): { points: { e: number; n: number }[]; closed: boolean } | undefined {
+    const kept: { e: number; n: number }[] = [];
+    for (const p of raw) {
+        const last = kept[kept.length - 1];
+        if (last === undefined || Math.hypot(p.e - last.e, p.n - last.n) > DEGENERATE_SEGMENT_M) {
+            kept.push(p);
+        }
+    }
+    let closed = false;
+    if (kept.length >= 4) {
+        const first = kept[0];
+        const last = kept[kept.length - 1];
+        if (Math.hypot(first.e - last.e, first.n - last.n) <= DEGENERATE_SEGMENT_M * 10) {
+            kept.pop();
+            closed = true;
+        }
+    }
+    if (kept.length < 2) {
+        return undefined;
+    }
+    const points: { e: number; n: number }[] = [];
+    const segments = closed ? kept.length : kept.length - 1;
+    for (let i = 0; i < segments; i++) {
+        const a = kept[i];
+        const b = kept[(i + 1) % kept.length];
+        const steps = Math.max(1, Math.ceil(Math.hypot(b.e - a.e, b.n - a.n) / TAXIWAY_STEP_M));
+        for (let s = 0; s < steps; s++) {
+            const t = s / steps;
+            points.push({ e: a.e + (b.e - a.e) * t, n: a.n + (b.n - a.n) * t });
+        }
+    }
+    if (!closed) {
+        points.push(kept[kept.length - 1]);
+    }
+    return { points, closed };
+}
+
+/**
+ * Left-hand normal at point `i` of a crest, mitred so both sides keep their
+ * width round a bend, and held to EMBANKMENT_MITRE_LIMIT at a sharp one.
+ */
+function mitredNormal(
+    points: readonly { e: number; n: number }[], i: number, closed: boolean,
+): [number, number] {
+    const unit = (a: { e: number; n: number }, b: { e: number; n: number }): [number, number] => {
+        const len = Math.hypot(b.e - a.e, b.n - a.n);
+        return [(b.e - a.e) / len, (b.n - a.n) / len];
+    };
+    const last = points.length - 1;
+    const before = i > 0 ? i - 1 : closed ? last : undefined;
+    const after = i < last ? i + 1 : closed ? 0 : undefined;
+    const inDir = before !== undefined ? unit(points[before], points[i]) : undefined;
+    const outDir = after !== undefined ? unit(points[i], points[after]) : undefined;
+    const t0 = inDir ?? outDir!;
+    const t1 = outDir ?? inDir!;
+    let te = t0[0] + t1[0];
+    let tn = t0[1] + t1[1];
+    const tl = Math.hypot(te, tn);
+    if (tl < 1e-6) {
+        // Doubles straight back: the incoming direction is as good as any.
+        te = t0[0];
+        tn = t0[1];
+    } else {
+        te /= tl;
+        tn /= tl;
+    }
+    // Left of the direction of travel, scaled out by the mitre.
+    const cos = te * t1[0] + tn * t1[1];
+    const scale = Math.min(1 / Math.max(cos, 1e-6), EMBANKMENT_MITRE_LIMIT);
+    return [-tn * scale, te * scale];
+}
+
+/** A quad wound so its face is the upper one, whatever order the corners came in. */
+function addUpQuad(
+    parts: MeshParts, paint: Paint,
+    a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, d: THREE.Vector3,
+): void {
+    if (upward(a, b, c)) {
+        parts.addQuad(paint, a, b, c, d);
+    } else {
+        parts.addQuad(paint, d, c, b, a);
+    }
+}
+
+function addUpTriangle(
+    parts: MeshParts, paint: Paint,
+    a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3,
+): void {
+    if (upward(a, b, c)) {
+        parts.add(paint, a, b, c);
+    } else {
+        parts.add(paint, c, b, a);
+    }
+}
+
+/** True when a, b, c run counter-clockwise seen from above (+Y), so the face looks up. */
+function upward(a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3): boolean {
+    // Y of (b - a) x (c - a).
+    return (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z) > 0;
 }
 
 function addAprons(

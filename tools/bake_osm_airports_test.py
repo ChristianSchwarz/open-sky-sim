@@ -481,6 +481,7 @@ from bake_osm_airports import (
     LandMask,
     ORPHAN_ASSIGN_RADIUS_M,
     StageProgress,
+    airfield_to_json,
     assemble_airfields,
 )
 
@@ -667,6 +668,35 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(len(found[0].arresting_wires), 1)
         self.assertEqual(found[0].arresting_wires[0]['name'], 'Svetlana-2')
         self.assertEqual(len(found[0].arresting_wires[0]['points']), 2)
+
+    def test_an_embankment_goes_with_its_aerodrome_and_keeps_a_believable_height(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        bank, bank_nodes = way_from_bearing(13, 90.0, 40.0, {'man_made': 'embankment', 'height': '4'})
+        bank['nodes'] = [400, 401]
+        bank_nodes = {400: bank_nodes[1], 401: bank_nodes[2]}
+        tall, tall_nodes = way_from_bearing(14, 0.0, 40.0, {'man_made': 'embankment', 'height': '80'})
+        tall['nodes'] = [500, 501]
+        tall_nodes = {500: tall_nodes[1], 501: tall_nodes[2]}
+        found = assemble_airfields(elements_and_nodes(
+            field, runway, (bank, bank_nodes), (tall, tall_nodes)))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(len(found[0].embankments), 2)
+        self.assertEqual(found[0].embankments[0]['heightM'], 4.0)
+        self.assertEqual(len(found[0].embankments[0]['points']), 2)
+        self.assertNotIn('heightM', found[0].embankments[1])
+        self.assertEqual(airfield_to_json(found[0])['embankments'], found[0].embankments)
+
+    def test_an_embankment_outside_every_aerodrome_is_dropped(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        bank, bank_nodes = way_from_bearing(13, 90.0, 40.0, {'man_made': 'embankment'})
+        bank['nodes'] = [400, 401]
+        # Twenty kilometres north: beside a road, not a field.
+        bank_nodes = {400: (LON0, LAT0 + 0.18), 401: (LON0 + 0.0005, LAT0 + 0.18)}
+        found = assemble_airfields(elements_and_nodes(field, runway, (bank, bank_nodes)))
+        self.assertEqual(found[0].embankments, [])
+        self.assertNotIn('embankments', airfield_to_json(found[0]))
 
     def test_first_listed_polygon_wins_when_two_contain_the_runway(self):
         outer = aerodrome_way(10, LAT0, LON0, 6000.0, {'name': 'outer'}, first_node=100)
