@@ -186,6 +186,9 @@ const shader = (kind: 'stroke' | 'flat' | 'rail'): string => {
 ` + (flat ? `
   uniform sampler2D uMap;
   uniform float uMarkings;
+  uniform vec4 uPlates;
+  const float PLATE_JOINT_M = 0.12;
+  const float PLATE_JOINT_DARKEN = 0.10;
   uniform vec3 uMarkColorA;
   uniform vec3 uMarkColorB;
   uniform float uMaxFootprint;
@@ -286,6 +289,24 @@ ${DITHER_PARS_FRAGMENT}
       vec2 paint = texture2D(uMap, vUv).rg * markWeight;
       diffuse = mix(diffuse, uMarkColorA, paint.r);
       diffuse = mix(diffuse, uMarkColorB, paint.g);
+    }
+    // Concrete plates: the joints between them, as a box-filtered grid in
+    // plate units. Each axis gives the fraction of the pixel's footprint
+    // that is joint, exactly, so a joint thinner than a pixel greys the
+    // pavement by its share instead of flickering, and the far runway is
+    // just a shade darker. Rows laid in line, joints straight across; over
+    // the paint as well, which is painted on the plates and not over them.
+    if (uPlates.x > 0.0) {
+      vec2 plateM = vUv * uPlates.zw;
+      vec2 cell = plateM / uPlates.xy;
+      vec2 jointN = uPlates.xy / PLATE_JOINT_M;
+      vec2 cellW = fwidth(cell) + 1e-4;
+      vec2 hi = cell + 0.5 * cellW;
+      vec2 lo = cell - 0.5 * cellW;
+      vec2 joint = (floor(hi) + min(fract(hi) * jointN, 1.0)
+        - floor(lo) - min(fract(lo) * jointN, 1.0)) / (jointN * cellW);
+      float jointCover = 1.0 - (1.0 - joint.x) * (1.0 - joint.y);
+      diffuse *= 1.0 - PLATE_JOINT_DARKEN * jointCover;
     }
 ` : '') + (rail ? RAIL_FRAGMENT : '') + `
     // Real glass gets noticeably more reflective toward a grazing view - a

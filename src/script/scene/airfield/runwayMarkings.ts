@@ -194,14 +194,20 @@ function glyphRect(bar: GlyphBar, baseU: number, leftV: number, sign: number): M
     };
 }
 
+/** How far short of each end a run-up's middle line stops (m). */
+const RUN_UP_LINE_INSET_M = 3;
+
 /**
  * Everything painted on one runway, pavement first.
  *
  * Pavement leads so a renderer that draws in list order puts the paint on top
  * of it without needing to think about depth.
+ *
+ * `centrelineOnly` is a ski-jump run-up (Saki's T-2): nobody lands on it, so
+ * no thresholds, numbers or edges, just one unbroken line to roll along.
  */
 export function runwayMarkings(
-    lengthM: number, widthM: number, ref: string, surface: string,
+    lengthM: number, widthM: number, ref: string, surface: string, centrelineOnly = false,
 ): MarkingRect[] {
     const out: MarkingRect[] = [{
         u: 0, v: 0, lengthM, widthM, kind: 'pavement',
@@ -210,6 +216,15 @@ export function runwayMarkings(
         // Grass and gravel strips carry no paint at all, and painting a
         // threshold on one is the sort of detail that reads as wrong without
         // anyone being able to say why.
+        return out;
+    }
+    if (centrelineOnly) {
+        out.push({
+            u: 0, v: 0,
+            lengthM: Math.max(0, lengthM - 2 * RUN_UP_LINE_INSET_M),
+            widthM: CENTRELINE_WIDTH_M,
+            kind: 'centreline',
+        });
         return out;
     }
 

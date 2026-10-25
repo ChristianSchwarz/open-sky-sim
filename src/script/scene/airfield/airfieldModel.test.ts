@@ -15,7 +15,7 @@ import {
  * and building the real one drags in shader sources and a palette. Everything
  * this file checks is in the vertices.
  */
-type BuiltProps = { category: string; overbright?: number; rawColor?: string };
+type BuiltProps = { category: string; overbright?: number; rawColor?: string; plates?: object };
 
 const MATERIALS = {
     build: (p: BuiltProps) => {
@@ -23,6 +23,7 @@ const MATERIALS = {
         m.userData.category = p.category;
         m.userData.overbright = p.overbright;
         m.userData.rawColor = p.rawColor;
+        m.userData.plates = p.plates;
         return m;
     },
 } as unknown as SceneMaterialManager;
@@ -226,6 +227,27 @@ describe('airfield model', () => {
         assert.ok(counts[1] >= counts[2], `level 1 ${counts[1]} vs level 2 ${counts[2]}`);
         // The coarsest level is the pavement and nothing else: two triangles.
         assert.equal(counts[2], 2);
+    });
+
+    it('runs the plate joints of a plated runway through its paint, on the runway UVs', () => {
+        const plated = gclp({ runways: [{ ...gclp().runways[0], surface: 'concrete', plates: true }] });
+        const flats = buildAirfieldModel(plated, BASIS, MATERIALS)!.model.lod[0].flats as THREE.Mesh[];
+        const withPlates = flats.filter(m => (m.material as THREE.Material).userData.plates !== undefined);
+        const categoriesWithPlates = new Set(withPlates.map(m => (m.material as THREE.Material).userData.category));
+        // The pavement, and both paint tones over it.
+        assert.ok(categoriesWithPlates.has('SCENERY_BASE_CONCRETE'), [...categoriesWithPlates].join());
+        assert.ok(categoriesWithPlates.has('SCENERY_BASE_RUNWAY_LINES'), [...categoriesWithPlates].join());
+        assert.ok(categoriesWithPlates.has('SCENERY_BASE_RUNWAY_THRESHOLD'), [...categoriesWithPlates].join());
+        for (const m of withPlates) {
+            const uv = m.geometry.getAttribute('uv');
+            assert.ok(uv, 'plated mesh without UVs');
+            for (let i = 0; i < uv.count; i++) {
+                assert.ok(uv.getX(i) >= -1e-6 && uv.getX(i) <= 1 + 1e-6 && uv.getY(i) >= -1e-6 && uv.getY(i) <= 1 + 1e-6);
+            }
+        }
+        // An unplated runway's paint stays plain.
+        const plain = buildAirfieldModel(gclp(), BASIS, MATERIALS)!.model.lod[0].flats as THREE.Mesh[];
+        assert.equal(plain.filter(m => (m.material as THREE.Material).userData.plates !== undefined).length, 0);
     });
 
     it('is the size of the runway it was given', () => {

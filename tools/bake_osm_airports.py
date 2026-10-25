@@ -406,6 +406,9 @@ class Runway:
     #: The run-up to a ski-jump ramp (`attach_ski_jumps`): kept however short,
     #: and never landed on or spawned at by the runtime.
     ski_jump: bool = False
+    #: Laid in concrete plates (`surface=concrete:plates`), which `surface`
+    #: folds into plain concrete; the runtime draws their joints.
+    plates: bool = False
 
 
 @dataclass
@@ -649,6 +652,7 @@ def runway_from_way(
         width_measured=width_measured,
         length_tag_m=tagged_number(tags.get('length')),
         width_implausible=width_implausible,
+        plates=str(tags.get('surface', '')).lower() == 'concrete:plates',
     )
 
 
@@ -1706,6 +1710,7 @@ def airfield_to_json(airfield: Airfield) -> dict:
             'lengthTagM': r.length_tag_m,
             'widthImplausible': r.width_implausible,
             **({'skiJump': True} if r.ski_jump else {}),
+            **({'plates': True} if r.plates else {}),
         } for r in airfield.runways],
         'taxiways': airfield.taxiways,
         'aprons': airfield.aprons,

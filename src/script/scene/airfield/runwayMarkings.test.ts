@@ -255,4 +255,12 @@ describe('runway markings', () => {
             }
         });
     });
+
+    it('paints a ski-jump run-up with one unbroken middle line and nothing else', () => {
+        const rects = runwayMarkings(173, 45, '04/22', 'asphalt', true);
+        assert.deepEqual(rects.map(r => r.kind), ['pavement', 'centreline']);
+        const line = rects[1];
+        assert.equal(line.v, 0);
+        assert.equal(line.lengthM, 173 - 6);
+    });
 });

@@ -38,6 +38,8 @@ export interface AirfieldRunway {
     refDerived?: boolean;
     /** The run-up to a ski-jump ramp: drawn, never landed on or spawned at. */
     skiJump?: boolean;
+    /** Laid in concrete plates (OSM `surface=concrete:plates`); the joints are drawn. */
+    plates?: boolean;
 }
 
 interface AirfieldTaxiway {

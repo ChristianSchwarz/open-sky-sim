@@ -185,6 +185,14 @@ type SceneMaterialMeshProperties = {
                 fadeInM: number;
             };
             /**
+             * Concrete plates: their joints, a plate `plateLengthM` along the
+             * runway by `plateWidthM` across it, over a pavement `lengthM` by
+             * `widthM` that the UVs' 0..1 span. Drawn over everything else
+             * this material paints, so the runway's paint shows them too.
+             * Needs UVs.
+             */
+            plates?: { plateLengthM: number; plateWidthM: number; lengthM: number; widthM: number };
+            /**
              * Discard fragments where one pixel spans more than this many
              * metres of ground. For paint drawn as geometry that is too thin
              * to rasterise cleanly past that point - and that has a texture
@@ -613,6 +621,7 @@ export class SceneMaterialManager implements KernelTask {
                         : this.markingsOf(properties)?.map ?? null,
                 },
                 uMarkings: { value: this.markingsOf(properties) ? 1 : 0 },
+                uPlates: { value: this.platesOf(properties) },
                 uSecondTone: { value: new THREE.Color() },
                 uSecondToneShade: { value: new THREE.Color() },
                 uMarkColorA: { value: this.markColor(properties, 0) },
@@ -649,6 +658,16 @@ export class SceneMaterialManager implements KernelTask {
                 vCameraD: { value: 0 }
             }
         };
+    }
+
+    /** (plate length, plate width, pavement length, pavement width), or zero for none. */
+    private platesOf(properties: SceneMaterialProperties): THREE.Vector4 {
+        const p = properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
+            ? properties.plates
+            : undefined;
+        return p === undefined
+            ? new THREE.Vector4()
+            : new THREE.Vector4(p.plateLengthM, p.plateWidthM, p.lengthM, p.widthM);
     }
 
     private markingsOf(properties: SceneMaterialProperties) {

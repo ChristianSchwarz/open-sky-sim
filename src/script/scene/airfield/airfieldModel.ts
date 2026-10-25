@@ -181,6 +181,14 @@ function flatMaterial(materials: SceneMaterialManager, paint: Paint): THREE.Mate
 }
 
 /**
+ * Concrete runway plates (OSM `surface=concrete:plates`), laid lengthwise:
+ * 6 m along the runway by 2 m across, the slab size of Soviet-built military
+ * fields like Saki's.
+ */
+const PLATE_LENGTH_M = 6;
+const PLATE_WIDTH_M = 2;
+
+/**
  * A paved runway's pavement with its paint in a texture (see
  * runwayMarkingTexture.ts), so the far view shows the markings filtered rather
  * than as geometry too thin to rasterise.
@@ -191,7 +199,7 @@ function markedPavementMaterial(
     materials: SceneMaterialManager, runway: AirfieldRunway, paint: Paint,
 ): THREE.Material {
     const mask = rasteriseMarkings(
-        runwayMarkings(runway.lengthM, runway.widthM, runway.ref, runway.surface),
+        runwayMarkings(runway.lengthM, runway.widthM, runway.ref, runway.surface, runway.skiJump),
         runway.lengthM, runway.widthM);
     const map = new THREE.DataTexture(
         mask.data, mask.width, mask.height, THREE.RGFormat, THREE.UnsignedByteType);
@@ -221,6 +229,34 @@ function markedPavementMaterial(
             fadeOutM: MARKING_TEXTURE_FADE_OUT_M,
             fadeInM: PAINT_MAX_FOOTPRINT_M,
         },
+        plates: platesOf(runway),
+    });
+}
+
+/** The plate layout of a runway laid in plates, for a material; undefined otherwise. */
+function platesOf(runway: AirfieldRunway) {
+    return runway.plates ? {
+        plateLengthM: PLATE_LENGTH_M, plateWidthM: PLATE_WIDTH_M,
+        lengthM: runway.lengthM, widthM: runway.widthM,
+    } : undefined;
+}
+
+/**
+ * One paint on a runway laid in plates: the plate joints run through it as
+ * they do through the pavement under it (the paint's UVs are the runway's).
+ */
+function platedPaintMaterial(
+    materials: SceneMaterialManager, runway: AirfieldRunway, paint: Paint,
+): THREE.Material {
+    return materials.build({
+        type: SceneMaterialPrimitiveType.MESH,
+        category: typeof paint === 'string' ? paint : paint.category,
+        depthWrite: false,
+        shaded: false,
+        overbright: typeof paint === 'string' ? 1 : paint.lighten,
+        rawColor: typeof paint === 'string' ? undefined : paint.rawColor,
+        maxFootprintM: typeof paint === 'string' ? undefined : paint.maxFootprintM,
+        plates: platesOf(runway),
     });
 }
 
@@ -426,6 +462,27 @@ class MeshParts {
         });
     }
 
+    /**
+     * A quad in a material of its own with UVs given per corner, merged with
+     * every other quad in that same material into one mesh.
+     */
+    addMaterialQuad(
+        paint: Paint, material: THREE.Material,
+        corners: [THREE.Vector3, THREE.Vector3, THREE.Vector3, THREE.Vector3],
+        uvs: [number, number][],
+    ): void {
+        const key = 'material#' + material.uuid;
+        let part = this.parts.get(key);
+        if (part === undefined) {
+            part = { paint, material, positions: [], uvs: [] };
+            this.parts.set(key, part);
+        }
+        for (const i of [0, 1, 2, 0, 2, 3]) {
+            part.positions.push(corners[i].x, corners[i].y, corners[i].z);
+            part.uvs!.push(uvs[i][0], uvs[i][1]);
+        }
+    }
+
     /** Two triangles from four corners wound a, b, c, d. */
     addQuad(
         paint: Paint,
@@ -622,6 +679,17 @@ export function buildAirfieldModel(
         .filter(r => isPaintedSurface(r.surface))
         .map(r => [r, markedPavementMaterial(materials, r, paints.get(r)!)]));
 
+    // One material per paint per plated runway, shared by every LOD level.
+    const platedPaints = new Map<string, THREE.Material>();
+    const platedPaintOf = (runway: AirfieldRunway, paint: Paint): THREE.Material => {
+        const key = runway.ref + '|' + runway.lat + '|' + paintKey(paint);
+        let material = platedPaints.get(key);
+        if (material === undefined) {
+            material = platedPaintMaterial(materials, runway, paint);
+            platedPaints.set(key, material);
+        }
+        return material;
+    };
     const levels: Model['lod'] = [];
     const flatsPerLevel: MeshParts[] = [];
     const solidPavement: number[] = [];
@@ -652,7 +720,8 @@ export function buildAirfieldModel(
                     continue;
                 }
                 addRunway(parts, runway, paints.get(runway)!, marked.get(runway),
-                    kinds, pass, toEnu, place);
+                    kinds, pass, toEnu, place,
+                    runway.plates ? paint => platedPaintOf(runway, paint) : undefined);
             }
         }
         parts.solid = level === 0 ? solidPavement : undefined;
@@ -724,6 +793,7 @@ function addRunway(
     parts: MeshParts, runway: AirfieldRunway, pavement: Paint,
     marked: THREE.Material | undefined, kinds: Set<MarkingKind>,
     pass: 'pavement' | 'paint', toEnu: ToEnu, place: Place,
+    platedPaint?: (paint: Paint) => THREE.Material,
 ): void {
     const centre = toEnu(runway.lat, runway.lon);
     const axis = bearingAxisAt(runway.lat, runway.lon, runway.headingDeg, toEnu);
@@ -736,7 +806,7 @@ function addRunway(
     );
 
     for (const rect of runwayMarkings(
-        runway.lengthM, runway.widthM, runway.ref, runway.surface)) {
+        runway.lengthM, runway.widthM, runway.ref, runway.surface, runway.skiJump)) {
         if (!kinds.has(rect.kind) || (rect.kind === 'pavement') !== (pass === 'pavement')) {
             continue;
         }
@@ -754,7 +824,18 @@ function addRunway(
             lighten: 1,
             maxFootprintM: marked !== undefined ? PAINT_MAX_FOOTPRINT_M : undefined,
         };
-        parts.addQuad(paint, ...quadCorners(rect, at, AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M));
+        const corners = quadCorners(rect, at, AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M);
+        if (platedPaint !== undefined) {
+            // The runway's own UVs at the paint's corners, in quadCorners'
+            // order, so the joints line up with the plates under it.
+            const u0 = (rect.u - rect.lengthM / 2) / runway.lengthM + 0.5;
+            const u1 = (rect.u + rect.lengthM / 2) / runway.lengthM + 0.5;
+            const v0 = (rect.v - rect.widthM / 2) / runway.widthM + 0.5;
+            const v1 = (rect.v + rect.widthM / 2) / runway.widthM + 0.5;
+            parts.addMaterialQuad(paint, platedPaint(paint), corners, [[u0, v0], [u0, v1], [u1, v1], [u1, v0]]);
+            continue;
+        }
+        parts.addQuad(paint, ...corners);
     }
 }
 

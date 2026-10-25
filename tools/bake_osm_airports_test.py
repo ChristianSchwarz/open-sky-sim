@@ -255,6 +255,16 @@ class PavementPadTest(unittest.TestCase):
         way, nodes = way_from_bearing(7, 90.0, MIN_RUNWAY_LENGTH_M - 1.0, {'aeroway': 'runway'})
         self.assertIsNone(runway_from_way(way, nodes, 'ga'))
 
+    def test_a_runway_laid_in_plates_says_so(self):
+        way, nodes = way_from_bearing(
+            45, 45.0, 3220.0, {'aeroway': 'runway', 'ref': '04R/22L', 'surface': 'concrete:plates'})
+        r = runway_from_way(way, nodes, 'military')
+        self.assertEqual(r.surface, 'concrete')
+        self.assertTrue(r.plates)
+        way, nodes = way_from_bearing(
+            46, 45.0, 3220.0, {'aeroway': 'runway', 'ref': '04/22', 'surface': 'concrete'})
+        self.assertFalse(runway_from_way(way, nodes, 'military').plates)
+
     def test_a_steel_deck_is_kept_however_short(self):
         # Saki's NITKA: 218 m of metal, no ref.
         way, nodes = way_from_bearing(
