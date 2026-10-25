@@ -37,6 +37,20 @@ export function hasLanduseGround(landAttrs: Uint8Array): boolean {
     return false;
 }
 
+/**
+ * Added to every triangle's normal weight, in quantised units squared, so a
+ * position touched only by zero-area triangles still gets their normal.
+ */
+const MIN_NORMAL_WEIGHT = 1e-3;
+
+/** A land triangle's area (twice it, which weights the same), in quantised units squared. */
+function triangleArea(positions: Int16Array, first: number): number {
+    const o = first * 3;
+    const ax = positions[o + 3] - positions[o], ay = positions[o + 4] - positions[o + 1], az = positions[o + 5] - positions[o + 2];
+    const bx = positions[o + 6] - positions[o], by = positions[o + 7] - positions[o + 1], bz = positions[o + 8] - positions[o + 2];
+    return Math.hypot(ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx);
+}
+
 function regionKeyOf(attrs: Uint8Array, v: number, landuse: boolean): number {
     const cls = attrs[v * 4 + 3];
     if (!landuse || cls === GROUND_CLASS) {
@@ -48,8 +62,14 @@ function regionKeyOf(attrs: Uint8Array, v: number, landuse: boolean): number {
 /**
  * The FACETED land welded into shared vertices, with the colour averaged
  * (mean) over the triangles of the *same region* that touch the vertex and
- * the normal averaged (mean, renormalised) over every triangle that touches
- * the position, whatever its region.
+ * the normal averaged (mean weighted by area, renormalised) over every
+ * triangle that touches the position, whatever its region.
+ *
+ * By area because the bake hangs vertical shore walls of a square metre or
+ * two, and zero-area slivers, off corners that also carry flat field
+ * triangles hundreds of metres long. Counted one each, they tilted such a
+ * corner by up to 45 degrees, and the big flat triangles shaded from it
+ * showed as dark fans across the fields beside every canal and lake.
  *
  * Welding is by exact match of the quantised int16 position plus the region
  * the vertex belongs to (see `regionKeyOf`), so a corner where a field meets
@@ -100,6 +120,7 @@ export function weldSmoothLand(
     let uniqueCount = 0;
     const remap = new Uint32Array(vertexCount);
     const landuse = hasLanduseGround(attrs);
+    let weight = 0;
 
     for (let i = 0; i < vertexCount; i++) {
         const px = positions[i * 3];
@@ -140,10 +161,13 @@ export function weldSmoothLand(
             sizeMax[idx] = sizes[i];
         }
 
+        if (i % 3 === 0) {
+            weight = triangleArea(positions, i) + MIN_NORMAL_WEIGHT;
+        }
         const ni = i * 4;
-        normalSum[n * 3] += normals[ni];
-        normalSum[n * 3 + 1] += normals[ni + 1];
-        normalSum[n * 3 + 2] += normals[ni + 2];
+        normalSum[n * 3] += normals[ni] * weight;
+        normalSum[n * 3 + 1] += normals[ni + 1] * weight;
+        normalSum[n * 3 + 2] += normals[ni + 2] * weight;
 
         const ai = i * 4;
         colorSum[idx * 4] += attrs[ai];

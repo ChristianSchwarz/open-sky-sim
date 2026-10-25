@@ -226,6 +226,25 @@ describe('buildSmoothLandGeometry', () => {
         assert.equal(verticesAt(h, 100, 0).length, 2, 'a class edge is a hard edge');
     });
 
+    it('weights the normal by area: a small shore wall barely tilts a big field corner', () => {
+        // A field triangle 4000 units on a side, and two walls 1 unit tall
+        // and 10 long hung off its corner, facing +x as a shore wall does.
+        const t = tile([
+            { pts: [0, 0, 0, 4000, 0, 0, 0, 0, 4000], cls: GROUND },
+            { pts: [0, 0, 0, 0, -1, 0, 0, 0, -10], cls: GROUND },
+            { pts: [0, -1, 0, 0, -1, -10, 0, 0, -10], cls: GROUND },
+        ]);
+        const normals = flatNormals(t.positions);
+        for (let v = 3; v < 9; v++) {
+            normals[v * 4] = 127;
+            normals[v * 4 + 1] = 0;
+        }
+        const g = buildSmoothLandGeometry(t.positions, normals, t.attrs)!;
+        const n = (g.getAttribute('normal') as { data: { array: Int8Array } }).data.array;
+        const [corner] = verticesAt(g, 0, 0).filter(v => g.getAttribute('position').array[v * 3 + 1] === 0);
+        assert.ok(n[corner * 4 + 1] >= 126, `the corner stays up: ${n[corner * 4]},${n[corner * 4 + 1]},${n[corner * 4 + 2]}`);
+    });
+
     /** The weld as it was first written, on Maps keyed by string: the reference for the typed-array one. */
     function referenceWeld(positions: Int16Array, normals: Int8Array, attrs: Uint8Array, sizes: Uint16Array) {
         const landuse = Array.from({ length: attrs.length / 4 }, (_, v) => attrs[v * 4 + 3]).includes(GROUND);
@@ -254,8 +273,12 @@ describe('buildSmoothLandGeometry', () => {
             }
             index.push(idx);
             size[idx] = Math.max(size[idx], sizes[i]);
+            const t0 = i - (i % 3);
+            const d = (v: number, k: number) => positions[(t0 + v) * 3 + k] - positions[t0 * 3 + k];
+            const area = Math.hypot(
+                d(1, 1) * d(2, 2) - d(1, 2) * d(2, 1), d(1, 2) * d(2, 0) - d(1, 0) * d(2, 2), d(1, 0) * d(2, 1) - d(1, 1) * d(2, 0));
             for (let k = 0; k < 3; k++) {
-                nSum[n * 3 + k] += normals[i * 4 + k];
+                nSum[n * 3 + k] += normals[i * 4 + k] * (area + 1e-3);
                 cSum[idx * 4 + k] += attrs[i * 4 + k];
             }
             cSum[idx * 4 + 3]++;
