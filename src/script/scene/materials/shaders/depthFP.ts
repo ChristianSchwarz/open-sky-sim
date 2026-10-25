@@ -187,6 +187,12 @@ const shader = (kind: 'stroke' | 'flat' | 'rail'): string => {
   uniform sampler2D uMap;
   uniform float uMarkings;
   uniform vec4 uPlates;
+  uniform float uOpacity;
+  /** The far view's runway paint, as opaque as the near view's (MARKING_OPACITY). */
+  const float MARK_OPACITY = 0.9;
+  uniform float uPlateShade;
+  /** Darkest a plate is shaded, as a fraction of the concrete. */
+  const float PLATE_SHADE_MAX = 0.20;
   const float PLATE_JOINT_M = 0.12;
   const float PLATE_JOINT_DARKEN = 0.10;
   uniform vec3 uMarkColorA;
@@ -282,11 +288,22 @@ ${DITHER_PARS_FRAGMENT}
     // second, both over the pavement. Faded out close in, where the paint is
     // drawn as geometry and the magnified texture would only blur its edges;
     // full strength by the footprint the geometry gives way at.
+    // Every plate a shade of its own, 0 to PLATE_SHADE_MAX darker, from a
+    // hash of which plate this is - under the paint, which is not weathered
+    // with the slab it is painted on. Where a plate shrinks below about a
+    // pixel the shades would sparkle, so they settle to their mean there.
+    if (uPlates.x > 0.0 && uPlateShade > 0.5) {
+      vec2 plateCell = vUv * uPlates.zw / uPlates.xy;
+      float plateHash = fract(sin(dot(floor(plateCell), vec2(12.9898, 78.233))) * 43758.5453);
+      vec2 plateSpan = fwidth(plateCell);
+      float plateSharp = 1.0 - smoothstep(0.25, 1.0, max(plateSpan.x, plateSpan.y));
+      diffuse *= 1.0 - PLATE_SHADE_MAX * mix(0.5, plateHash, plateSharp);
+    }
     if (uMarkings > 0.5) {
       vec2 markFootprint = fwidth(vPosition.xz);
       float markWeight = smoothstep(uMarkFade.x, uMarkFade.y,
         max(markFootprint.x, markFootprint.y));
-      vec2 paint = texture2D(uMap, vUv).rg * markWeight;
+      vec2 paint = texture2D(uMap, vUv).rg * markWeight * MARK_OPACITY;
       diffuse = mix(diffuse, uMarkColorA, paint.r);
       diffuse = mix(diffuse, uMarkColorB, paint.g);
     }
@@ -325,6 +342,7 @@ ${DITHER_PARS_FRAGMENT}
     diffuse *= overbright;
     gl_FragColor = mix(vec4(diffuse, 1.0), vec4(fogColor, 1.0), fogFactor * 0.92);
 ` + (rail ? `    gl_FragColor.a = railAlpha;
+` : '') + (flat ? `    gl_FragColor.a = uOpacity;
 ` : '') + `${LOG_DEPTH_FRAGMENT}
   }
 `;

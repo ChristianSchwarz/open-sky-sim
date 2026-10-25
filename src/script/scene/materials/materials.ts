@@ -191,7 +191,14 @@ type SceneMaterialMeshProperties = {
              * this material paints, so the runway's paint shows them too.
              * Needs UVs.
              */
-            plates?: { plateLengthM: number; plateWidthM: number; lengthM: number; widthM: number };
+            plates?: {
+                plateLengthM: number; plateWidthM: number; lengthM: number; widthM: number;
+                /**
+                 * The concrete itself, not paint on it: each plate a random
+                 * shade darker (see PLATE_SHADE_MAX in depthFP.ts).
+                 */
+                shade?: boolean;
+            };
             /**
              * Discard fragments where one pixel spans more than this many
              * metres of ground. For paint drawn as geometry that is too thin
@@ -199,6 +206,12 @@ type SceneMaterialMeshProperties = {
              * under it taking over there. 0 or undefined = never.
              */
             maxFootprintM?: number;
+            /**
+             * Blended over what is under it at this opacity, 0..1 (runway
+             * paint lets a little of the pavement through). 1 or undefined =
+             * opaque, as everything else is.
+             */
+            opacity?: number;
         }
     );
 
@@ -440,6 +453,9 @@ export class SceneMaterialManager implements KernelTask {
         if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && p.railDetail) {
             material.transparent = true;
         }
+        if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && (p.opacity ?? 1) < 1) {
+            material.transparent = true;
+        }
         if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && !p.river && p.vertexAlphaDither) {
             material.defines = { ...material.defines, VERTEX_ALPHA_DITHER: '' };
         }
@@ -622,6 +638,14 @@ export class SceneMaterialManager implements KernelTask {
                 },
                 uMarkings: { value: this.markingsOf(properties) ? 1 : 0 },
                 uPlates: { value: this.platesOf(properties) },
+                uOpacity: {
+                    value: properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
+                        ? (properties.opacity ?? 1) : 1,
+                },
+                uPlateShade: {
+                    value: properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
+                        && properties.plates?.shade ? 1 : 0,
+                },
                 uSecondTone: { value: new THREE.Color() },
                 uSecondToneShade: { value: new THREE.Color() },
                 uMarkColorA: { value: this.markColor(properties, 0) },

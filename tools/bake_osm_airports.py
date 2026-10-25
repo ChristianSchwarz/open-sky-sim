@@ -1278,6 +1278,9 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
             host.taxiways.append({
                 'widthM': taxiway_width_m(tags, host.kind),
                 'points': [[c[1], c[0]] for c in coords],
+                # As tagged: the runtime lays concrete plates on it (and on an
+                # untagged one at a field whose runway has them).
+                **({'surface': str(tags['surface'])} if tags.get('surface') else {}),
             })
         elif aeroway == 'apron':
             # Every outer ring, not just the largest: a multipolygon apron with
@@ -1289,7 +1292,10 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
                 if way_ring is not None:
                     rings = [way_ring]
             for ring in rings:
-                host.aprons.append({'ring': [[c[1], c[0]] for c in ring]})
+                host.aprons.append({
+                    'ring': [[c[1], c[0]] for c in ring],
+                    **({'surface': str(tags['surface'])} if tags.get('surface') else {}),
+                })
         elif aeroway in ('terminal', 'hangar', 'control_tower', 'tower'):
             ring = _ring_of(el, nodes) if el.get('type') == 'way' else (
                 rel_rings[0] if rel_rings else None)

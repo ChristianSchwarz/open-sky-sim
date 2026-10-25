@@ -46,11 +46,15 @@ interface AirfieldTaxiway {
     widthM: number;
     /** `[lat, lon]` along the centreline. */
     points: number[][];
+    /** OSM `surface`, where tagged. */
+    surface?: string;
 }
 
 interface AirfieldApron {
     /** `[lat, lon]` ring, closed. */
     ring: number[][];
+    /** OSM `surface`, where tagged. */
+    surface?: string;
 }
 
 export interface AirfieldBuilding {

@@ -642,6 +642,19 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(len(found[0].decks[0]['ring']), 5)
         self.assertEqual(len(found[0].extra_pads), 1)
 
+    def test_aprons_and_taxiways_keep_their_surface_tag(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        apron, apron_nodes = aerodrome_way(14, LAT0, LON0, 60.0, {}, first_node=500)
+        apron['tags'] = {'aeroway': 'apron', 'surface': 'concrete:plates'}
+        taxi, taxi_nodes = way_from_bearing(15, 0.0, 300.0, {'aeroway': 'taxiway'})
+        taxi['nodes'] = [600, 601]
+        taxi_nodes = {600: taxi_nodes[1], 601: taxi_nodes[2]}
+        found = assemble_airfields(elements_and_nodes(
+            field, runway, (apron, apron_nodes), (taxi, taxi_nodes)))
+        self.assertEqual(found[0].aprons[0].get('surface'), 'concrete:plates')
+        self.assertNotIn('surface', found[0].taxiways[0])
+
     def test_an_arresting_wire_goes_with_its_aerodrome(self):
         field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
         runway = runway_way(12, LAT0, LON0, first_node=300)

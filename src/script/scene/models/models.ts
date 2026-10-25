@@ -6,7 +6,7 @@ import { isZero } from '../../utils/math';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../materials/materials';
 import { updateUniforms } from '../utils';
 import { aircraftPackStore, isPackUrl, parsePackUrl } from '../../state/aircraftPack';
-import { SHADOW_ALPHA_DITHER } from '../entities/aircraftShadow';
+import { SHADOW_ALPHA_DITHER, SHADOW_RENDER_ORDER } from '../entities/aircraftShadow';
 
 
 export interface ModelLodLevel {
@@ -254,6 +254,10 @@ export class ModelManager {
                             colorDither: false,
                             alphaDither: SHADOW_ALPHA_DITHER,
                         });
+                        // Stippled, not blended: transparent only to be
+                        // queued after the runway paint (SHADOW_RENDER_ORDER).
+                        obj.material.transparent = true;
+                        obj.renderOrder = SHADOW_RENDER_ORDER;
                     } else if (isGlassMaterialName(matName)) {
                         obj.material = this.materials.build({
                             type: SceneMaterialPrimitiveType.MESH,

@@ -15,7 +15,7 @@ import {
  * and building the real one drags in shader sources and a palette. Everything
  * this file checks is in the vertices.
  */
-type BuiltProps = { category: string; overbright?: number; rawColor?: string; plates?: object };
+type BuiltProps = { category: string; overbright?: number; rawColor?: string; plates?: object; opacity?: number };
 
 const MATERIALS = {
     build: (p: BuiltProps) => {
@@ -24,6 +24,7 @@ const MATERIALS = {
         m.userData.overbright = p.overbright;
         m.userData.rawColor = p.rawColor;
         m.userData.plates = p.plates;
+        m.userData.opacity = p.opacity;
         return m;
     },
 } as unknown as SceneMaterialManager;
@@ -245,9 +246,48 @@ describe('airfield model', () => {
                 assert.ok(uv.getX(i) >= -1e-6 && uv.getX(i) <= 1 + 1e-6 && uv.getY(i) >= -1e-6 && uv.getY(i) <= 1 + 1e-6);
             }
         }
+        // Each plate shaded on its own in the concrete, never in the paint on it.
+        for (const m of withPlates) {
+            const userData = (m.material as THREE.Material).userData;
+            assert.equal((userData.plates as { shade: boolean }).shade,
+                userData.category === 'SCENERY_BASE_CONCRETE', userData.category);
+        }
         // An unplated runway's paint stays plain.
         const plain = buildAirfieldModel(gclp(), BASIS, MATERIALS)!.model.lod[0].flats as THREE.Mesh[];
         assert.equal(plain.filter(m => (m.material as THREE.Material).userData.plates !== undefined).length, 0);
+    });
+
+    it('lays plates on aprons and taxiways tagged so, or untagged at a plated field', () => {
+        const ring = (de: number) => [[27.928, -15.392 + de], [27.928, -15.391 + de], [27.929, -15.391 + de], [27.928, -15.392 + de]];
+        const taxi = (de: number, surface?: string) => ({ widthM: 18, points: [[27.927, -15.395 + de], [27.927, -15.394 + de]], surface });
+        const platedSlabs = (field: Airfield) => {
+            const flats = buildAirfieldModel(field, BASIS, MATERIALS)!.model.lod[0].flats as THREE.Mesh[];
+            return flats.filter(m => {
+                const userData = (m.material as THREE.Material).userData;
+                return userData.plates !== undefined && (userData.plates as { lengthM: number }).lengthM === 1;
+            }).reduce((n, m) => n + m.geometry.getAttribute('position').count / 3, 0);
+        };
+        const runway = { ...gclp().runways[0], surface: 'concrete' as const, plates: true };
+        // Untagged at a plated field: plated. Tagged otherwise: not.
+        assert.ok(platedSlabs(gclp({ runways: [runway], aprons: [{ ring: ring(0) }], taxiways: [taxi(0)] })) > 0);
+        assert.equal(platedSlabs(gclp({ runways: [runway],
+            aprons: [{ ring: ring(0), surface: 'asphalt' }], taxiways: [taxi(0, 'concrete')] })), 0);
+        // Tagged plates at a field whose runway is not: plated.
+        const plain = { ...gclp().runways[0], surface: 'concrete' as const };
+        assert.ok(platedSlabs(gclp({ runways: [plain], aprons: [{ ring: ring(0), surface: 'concrete:plates' }] })) > 0);
+        assert.equal(platedSlabs(gclp({ runways: [plain], aprons: [{ ring: ring(0) }], taxiways: [taxi(0)] })), 0);
+    });
+
+    it('lets a tenth of the pavement through the runway paint', () => {
+        const flats = buildAirfieldModel(gclp(), BASIS, MATERIALS)!.model.lod[0].flats as THREE.Mesh[];
+        const opacityOf = (category: string) => flats
+            .filter(m => (m.material as THREE.Material).userData.category === category)
+            .map(m => (m.material as THREE.Material).userData.opacity);
+        assert.ok(opacityOf('SCENERY_BASE_RUNWAY_LINES').length > 0);
+        assert.ok(opacityOf('SCENERY_BASE_RUNWAY_LINES').every(o => o === 0.9));
+        assert.ok(opacityOf('SCENERY_BASE_RUNWAY_THRESHOLD').every(o => o === 0.9));
+        // The pavement under it stays opaque.
+        assert.ok(opacityOf('SCENERY_ROAD_SECONDARY').every(o => o === undefined));
     });
 
     it('is the size of the runway it was given', () => {

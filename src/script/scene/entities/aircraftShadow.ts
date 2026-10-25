@@ -5,6 +5,14 @@ import { FORWARD, RIGHT, UP } from '../../utils/math';
 export const SHADOW_SURFACE_EPSILON_M = 0.08;
 /** Ground-shadow opacity via screen-space stipple (higher = denser / more opaque). */
 export const SHADOW_ALPHA_DITHER = 0.4;
+/**
+ * Where the silhouette goes in the transparent queue. The entity layers are
+ * drawn as one scene, opaque first, and runway paint is translucent
+ * (PAINT_RENDER_ORDER, one lower): a silhouette left opaque was drawn before
+ * the paint and covered by it. Queued just after the paint, and before every
+ * other translucent thing (smoke, trails at 0), it falls across the markings.
+ */
+export const SHADOW_RENDER_ORDER = -1;
 
 /** Samples per axis over the footprint when fitting the ground plane (3 => 3x3 grid). */
 const FOOTPRINT_SAMPLES = 3;

@@ -19,6 +19,7 @@ import {
     Airfield, AirfieldBuilding, AirfieldRunway, RunwaySurface, primaryRunway,
 } from '../../terrain/airfields';
 import { bearingAxisAt } from '../../terrain/flattenPad';
+import { SHADOW_RENDER_ORDER } from '../entities/aircraftShadow';
 import {
     Ecef, Enu, EnuBasis, ecefToEnu, geodeticOnSurfaceAtEnu, geodeticToEcef, sceneFromEnu,
 } from '../../terrain/geodesy';
@@ -158,13 +159,29 @@ type Paint = PaletteCategory | {
     category: PaletteCategory; lighten: number; rawColor?: string;
     /** See PAINT_MAX_FOOTPRINT_M. */
     maxFootprintM?: number;
+    /** Blended over the pavement at this opacity; see MARKING_OPACITY. */
+    opacity?: number;
 };
+
+/**
+ * Runway paint lets a tenth of the pavement through it, as worn paint on
+ * concrete does. The far view's mask is drawn the same (MARK_OPACITY in
+ * depthFP.ts).
+ */
+const MARKING_OPACITY = 0.9;
+/**
+ * Translucent paint is drawn first of everything translucent, straight after
+ * the opaque pavement it is on, and before the aircraft shadows that fall
+ * across it (SHADOW_RENDER_ORDER, one higher).
+ */
+const PAINT_RENDER_ORDER = SHADOW_RENDER_ORDER - 1;
 
 function paintKey(paint: Paint): string {
     return typeof paint === 'string'
         ? paint
         : paint.category + '*' + paint.lighten + (paint.rawColor ?? '')
-            + (paint.maxFootprintM !== undefined ? '@' + paint.maxFootprintM : '');
+            + (paint.maxFootprintM !== undefined ? '@' + paint.maxFootprintM : '')
+            + (paint.opacity !== undefined ? '%' + paint.opacity : '');
 }
 
 /** The material for a flat, unlit part in one paint. */
@@ -177,6 +194,7 @@ function flatMaterial(materials: SceneMaterialManager, paint: Paint): THREE.Mate
         overbright: typeof paint === 'string' ? 1 : paint.lighten,
         rawColor: typeof paint === 'string' ? undefined : paint.rawColor,
         maxFootprintM: typeof paint === 'string' ? undefined : paint.maxFootprintM,
+        opacity: typeof paint === 'string' ? undefined : paint.opacity,
     });
 }
 
@@ -229,15 +247,19 @@ function markedPavementMaterial(
             fadeOutM: MARKING_TEXTURE_FADE_OUT_M,
             fadeInM: PAINT_MAX_FOOTPRINT_M,
         },
-        plates: platesOf(runway),
+        plates: platesOf(runway, true),
     });
 }
 
-/** The plate layout of a runway laid in plates, for a material; undefined otherwise. */
-function platesOf(runway: AirfieldRunway) {
+/**
+ * The plate layout of a runway laid in plates, for a material; undefined
+ * otherwise. `shade` for the concrete, whose plates each weather to a shade
+ * of their own; not for the paint on it.
+ */
+function platesOf(runway: AirfieldRunway, shade = false) {
     return runway.plates ? {
         plateLengthM: PLATE_LENGTH_M, plateWidthM: PLATE_WIDTH_M,
-        lengthM: runway.lengthM, widthM: runway.widthM,
+        lengthM: runway.lengthM, widthM: runway.widthM, shade,
     } : undefined;
 }
 
@@ -256,6 +278,7 @@ function platedPaintMaterial(
         overbright: typeof paint === 'string' ? 1 : paint.lighten,
         rawColor: typeof paint === 'string' ? undefined : paint.rawColor,
         maxFootprintM: typeof paint === 'string' ? undefined : paint.maxFootprintM,
+        opacity: typeof paint === 'string' ? undefined : paint.opacity,
         plates: platesOf(runway),
     });
 }
@@ -471,15 +494,28 @@ class MeshParts {
         corners: [THREE.Vector3, THREE.Vector3, THREE.Vector3, THREE.Vector3],
         uvs: [number, number][],
     ): void {
+        for (const [i, j, k] of [[0, 1, 2], [0, 2, 3]]) {
+            this.addMaterialTri(paint, material,
+                [corners[i], corners[j], corners[k]], [uvs[i], uvs[j], uvs[k]]);
+        }
+    }
+
+    /** One triangle of {@link addMaterialQuad}. */
+    addMaterialTri(
+        paint: Paint, material: THREE.Material,
+        corners: [THREE.Vector3, THREE.Vector3, THREE.Vector3],
+        uvs: [number, number][],
+    ): void {
         const key = 'material#' + material.uuid;
         let part = this.parts.get(key);
         if (part === undefined) {
             part = { paint, material, positions: [], uvs: [] };
             this.parts.set(key, part);
         }
-        for (const i of [0, 1, 2, 0, 2, 3]) {
+        for (let i = 0; i < 3; i++) {
             part.positions.push(corners[i].x, corners[i].y, corners[i].z);
             part.uvs!.push(uvs[i][0], uvs[i][1]);
+            this.solid?.push(corners[i].x, corners[i].y, corners[i].z);
         }
     }
 
@@ -516,6 +552,9 @@ class MeshParts {
                 : flatMaterial(materials, paint));
             const mesh = new THREE.Mesh(geometry, material);
             mesh.onBeforeRender = updateUniforms;
+            if (material.transparent) {
+                mesh.renderOrder = PAINT_RENDER_ORDER;
+            }
             this.meshes.set(key, mesh);
             out.push(mesh);
         }
@@ -679,6 +718,37 @@ export function buildAirfieldModel(
         .filter(r => isPaintedSurface(r.surface))
         .map(r => [r, markedPavementMaterial(materials, r, paints.get(r)!)]));
 
+    // Aprons and taxiways in concrete plates: tagged so, or untagged at a
+    // field whose runway is. Their slab coordinates are metres (u, v), so the
+    // material's pavement is 1 m by 1 m; an apron's continue the primary
+    // runway's grid, from its low threshold's left-hand corner.
+    const runwayPlated = primary.plates === true;
+    const anyPlated = runwayPlated
+        || airfield.aprons.some(a => a.surface === 'concrete:plates')
+        || airfield.taxiways.some(t => t.surface === 'concrete:plates');
+    const primaryCentre = toEnu(primary.lat, primary.lon);
+    const primaryAxis = bearingAxisAt(primary.lat, primary.lon, primary.headingDeg, toEnu);
+    const platedPavement: PlatedPavement | undefined = anyPlated ? {
+        material: materials.build({
+            type: SceneMaterialPrimitiveType.MESH,
+            category: groundSurfaceOf(airfield),
+            depthWrite: false,
+            shaded: false,
+            plates: {
+                plateLengthM: PLATE_LENGTH_M, plateWidthM: PLATE_WIDTH_M,
+                lengthM: 1, widthM: 1, shade: true,
+            },
+        }),
+        isPlated: surface => surface === 'concrete:plates' || (surface === undefined && runwayPlated),
+        runwayGrid: (e, n) => {
+            const de = e - primaryCentre.e;
+            const dn = n - primaryCentre.n;
+            return [
+                de * primaryAxis.e + dn * primaryAxis.n + primary.lengthM / 2,
+                de * primaryAxis.n - dn * primaryAxis.e + primary.widthM / 2,
+            ];
+        },
+    } : undefined;
     // One material per paint per plated runway, shared by every LOD level.
     const platedPaints = new Map<string, THREE.Material>();
     const platedPaintOf = (runway: AirfieldRunway, paint: Paint): THREE.Material => {
@@ -704,8 +774,8 @@ export function buildAirfieldModel(
             // Drawn under the runways, so a taxiway crossing one loses.
             const pavement = groundSurfaceOf(airfield);
             parts.solid = level === 0 ? solidPavement : undefined;
-            addAprons(parts, airfield, toEnu, drape, pavement);
-            addTaxiways(parts, airfield, toEnu, drape, kinds.has('centreline'), pavement);
+            addAprons(parts, airfield, toEnu, drape, pavement, platedPavement);
+            addTaxiways(parts, airfield, toEnu, drape, kinds.has('centreline'), pavement, platedPavement);
             parts.solid = undefined;
             addBuildings(solids, airfield, toEnu, drape);
         }
@@ -823,6 +893,7 @@ function addRunway(
             category: MARKING_CATEGORY[rect.kind],
             lighten: 1,
             maxFootprintM: marked !== undefined ? PAINT_MAX_FOOTPRINT_M : undefined,
+            opacity: MARKING_OPACITY,
         };
         const corners = quadCorners(rect, at, AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M);
         if (platedPaint !== undefined) {
@@ -1119,7 +1190,7 @@ export function smoothCentreline(
 
 function addTaxiways(
     parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place, withStripe: boolean,
-    pavement: PaletteCategory,
+    pavement: PaletteCategory, plates?: PlatedPavement,
 ): void {
     for (const taxiway of airfield.taxiways) {
         // Smoothed before it is cut into segments, so the pavement and the
@@ -1143,10 +1214,20 @@ function addTaxiways(
             }
             segments.push({ a, de, dn, len, px: -dn / len, py: de / len });
         }
+        // Where along the taxiway each segment starts, for its plates: they
+        // run down the taxiway, wherever it turns.
+        const startsAt: number[] = [];
+        let run = 0;
+        for (const seg of segments) {
+            startsAt.push(run);
+            run += seg.len;
+        }
+        const slab = plates?.isPlated(taxiway.surface) ? plates.material : undefined;
 
-        const lay = (width: number, lift: number, category: PaletteCategory) => {
+        const lay = (width: number, lift: number, category: PaletteCategory, slabs?: THREE.Material) => {
             const h = width / 2;
-            for (const seg of segments) {
+            for (let k = 0; k < segments.length; k++) {
+                const seg = segments[k];
                 const { a, de, dn, px, py } = seg;
                 // Cut into steps so the strip follows the ground under it
                 // instead of spanning a rise as one flat quad.
@@ -1158,19 +1239,27 @@ function addTaxiways(
                     const n0 = a.n + dn * t0;
                     const e1 = a.e + de * t1;
                     const n1 = a.n + dn * t1;
-                    parts.addQuad(category,
+                    const corners: [THREE.Vector3, THREE.Vector3, THREE.Vector3, THREE.Vector3] = [
                         place(e0 + px * h, n0 + py * h, lift),
                         place(e0 - px * h, n0 - py * h, lift),
                         place(e1 - px * h, n1 - py * h, lift),
-                        place(e1 + px * h, n1 + py * h, lift));
+                        place(e1 + px * h, n1 + py * h, lift)];
+                    if (slabs !== undefined) {
+                        const u0 = startsAt[k] + seg.len * t0;
+                        const u1 = startsAt[k] + seg.len * t1;
+                        parts.addMaterialQuad(category, slabs, corners, [[u0, h], [u0, -h], [u1, -h], [u1, h]]);
+                    } else {
+                        parts.addQuad(category, ...corners);
+                    }
                 }
             }
             for (let i = 0; i + 1 < segments.length; i++) {
-                addTaxiwayJoint(parts, segments[i], segments[i + 1], h, lift, category, place);
+                addTaxiwayJoint(parts, segments[i], segments[i + 1], h, lift, category, place,
+                    slabs && { material: slabs, endsAt: startsAt[i] + segments[i].len });
             }
         };
 
-        lay(taxiway.widthM, AIRFIELD_SURFACE_EPS_M, pavement);
+        lay(taxiway.widthM, AIRFIELD_SURFACE_EPS_M, pavement, slab);
         if (withStripe) {
             lay(TAXIWAY_STRIPE_M, AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M,
                 PaletteCategory.SCENERY_FIELD_YELLOW);
@@ -1196,6 +1285,7 @@ function addTaxiways(
 function addTaxiwayJoint(
     parts: MeshParts, prev: TaxiwaySegment, next: TaxiwaySegment,
     half: number, lift: number, category: PaletteCategory, place: Place,
+    slabs?: { material: THREE.Material; endsAt: number },
 ): void {
     const cross = prev.de * next.dn - prev.dn * next.de;
     const dot = prev.de * next.de + prev.dn * next.dn;
@@ -1219,27 +1309,34 @@ function addTaxiwayJoint(
     const startE = prev.px * side;
     const startN = prev.py * side;
     const centre = place(ce, cn, lift);
+    // Plates in the incoming leg's own run, carried on past its end.
+    const len = Math.hypot(prev.de, prev.dn);
+    const slabAt = (e: number, n: number): [number, number] => slabs === undefined ? [0, 0] : [
+        slabs.endsAt + ((e - ce) * prev.de + (n - cn) * prev.dn) / len,
+        (e - ce) * prev.px + (n - cn) * prev.py,
+    ];
     const rim = (t: number) => {
         const angle = signed * t;
         const cos = Math.cos(angle);
         const sin = Math.sin(angle);
         // Rotating the normal by the same signed angle the direction turns
         // through walks the rim from prev's outer edge to next's.
-        return place(
-            ce + half * (startE * cos - startN * sin),
-            cn + half * (startE * sin + startN * cos),
-            lift);
+        const e = ce + half * (startE * cos - startN * sin);
+        const n = cn + half * (startE * sin + startN * cos);
+        return { at: place(e, n, lift), uv: slabAt(e, n) };
     };
 
+    const hub = { at: centre, uv: slabAt(ce, cn) };
     let from = rim(0);
     for (let s = 1; s <= steps; s++) {
         const to = rim(s / steps);
         // Wound counter-clockwise in east/north, which is what faces up once
         // east/north become the scene's x and -z; see addAprons.
-        if (signed > 0) {
-            parts.add(category, centre, from, to);
+        const [b, c] = signed > 0 ? [from, to] : [to, from];
+        if (slabs !== undefined) {
+            parts.addMaterialTri(category, slabs.material, [hub.at, b.at, c.at], [hub.uv, b.uv, c.uv]);
         } else {
-            parts.add(category, centre, to, from);
+            parts.add(category, hub.at, b.at, c.at);
         }
         from = to;
     }
@@ -1309,11 +1406,25 @@ function addBuildings(
 
 function addAprons(
     parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place,
-    pavement: PaletteCategory,
+    pavement: PaletteCategory, plates?: PlatedPavement,
 ): void {
     for (const apron of airfield.aprons) {
-        addFilledRing(parts, apron.ring, toEnu, place, pavement);
+        addFilledRing(parts, apron.ring, toEnu, place, pavement,
+            plates?.isPlated(apron.surface) ? plates : undefined);
     }
+}
+
+/**
+ * Aprons and taxiways laid in concrete plates (concrete.ts's 6 x 2 m, in
+ * PLATE_LENGTH_M by PLATE_WIDTH_M): which ones are, the material that draws
+ * them, and the runway's own plate grid an apron's plates continue.
+ */
+interface PlatedPavement {
+    material: THREE.Material;
+    /** Tagged `concrete:plates`, or untagged at a field whose runway is. */
+    isPlated(surface: string | undefined): boolean;
+    /** Metres along and across the primary runway from its low-threshold corner. */
+    runwayGrid(e: number, n: number): [number, number];
 }
 
 /**
@@ -1329,7 +1440,7 @@ function addDecks(parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Pla
 /** One closed `[lat, lon]` ring, triangulated flat at `place`. */
 function addFilledRing(
     parts: MeshParts, latLonRing: number[][], toEnu: ToEnu, place: Place,
-    category: PaletteCategory,
+    category: PaletteCategory, plates?: PlatedPavement,
 ): void {
     const ring = latLonRing.map(p => toEnu(p[0], p[1]));
     // OSM closes its rings by repeating the first node; the triangulator
@@ -1364,11 +1475,13 @@ function addFilledRing(
         return;
     }
     for (const face of faces) {
-        parts.add(
-            category,
-            place(ring[face[0]].e, ring[face[0]].n, AIRFIELD_SURFACE_EPS_M),
-            place(ring[face[1]].e, ring[face[1]].n, AIRFIELD_SURFACE_EPS_M),
-            place(ring[face[2]].e, ring[face[2]].n, AIRFIELD_SURFACE_EPS_M),
-        );
+        const corners = face.map(i => place(ring[i].e, ring[i].n, AIRFIELD_SURFACE_EPS_M)) as
+            [THREE.Vector3, THREE.Vector3, THREE.Vector3];
+        if (plates !== undefined) {
+            parts.addMaterialTri(category, plates.material, corners,
+                face.map(i => plates.runwayGrid(ring[i].e, ring[i].n)));
+        } else {
+            parts.add(category, ...corners);
+        }
     }
 }
