@@ -15,6 +15,15 @@ import { rotateBodyToWorld, rotateWorldToBody } from './rigidBody6';
 const FOOTPRINT_M = 0.45;
 /** Finite-difference half-step (m) for surface normals (as FM2). */
 const NORMAL_EPS_M = 0.5;
+/**
+ * A slope sample this far (m) above or below the surface under the tyre is
+ * the other side of an edge (a deck's stern or side over the sea, a pad's
+ * rim), not the surface the leg is over: it is taken level with that
+ * surface, and the edge as a wall is left to the solid contacts. Across the
+ * Kuznetsov's stern a raw difference made a near-vertical "ground" facing
+ * aft, and a leg 3 m above the deck was sprung backwards off it.
+ */
+const EDGE_DROP_M = 0.5;
 /** Slip speed (m/s) below which friction fades out linearly. */
 const SLIP_EPS_MPS = 0.1;
 
@@ -86,8 +95,10 @@ export class Fm3GroundContact {
             this.planeZ[i] = z;
             this.planeY[i] = this.groundHeightUnderGear(x, z);
             const e = NORMAL_EPS_M;
-            const hL = this.groundHeightAt(x - e, z), hR = this.groundHeightAt(x + e, z);
-            const hD = this.groundHeightAt(x, z - e), hU = this.groundHeightAt(x, z + e);
+            const top = this.planeY[i];
+            const level = (h: number) => (Math.abs(h - top) > EDGE_DROP_M ? top : h);
+            const hL = level(this.groundHeightAt(x - e, z)), hR = level(this.groundHeightAt(x + e, z));
+            const hD = level(this.groundHeightAt(x, z - e)), hU = level(this.groundHeightAt(x, z + e));
             let nx = -(hR - hL) / (2 * e), ny = 1, nz = -(hU - hD) / (2 * e);
             const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
             nx /= len; ny /= len; nz /= len;
