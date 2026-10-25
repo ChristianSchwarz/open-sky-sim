@@ -43,7 +43,7 @@ import { ActivePlayArea, areaContains, homeArea, resolvePlayArea, terrainAreas }
 import { carrierSurfaceY, chooseCarrierSite } from './carrierSite';
 import { Airfield, AirfieldBuilding, airfieldsInArea } from '../terrain/airfields';
 import {
-    SceneRunway, airfieldChoices, headingForward, pickStartRunway, sceneRunwaysOf,
+    SceneRunway, airfieldChoices, headingForward, pickStartRunway, regionalHomeBase, runwayKey, sceneRunwaysOf,
 } from './activeAirfield';
 import {
     AIRFIELD_SURFACE_EPS_M, GroundStrip, buildAirfieldModel, buildingHeightM, combineCover, repaintGroundStrip,
@@ -123,7 +123,12 @@ import { WeaponsField } from '../scene/entities/weaponsField';
 import { Faction } from '../weapons/combatant';
 import { CombatSimClient } from '../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../physics/model/simProxyFlightModel';
-import { SerializedWorld, serializeStaticColliders, serializeWorld, defaultArrestorCableField } from '../physics/sim/serializedWorld';
+import { SerializedWorld, serializeStaticColliders, serializeWorld, defaultArrestorCableField, serializeArrestorCables } from '../physics/sim/serializedWorld';
+import { LandArrestorWire, landArrestorFields, landArrestorWiresOf, landWireById } from '../scene/entities/landArrestorWires';
+import { LandArrestorWiresEntity } from '../scene/entities/landArrestorWiresEntity';
+import { osmSkiJumpsOf } from '../scene/entities/osmSkiJumps';
+import { pavementColliders } from '../scene/airfield/pavementColliders';
+import { SkiJumpModelLibBuilder } from '../scene/models/lib/skiJumpModelBuilder';
 import { HeightFieldSender, MirrorFocus, SerializedHeightField } from '../terrain/heightMirror';
 import { rebaseMeshCollider, rebaseRunway, rebaseSkiJump, rebaseSurfacePad } from './worldRebase';
 import { FlightRecorder, ReplayPlayer, newReplayPose } from './flightRecorder';
@@ -518,6 +523,13 @@ export class Game {
     private readonly surfacePads = new SurfacePadIndex();
     /** Every runway of this play area, longest first. Empty on an old pyramid. */
     private sceneRunways: SceneRunway[] = [];
+    /** Arresting wires of this area's airfields, in scene coordinates (re-based with the scene). */
+    private landWires: LandArrestorWire[] = [];
+    /**
+     * This area's OSM ski-jump ramps (Saki's T2). Kept apart from skiJumps,
+     * which addAirBase empties for its own ramp, and put back there after it.
+     */
+    private osmSkiJumps: SkiJumpCollider[] = [];
     /** Every airfield of this play area with its scene position; built or not. */
     private areaAirfields: Array<{ airfield: Airfield; x: number; z: number }> = [];
     /** Airfields already built into the scene, or being built right now. */
@@ -1729,7 +1741,10 @@ export class Game {
         // Lined up at the threshold with the roll-out ahead, whatever the
         // runway's length: the inset is from the threshold, not from a fixed
         // point that happened to be inside a 3 km strip.
-        const p = this.onRunwayAxis(this.spawnFrame.halfLength - RUNWAY_SPAWN_INSET_M);
+        // A start point a couple of hundred metres long (a deck, a ski-jump
+        // run-up) is started from its very end, or there is no run left.
+        const inset = Math.min(RUNWAY_SPAWN_INSET_M, this.spawnFrame.halfLength * 0.15);
+        const p = this.onRunwayAxis(this.spawnFrame.halfLength - inset);
         return new THREE.Vector3(p.x, this.groundHeightAt(p.x, p.z) + gearY, p.z);
     }
 
@@ -2182,6 +2197,7 @@ export class Game {
         } else if (this.state === GameState.SPAWN_MENU || this.state === GameState.FIXED_CAMERA) {
             if (this.state === GameState.FIXED_CAMERA) {
                 this.moveFixedCamera(delta);
+                this.streamAirfields();
                 this.maybeRebase();
             }
             this.advanceCarrier(delta);
@@ -2489,17 +2505,10 @@ export class Game {
             m.originZ = p.z;
         }
 
+        // The land wires go along every time: the sim replaces the whole list.
         const field = defaultArrestorCableField(p.x, p.y, p.z, q);
-        this.combatSim.setArrestorCables([{
-            originX: field.originX,
-            originY: field.originY,
-            originZ: field.originZ,
-            deckAxis: [field.deckAxis.x, field.deckAxis.y, field.deckAxis.z],
-            segmentsLocal: field.segments.map(s => [
-                s.a.x - field.originX, s.a.y - field.originY, s.a.z - field.originZ,
-                s.b.x - field.originX, s.b.y - field.originY, s.b.z - field.originZ,
-            ] as [number, number, number, number, number, number]),
-        }]);
+        this.combatSim.setArrestorCables(
+            [field, ...landArrestorFields(this.landWires)].map(serializeArrestorCables));
         this.syncBarricade(true);
         this.combatSim.setCarrierMeshOrigins(
             this.carrierMeshes.map(c => ({
@@ -3897,7 +3906,7 @@ export class Game {
         // its own by proximity. On a pyramid with no airfields this is the
         // authored airbase, exactly as it always was.
         const runways: Runway[] = this.sceneRunways.length > 0
-            ? [...this.sceneRunways]
+            ? this.sceneRunways.filter(r => !r.startOnly)
                 .sort((a, b) => Number(b === this.activeRunway) - Number(a === this.activeRunway))
                 .map(r => ({
                     center: r.center.clone(),
@@ -3918,7 +3927,7 @@ export class Game {
                 const pose = this.carrierPose();
                 return [defaultArrestorCableField(
                     pose.position.x, pose.position.y, pose.position.z, pose.quaternion,
-                )];
+                ), ...landArrestorFields(this.landWires)];
             })(),
             this.surfacePads.pads,
             this.sceneryMeshes,
@@ -4660,8 +4669,25 @@ export class Game {
         this.sceneRunways = sceneRunwaysOf(
             here, this.planetTerrain.basis, AIRFIELD_SURFACE_EPS_M);
         this.planetTerrain.setAirfieldExclusion(here);
-        this.homeRunway = pickStartRunway(this.sceneRunways);
-        this.activeRunway = pickStartRunway(this.sceneRunways, this.preferredIcao);
+        this.landWires = landArrestorWiresOf(here, this.planetTerrain.basis);
+        this.osmSkiJumps = [];
+        for (const { source, collider } of osmSkiJumpsOf(here, this.planetTerrain.basis)) {
+            this.osmSkiJumps.push(collider);
+            const ramp = new StaticSceneryEntity(new SkiJumpModelLibBuilder(
+                'osmSkiJump', collider.length, collider.height, collider.halfWidth * 2,
+            ).build(this.materials));
+            ramp.position.set(collider.originX, collider.originY, collider.originZ);
+            ramp.quaternion.setFromAxisAngle(UP, collider.heading);
+            scene.add(ramp);
+            if (!source.runUpFound) {
+                console.warn(`ski-jump "${source.name}": no run-up in reach, uphill way guessed`);
+            }
+        }
+        // The region's own base where it has one (Saki for Krim), else the
+        // long runway nearest the middle of the area.
+        const regionalHome = regionalHomeBase(this.playArea.area);
+        this.homeRunway = pickStartRunway(this.sceneRunways, undefined, regionalHome);
+        this.activeRunway = pickStartRunway(this.sceneRunways, this.preferredIcao, regionalHome);
         const homeField = this.homeRunway === undefined
             ? undefined
             : here.find(a => a.icao === this.homeRunway!.icao
@@ -4700,7 +4726,7 @@ export class Game {
         (globalThis as Record<string, unknown>).__surfacePads = this.surfacePads;
         this.spawnPanel.setAirfields(
             airfieldChoices(this.sceneRunways),
-            active ? (active.icao || active.name) : undefined);
+            active ? runwayKey(active) : undefined);
     }
 
     /**
@@ -4767,8 +4793,51 @@ export class Game {
                 };
             }
             this.scene.add(entity);
+            this.addPavementColliders(airfield, pavementColliders(
+                built.solidPavement, built.origin, AIRFIELD_SURFACE_EPS_M));
         }
         this.addBuildingColliders(airfield);
+    }
+
+    /**
+     * Make an airfield's aprons, taxiways and steel decks solid at the height
+     * they are drawn, as its runways already are - before, an aircraft that
+     * left the runway sank 1.5 m into them. Before setupCombat they join the
+     * world it sends; streamed in later, they go to the sim worker themselves.
+     */
+    private addPavementColliders(airfield: Airfield, colliders: CarrierMeshCollider[]): void {
+        if (colliders.length === 0) {
+            return;
+        }
+        // Pavement appearing around an aircraft on the ground below it would
+        // put it 1.5 m into the surface. Only after a teleport onto a field
+        // that is not yet built; that field is left soft rather than crashing it.
+        if (this.worldSent && colliders.some(c => this.aircraftInBox(c))) {
+            console.warn(`airfield ${airfield.icao || airfield.name}: pavement left soft, an aircraft is on it`);
+            return;
+        }
+        this.sceneryMeshes.push(...colliders);
+        if (this.worldSent) {
+            this.combatSim.addStaticColliders(serializeStaticColliders([], [], colliders));
+        }
+    }
+
+    /** True when a live aircraft is inside a collider's box, up to a few metres above its top. */
+    private aircraftInBox(c: CarrierMeshCollider): boolean {
+        const positions: THREE.Vector3[] = [this.player.position];
+        for (const ai of this.aiOpponents) {
+            if (ai.isAlive()) {
+                positions.push(ai.position);
+            }
+        }
+        if (this.wingman?.isAlive()) {
+            positions.push(this.wingman.position);
+        }
+        return positions.some(p => {
+            const x = p.x - c.originX, y = p.y - c.originY, z = p.z - c.originZ;
+            return x >= c.aabb.min[0] && x <= c.aabb.max[0] && z >= c.aabb.min[2] && z <= c.aabb.max[2]
+                && y <= c.aabb.max[1] + BUILDING_STREAM_CLEARANCE_M;
+        });
     }
 
     /**
@@ -4824,6 +4893,10 @@ export class Game {
         this.surfacePads.add(pads);
         for (const s of this.skiJumps) {
             rebaseSkiJump(s, shift);
+        }
+        for (const w of this.landWires) {
+            shift.point(w.a);
+            shift.point(w.b);
         }
         for (const m of this.carrierMeshes) {
             rebaseMeshCollider(m, shift);
@@ -4885,7 +4958,10 @@ export class Game {
             return;
         }
         this.lastAirfieldStreamMs = now;
-        const p = this.player.position;
+        // A camera placed from the URL has no aircraft flying: its airfields
+        // come in around the camera.
+        const p = this.state === GameState.FIXED_CAMERA
+            ? this.fixedCameraUpdater.getPosition(this._fixedCameraPos) : this.player.position;
         this.airfieldStreamBusy = true;
         void this.buildAirfieldsNear(p.x, p.z)
             .catch(err => console.warn('airfield streaming failed', err))
@@ -4935,7 +5011,7 @@ export class Game {
             const active = this.activeRunway;
             this.spawnPanel.setAirfields(
                 airfieldChoices(this.sceneRunways),
-                active ? (active.icao || active.name) : undefined);
+                active ? runwayKey(active) : undefined);
             return;
         }
         if (this.state !== GameState.SPAWN_MENU) {
@@ -5321,6 +5397,8 @@ export class Game {
         );
         scene.add(arrestorCables);
         this.player.setArrestorCarrierPoseProvider(() => this.carrierPose());
+        scene.add(new LandArrestorWiresEntity(this.materials, () => this.landWires, () => this.player));
+        this.player.setLandWireProvider(id => landWireById(this.landWires, id));
 
         const barricade = new BarricadeEntity(
             this.materials,
@@ -5361,6 +5439,7 @@ export class Game {
 
         // Carrier-style ski jump 90 m ahead of the runway spawn, rising toward +Z (takeoff).
         this.skiJumps.length = 0;
+        this.skiJumps.push(...this.osmSkiJumps);
         const skiJumpAheadM = 90;
         const home = this.baseFrame;
         const skiJumpHeading = home.heading;

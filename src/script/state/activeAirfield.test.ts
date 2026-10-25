@@ -4,6 +4,8 @@ import { Airfield } from '../terrain/airfields';
 import { makeEnuBasis } from '../terrain/geodesy';
 import {
     airfieldChoices, headingForward, nearestSceneRunway, pickStartRunway, sceneRunwayOf,
+    regionalHomeBase,
+    runwayKey,
     sceneRunwaysOf,
 } from './activeAirfield';
 
@@ -118,6 +120,45 @@ describe('active airfield', () => {
             const runways = sceneRunwaysOf([parallel], BASIS, EPS);
             assert.equal(runways.filter(r => r.primary).length, 1);
             assert.equal(runways.find(r => r.primary)!.ref, '03L/21R');
+        });
+
+        it('starts at the region\'s own base when it has one, unless the player picked another', () => {
+            const near = airfield({ icao: 'GCXO', name: 'near', lat: 28.0, lon: -15.39,
+                runways: [{ ...airfield().runways[0], lat: 28.0, lon: -15.39, lengthM: 2000 }] });
+            const base = airfield({ icao: 'URFI', name: 'base', lat: 27.7, lon: -15.6,
+                runways: [{ ...airfield().runways[0], lat: 27.7, lon: -15.6, lengthM: 3220 }] });
+            const runways = sceneRunwaysOf([near, base], BASIS, EPS);
+            assert.equal(pickStartRunway(runways)!.icao, 'GCXO');
+            assert.equal(pickStartRunway(runways, undefined, 'URFI')!.icao, 'URFI');
+            assert.equal(pickStartRunway(runways, 'GCXO', 'URFI')!.icao, 'GCXO');
+            assert.equal(pickStartRunway(runways, undefined, 'ZZZZ')!.icao, 'GCXO');
+        });
+
+        it('knows Krim is based at Saki', () => {
+            assert.equal(regionalHomeBase({ west: 32.34, south: 43.95, east: 37.27, north: 46.63 }), 'URFI');
+            assert.equal(regionalHomeBase({ west: -15.9, south: 27.7, east: -15.3, north: 28.2 }), undefined);
+        });
+
+        it('offers a steel deck as a start point of its own, and only that', () => {
+            const withDeck = airfield({
+                runways: [
+                    airfield().runways[0],
+                    { ...airfield().runways[0], ref: '04/22', lengthM: 218, surface: 'metal' },
+                ],
+                decks: [{ name: 'NITKA', ring: [[27.93, -15.39], [27.931, -15.389], [27.93, -15.388]] }],
+            });
+            const runways = sceneRunwaysOf([withDeck], BASIS, EPS);
+            const deck = runways.find(r => r.startOnly)!;
+            assert.equal(deck.label, 'NITKA');
+            assert.equal(deck.primary, false);
+            assert.equal(runwayKey(deck), 'GCLP#NITKA');
+            // The airfield is still based on its real runway...
+            assert.equal(pickStartRunway(runways)!.ref, '03L/21R');
+            // ...the picker lists the deck after it, and picking it starts there.
+            const choices = airfieldChoices(runways);
+            assert.deepEqual(choices.map(c => c.key), ['GCLP', 'GCLP#NITKA']);
+            assert.equal(pickStartRunway(runways, 'GCLP#NITKA'), deck);
+            assert.equal(pickStartRunway(runways, 'GCLP')!.ref, '03L/21R');
         });
 
         it('starts at the usable field nearest the play origin', () => {

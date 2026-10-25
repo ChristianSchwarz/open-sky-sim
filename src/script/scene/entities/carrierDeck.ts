@@ -247,3 +247,60 @@ export function sampleCarrierMeshSurfaceYMax(
     }
     return maxY;
 }
+
+/** Side of the cells {@link MeshColliderIndex} buckets colliders into (m). */
+const MESH_CELL_M = 128;
+const meshCellKey = (cx: number, cz: number) => (cx + (1 << 20)) * (1 << 21) + (cz + (1 << 20));
+
+/**
+ * Static mesh colliders bucketed into a grid by their boxes, so a ground
+ * query tests only the few whose box can hold it. An airfield's pavement is
+ * hundreds of them (pavementColliders.ts), and the sim asks for the ground
+ * under every hull point of every aircraft each step.
+ */
+export class MeshColliderIndex {
+    private readonly list: CarrierMeshCollider[] = [];
+    private readonly grid = new Map<number, number[]>();
+
+    constructor(colliders: readonly CarrierMeshCollider[] = []) {
+        this.add(colliders);
+    }
+
+    add(colliders: readonly CarrierMeshCollider[]): void {
+        for (const c of colliders) {
+            const i = this.list.length;
+            this.list.push(c);
+            const x0 = Math.floor((c.originX + c.aabb.min[0]) / MESH_CELL_M);
+            const x1 = Math.floor((c.originX + c.aabb.max[0]) / MESH_CELL_M);
+            const z0 = Math.floor((c.originZ + c.aabb.min[2]) / MESH_CELL_M);
+            const z1 = Math.floor((c.originZ + c.aabb.max[2]) / MESH_CELL_M);
+            for (let cx = x0; cx <= x1; cx++) {
+                for (let cz = z0; cz <= z1; cz++) {
+                    const k = meshCellKey(cx, cz);
+                    const cell = this.grid.get(k);
+                    if (cell) {
+                        cell.push(i);
+                    } else {
+                        this.grid.set(k, [i]);
+                    }
+                }
+            }
+        }
+    }
+
+    /** {@link sampleCarrierMeshSurfaceYMax} over this index. */
+    sampleYMax(worldX: number, worldZ: number): number {
+        const cell = this.grid.get(meshCellKey(Math.floor(worldX / MESH_CELL_M), Math.floor(worldZ / MESH_CELL_M)));
+        let maxY = NO_SURFACE_Y;
+        if (cell === undefined) {
+            return maxY;
+        }
+        for (let n = 0; n < cell.length; n++) {
+            const y = sampleCarrierMeshSurfaceY(worldX, worldZ, this.list[cell[n]]);
+            if (y > maxY) {
+                maxY = y;
+            }
+        }
+        return maxY;
+    }
+}

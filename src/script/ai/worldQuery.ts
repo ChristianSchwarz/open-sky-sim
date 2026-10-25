@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CarrierMeshCollider, sampleCarrierMeshSurfaceYMax } from '../scene/entities/carrierDeck';
+import { CarrierMeshCollider, MeshColliderIndex, sampleCarrierMeshSurfaceYMax } from '../scene/entities/carrierDeck';
 import { HillCollider, sampleHillSurfaceY } from '../scene/entities/hillCollider';
 import { SurfacePadCollider, SurfacePadIndex } from '../scene/entities/surfacePad';
 import { SkiJumpCollider, sampleSkiJumpSurfaceYMax } from '../scene/entities/skiJump';
@@ -75,10 +75,14 @@ export class SceneWorldQuery implements WorldQuery {
         /** Flat solid surfaces (runway strip, pavement pads) sitting slightly above the terrain. */
         surfacePads: readonly SurfacePadCollider[] = [],
         /** Static scenery collision soups (hangars, towers, depots...). */
-        private readonly sceneryMeshes: readonly CarrierMeshCollider[] = [],
+        sceneryMeshes: readonly CarrierMeshCollider[] = [],
     ) {
         this.padIndex = new SurfacePadIndex(surfacePads);
+        this.sceneryIndex = new MeshColliderIndex(sceneryMeshes);
     }
+
+    /** Static scenery collision soups; grows as airfields stream in (addStaticColliders). */
+    private readonly sceneryIndex: MeshColliderIndex;
 
     /**
      * More static ground, after the world was built: the buildings of an
@@ -86,9 +90,13 @@ export class SceneWorldQuery implements WorldQuery {
      * flight model and pilot already holding this world sees them at once -
      * rebuilding the world instead would rebuild every pilot with it.
      */
-    addStaticColliders(pads: readonly SurfacePadCollider[], obstacles: readonly Obstacle[]): void {
+    addStaticColliders(
+        pads: readonly SurfacePadCollider[], obstacles: readonly Obstacle[],
+        meshes: readonly CarrierMeshCollider[] = [],
+    ): void {
         this.padIndex.add(pads);
         this.obstacleList.push(...obstacles);
+        this.sceneryIndex.add(meshes);
     }
 
     groundHeightAt(x: number, z: number): number {
@@ -97,7 +105,7 @@ export class SceneWorldQuery implements WorldQuery {
             sampleHillSurfaceY(x, z, this.hills),
             sampleSkiJumpSurfaceYMax(x, z, this.skiJumps),
             this.padIndex.sampleYMax(x, z),
-            sampleCarrierMeshSurfaceYMax(x, z, this.sceneryMeshes),
+            this.sceneryIndex.sampleYMax(x, z),
             this.carrierHeightAt(x, z),
         );
     }

@@ -254,6 +254,14 @@ export interface ArrestorCableField {
     /** Unit vector: landing / roll-out direction (toward bow). */
     deckAxis: THREE.Vector3;
     segments: ArrestorCableSegment[];
+    /**
+     * What the snapshot reports a catch on each segment as. Absent on the
+     * carrier, whose cables are reported by index; land wires (landArrestorWires.ts)
+     * number from LAND_WIRE_ID_BASE so neither side bends the other's cable.
+     */
+    cableIds?: number[];
+    /** On the ground rather than on the ship: the pull-out is to rest, not to the carrier's speed. */
+    fixed?: boolean;
 }
 
 /** Four lateral cables in carrier-local space. */
@@ -339,6 +347,9 @@ export function distancePointToSegment(
  * A stern→bow plane crossing with the hook near deck height catches even when
  * the discrete step jumps past the wire; proximity alone also catches when
  * already inside the catch radius.
+ *
+ * Measured along the field's own deck axis and wire, so a yawed carrier or a
+ * wire across a runway at any heading catches the same as the unturned deck.
  */
 export function trySnag(
     hook: THREE.Vector3,
@@ -348,7 +359,8 @@ export function trySnag(
     hookDown: boolean,
 ): number {
     if (!hookDown) return -1;
-    const along = vel.dot(field.deckAxis);
+    const axis = field.deckAxis;
+    const along = vel.dot(axis);
     if (along < ARRESTOR_MIN_SNAG_SPEED_MPS) return -1;
 
     for (let i = 0; i < field.segments.length; i++) {
@@ -356,15 +368,22 @@ export function trySnag(
         const cableY = (seg.a.y + seg.b.y) * 0.5;
         if (Math.abs(hook.y - cableY) > ARRESTOR_CATCH_VERT_M) continue;
 
-        const cableZ = (seg.a.z + seg.b.z) * 0.5;
         const midX = (seg.a.x + seg.b.x) * 0.5;
-        const halfSpan = Math.abs(seg.b.x - seg.a.x) * 0.5;
-        const inLane = Math.abs(hook.x - midX) <= halfSpan + ARRESTOR_CATCH_RADIUS_M;
+        const midZ = (seg.a.z + seg.b.z) * 0.5;
+        const spanX = seg.b.x - seg.a.x;
+        const spanZ = seg.b.z - seg.a.z;
+        const span = Math.hypot(spanX, spanZ);
+        if (span < 1e-6) continue;
+        const lateral = ((hook.x - midX) * spanX + (hook.z - midZ) * spanZ) / span;
+        const inLane = Math.abs(lateral) <= span * 0.5 + ARRESTOR_CATCH_RADIUS_M;
 
         let crossed = false;
         if (prevHook) {
-            // Landing along −Z: crossed when previous Z was aft of the wire.
-            crossed = prevHook.z > cableZ && hook.z <= cableZ;
+            // Crossed when the previous hook was short of the wire along the
+            // deck axis and this one is on or past it.
+            const before = (prevHook.x - midX) * axis.x + (prevHook.z - midZ) * axis.z;
+            const after = (hook.x - midX) * axis.x + (hook.z - midZ) * axis.z;
+            crossed = before < 0 && after >= 0;
         }
         if (crossed && inLane) {
             return i;

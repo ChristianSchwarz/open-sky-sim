@@ -72,6 +72,8 @@ import type { BarricadeWebSnapshot } from './simTypes';
 const PROJECTILE_LIFESPAN = 2.5;
 /** Max ship-relative groundspeed (m/s) before kinematic deck park engages. */
 const CARRIER_PARK_REL_SPEED_MPS = 2.0;
+/** The frame a fixed (land) arrestor field holds an aircraft in. */
+const ZERO_VELOCITY: Readonly<THREE.Vector3> = new THREE.Vector3();
 const PROJECTILE_GRAVITY = 9.80665;
 const PROJECTILE_POOL_SIZE = 480;
 /** Allow this much mesh–terrain overlap (m) when gear is down (spring travel). */
@@ -216,6 +218,8 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     arrestorLatch = -1;
     /** Which arrestor field is latched (carrier index), or -1. */
     arrestorFieldIndex = -1;
+    /** What the snapshot reports the latched cable as (ArrestorCableField.cableIds). */
+    arrestorLatchId = -1;
     /** Deck-axis projection of the hook at snag time (for pull-out distance). */
     arrestorSnagAlong = 0;
     /** True after pull-out finished; cable stays bent until the plane taxis away. */
@@ -593,7 +597,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         out[base + AC.limitersEnabled] = mirror.limitersEnabled ? 1 : 0;
         out[base + AC.pitchLimiterMode] = mirror.pitchLimiterMode;
         out[base + AC.autopilot] = mirror.autopilot ? 1 : 0;
-        out[base + AC.arrestorLatch] = this.arrestorLatch;
+        out[base + AC.arrestorLatch] = this.arrestorLatch < 0 ? -1 : this.arrestorLatchId;
         out[base + AC.hookX] = this.hookNow.x;
         out[base + AC.hookY] = this.hookNow.y;
         out[base + AC.hookZ] = this.hookNow.z;
@@ -1408,6 +1412,7 @@ export class CombatSim implements ProjectileSink {
                 );
                 if (idx >= 0) {
                     a.arrestorLatch = idx;
+                    a.arrestorLatchId = field.cableIds?.[idx] ?? idx;
                     a.arrestorFieldIndex = fi;
                     a.arrestorSnagAlong = a.hookNow.dot(field.deckAxis);
                     a.arrestorHeld = false;
@@ -1419,7 +1424,9 @@ export class CombatSim implements ProjectileSink {
         if (a.arrestorLatch >= 0 && a.arrestorFieldIndex >= 0) {
             const field = this.arrestorFields[a.arrestorFieldIndex];
             const vel = a.model.velocityVector;
-            const shipAlong = this.carrierVel.dot(field.deckAxis);
+            // A wire on land holds the aircraft at rest, not at the ship's speed.
+            const frameVel = field.fixed ? ZERO_VELOCITY : this.carrierVel;
+            const shipAlong = frameVel.dot(field.deckAxis);
             if (!a.arrestorHeld) {
                 const traveled = a.hookNow.dot(field.deckAxis) - a.arrestorSnagAlong;
                 const remaining = ARRESTOR_PULL_OUT_M - traveled;
@@ -1437,8 +1444,8 @@ export class CombatSim implements ProjectileSink {
                 vel.addScaledVector(field.deckAxis, shipAlong - along);
                 a.model.snapPhysicsState();
                 const relSpeed = Math.hypot(
-                    vel.x - this.carrierVel.x,
-                    vel.z - this.carrierVel.z,
+                    vel.x - frameVel.x,
+                    vel.z - frameVel.z,
                 );
                 if (relSpeed > ARRESTOR_RELEASE_SPEED_MPS || !a.isHookDeployed()) {
                     a.arrestorLatch = -1;

@@ -38,6 +38,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import re
 import sys
 import time
 from collections import OrderedDict
@@ -47,7 +48,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 import numpy as np
 
 try:
-    from shapely.geometry import Point, Polygon, box
+    from shapely.geometry import LineString, Point, Polygon, box
     from shapely.strtree import STRtree
 except ImportError:
     print('error: shapely is required (pip install shapely requests)', file=sys.stderr)
@@ -144,6 +145,21 @@ MAX_APRON_PADS = 8
 # Shorter than this and it is a farm strip: not worth a manifest entry, and
 # short enough that the pad it would ask for is mostly feather.
 MIN_RUNWAY_LENGTH_M = 500.0
+
+# Steel decks. A runway OSM surfaces in metal is a carrier deck built on land -
+# Saki's NITKA, 218 m - short on purpose and kept whatever its length. The
+# runtime draws it but never lands, spawns or bases anything on it.
+METAL_SURFACES = ('metal', 'metal_grid', 'steel')
+
+# Ski-jump ramps. OSM has no tag for one; Saki maps its T2 as a structure with
+# no storeys under a single sloping roof (`building:levels=0
+# roof:shape=skillion roof:height=8`), and that or a name saying so is a ramp.
+# Its run-up is a runway one of whose ends is within this of the ramp, kept
+# however short (Saki's is 213 m).
+SKI_JUMP_RUNWAY_REACH_M = 30.0
+# Rise of a ramp OSM gives no height for.
+SKI_JUMP_DEFAULT_HEIGHT_M = 6.0
+SKI_JUMP_NAMES = ('ski-jump', 'ski jump', 'skijump', 'трамплин')
 
 # A runway way with no aerodrome polygon around it attaches to the nearest
 # aerodrome node within this. Node-only aerodromes are common - plenty of
@@ -323,11 +339,18 @@ def axis_extent(
 # --- runway designators -----------------------------------------------------
 
 def parse_ref(ref: Optional[str]) -> List[str]:
-    """Split an OSM runway `ref` into its designators: '03L/21R' -> ['03L','21R']."""
+    """Split an OSM runway `ref` into its designators: '03L/21R' -> ['03L','21R'].
+
+    Only what could be painted on a threshold counts. A ref that is a name -
+    Saki's ski-jump run-up is `T-2 ski-jump` - has none, and its designators
+    are derived from the heading like any other runway's without a ref.
+    """
     if not ref:
         return []
     parts = [p.strip().upper() for p in str(ref).replace('-', '/').split('/')]
-    return [p for p in parts if p and p[0].isdigit()]
+    if not all(re.fullmatch(r'\d{1,2}[LCRW]?', p) for p in parts if p):
+        return []
+    return [p for p in parts if p]
 
 
 def designator_bearing(designator: str) -> Optional[float]:
@@ -379,6 +402,9 @@ class Runway:
     #: True when OSM's `width` was too narrow to believe and the class default
     #: was used instead.
     width_implausible: bool
+    #: The run-up to a ski-jump ramp (`attach_ski_jumps`): kept however short,
+    #: and never landed on or spawned at by the runtime.
+    ski_jump: bool = False
 
 
 @dataclass
@@ -399,6 +425,15 @@ class Airfield:
     #: not a landing surface of its own, kept as ready-made pad rectangles
     #: rather than as `Runway`s. See `pavement_pad`.
     extra_pads: List[dict] = field(default_factory=list)
+    #: `barrier=cable_barrier` ways: `{'name', 'points'}`, points `[lat, lon]`.
+    arresting_wires: List[dict] = field(default_factory=list)
+    #: Steel deck outlines (`deck_tags`): `{'name', 'ring'}`, ring `[lat, lon]`.
+    decks: List[dict] = field(default_factory=list)
+    #: Ski-jump ramps (`ski_jump_tags`), placed by `attach_ski_jumps`.
+    ski_jumps: List[dict] = field(default_factory=list)
+    #: Runways under MIN_RUNWAY_LENGTH_M, held until `attach_ski_jumps` has
+    #: kept the ones that are a ramp's run-up.
+    short_runways: List[Runway] = field(default_factory=list)
     #: Filled in by the DEM pass.
     plane: Optional[dict] = None
     fit: Optional[dict] = None
@@ -430,6 +465,8 @@ def runway_surface(tags: dict) -> str:
     if surface in ('grass', 'ground', 'earth', 'dirt', 'sand', 'gravel', 'unpaved',
                    'compacted', 'fine_gravel'):
         return 'grass' if surface == 'grass' else 'gravel'
+    if surface in METAL_SURFACES:
+        return 'metal'
     return 'asphalt' if tags.get('ref') or tags.get('lit') == 'yes' else 'gravel'
 
 
@@ -481,6 +518,10 @@ def same_runway(a: 'Runway', b: 'Runway') -> bool:
 
     A stated pair of refs settles it outright. 03L and 03R are two runways no
     matter how the geometry landed, and merging them would delete one.
+
+    And the two have to overlap along the axis as well. Strips in one line are
+    not one strip: Saki's NITKA deck and its T2 ski-jump run-up stand two
+    kilometres apart on the same centreline, and were merged into one.
     """
     if abs(angle_delta_deg(a.heading_deg % 180.0, b.heading_deg % 180.0)) > DUPLICATE_HEADING_DEG:
         return False
@@ -490,6 +531,8 @@ def same_runway(a: 'Runway', b: 'Runway') -> bool:
     e, n = frame.to_m(b.lon, b.lat)
     ax = math.sin(math.radians(a.heading_deg))
     ay = math.cos(math.radians(a.heading_deg))
+    if abs(e * ax + n * ay) > (a.length_m + b.length_m) / 2.0:
+        return False
     return abs(-e * ay + n * ax) < DUPLICATE_OFFSET_M
 
 
@@ -507,6 +550,7 @@ def runway_from_way(
     way: dict,
     nodes: Dict[int, Tuple[float, float]],
     kind: str,
+    min_length_m: float = MIN_RUNWAY_LENGTH_M,
 ) -> Optional[Runway]:
     """One `aeroway=runway` way as a centre, a heading, a length and a width.
 
@@ -540,7 +584,7 @@ def runway_from_way(
     a_min, a_max, c_min, c_max = axis_extent(pts, centre_m, direction)
 
     length = a_max - a_min
-    if length < MIN_RUNWAY_LENGTH_M:
+    if length < min_length_m and runway_surface(tags) != 'metal':
         return None
 
     measured_width = c_max - c_min
@@ -801,6 +845,7 @@ AREA_PHASES: Tuple[Tuple[str, str, float], ...] = (
     ('runways', 'fetching OSM runways', 3),
     ('taxiways', 'fetching OSM taxiways', 6),
     ('aprons', 'fetching OSM aprons and buildings', 6),
+    ('wires', 'fetching OSM arresting gear, decks and ski-jumps', 2),
     ('assemble', 'assembling airfields', 4),
     ('sample', 'sampling platforms', 20),
 )
@@ -837,6 +882,28 @@ def aprons_tags(tags: dict) -> bool:
     return tags.get('aeroway') in ('apron', 'terminal', 'hangar', 'control_tower', 'tower')
 
 
+def wires_tags(tags: dict) -> bool:
+    return tags.get('barrier') == 'cable_barrier'
+
+
+def deck_tags(tags: dict) -> bool:
+    """A steel deck's outline: Saki maps NITKA as `area=yes surface=metal`."""
+    return tags.get('area') == 'yes' and str(tags.get('surface', '')).lower() in METAL_SURFACES
+
+
+def ski_jump_tags(tags: dict) -> bool:
+    if not tags.get('building'):
+        return False
+    name = str(tags.get('name', '')).lower()
+    if any(n in name for n in SKI_JUMP_NAMES):
+        return True
+    return str(tags.get('building:levels', '')) == '0' and tags.get('roof:shape') == 'skillion'
+
+
+def gear_tags(tags: dict) -> bool:
+    return wires_tags(tags) or deck_tags(tags) or ski_jump_tags(tags)
+
+
 # Cache key and tag test of each group, as overpass_airports reads them from
 # a local extract - what osm_prefetch.py fills the cache under.
 PBF_GROUPS = (
@@ -844,6 +911,7 @@ PBF_GROUPS = (
     ('runways', runways_tags),
     ('taxiways', taxiways_tags),
     ('aprons', aprons_tags),
+    ('wires', gear_tags),
 )
 
 
@@ -903,6 +971,17 @@ def overpass_airports(
             + [f'relation["aeroway"="{kind}"]({c.as_overpass()})'
                for kind in ('apron', 'terminal')])
 
+    # Arresting gear across a runway or a deck: Saki's NITKA maps its
+    # Svetlana-2 wires as `barrier=cable_barrier`. A handful per area, so the
+    # light grid; its own group so the apron cache keys stay as they were.
+    # Never sea-skipped: a coarse cell over a coastal field is mostly sea
+    # (Saki's was), and the answer is a few ways either way.
+    def wires(c: Bounds) -> str:
+        return _aeroway_query(
+            [f'way["barrier"="cable_barrier"]({c.as_overpass()})']
+            + [f'way["surface"="{s}"]["area"="yes"]({c.as_overpass()})' for s in METAL_SURFACES]
+            + [f'way["building:levels"="0"]["roof:shape"="skillion"]({c.as_overpass()})'])
+
     # Same tag test as the query closures above, for the PBF path.
 
     groups = (
@@ -910,6 +989,7 @@ def overpass_airports(
         ('runways', 'runways', runways, runways_tags, OVERPASS_LIGHT_CELL_ZOOM, False, None),
         ('taxiways', 'taxiways', taxiways, taxiways_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
         ('aprons', 'aprons and buildings', aprons, aprons_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
+        ('wires', 'arresting gear, decks and ski-jumps', wires, gear_tags, OVERPASS_LIGHT_CELL_ZOOM, True, None),
     )
 
     # One pass over the file covers all four groups - see pbf_elements_groups's
@@ -1095,6 +1175,47 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
         if on_progress is not None and index % 2000 == 0:
             on_progress(index / total if total else 1.0, f'{index}/{total} elements')
         tags = el.get('tags') or {}
+        if wires_tags(tags) and el.get('type') == 'way':
+            # Belongs to the field it lies in; the runtime spans a wire from
+            # its first node to its last.
+            wire = [nodes[nid] for nid in el.get('nodes', []) if nid in nodes]
+            if len(wire) >= 2:
+                host = owner(sum(c[0] for c in wire) / len(wire), sum(c[1] for c in wire) / len(wire))
+                if host is not None:
+                    host.arresting_wires.append({
+                        'name': str(tags.get('name', '')),
+                        'points': [[c[1], c[0]] for c in wire],
+                    })
+            continue
+        if ski_jump_tags(tags) and el.get('type') == 'way':
+            ring = _ring_of(el, nodes)
+            if ring is not None:
+                host = owner(sum(c[0] for c in ring) / len(ring), sum(c[1] for c in ring) / len(ring))
+                if host is not None:
+                    rise = tagged_number(tags.get('roof:height')) or building_height_m(tags)
+                    host.ski_jumps.append({
+                        'name': str(tags.get('name', '')),
+                        'ring': [[c[1], c[0]] for c in ring],
+                        'heightM': rise if rise and rise > 0 else SKI_JUMP_DEFAULT_HEIGHT_M,
+                    })
+                    pad = pavement_pad(el, nodes, 0.0)
+                    if pad is not None:
+                        host.extra_pads.append(pad)
+            continue
+        if deck_tags(tags) and el.get('type') == 'way':
+            ring = _ring_of(el, nodes)
+            if ring is not None:
+                host = owner(sum(c[0] for c in ring) / len(ring), sum(c[1] for c in ring) / len(ring))
+                if host is not None:
+                    host.decks.append({
+                        'name': str(tags.get('name', '')),
+                        'ring': [[c[1], c[0]] for c in ring],
+                    })
+                    # Cut flat like any other pavement the field stands on.
+                    pad = pavement_pad(el, nodes, 0.0)
+                    if pad is not None:
+                        host.extra_pads.append(pad)
+            continue
         aeroway = tags.get('aeroway')
         if aeroway is None or aeroway == 'aerodrome':
             continue
@@ -1136,8 +1257,12 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
                 if pad is not None:
                     host.extra_pads.append(pad)
                 continue
-            runway = runway_from_way(el, nodes, host.kind)
-            if runway is not None:
+            runway = runway_from_way(el, nodes, host.kind, min_length_m=0.0)
+            if runway is None:
+                pass
+            elif runway.length_m < MIN_RUNWAY_LENGTH_M and runway.surface != 'metal':
+                host.short_runways.append(runway)
+            else:
                 host.runways.append(runway)
         elif host is None:
             continue
@@ -1182,14 +1307,87 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
             osm_id=int(el.get('id', 0)),
         )
         runway = runway_from_way(el, nodes, 'ga')
-        if runway is None:
+        # A deck alone is not an airfield: there would be nowhere to land.
+        if runway is None or runway.surface == 'metal':
             continue
         synthetic.runways.append(runway)
         airfields.append(synthetic)
 
     for airfield in airfields:
+        attach_ski_jumps(airfield)
+        attach_deck_runways(airfield)
         airfield.runways = dedupe_runways(airfield.runways)
     return [a for a in airfields if a.runways]
+
+
+def attach_deck_runways(airfield: Airfield) -> None:
+    """Keep a short runway laid on a steel deck, as the deck's own runway.
+
+    Saki's `Practice aircraft carrier runway` is 218 m down the NITKA deck and
+    tagged with nothing but its name now that the deck outline carries the
+    `surface=metal`. It is the deck's landing line, not a farm strip: kept,
+    and given the deck's surface so it is drawn as the deck and never offered
+    as somewhere to land or spawn.
+    """
+    if not airfield.decks:
+        return
+    decks = []
+    for deck in airfield.decks:
+        try:
+            decks.append(Polygon([(p[1], p[0]) for p in deck['ring']]))
+        except Exception:
+            continue
+    for runway in list(airfield.short_runways):
+        # Crossing it, not inside it: the NITKA outline is a wide pad joined
+        # to a narrow strip, and the runway line runs over both.
+        line = LineString([(t[1], t[0]) for t in runway.thresholds])
+        if any(d.is_valid and d.intersects(line) for d in decks):
+            airfield.short_runways.remove(runway)
+            runway.surface = 'metal'
+            airfield.runways.append(runway)
+
+
+def attach_ski_jumps(airfield: Airfield) -> None:
+    """Point each ramp up and away from its run-up, and keep that runway.
+
+    A skillion roof `along` says the slope runs down the ramp's long axis but
+    not which end is high. The run-up says: an aircraft comes down the runway
+    and onto the ramp, so the ramp rises away from the runway's middle - which
+    holds whether the runway way stops at the foot of the ramp or, as Saki's
+    now does, runs on over it to the lip. A ramp with no runway end in reach
+    keeps its axis as fitted - a guess, flagged as `runUpFound: false`.
+    """
+    for jump in airfield.ski_jumps:
+        ring = [(p[1], p[0]) for p in jump['ring']]
+        lat, lon, heading, width, depth = _oriented_footprint(ring)
+        frame = LocalFrame(lat, lon)
+        corners = [frame.to_m(q[0], q[1]) for q in ring]
+        best: Optional[Tuple[float, Runway]] = None
+        for runway in airfield.runways + airfield.short_runways:
+            for t_lat, t_lon in runway.thresholds:
+                te, tn = frame.to_m(t_lon, t_lat)
+                reach = min(math.hypot(te - e, tn - n) for e, n in corners)
+                if reach <= SKI_JUMP_RUNWAY_REACH_M and (best is None or reach < best[0]):
+                    best = (reach, runway)
+        jump['runUpFound'] = best is not None
+        if best is not None:
+            runway = best[1]
+            re_, rn = frame.to_m(runway.lon, runway.lat)
+            ax, ay = math.sin(math.radians(heading)), math.cos(math.radians(heading))
+            # Runway middle to ramp centre, along the axis: negative means the
+            # axis points back down the run-up, so turn it round.
+            if -re_ * ax - rn * ay < 0.0:
+                heading = (heading + 180.0) % 360.0
+            if runway in airfield.short_runways:
+                airfield.short_runways.remove(runway)
+                runway.ski_jump = True
+                airfield.runways.append(runway)
+        ax, ay = math.sin(math.radians(heading)), math.cos(math.radians(heading))
+        base_lon, base_lat = frame.to_lonlat(-ax * depth / 2.0, -ay * depth / 2.0)
+        jump.update({
+            'lat': base_lat, 'lon': base_lon, 'headingDeg': heading,
+            'lengthM': depth, 'widthM': width,
+        })
 
 
 def tagged_number(raw) -> Optional[float]:
@@ -1503,11 +1701,15 @@ def airfield_to_json(airfield: Airfield) -> dict:
             'widthMeasured': r.width_measured,
             'lengthTagM': r.length_tag_m,
             'widthImplausible': r.width_implausible,
+            **({'skiJump': True} if r.ski_jump else {}),
         } for r in airfield.runways],
         'taxiways': airfield.taxiways,
         'aprons': airfield.aprons,
         'buildings': airfield.buildings,
         'pads': airfield.pads,
+        **({'arrestingWires': airfield.arresting_wires} if airfield.arresting_wires else {}),
+        **({'decks': airfield.decks} if airfield.decks else {}),
+        **({'skiJumps': airfield.ski_jumps} if airfield.ski_jumps else {}),
     }
 
 
@@ -1622,7 +1824,10 @@ def report_airfield(airfield: Airfield, rejected: str = '') -> None:
         drift = airfield.plane['heightMsl'] - airfield.ele_tag_m
         print(f'      OSM ele {airfield.ele_tag_m:.0f} m, DEM plane differs by {drift:+.1f} m')
     print(f'      {len(airfield.pads)} pads, {len(airfield.taxiways)} taxiways, '
-          f'{len(airfield.aprons)} aprons, {len(airfield.buildings)} buildings')
+          f'{len(airfield.aprons)} aprons, {len(airfield.buildings)} buildings'
+          + (f', {len(airfield.arresting_wires)} arresting wires' if airfield.arresting_wires else '')
+          + (f', {len(airfield.decks)} steel decks' if airfield.decks else '')
+          + (f', {len(airfield.ski_jumps)} ski-jumps' if airfield.ski_jumps else ''))
 
 
 def evaluate_airfield(

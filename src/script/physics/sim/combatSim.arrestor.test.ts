@@ -14,6 +14,7 @@ import {
 import { CarrierMeshCollider } from '../../scene/entities/carrierDeck';
 import { CombatSim } from './combatSim';
 import { defaultArrestorCableField, serializeWorld } from './serializedWorld';
+import { LAND_WIRE_ID_BASE, landArrestorFields } from '../../scene/entities/landArrestorWires';
 
 /** Flat deck plate for ride-along tests (local Y above water so carrierHeightAt > 0). */
 function flatDeckCollider(half = 30, deckY = 18): CarrierMeshCollider {
@@ -247,5 +248,78 @@ describe('CombatSim arrestor trap', () => {
             Math.abs(a.model.position.z - (originZ + localZ)) < 0.05,
             `world Z ${a.model.position.z} vs ${originZ + localZ}`,
         );
+    });
+
+    it('a land wire across a deck at 045 stops the jet and holds it at rest', () => {
+        // Rolling north-east; the carrier steams the other way, so a wire that
+        // held to the ship's speed would drag the jet backwards.
+        const dir = new THREE.Vector3(Math.SQRT1_2, 0, -Math.SQRT1_2);
+        const span = new THREE.Vector3(Math.SQRT1_2, 0, Math.SQRT1_2);
+        const wireAt = dir.clone().multiplyScalar(40);
+        const wire = {
+            id: LAND_WIRE_ID_BASE, name: 'Svetlana-2',
+            a: wireAt.clone().addScaledVector(span, -15).setY(0.35),
+            b: wireAt.clone().addScaledVector(span, 15).setY(0.35),
+        };
+        const sim = new CombatSim();
+        sim.setWorld(serializeWorld([], [], [{
+            center: new THREE.Vector3(0, 0, 0),
+            heading: Math.atan2(dir.x, dir.z),
+            halfLength: 400,
+            halfWidth: 30,
+        }], [], [], landArrestorFields([wire])));
+        sim.setCarrierVelocity(-10, 0, 10);
+
+        const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 3 * Math.PI / 4);
+        const restY = fm2GroundRestHeight(defaultFm2Config);
+        const vel = dir.clone().multiplyScalar(55);
+        sim.addAircraft({
+            id: 'land-trap',
+            faction: Faction.PLAYER,
+            control: 'external',
+            kinematic: false,
+            aircraftConfig: defaultFm2Config,
+            hitRadius: 5,
+            maxHealth: 100,
+            spawn: {
+                position: [0, restY, 0],
+                quaternion: [quat.x, quat.y, quat.z, quat.w],
+                velocity: [vel.x, vel.y, vel.z],
+                throttle: 0,
+                landed: true,
+                airborne: false,
+            },
+            enabled: true,
+        });
+        sim.keyDown('land-trap', 'h', false);
+
+        type Probe = {
+            arrestorLatch: number; arrestorLatchId: number; arrestorHeld: boolean;
+            model: { position: THREE.Vector3; velocityVector: THREE.Vector3 };
+        };
+        const probe = () => (sim as unknown as { aircraft: Map<string, Probe> }).aircraft.get('land-trap')!;
+        const dt = 1 / 60;
+        let caughtAt: THREE.Vector3 | undefined;
+        let held = false;
+        for (let i = 0; i < 900 && !held; i++) {
+            sim.step(dt, { 'land-trap': { ...IDLE_INPUT, wheelBrakesApplied: false } });
+            const a = probe();
+            if (a.arrestorLatch >= 0 && caughtAt === undefined) {
+                assert.equal(a.arrestorLatchId, LAND_WIRE_ID_BASE);
+                caughtAt = a.model.position.clone();
+            }
+            held = a.arrestorHeld;
+        }
+        assert.ok(caughtAt !== undefined, 'expected the wire to catch the hook');
+        assert.ok(held, 'expected the pull-out to finish');
+        const runOut = probe().model.position.clone().sub(caughtAt).dot(dir);
+        assert.ok(runOut > 60 && runOut < 160, `run-out ${runOut.toFixed(1)} m`);
+
+        // Held at rest, not at the carrier's 14 m/s.
+        for (let i = 0; i < 60; i++) {
+            sim.step(dt, { 'land-trap': IDLE_INPUT });
+        }
+        const v = probe().model.velocityVector;
+        assert.ok(Math.hypot(v.x, v.z) < 0.5, `still moving at ${Math.hypot(v.x, v.z).toFixed(2)} m/s`);
     });
 });

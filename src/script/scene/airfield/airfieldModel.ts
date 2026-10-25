@@ -105,7 +105,13 @@ const RUNWAY_FALLBACK_CATEGORY: Record<RunwaySurface, PaletteCategory> = {
     concrete: PaletteCategory.SCENERY_BASE_CONCRETE,
     grass: PaletteCategory.TERRAIN_GRASS,
     gravel: PaletteCategory.TERRAIN_BARE,
+    metal: PaletteCategory.SCENERY_BASE_DECK_RUST,
 };
+
+/** Drawn in its own surface tone, never in the ground's. */
+function isHardSurface(surface: RunwaySurface): boolean {
+    return surface === 'asphalt' || surface === 'concrete' || surface === 'metal';
+}
 
 /**
  * How much brighter an unpaved strip is drawn than the terrain tone under it.
@@ -119,7 +125,7 @@ export const GROUND_STRIP_LIGHTEN = 1.1;
 
 /** How much a runway surface is lifted above the ground colour it samples. */
 function runwayLighten(surface: RunwaySurface): number {
-    return surface === 'asphalt' || surface === 'concrete' ? 1 : GROUND_STRIP_LIGHTEN;
+    return isHardSurface(surface) ? 1 : GROUND_STRIP_LIGHTEN;
 }
 
 /**
@@ -384,10 +390,16 @@ class MeshParts {
     }>();
     /** The mesh each paint became, filled by {@link build}. */
     readonly meshes = new Map<string, THREE.Mesh>();
+    /**
+     * While set, every triangle added is also copied here: the pavement that
+     * is solid ground as well as paint (see AirfieldModel.solidPavement).
+     */
+    solid: number[] | undefined;
 
     constructor(private readonly shaded = false) { }
 
     add(paint: Paint, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3): void {
+        this.solid?.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
         const key = paintKey(paint);
         let part = this.parts.get(key);
         if (part === undefined) {
@@ -503,6 +515,11 @@ export interface AirfieldModel {
     origin: THREE.Vector3;
     /** Every runway, to be repainted as the ground under it is drawn. */
     groundStrips: GroundStrip[];
+    /**
+     * The aprons, taxiways and steel decks as drawn at the finest level,
+     * relative to {@link origin}: solid ground for pavementColliders.ts.
+     */
+    solidPavement: number[];
 }
 
 /**
@@ -575,7 +592,7 @@ export function buildAirfieldModel(
         const lighten = runwayLighten(runway.surface);
         // Paved runways are drawn in their own surface tone - gray concrete,
         // dark gray asphalt - never the ground's, and so are never repainted.
-        if (runway.surface === 'asphalt' || runway.surface === 'concrete') {
+        if (isHardSurface(runway.surface)) {
             return { category: RUNWAY_FALLBACK_CATEGORY[runway.surface], lighten };
         }
         const points = runwaySamplePoints(runway).map(p => toEnu(p.lat, p.lon));
@@ -607,6 +624,7 @@ export function buildAirfieldModel(
 
     const levels: Model['lod'] = [];
     const flatsPerLevel: MeshParts[] = [];
+    const solidPavement: number[] = [];
     let maxSize = 0;
     for (let level = 0; level < LOD_KINDS.length; level++) {
         const kinds = new Set(LOD_KINDS[level]);
@@ -617,8 +635,10 @@ export function buildAirfieldModel(
         if (level <= LOD_WITH_SURROUNDS) {
             // Drawn under the runways, so a taxiway crossing one loses.
             const pavement = groundSurfaceOf(airfield);
+            parts.solid = level === 0 ? solidPavement : undefined;
             addAprons(parts, airfield, toEnu, drape, pavement);
             addTaxiways(parts, airfield, toEnu, drape, kinds.has('centreline'), pavement);
+            parts.solid = undefined;
             addBuildings(solids, airfield, toEnu, drape);
         }
         // Every runway's pavement before any runway's paint, so where two
@@ -626,10 +646,18 @@ export function buildAirfieldModel(
         for (const pass of ['pavement', 'paint'] as const) {
             for (const runway of airfield.runways) {
                 maxSize = Math.max(maxSize, runway.lengthM);
+                // A deck mapped as its own outline is drawn from that, not
+                // as a strip of the runway's default width.
+                if (runway.surface === 'metal' && (airfield.decks?.length ?? 0) > 0) {
+                    continue;
+                }
                 addRunway(parts, runway, paints.get(runway)!, marked.get(runway),
                     kinds, pass, toEnu, place);
             }
         }
+        parts.solid = level === 0 ? solidPavement : undefined;
+        addDecks(parts, airfield, toEnu, place);
+        parts.solid = undefined;
         levels.push({ flats: parts.build(materials), volumes: solids.build(materials) });
     }
     const groundStrips: GroundStrip[] = unpaved.map(({ runway, paint, zoom, points }) => {
@@ -653,6 +681,7 @@ export function buildAirfieldModel(
         },
         origin: originScene,
         groundStrips,
+        solidPavement,
     };
 }
 
@@ -1202,45 +1231,63 @@ function addAprons(
     pavement: PaletteCategory,
 ): void {
     for (const apron of airfield.aprons) {
-        const ring = apron.ring.map(p => toEnu(p[0], p[1]));
-        // OSM closes its rings by repeating the first node; the triangulator
-        // wants an open contour and produces a degenerate ear from the repeat.
-        if (ring.length > 1
-            && Math.abs(ring[0].e - ring[ring.length - 1].e) < 1e-6
-            && Math.abs(ring[0].n - ring[ring.length - 1].n) < 1e-6) {
-            ring.pop();
-        }
-        if (ring.length < 3) {
-            continue;
-        }
-        // Turned counter-clockwise in east/north, which is the winding that
-        // comes out facing up once east/north becomes the scene's x and -z.
-        //
-        // OSM does not promise either winding on a closed way, and it really
-        // does use both: across the baked airfields, 118 apron rings run one
-        // way and 170 the other. Triangulated blind, half of every airfield's
-        // ramp is emitted back-facing — and the mesh material culls back faces,
-        // so half the aprons simply are not there. Saki draws seven of its
-        // fourteen.
-        if (signedArea(ring) < 0) {
-            ring.reverse();
-        }
-        const contour = ring.map(p => new THREE.Vector2(p.e, p.n));
-        let faces: number[][];
-        try {
-            faces = THREE.ShapeUtils.triangulateShape(contour, []);
-        } catch {
-            // A self-intersecting apron is a mapping error, not a reason to
-            // drop the whole airfield.
-            continue;
-        }
-        for (const face of faces) {
-            parts.add(
-                pavement,
-                place(ring[face[0]].e, ring[face[0]].n, AIRFIELD_SURFACE_EPS_M),
-                place(ring[face[1]].e, ring[face[1]].n, AIRFIELD_SURFACE_EPS_M),
-                place(ring[face[2]].e, ring[face[2]].n, AIRFIELD_SURFACE_EPS_M),
-            );
-        }
+        addFilledRing(parts, apron.ring, toEnu, place, pavement);
+    }
+}
+
+/**
+ * Steel decks (Saki's NITKA) in their rust, on the airfield's plane. Drawn
+ * after the runways, so the deck is what shows where the two overlap.
+ */
+function addDecks(parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place): void {
+    for (const deck of airfield.decks ?? []) {
+        addFilledRing(parts, deck.ring, toEnu, place, PaletteCategory.SCENERY_BASE_DECK_RUST);
+    }
+}
+
+/** One closed `[lat, lon]` ring, triangulated flat at `place`. */
+function addFilledRing(
+    parts: MeshParts, latLonRing: number[][], toEnu: ToEnu, place: Place,
+    category: PaletteCategory,
+): void {
+    const ring = latLonRing.map(p => toEnu(p[0], p[1]));
+    // OSM closes its rings by repeating the first node; the triangulator
+    // wants an open contour and produces a degenerate ear from the repeat.
+    if (ring.length > 1
+        && Math.abs(ring[0].e - ring[ring.length - 1].e) < 1e-6
+        && Math.abs(ring[0].n - ring[ring.length - 1].n) < 1e-6) {
+        ring.pop();
+    }
+    if (ring.length < 3) {
+        return;
+    }
+    // Turned counter-clockwise in east/north, which is the winding that
+    // comes out facing up once east/north becomes the scene's x and -z.
+    //
+    // OSM does not promise either winding on a closed way, and it really
+    // does use both: across the baked airfields, 118 apron rings run one
+    // way and 170 the other. Triangulated blind, half of every airfield's
+    // ramp is emitted back-facing — and the mesh material culls back faces,
+    // so half the aprons simply are not there. Saki draws seven of its
+    // fourteen.
+    if (signedArea(ring) < 0) {
+        ring.reverse();
+    }
+    const contour = ring.map(p => new THREE.Vector2(p.e, p.n));
+    let faces: number[][];
+    try {
+        faces = THREE.ShapeUtils.triangulateShape(contour, []);
+    } catch {
+        // A self-intersecting apron is a mapping error, not a reason to
+        // drop the whole airfield.
+        return;
+    }
+    for (const face of faces) {
+        parts.add(
+            category,
+            place(ring[face[0]].e, ring[face[0]].n, AIRFIELD_SURFACE_EPS_M),
+            place(ring[face[1]].e, ring[face[1]].n, AIRFIELD_SURFACE_EPS_M),
+            place(ring[face[2]].e, ring[face[2]].n, AIRFIELD_SURFACE_EPS_M),
+        );
     }
 }

@@ -14,7 +14,11 @@
 import { FlattenPadManifest } from './manifest';
 import { LonLatBounds } from './tiling';
 
-export type RunwaySurface = 'asphalt' | 'concrete' | 'grass' | 'gravel';
+/**
+ * `metal` is a carrier deck built on land (Saki's NITKA): drawn with the
+ * airfield, never landed on, spawned at or based from - see sceneRunwaysOf.
+ */
+export type RunwaySurface = 'asphalt' | 'concrete' | 'grass' | 'gravel' | 'metal';
 
 export interface AirfieldRunway {
     /** Painted designators, low end first: `03L/21R`. */
@@ -32,6 +36,8 @@ export interface AirfieldRunway {
     thresholds: number[][];
     /** True when OSM had no `ref` and the designators were derived. */
     refDerived?: boolean;
+    /** The run-up to a ski-jump ramp: drawn, never landed on or spawned at. */
+    skiJump?: boolean;
 }
 
 interface AirfieldTaxiway {
@@ -88,6 +94,44 @@ export interface Airfield {
     aprons: AirfieldApron[];
     buildings: AirfieldBuilding[];
     pads: FlattenPadManifest[];
+    /** OSM `barrier=cable_barrier`; absent on the fields that have none. */
+    arrestingWires?: AirfieldArrestingWire[];
+    /** Steel deck outlines (`area=yes surface=metal`); absent on the fields that have none. */
+    decks?: AirfieldDeck[];
+    /** Ski-jump ramps; absent on the fields that have none. */
+    skiJumps?: AirfieldSkiJump[];
+}
+
+/** A ski-jump ramp at the end of its run-up (Saki's T2), as the bake placed it. */
+export interface AirfieldSkiJump {
+    name: string;
+    /** `[lat, lon]` footprint, closed. */
+    ring: number[][];
+    /** Rise from base to lip. */
+    heightM: number;
+    /** Middle of the low end, where the run-up meets the ramp. */
+    lat: number;
+    lon: number;
+    /** True bearing up the ramp. */
+    headingDeg: number;
+    lengthM: number;
+    widthM: number;
+    /** False when no runway was in reach and the uphill way is a guess. */
+    runUpFound: boolean;
+}
+
+/** A carrier deck on land, drawn in rust from its own outline (Saki's NITKA). */
+export interface AirfieldDeck {
+    name: string;
+    /** `[lat, lon]` ring, closed. */
+    ring: number[][];
+}
+
+/** Arresting gear across a runway or deck (landArrestorWires.ts). */
+export interface AirfieldArrestingWire {
+    name: string;
+    /** `[lat, lon]` along the wire; it spans the first to the last. */
+    points: number[][];
 }
 
 export interface AirfieldsFile {

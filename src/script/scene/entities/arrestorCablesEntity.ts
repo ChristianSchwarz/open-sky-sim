@@ -299,6 +299,10 @@ export class ArrestorCablesEntity implements Entity {
         let latch = -1;
         if (fm instanceof SimProxyFlightModel) {
             latch = fm.getArrestorLatch();
+            // A wire on land (landArrestorWires.ts) is not one of the ship's.
+            if (latch >= this.cables.length) {
+                latch = -1;
+            }
         }
         // Unlatched cables are static in carrier-local space — the layout and
         // deck heights never change, so the (deck-sampling) rebuild is pure

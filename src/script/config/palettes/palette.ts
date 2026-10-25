@@ -109,6 +109,8 @@ export enum PaletteCategory {
      * tells the two apart. OSM records which it is, so the sim can too.
      */
     SCENERY_BASE_CONCRETE = 'SCENERY_BASE_CONCRETE',
+    /** Steel deck plating gone to rust: Saki's NITKA, a carrier deck on land. */
+    SCENERY_BASE_DECK_RUST = 'SCENERY_BASE_DECK_RUST',
 
     FX_FIRE = 'FX_FIRE',
     FX_FIRE__B = 'FX_FIRE__B',

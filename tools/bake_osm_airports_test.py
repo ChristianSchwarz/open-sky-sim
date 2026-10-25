@@ -255,6 +255,14 @@ class PavementPadTest(unittest.TestCase):
         way, nodes = way_from_bearing(7, 90.0, MIN_RUNWAY_LENGTH_M - 1.0, {'aeroway': 'runway'})
         self.assertIsNone(runway_from_way(way, nodes, 'ga'))
 
+    def test_a_steel_deck_is_kept_however_short(self):
+        # Saki's NITKA: 218 m of metal, no ref.
+        way, nodes = way_from_bearing(
+            45, 220.0, 218.0, {'aeroway': 'runway', 'surface': 'metal'})
+        r = runway_from_way(way, nodes, 'military')
+        self.assertIsNotNone(r)
+        self.assertEqual(r.surface, 'metal')
+
 
 class DedupeRunwaysTest(unittest.TestCase):
     """OSM often maps one strip twice - a centreline and an area."""
@@ -279,6 +287,13 @@ class DedupeRunwaysTest(unittest.TestCase):
         kept = dedupe_runways([line, area])
         self.assertEqual(len(kept), 1)
         self.assertTrue(kept[0].width_measured)
+
+    def test_strips_in_line_are_two_runways(self):
+        a = self.runway(45.0, 219.0)
+        b = self.runway(45.0, 214.0)
+        frame = LocalFrame(a.lat, a.lon)
+        b.lon, b.lat = frame.to_lonlat(1500.0, 1500.0)
+        self.assertEqual(len(dedupe_runways([a, b])), 2)
 
     def test_parallel_runways_are_two_runways(self):
         # Las Palmas 03L / 03R sit about 180 m apart. Merging them would
@@ -505,6 +520,118 @@ def elements_and_nodes(*pairs) -> dict:
 
 
 class OwnerTest(unittest.TestCase):
+
+    def test_a_ski_jump_keeps_its_short_run_up_and_rises_away_from_it(self):
+        # Saki's T2: a 213 m concrete run-up ending at a ramp 50 m long.
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        main = runway_way(12, LAT0, LON0, first_node=300)
+        lat_r, lon_r = offset(LAT0, LON0, -800.0, 800.0)
+        run_up, run_nodes = way_from_bearing(
+            13, 45.0, 213.0, {'aeroway': 'runway', 'ref': '04/22', 'surface': 'concrete'},
+            lat=lat_r, lon=lon_r)
+        run_up['nodes'] = [400, 401]
+        run_nodes = {400: run_nodes[1], 401: run_nodes[2]}
+        # The ramp starts at the run-up's 22 end (north-east) and runs on 50 m.
+        end_lon, end_lat = run_nodes[401]
+        frame = LocalFrame(end_lat, end_lon)
+        ax, ay = math.sin(math.radians(45.0)), math.cos(math.radians(45.0))
+        corners = [(-ay * 12 + ax * a, ax * 12 + ay * a) for a in (0.0, 50.0)]
+        corners = [corners[0], corners[1], (corners[1][0] + 2 * ay * 12, corners[1][1] - 2 * ax * 12),
+                   (corners[0][0] + 2 * ay * 12, corners[0][1] - 2 * ax * 12)]
+        ramp_nodes = {500 + i: frame.to_lonlat(e, n) for i, (e, n) in enumerate(corners)}
+        ramp = {'type': 'way', 'id': 14, 'nodes': [500, 501, 502, 503, 500], 'tags': {
+            'building': 'yes', 'building:levels': '0', 'roof:shape': 'skillion',
+            'roof:height': '8', 'name': 'T2 ski-jump'}}
+        found = assemble_airfields(elements_and_nodes(field, main, (run_up, run_nodes), (ramp, ramp_nodes)))
+        self.assertEqual(len(found), 1)
+        refs = sorted(r.ref for r in found[0].runways)
+        self.assertIn('04/22', refs)
+        self.assertTrue(next(r for r in found[0].runways if r.ref == '04/22').ski_jump)
+        jump = found[0].ski_jumps[0]
+        self.assertTrue(jump['runUpFound'])
+        self.assertEqual(jump['heightM'], 8.0)
+        self.assertAlmostEqual(jump['lengthM'], 50.0, delta=1.0)
+        self.assertLess(abs(((jump['headingDeg'] - 45.0) + 180.0) % 360.0 - 180.0), 2.0)
+        # The base is where the run-up ends.
+        e, n = frame.to_m(jump['lon'], jump['lat'])
+        self.assertLess(math.hypot(e, n), 2.0)
+
+    def test_a_run_up_that_runs_over_the_ramp_still_points_it_uphill(self):
+        # As Saki maps it now: the runway way goes on over the ramp to its lip.
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        main = runway_way(12, LAT0, LON0, first_node=300)
+        lat_r, lon_r = offset(LAT0, LON0, -800.0, 800.0)
+        run_up, run_nodes = way_from_bearing(
+            13, 45.0, 173.0, {'aeroway': 'runway', 'ref': 'T-2 ski-jump'}, lat=lat_r, lon=lon_r)
+        run_up['nodes'] = [400, 401]
+        run_nodes = {400: run_nodes[1], 401: run_nodes[2]}
+        # The ramp is the last 59 m of the run-up.
+        end_lon, end_lat = run_nodes[401]
+        frame = LocalFrame(end_lat, end_lon)
+        ax, ay = math.sin(math.radians(45.0)), math.cos(math.radians(45.0))
+        def at(a, c):
+            return frame.to_lonlat(ax * a + ay * c, ay * a - ax * c)
+        ramp_nodes = {500: at(-59, -13), 501: at(0, -13), 502: at(0, 13), 503: at(-59, 13)}
+        ramp = {'type': 'way', 'id': 14, 'nodes': [500, 501, 502, 503, 500], 'tags': {
+            'building': 'yes', 'building:levels': '0', 'roof:shape': 'skillion',
+            'roof:height': '8', 'name': 'T2 ski-jump'}}
+        found = assemble_airfields(elements_and_nodes(field, main, (run_up, run_nodes), (ramp, ramp_nodes)))
+        jump = found[0].ski_jumps[0]
+        self.assertTrue(jump['runUpFound'])
+        self.assertLess(abs(((jump['headingDeg'] - 45.0) + 180.0) % 360.0 - 180.0), 2.0)
+        e, n = frame.to_m(jump['lon'], jump['lat'])
+        self.assertAlmostEqual(e * ax + n * ay, -59.0, delta=2.0)
+        run = next(r for r in found[0].runways if r.ski_jump)
+        self.assertTrue(run.ref_derived)
+        self.assertEqual(run.ref, '04/22')
+
+    def test_a_short_runway_on_a_steel_deck_is_the_deck_runway(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        main = runway_way(12, LAT0, LON0, first_node=300)
+        lat_d, lon_d = offset(LAT0, LON0, -800.0, 800.0)
+        deck, deck_nodes = aerodrome_way(14, lat_d, lon_d, 150.0, {}, first_node=500)
+        deck['tags'] = {'area': 'yes', 'name': 'NITKA', 'surface': 'metal'}
+        line, line_nodes = way_from_bearing(
+            13, 45.0, 218.0, {'aeroway': 'runway', 'name': 'Practice aircraft carrier runway'},
+            lat=lat_d, lon=lon_d)
+        line['nodes'] = [400, 401]
+        line_nodes = {400: line_nodes[1], 401: line_nodes[2]}
+        found = assemble_airfields(elements_and_nodes(field, main, (deck, deck_nodes), (line, line_nodes)))
+        self.assertEqual(sorted(r.surface for r in found[0].runways), ['gravel', 'metal'])
+
+    def test_a_short_runway_with_no_ramp_is_still_a_farm_strip(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        main = runway_way(12, LAT0, LON0, first_node=300)
+        lat_r, lon_r = offset(LAT0, LON0, -800.0, 800.0)
+        short, short_nodes = way_from_bearing(13, 45.0, 213.0, {'aeroway': 'runway'}, lat=lat_r, lon=lon_r)
+        short['nodes'] = [400, 401]
+        short_nodes = {400: short_nodes[1], 401: short_nodes[2]}
+        found = assemble_airfields(elements_and_nodes(field, main, (short, short_nodes)))
+        self.assertEqual(len(found[0].runways), 1)
+
+    def test_a_steel_deck_outline_is_a_deck_with_a_pad(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        deck, deck_nodes = aerodrome_way(14, LAT0, LON0, 30.0, {}, first_node=500)
+        deck['tags'] = {'area': 'yes', 'name': 'NITKA', 'surface': 'metal'}
+        found = assemble_airfields(elements_and_nodes(field, runway, (deck, deck_nodes)))
+        self.assertEqual(len(found), 1)
+        self.assertEqual([d['name'] for d in found[0].decks], ['NITKA'])
+        self.assertEqual(len(found[0].decks[0]['ring']), 5)
+        self.assertEqual(len(found[0].extra_pads), 1)
+
+    def test_an_arresting_wire_goes_with_its_aerodrome(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        wire, wire_nodes = way_from_bearing(
+            13, 0.0, 36.0, {'barrier': 'cable_barrier', 'material': 'wire', 'name': 'Svetlana-2'})
+        wire['nodes'] = [400, 401]
+        wire_nodes = {400: wire_nodes[1], 401: wire_nodes[2]}
+        found = assemble_airfields(elements_and_nodes(field, runway, (wire, wire_nodes)))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(len(found[0].arresting_wires), 1)
+        self.assertEqual(found[0].arresting_wires[0]['name'], 'Svetlana-2')
+        self.assertEqual(len(found[0].arresting_wires[0]['points']), 2)
 
     def test_first_listed_polygon_wins_when_two_contain_the_runway(self):
         outer = aerodrome_way(10, LAT0, LON0, 6000.0, {'name': 'outer'}, first_node=100)

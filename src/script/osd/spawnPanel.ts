@@ -14,6 +14,10 @@ export interface AirfieldChoice {
     /** Designators of its longest runway. */
     ref: string;
     lengthM: number;
+    /** What selecting it sets as the preferred airfield; `icao || name` when absent. */
+    key?: string;
+    /** A start point within the airfield (a deck, a ski-jump), shown after its name. */
+    label?: string;
 }
 
 /** What the settings dialog's Flight tab shows: labels plus the selected index of each list. */
@@ -75,7 +79,7 @@ export class SpawnPanel {
         const choice = this.airfieldChoices[index];
         if (choice !== undefined) {
             this.update({ airfieldIndex: index });
-            this.onAirfieldSelect(choice.icao || choice.name);
+            this.onAirfieldSelect(choice.key ?? (choice.icao || choice.name));
         }
     }
 
@@ -131,11 +135,12 @@ export class SpawnPanel {
      */
     setAirfields(choices: AirfieldChoice[], selectedIcao: string | undefined): void {
         this.airfieldChoices = choices;
-        const index = choices.findIndex(c => (c.icao || c.name) === selectedIcao);
+        const index = choices.findIndex(c => (c.key ?? (c.icao || c.name)) === selectedIcao);
         this.update({
             airfields: choices.map(choice => {
                 const id = choice.icao ? `${choice.icao} — ` : '';
-                return `${id}${choice.name} (${choice.ref}, ${Math.round(choice.lengthM)} m)`;
+                const where = choice.label ? `${choice.name}: ${choice.label}` : choice.name;
+                return `${id}${where} (${choice.ref}, ${Math.round(choice.lengthM)} m)`;
             }),
             airfieldIndex: index >= 0 ? index : 0,
         });

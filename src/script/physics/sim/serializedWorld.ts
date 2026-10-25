@@ -73,6 +73,10 @@ export interface SerializedArrestorCables {
     deckAxis: [number, number, number];
     /** Local endpoints [ax, ay, az, bx, by, bz] per cable. */
     segmentsLocal: [number, number, number, number, number, number][];
+    /** See ArrestorCableField.cableIds. */
+    cableIds?: number[];
+    /** See ArrestorCableField.fixed. */
+    fixed?: boolean;
 }
 
 /**
@@ -162,16 +166,7 @@ export function serializeWorld(
             triangles: c.triangles,
             aabb: c.aabb,
         })),
-        arrestorCables: arrestorCables.map(f => ({
-            originX: f.originX,
-            originY: f.originY,
-            originZ: f.originZ,
-            deckAxis: [f.deckAxis.x, f.deckAxis.y, f.deckAxis.z],
-            segmentsLocal: f.segments.map(s => [
-                s.a.x - f.originX, s.a.y - f.originY, s.a.z - f.originZ,
-                s.b.x - f.originX, s.b.y - f.originY, s.b.z - f.originZ,
-            ] as [number, number, number, number, number, number]),
-        })),
+        arrestorCables: arrestorCables.map(serializeArrestorCables),
         barricades: [],
         surfacePads: surfacePads.map(p => ({ ...p })),
         sceneryMeshes: sceneryMeshes.map(c => ({
@@ -254,12 +249,19 @@ function deserializeObstacles(list: readonly SerializedObstacle[]): Obstacle[] {
 export interface SerializedStaticColliders {
     surfacePads: SurfacePadCollider[];
     obstacles: SerializedObstacle[];
+    /** Solid soups: an airfield's aprons and taxiways (pavementColliders.ts). */
+    sceneryMeshes?: SerializedCarrierMesh[];
 }
 
 export function serializeStaticColliders(
     surfacePads: readonly SurfacePadCollider[], obstacles: readonly Obstacle[],
+    sceneryMeshes: readonly CarrierMeshCollider[] = [],
 ): SerializedStaticColliders {
     return {
+        sceneryMeshes: sceneryMeshes.map(c => ({
+            originX: c.originX, originY: c.originY, originZ: c.originZ,
+            triangles: c.triangles, aabb: c.aabb,
+        })),
         surfacePads: surfacePads.map(p => ({ ...p })),
         obstacles: obstacles.map(o => ({
             position: [o.position.x, o.position.y, o.position.z],
@@ -270,7 +272,24 @@ export function serializeStaticColliders(
 }
 
 export function applyStaticColliders(world: SceneWorldQuery, colliders: SerializedStaticColliders): void {
-    world.addStaticColliders(colliders.surfacePads, deserializeObstacles(colliders.obstacles));
+    world.addStaticColliders(colliders.surfacePads, deserializeObstacles(colliders.obstacles),
+        (colliders.sceneryMeshes ?? []).map(c => ({ ...c })));
+}
+
+/** One cable field, structured-clone-safe. */
+export function serializeArrestorCables(f: ArrestorCableField): SerializedArrestorCables {
+    return {
+        originX: f.originX,
+        originY: f.originY,
+        originZ: f.originZ,
+        deckAxis: [f.deckAxis.x, f.deckAxis.y, f.deckAxis.z],
+        segmentsLocal: f.segments.map(s => [
+            s.a.x - f.originX, s.a.y - f.originY, s.a.z - f.originZ,
+            s.b.x - f.originX, s.b.y - f.originY, s.b.z - f.originZ,
+        ] as [number, number, number, number, number, number]),
+        cableIds: f.cableIds?.slice(),
+        fixed: f.fixed,
+    };
 }
 
 /** Rebuild arrestor cable fields for combat-sim trap physics. */
@@ -291,6 +310,8 @@ export function deserializeArrestorCables(world: SerializedWorld): ArrestorCable
                 });
             }
         }
+        field.cableIds = s.cableIds?.slice();
+        field.fixed = s.fixed;
         return field;
     });
 }

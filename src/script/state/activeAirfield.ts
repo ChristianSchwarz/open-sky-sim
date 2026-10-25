@@ -13,7 +13,7 @@
  */
 
 import * as THREE from 'three';
-import { Airfield, AirfieldRunway, RunwaySurface, planeElevationAt } from '../terrain/airfields';
+import { Airfield, AirfieldRunway, RunwaySurface, primaryRunway } from '../terrain/airfields';
 import { ecefToEnu, EnuBasis, geodeticToEcef, sceneFromEnu } from '../terrain/geodesy';
 
 export interface SceneRunway {
@@ -33,6 +33,49 @@ export interface SceneRunway {
     name: string;
     /** True when this is the longest runway of its airfield. */
     primary: boolean;
+    /**
+     * A place to start from and nothing else: a steel deck (Saki's NITKA) or
+     * a ski-jump run-up (its T2). Offered in the picker under {@link label};
+     * never landed on, never where the AI or the opponents are based.
+     */
+    startOnly?: boolean;
+    /** What a start-only runway is called in the picker: the deck's or the ramp's name. */
+    label?: string;
+}
+
+/**
+ * What the picker and the session's preferred airfield call a runway: the
+ * airfield's ICAO (or name), and for a start-only one that plus its label.
+ */
+export function runwayKey(r: Pick<SceneRunway, 'icao' | 'name' | 'startOnly' | 'label'>): string {
+    const field = r.icao || r.name;
+    return r.startOnly ? `${field}#${r.label ?? ''}` : field;
+}
+
+/** The nearest of some named `[lat, lon]` places to a runway's middle. */
+function nearestName(
+    runway: AirfieldRunway, places: ReadonlyArray<{ name: string; lat: number; lon: number }>,
+): { name: string; lat: number; lon: number } | undefined {
+    let best: { name: string; lat: number; lon: number } | undefined;
+    let bestD = Infinity;
+    for (const p of places) {
+        const d = (p.lat - runway.lat) ** 2 + ((p.lon - runway.lon) * Math.cos(runway.lat * Math.PI / 180)) ** 2;
+        if (d < bestD) {
+            bestD = d;
+            best = p;
+        }
+    }
+    return best;
+}
+
+/** The middle of a closed `[lat, lon]` ring, as a point to measure to. */
+function ringCentre(name: string, ring: number[][]): { name: string; lat: number; lon: number } {
+    const n = Math.max(1, ring.length);
+    return {
+        name,
+        lat: ring.reduce((s, p) => s + p[0], 0) / n,
+        lon: ring.reduce((s, p) => s + p[1], 0) / n,
+    };
 }
 
 /** Metres per degree, good enough to step a kilometre along a runway. */
@@ -42,6 +85,27 @@ function metresPerDegree(latDeg: number): { lat: number; lon: number } {
         lat: 111132.92 - 559.82 * Math.cos(2 * lat) + 1.175 * Math.cos(4 * lat),
         lon: Math.max(1, 111412.84 * Math.cos(lat) - 93.5 * Math.cos(3 * lat)),
     };
+}
+
+/**
+ * Scene position of a point on an airfield's platform plane, `liftM` above it.
+ *
+ * The plane is what the bake cut every pad to, so anything standing on the
+ * pavement - an arresting wire, the foot of a ski-jump - belongs on it.
+ */
+export function airfieldPlaneSceneAt(
+    airfield: Airfield, basis: EnuBasis, lat: number, lon: number, liftM = 0,
+): THREE.Vector3 {
+    const primary = primaryRunway(airfield);
+    const originLat = primary?.lat ?? airfield.lat;
+    const originLon = primary?.lon ?? airfield.lon;
+    const perDeg = metresPerDegree(originLat);
+    const e = (lon - originLon) * perDeg.lon;
+    const n = (lat - originLat) * perDeg.lat;
+    const h = airfield.plane.headingDeg * Math.PI / 180;
+    const height = airfield.plane.heightMsl
+        + airfield.plane.gradient * (e * Math.sin(h) + n * Math.cos(h)) + liftM;
+    return sceneFromEnu(ecefToEnu(basis, geodeticToEcef(lat, lon, height)));
 }
 
 /**
@@ -58,12 +122,16 @@ export function sceneRunwayOf(
 ): SceneRunway {
     const perDeg = metresPerDegree(runway.lat);
     const r = runway.headingDeg * Math.PI / 180;
-    const at = (along: number): THREE.Vector3 => {
-        const lat = runway.lat + (along * Math.cos(r)) / perDeg.lat;
-        const lon = runway.lon + (along * Math.sin(r)) / perDeg.lon;
-        const elevation = planeElevationAt(airfield, runway.headingDeg, along) + surfaceEpsM;
-        return sceneFromEnu(ecefToEnu(basis, geodeticToEcef(lat, lon, elevation)));
-    };
+    // On the plane where this runway really is. planeElevationAt measures
+    // from the primary runway's centre, so handing it `along` from this one's
+    // put a secondary runway off its pavement by the plane's rise between the
+    // two: Saki's NITKA deck, 1.8 km down a 0.47 % plane, was solid 8.5 m
+    // above the deck drawn for it, and a landing there flew into it.
+    const at = (along: number): THREE.Vector3 => airfieldPlaneSceneAt(
+        airfield, basis,
+        runway.lat + (along * Math.cos(r)) / perDeg.lat,
+        runway.lon + (along * Math.sin(r)) / perDeg.lon,
+        surfaceEpsM);
 
     const half = runway.lengthM / 2;
     const centre = at(0);
@@ -92,6 +160,30 @@ export function sceneRunwaysOf(
         let longest: SceneRunway | undefined;
         for (const runway of airfield.runways) {
             const scene = sceneRunwayOf(airfield, runway, basis, surfaceEpsM);
+            // A deck or a ski-jump run-up is a couple of hundred metres: a
+            // start point, never the airfield's runway (see SceneRunway.startOnly).
+            if (runway.surface === 'metal' || runway.skiJump) {
+                scene.startOnly = true;
+                if (runway.skiJump) {
+                    const ramp = nearestName(runway, airfield.skiJumps ?? []);
+                    scene.label = ramp?.name || 'ski-jump';
+                    if (ramp !== undefined) {
+                        // Lined up to roll onto the ramp, whichever end the
+                        // designators put first.
+                        const at = sceneFromEnu(ecefToEnu(basis, geodeticToEcef(ramp.lat, ramp.lon, 0)));
+                        const fwd = headingForward(scene.heading);
+                        if ((at.x - scene.center.x) * fwd.x + (at.z - scene.center.z) * fwd.z < 0) {
+                            scene.heading = Math.atan2(-fwd.x, -fwd.z);
+                            scene.slope = -scene.slope;
+                        }
+                    }
+                } else {
+                    scene.label = nearestName(runway,
+                        (airfield.decks ?? []).map(d => ringCentre(d.name, d.ring)))?.name || 'deck';
+                }
+                out.push(scene);
+                continue;
+            }
             out.push(scene);
             if (longest === undefined || scene.halfLength > longest.halfLength) {
                 longest = scene;
@@ -124,21 +216,28 @@ const MIN_BASE_RUNWAY_M = 1500;
  *
  * `preferIcao` picks a named one when the player has chosen it, and is ignored
  * rather than honoured-as-nothing when that airfield is not in this area.
+ * `homeIcao` is the area's own base where it has one (regionalHomeBase), ahead
+ * of the nearest-field rule but behind the player's choice.
  */
 export function pickStartRunway(
-    runways: readonly SceneRunway[], preferIcao?: string,
+    runways: readonly SceneRunway[], preferIcao?: string, homeIcao?: string,
 ): SceneRunway | undefined {
     if (runways.length === 0) {
         return undefined;
+    }
+    if (homeIcao && !preferIcao) {
+        const home = runways.find(r => r.primary && runwayKey(r) === homeIcao);
+        if (home !== undefined) {
+            return home;
+        }
     }
     if (preferIcao) {
         // Keyed the same way the picker offered it: `icao || name`. An airfield
         // with no ICAO — most of the small US strips and unnamed ones — would
         // otherwise never match here, since `r.icao` alone is `''` and falls
         // through to the general ranking silently, ignoring what was chosen.
-        const key = (r: SceneRunway) => r.icao || r.name;
-        const named = runways.find(r => r.primary && key(r) === preferIcao)
-            ?? runways.find(r => key(r) === preferIcao);
+        const named = runways.find(r => r.primary && runwayKey(r) === preferIcao)
+            ?? runways.find(r => runwayKey(r) === preferIcao);
         if (named !== undefined) {
             return named;
         }
@@ -188,24 +287,49 @@ export function nearestSceneRunway(
     return best;
 }
 
+/**
+ * Airfields a region is based at, instead of the long runway nearest the
+ * middle of its box. A box drawn round a coastline puts its middle wherever
+ * the coast happens to bend - Krim's is closest to Kirovske - and a region
+ * with a famous base should start there.
+ *
+ * Found by position, like homeArea, so renaming an area cannot strand it.
+ */
+export const REGIONAL_HOME_BASES: ReadonlyArray<{ icao: string; lat: number; lon: number }> = [
+    // Krim: Saki, the naval aviation field with the NITKA deck and the T2 ski-jump.
+    { icao: 'URFI', lat: 45.0918, lon: 33.6048 },
+];
+
+/** The home base of the area with these bounds, if it has one. */
+export function regionalHomeBase(
+    area: { west: number; south: number; east: number; north: number },
+): string | undefined {
+    return REGIONAL_HOME_BASES.find(b =>
+        b.lon >= area.west && b.lon <= area.east && b.lat >= area.south && b.lat <= area.north)?.icao;
+}
+
 /** Unit forward vector along a scene heading. */
 export function headingForward(heading: number, out = new THREE.Vector3()): THREE.Vector3 {
     return out.set(Math.sin(heading), 0, Math.cos(heading));
 }
 
-/** One airfield entry per ICAO, for a picker. Longest runway decides the order. */
+/**
+ * One airfield entry per ICAO, for a picker. Longest runway decides the order.
+ * An airfield's start-only runways (a deck, a ski-jump run-up) follow it as
+ * entries of their own.
+ */
 export function airfieldChoices(
     runways: readonly SceneRunway[],
-): Array<{ icao: string; name: string; ref: string; lengthM: number }> {
+): Array<{ icao: string; name: string; ref: string; lengthM: number; key: string; label?: string }> {
     const seen = new Set<string>();
-    const out: Array<{ icao: string; name: string; ref: string; lengthM: number }> = [];
+    const out: Array<{ icao: string; name: string; ref: string; lengthM: number; key: string; label?: string }> = [];
     for (const runway of runways) {
         if (!runway.primary) {
             continue;
         }
         // A field with no ICAO is keyed by its name; two unnamed airstrips in
         // one area would otherwise collapse into one menu entry.
-        const key = runway.icao || runway.name;
+        const key = runwayKey(runway);
         if (seen.has(key)) {
             continue;
         }
@@ -215,7 +339,23 @@ export function airfieldChoices(
             name: runway.name,
             ref: runway.ref,
             lengthM: runway.halfLength * 2,
+            key,
         });
+        for (const start of runways) {
+            if (start.startOnly && start.icao === runway.icao && start.name === runway.name
+                && !seen.has(runwayKey(start))) {
+                seen.add(runwayKey(start));
+                out.push({
+                    icao: start.icao,
+                    name: start.name,
+                    ref: start.ref,
+                    lengthM: start.halfLength * 2,
+                    key: runwayKey(start),
+                    label: start.label,
+                });
+            }
+        }
     }
     return out;
 }
+

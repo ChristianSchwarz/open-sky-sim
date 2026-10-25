@@ -38,6 +38,7 @@ import {
     DEFAULT_ARRESTOR_HOOK_HINGE,
     latchedHookTipWorld,
 } from './arrestorCables';
+import { LAND_WIRE_ID_BASE, LandArrestorWire } from './landArrestorWires';
 
 const ENGINE_LOWEST_VOLUME = 0.05; // [0,1]
 
@@ -212,6 +213,8 @@ export class PlayerEntity implements Entity {
     private readonly _hookTipBody = new THREE.Vector3(...DEFAULT_ARRESTOR_HOOK_BODY);
     /** Live carrier pose for latched-hook sheave aiming; falls back to default origin. */
     private getArrestorCarrierPose: (() => ArrestorCarrierPose) | undefined;
+    /** Land wire a snapshot latch id names (landArrestorWires.ts); undefined for the carrier's. */
+    private getLandWire: ((id: number) => LandArrestorWire | undefined) | undefined;
     private readonly _hookHingeBody = new THREE.Vector3(...DEFAULT_ARRESTOR_HOOK_HINGE);
     /**
      * Visual ride with the steaming Kuznetsov: frozen ship-local offset captured
@@ -1041,11 +1044,16 @@ export class PlayerEntity implements Entity {
             // Shared tip with the bent wire: colinear hinge → tip → left sheave.
             this._hookTip.copy(this._hookTipBody).sub(this._hookHingeBody)
                 .applyQuaternion(this.displayQuaternion);
-            arrestorCableStartWorld(
-                latch,
-                this.getArrestorCarrierPose?.() ?? undefined,
-                this._v,
-            );
+            const landWire = latch >= LAND_WIRE_ID_BASE ? this.getLandWire?.(latch) : undefined;
+            if (landWire !== undefined) {
+                this._v.copy(landWire.a);
+            } else {
+                arrestorCableStartWorld(
+                    latch,
+                    this.getArrestorCarrierPose?.() ?? undefined,
+                    this._v,
+                );
+            }
             latchedHookTipWorld(
                 this._hinge, this._v, this._v, this._hookDir, this._hookTip,
             );
@@ -1571,6 +1579,11 @@ export class PlayerEntity implements Entity {
     /** Provide the live carrier pose so a latched hook aims at the moving sheave. */
     setArrestorCarrierPoseProvider(getPose: () => ArrestorCarrierPose): void {
         this.getArrestorCarrierPose = getPose;
+    }
+
+    /** Provide the land wires, so a hook caught on one aims at its sheave. */
+    setLandWireProvider(getWire: (id: number) => LandArrestorWire | undefined): void {
+        this.getLandWire = getWire;
     }
 
     private getBarricadeStatus: (() => string | undefined) | undefined;
