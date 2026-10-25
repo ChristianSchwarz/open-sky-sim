@@ -1771,6 +1771,11 @@ export class Game {
     /** True when the airfield the furniture stands on has aprons of its own. */
     private homeHasRealAprons = false;
     /**
+     * True when the home airfield has a ski-jump of its own in OSM (Saki's
+     * T2): the real one is placed instead of the generic ramp down the runway.
+     */
+    private homeHasOwnSkiJump = false;
+    /**
      * The airport buildings, as cylinders for the AI to steer around.
      *
      * Obstacles only: they are not collision meshes. A ground-height query
@@ -5185,6 +5190,7 @@ export class Game {
             : here.find(a => a.icao === this.homeRunway!.icao
                 && a.name === this.homeRunway!.name);
         this.homeHasRealAprons = (homeField?.aprons.length ?? 0) > 0;
+        this.homeHasOwnSkiJump = (homeField?.skiJumps?.length ?? 0) > 0;
         this.builtAirfields.clear();
         this.areaAirfields = here.map(airfield => {
             const p = geodeticToWorld(this.planetTerrain.basis, airfield.lat, airfield.lon, 0);
@@ -5963,25 +5969,29 @@ export class Game {
         // run-up brings it to the ramp at ~70.
         this.skiJumps.length = 0;
         this.skiJumps.push(...this.osmSkiJumps);
-        const skiJumpAheadM = 400;
-        const home = this.baseFrame;
-        const skiJumpHeading = home.heading;
-        const fwd = headingForward(skiJumpHeading);
-        // That far past where an aircraft lines up on the home runway.
-        const fromCentre = home.halfLength - RUNWAY_SPAWN_INSET_M - skiJumpAheadM;
-        const skiJumpOrigin = new THREE.Vector3(
-            home.centerX - fwd.x * fromCentre, 0, home.centerZ - fwd.z * fromCentre);
-        skiJumpOrigin.y = yAt(skiJumpOrigin.x, skiJumpOrigin.z, 30, 40);
-        this.skiJumps.push(createSkiJumpCollider(
-            skiJumpOrigin.x,
-            skiJumpOrigin.y,
-            skiJumpOrigin.z,
-            skiJumpHeading,
-        ));
-        const skiJump = new StaticSceneryEntity(models.getModel('lib:skiJump'));
-        skiJump.position.copy(skiJumpOrigin);
-        skiJump.quaternion.setFromAxisAngle(UP, skiJumpHeading);
-        scene.add(skiJump);
+        // A home airfield with a ski-jump of its own (Saki's T2) gets that one
+        // only, not the generic ramp down its runway as well.
+        if (!this.homeHasOwnSkiJump) {
+            const skiJumpAheadM = 400;
+            const home = this.baseFrame;
+            const skiJumpHeading = home.heading;
+            const fwd = headingForward(skiJumpHeading);
+            // That far past where an aircraft lines up on the home runway.
+            const fromCentre = home.halfLength - RUNWAY_SPAWN_INSET_M - skiJumpAheadM;
+            const skiJumpOrigin = new THREE.Vector3(
+                home.centerX - fwd.x * fromCentre, 0, home.centerZ - fwd.z * fromCentre);
+            skiJumpOrigin.y = yAt(skiJumpOrigin.x, skiJumpOrigin.z, 30, 40);
+            this.skiJumps.push(createSkiJumpCollider(
+                skiJumpOrigin.x,
+                skiJumpOrigin.y,
+                skiJumpOrigin.z,
+                skiJumpHeading,
+            ));
+            const skiJump = new StaticSceneryEntity(models.getModel('lib:skiJump'));
+            skiJump.position.copy(skiJumpOrigin);
+            skiJump.quaternion.setFromAxisAngle(UP, skiJumpHeading);
+            scene.add(skiJump);
+        }
 
         const hangar1 = new StaticSceneryEntity(models.getModel('assets/hangar01.gltf'));
         {
