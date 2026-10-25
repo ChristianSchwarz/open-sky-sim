@@ -40,6 +40,10 @@ const _hit = bvhHit();
 const _a = new THREE.Vector3();
 const _b = new THREE.Vector3();
 
+/**
+ * Against the drawn skin without its gear (WebAirframe.skin): the wheels roll
+ * over the webbing and it passes through them by design (withoutGear).
+ */
 export function penetration(s: WebSolver, af: WebAirframe, pos: THREE.Vector3, qInv: THREE.Quaternion): Penetration {
     const b = af.bounds;
     const inBox = (p: THREE.Vector3) => p.x >= b[0] && p.x <= b[3] && p.y >= b[1] && p.y <= b[4] && p.z >= b[2] && p.z <= b[5];
@@ -48,17 +52,17 @@ export function penetration(s: WebSolver, af: WebAirframe, pos: THREE.Vector3, q
         _a.set(s.x[3 * i], s.x[3 * i + 1], s.x[3 * i + 2]).sub(pos).applyQuaternion(qInv);
         if (!inBox(_a)) continue;
         // Within the skin of the surface it cannot be deeper than the skin.
-        if (bvhClosestPoint(af.bvh, _a.x, _a.y, _a.z, SKIN_M, _near)) continue;
+        if (bvhClosestPoint(af.skinBvh, _a.x, _a.y, _a.z, SKIN_M, _near)) continue;
         // Parity over-reports on open soups but does not miss: confirm by winding.
-        if (!bvhContainsPoint(af.bvh, _a.x, _a.y, _a.z)) continue;
-        if (windingNumber(af.triangles, _a.x, _a.y, _a.z) > 0.5) deep++;
+        if (!bvhContainsPoint(af.skinBvh, _a.x, _a.y, _a.z)) continue;
+        if (windingNumber(af.skin, _a.x, _a.y, _a.z) > 0.5) deep++;
     }
     let through = 0;
     const throughLinks: number[] = [];
     for (const l of s.layout.links) {
         _a.set(s.x[3 * l.i], s.x[3 * l.i + 1], s.x[3 * l.i + 2]).sub(pos).applyQuaternion(qInv);
         _b.set(s.x[3 * l.j], s.x[3 * l.j + 1], s.x[3 * l.j + 2]).sub(pos).applyQuaternion(qInv);
-        if (bvhSegmentHit(af.bvh, _a.x, _a.y, _a.z, _b.x, _b.y, _b.z, _hit)) { through++; throughLinks.push(s.layout.links.indexOf(l)); }
+        if (bvhSegmentHit(af.skinBvh, _a.x, _a.y, _a.z, _b.x, _b.y, _b.z, _hit)) { through++; throughLinks.push(s.layout.links.indexOf(l)); }
     }
     return { deep, through, throughLinks };
 }

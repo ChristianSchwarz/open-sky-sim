@@ -105,6 +105,8 @@ export const PAYOUT_MAX_M = 90;
 const END_STOP_COMPLIANCE = 2e-5;
 /** The end-of-stroke buffer's time constant (s): see bufferEndStops. */
 const END_STOP_BUFFER_S = 0.02;
+/** A particle this close to its floor (m) lies on the deck: the deck skin and the airframe's, 2 x SKIN_M (see onDeck). */
+const DECK_SUPPORT_M = 0.08;
 /** A step's deadline is judged at its substeps' mean pace times this (see step). */
 const DEADLINE_PACE_MARGIN = 1.15;
 /** Substeps per step (a 60 Hz frame gives 0.52 ms substeps). */
@@ -166,9 +168,15 @@ const EDGE_ROW_GIVE = 0.05;
 /** A contact whose direction to the particle is more than this far off its face's normal (cos 20°) is on the face's rim. */
 const RIM_COS = Math.cos((20 * Math.PI) / 180);
 const EDGE_LIST = 64;
-/** Coulomb friction: nylon on deck, nylon on paint. */
+/** Coulomb friction: nylon on deck. */
 const DECK_FRICTION = 0.6;
-const SKIN_FRICTION = 0.4;
+/**
+ * Nylon on paint, sliding: the webbing slides over the airframe all through a
+ * catch, so the kinetic value (0.25-0.3), not the static 0.4. At 0.4 the
+ * centre straps held on the intake lips and the wing roots and the lower
+ * belt's whole pull went through them (to 39 % strain at 60 m/s).
+ */
+const SKIN_FRICTION = 0.3;
 /** Damping ratio of the webbing's own axial vibration (nylon hysteresis, loss factor about 0.2). */
 const WEBBING_ZETA = 0.1;
 /**
@@ -1821,21 +1829,51 @@ export class WebSolver {
         }
     }
 
-    private keepAboveDeck(): void {
-        const floor = BARRICADE_DECK_Y + SKIN_M;
+    /**
+     * Whether particle (at x index k) lies on the deck: within DECK_SUPPORT_M
+     * of its floor. An airframe pressing down on webbing that lies on the deck
+     * is held up by the deck through a few millimetres of nylon, not by the
+     * net: that upward part of the contact is not the webbing's to pass on. The
+     * two contact skins (deck and airframe, 4 cm each) made the net under a
+     * wheel an 8 cm block that lifted a stopped F-22 off its main gear, its
+     * brakes with it, and the belts rolled it back 40 m braked.
+     */
+
+    private onDeck(k: number): boolean {
         const x = this.x;
+        const floor = this.deck ? this.deck.heightAt(x[k], x[k + 2]) : BARRICADE_DECK_Y;
+        return x[k + 1] <= floor + DECK_SUPPORT_M;
+    }
+
+    private keepAboveDeck(): void {
+        const x = this.x, deck = this.deck;
         for (let i = 0; i < this.count; i++) {
-            if (this.w[i] !== 0 && x[3 * i + 1] < floor) x[3 * i + 1] = floor;
+            if (this.w[i] === 0) continue;
+            const k = 3 * i;
+            const floor = (deck ? deck.heightAt(x[k], x[k + 2]) : BARRICADE_DECK_Y) + SKIN_M;
+            if (x[k + 1] < floor) x[k + 1] = floor;
         }
     }
 
     private contactDeck(): void {
-        const floor = BARRICADE_DECK_Y + SKIN_M;
+        const x = this.x, deck = this.deck;
         for (let i = 0; i < this.count; i++) {
-            if (this.w[i] === 0 || this.x[3 * i + 1] > floor + SPECULATIVE_M) continue;
+            if (this.w[i] === 0) continue;
+            const k = 3 * i;
+            const floor = (deck ? deck.heightAt(x[k], x[k + 2]) : BARRICADE_DECK_Y) + SKIN_M;
+            if (x[k + 1] > floor + SPECULATIVE_M) continue;
             this.addContact(i, 0, 1, 0, floor, 0, 0, 0, DECK_FRICTION, false);
         }
     }
+
+    /**
+     * The carrier's deck under the webbing (WebDeck: the mesh's height), for
+     * its floor; without one, the flat plane at BARRICADE_DECK_Y.
+     */
+    setDeck(deck: { heightAt(x: number, z: number): number } | undefined): void {
+        this.deck = deck;
+    }
+    private deck: { heightAt(x: number, z: number): number } | undefined;
 
     private readonly hit = bvhHit();
     private readonly near = bvhClosest();
@@ -2499,8 +2537,10 @@ export class WebSolver {
             const m = this.mass[this.ctI[c]] / h;
             const ln = this.ctLn[c];
             const jx = m * (this.ctN[3 * c] * ln + this.ctFt[3 * c]);
-            const jy = m * (this.ctN[3 * c + 1] * ln + this.ctFt[3 * c + 1]);
+            let jy = m * (this.ctN[3 * c + 1] * ln + this.ctFt[3 * c + 1]);
             const jz = m * (this.ctN[3 * c + 2] * ln + this.ctFt[3 * c + 2]);
+            // Webbing lying on the deck under the airframe: the deck carries it, not the net (see DECK_SUPPORT_M).
+            if (jy < 0 && this.onDeck(k3)) jy = 0;
             ix += jx; iy += jy; iz += jz;
             this.stats.bodyWork += jx * this.ctVel[3 * c] + jy * this.ctVel[3 * c + 1] + jz * this.ctVel[3 * c + 2];
             this.addMoment(mom, x[k3], x[k3 + 1], x[k3 + 2], jx, jy, jz);
@@ -2513,8 +2553,9 @@ export class WebSolver {
             bp[this.ecB[c]] = 1;
             const f = 3 * c;
             const jx = (this.ecN[f] * l + this.ecFt[f]) / h;
-            const jy = (this.ecN[f + 1] * l + this.ecFt[f + 1]) / h;
+            let jy = (this.ecN[f + 1] * l + this.ecFt[f + 1]) / h;
             const jz = (this.ecN[f + 2] * l + this.ecFt[f + 2]) / h;
+            if (jy < 0 && this.onDeck(3 * this.ecA[c]) && this.onDeck(3 * this.ecB[c])) jy = 0;
             ix += jx; iy += jy; iz += jz;
             this.stats.bodyWork += jx * this.ecVel[f] + jy * this.ecVel[f + 1] + jz * this.ecVel[f + 2];
             {

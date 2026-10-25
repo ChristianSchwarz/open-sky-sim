@@ -54,7 +54,8 @@ import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { BarricadeEntity, BarricadeRigPhase } from '../scene/entities/barricadeEntity';
 import type { AirframeCollider } from '../physics/barricade/webBarricade';
-import { BarricadeEngagement, BARRICADE_LOCAL_Z } from '../scene/entities/barricadeSpec';
+import { BarricadeEngagement, BARRICADE_DECK_Y, BARRICADE_LOCAL_Z } from '../scene/entities/barricadeSpec';
+import { WebDeck } from '../physics/barricade/webDeck';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
 import { ShipWakeEntity } from '../scene/entities/shipWake';
 import {
@@ -2574,7 +2575,7 @@ export class Game {
         if (!drawn) return;
         this.barricadeAirframeKey = key;
         const triangles = Float32Array.from(drawn.triangles);
-        this.barricadeAirframeBaker().postMessage({ key, kind: 'drawn', triangles }, [triangles.buffer]);
+        this.barricadeAirframeBaker().postMessage({ key, kind: 'drawn', gear, triangles }, [triangles.buffer]);
         console.info(`[barricade] baking the webbing's airframe: ${triangles.length / 9} drawn triangles`);
     }
 
@@ -2622,6 +2623,29 @@ export class Game {
         return this.barricadeAirframeWorker = worker;
     }
     private barricadeAirframeWorker: Worker | undefined;
+
+    /**
+     * The carrier's deck under the barricade, from its mesh (as the gear meets
+     * it), for the drawn webbing and stanchions to stand on; sampled ahead a
+     * little each frame (WebDeck).
+     */
+    private barricadeDeckMap(): WebDeck | undefined {
+        const kuz = this.kuz;
+        if (!kuz || this.carrierMeshes.length === 0) return undefined;
+        // A new carrier (another area) has a deck of its own.
+        if (this.barricadeDeckFor !== kuz) {
+            this.barricadeDeck = undefined;
+            this.barricadeDeckFor = kuz;
+        }
+        const deck = this.barricadeDeck ??= new WebDeck(
+            (x, z) => sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes),
+            () => ({ origin: kuz.position, quaternion: kuz.quaternion }));
+        const t0 = performance.now();
+        while (performance.now() - t0 < 0.5 && !deck.fill(4)) { /* more */ }
+        return deck;
+    }
+    private barricadeDeck: WebDeck | undefined;
+    private barricadeDeckFor: unknown;
 
     /**
      * Pump one frame into the combat sim worker after entities have latched their
@@ -5330,6 +5354,7 @@ export class Game {
                 // With the player where it is drawn, for the webbing to go with it (BarricadeEntity.webToDrawn).
                 return w && { ...w, drawn: { position: this.player.getDisplayPosition(), quaternion: this.player.getDisplayQuaternion() } };
             },
+            () => this.barricadeDeckMap(),
         );
         this.barricade = barricade;
         // Debug: the sim's barricade webbing (particle count, solver ms of the last step).
@@ -5348,6 +5373,32 @@ export class Game {
                 peakMs: this.combatSim.takeBarricadeWebPeakMs(),
                 body: w.body,
                 chains: full && layout ? [layout.upperBelt, layout.lowerBelt, ...layout.straps] : undefined,
+            };
+        };
+        // Debug: the webbing against the carrier's real deck (its mesh, as the gear meets it), not the
+        // flat plane the solver floors it on: the lowest gap, sim and drawn, and the jet's height.
+        (globalThis as Record<string, unknown>).__barricadeDeckGap = () => {
+            const w = this.combatSim.getBarricadeWeb();
+            if (!w) return undefined;
+            const pose = this.carrierPose();
+            const cq = pose.quaternion ?? new THREE.Quaternion();
+            const p = new THREE.Vector3();
+            const gaps = (pos: ArrayLike<number>) => {
+                let worst = Infinity, at = -1, deck = NaN, local: number[] = [];
+                for (let i = 0; i < pos.length; i += 3) {
+                    p.set(pos[i], pos[i + 1], pos[i + 2]).applyQuaternion(cq).add(pose.position as THREE.Vector3);
+                    const y = sampleCarrierMeshSurfaceYMax(p.x, p.z, this.carrierMeshes);
+                    if (!(y > 0)) continue;
+                    if (p.y - y < worst) { worst = p.y - y; at = i / 3; deck = y; local = [pos[i], pos[i + 1], pos[i + 2]]; }
+                }
+                return { gap: +worst.toFixed(3), particle: at, deckWorldY: +deck.toFixed(2), local: local.map(v => +v.toFixed(2)) };
+            };
+            const jet = this.player.getDisplayPosition();
+            const under = sampleCarrierMeshSurfaceYMax(jet.x, jet.z, this.carrierMeshes);
+            const flat = new THREE.Vector3(0, BARRICADE_DECK_Y, 0).applyQuaternion(cq).add(pose.position as THREE.Vector3).y;
+            return {
+                sim: gaps(w.positions), drawn: barricade.lastWebDrawn ? gaps(barricade.lastWebDrawn) : undefined,
+                jetAboveDeck: +(jet.y - under).toFixed(2), flatDeckWorldY: +flat.toFixed(2),
             };
         };
         scene.add(barricade);

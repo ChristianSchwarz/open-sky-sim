@@ -11,7 +11,7 @@
  *
  * Everything is in the body frame and built once per airframe.
  */
-import { buildTriangleBvh, bvhSegmentHit, TriangleBvh } from '../collision/triangleBvh';
+import { buildTriangleBvh, TriangleBvh } from '../collision/triangleBvh';
 
 /** Edges whose faces meet at more than this (convex) are edges a strap can catch on (rad). */
 const FEATURE_ANGLE = (15 * Math.PI) / 180;
@@ -295,29 +295,30 @@ export function closestOnTriangle(tri: Float32Array, t: number, px: number, py: 
     return (px - cx) ** 2 + (py - cy) ** 2 + (pz - cz) ** 2;
 }
 
-/** Gaps above a part standing on the deck up to this tall (m) are closed by a strut. */
-const MAX_GEAR_GAP_M = 1;
-/** A gear part whose bottom is this close above the deck (m) but not on it is let down to it. */
-const MAX_WHEEL_LIFT_M = 0.3;
-/** Only a part at least this tall (a wheel, a leg) is let down; fragments of a leg are not (m). */
-const MIN_WHEEL_M = 0.25;
-/** Hanging wheels closer than this side by side (m) share an axle. */
-const TWIN_GAP_M = 0.4;
-/** Narrowest strut a closed gap gets (m). */
-const MIN_STRUT_M = 0.08;
+/** A part whose bottom is this close above the airframe's lowest point (m) stands on the deck: a wheel, or a leg with its wheel. */
+const WHEEL_ON_DECK_M = 0.3;
+/** A gear part is smaller than this (m, its box's largest side): never the airframe itself. */
+const GEAR_PART_MAX_M = 2.5;
+/** Nor does it reach higher than this above the lowest point (m): the gear ends at its wells. */
+const GEAR_TOP_MAX_M = 1.5;
+/** Parts whose boxes come this close (m) are one assembly: a leg on its wheel, a door on its leg. */
+const GEAR_TOUCH_M = 0.05;
 
 /**
- * Close the gap between a landing-gear part and the airframe above it.
- * Low-detail drawn models float a wheel or leg under the fuselage (the
- * F-22's nose gear stops 34 cm short of it); the lower belt slid through
- * that gap instead of bearing on the strut, and the whole lower-belt load
- * went into two straps. A part that stands on the deck (within 10 cm of
- * the lowest point) and has airframe within a metre straight above its top
- * gets a box from its top up to that surface; one hanging up to 30 cm
- * clear of the deck gets a box down to it. Returns a new soup (the input
- * when nothing needed closing).
+ * The airframe without its landing gear, for the webbing: the wheels roll
+ * over the lower load strap, which lies across the deck, and the vertical
+ * straps take the wings. Met as rigid parts the wheels bulldozed the strap
+ * (they cannot climb even 4 cm of it) up their legs, and 90-97 % of the stop
+ * went into the gear 1-2 m under the CG: the jet stood on its nose wheel,
+ * the mains lifted, and an off-centre catch yawed it round and rolled it
+ * onto its side, out of the net. A cut by height through the legs left solid
+ * stubs under the fuselage that the straps hooked on, so the gear goes as
+ * parts: the drawn models' separate pieces that stand on the deck (wheels,
+ * legs), and the small pieces touching those (the F-16's legs above its
+ * wheels, doors), never the airframe's own skin. Returns a new soup (the
+ * input when there is no gear).
  */
-export function closeGearGaps(tri: Float32Array): Float32Array {
+export function withoutGear(tri: Float32Array): Float32Array {
     const { pos, ids } = weldSoup(tri);
     const nv = pos.length / 3;
     const faces = ids.length / 3;
@@ -344,55 +345,28 @@ export function closeGearGaps(tri: Float32Array): Float32Array {
             b[k + 3] = Math.max(b[k + 3], pos[3 * v + k]);
         }
     }
-    const bvh = buildTriangleBvh(tri);
-    const hit = { t: 1, tri: -1, x: 0, y: 0, z: 0, nx: 0, ny: 1, nz: 0 };
-    const extra: number[] = [];
-    // A wheel hanging just clear of the deck (the airframe rests on its other gear): the
-    // lower belt slid under it. Wheels stand on the deck, so that gap is closed too, for
-    // wheels side by side on one axle (a twin nose gear) as one: between the two the belt
-    // wedged in the slot instead of resting on the axle.
-    const hanging = [...box.values()].filter(b => b[1] > minY + 0.02 && b[1] < minY + MAX_WHEEL_LIFT_M
-        && b[4] - b[1] >= MIN_WHEEL_M && b[4] - b[1] < 1.5).map(b => b.slice());
-    for (let i = 0; i < hanging.length; i++) {
-        for (let j = i + 1; j < hanging.length; j++) {
-            const a = hanging[i], c = hanging[j];
-            if (a[2] > c[5] || c[2] > a[5] || Math.max(a[0], c[0]) - Math.min(a[3], c[3]) > TWIN_GAP_M) continue;
-            for (let k = 0; k < 3; k++) { a[k] = Math.min(a[k], c[k]); a[k + 3] = Math.max(a[k + 3], c[k + 3]); }
-            hanging.splice(j, 1);
-            j = i;
+    const small = (b: number[]) => Math.max(b[3] - b[0], b[4] - b[1], b[5] - b[2]) < GEAR_PART_MAX_M && b[4] < minY + GEAR_TOP_MAX_M;
+    const gear = new Set<number>();
+    for (const [r, b] of box) if (small(b) && b[1] < minY + WHEEL_ON_DECK_M) gear.add(r);
+    const touch = (a: number[], b: number[]) => a[0] - GEAR_TOUCH_M <= b[3] && b[0] - GEAR_TOUCH_M <= a[3]
+        && a[1] - GEAR_TOUCH_M <= b[4] && b[1] - GEAR_TOUCH_M <= a[4] && a[2] - GEAR_TOUCH_M <= b[5] && b[2] - GEAR_TOUCH_M <= a[5];
+    for (let grew = gear.size > 0; grew;) {
+        grew = false;
+        for (const [r, b] of box) {
+            if (gear.has(r) || !small(b)) continue;
+            for (const g of gear) {
+                if (!touch(b, box.get(g)!)) continue;
+                gear.add(r);
+                grew = true;
+                break;
+            }
         }
     }
-    for (const b of hanging) {
-        const cx = (b[0] + b[3]) / 2, cz = (b[2] + b[5]) / 2;
-        const hx = Math.max(MIN_STRUT_M, b[3] - b[0]) / 2, hz = Math.max(MIN_STRUT_M, Math.min(0.3, b[5] - b[2])) / 2;
-        pushBox(extra, cx - hx, minY, cz - hz, cx + hx, b[1] + 0.02, cz + hz);
+    if (gear.size === 0) return tri;
+    const out: number[] = [];
+    for (let f = 0; f < faces; f++) {
+        if (gear.has(find(ids[3 * f]))) continue;
+        for (let k = 0; k < 9; k++) out.push(tri[9 * f + k]);
     }
-    for (const b of box.values()) {
-        const cx = (b[0] + b[3]) / 2, cz = (b[2] + b[5]) / 2;
-        if (b[1] > minY + MAX_WHEEL_LIFT_M) continue;
-        const top = b[4];
-        if (!bvhSegmentHitAbove(bvh, cx, top + 1e-3, cz, MAX_GEAR_GAP_M, hit)) continue;
-        const gap = hit.y - top;
-        if (gap < 0.02) continue;
-        const hx = Math.max(MIN_STRUT_M, b[3] - b[0]) / 2, hz = Math.max(MIN_STRUT_M, Math.min(0.3, b[5] - b[2])) / 2;
-        pushBox(extra, cx - hx, top - 0.02, cz - hz, cx + hx, hit.y + 0.02, cz + hz);
-    }
-    if (extra.length === 0) return tri;
-    const out = new Float32Array(tri.length + extra.length);
-    out.set(tri);
-    out.set(extra, tri.length);
-    return out;
-}
-
-function bvhSegmentHitAbove(bvh: TriangleBvh, x: number, y: number, z: number, reach: number, out: { t: number; tri: number; x: number; y: number; z: number; nx: number; ny: number; nz: number }): boolean {
-    return bvhSegmentHit(bvh, x, y, z, x, y + reach, z, out);
-}
-
-/** Twelve outward-wound triangles of an axis-aligned box. */
-function pushBox(out: number[], x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void {
-    const c = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
-    const quads = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [3, 7, 6, 2], [0, 4, 7, 3], [1, 2, 6, 5]];
-    for (const [a, b, d, e] of quads) {
-        for (const v of [a, b, d, a, d, e]) out.push(c[v][0], c[v][1], c[v][2]);
-    }
+    return Float32Array.from(out);
 }

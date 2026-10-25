@@ -66,6 +66,7 @@ import {
 import { fm2UsesAfterburner, SimPlayerInput, SimPlayerInputSink } from './simPlayerInput';
 import { FrameShift } from '../../terrain/geodesy';
 import { AirframeCollider, BarricadeWeb, buildAirframeCollider, substepsFor } from '../barricade/webBarricade';
+import { WebDeck } from '../barricade/webDeck';
 import type { BarricadeWebSnapshot } from './simTypes';
 
 /** Seconds a tracer lives before self-destructing (mirrors WeaponsField). */
@@ -640,6 +641,8 @@ class ExternalCombatant implements Combatant {
  */
 /** An aircraft this close to a rigged barricade's centre (m) is stepped with its webbing. */
 const BARRICADE_WEB_REACH_M = 60;
+/** Of an idle frame, the time given to sampling the deck under the webbing ahead (ms). */
+const BARRICADE_DECK_FILL_MS = 1;
 /** Faster than this over the deck (m/s), an aircraft in reach is coming at the webbing, not parked by it. */
 const BARRICADE_WEB_MOVING_MPS = 1;
 /** Moving more than this in a step (m) is a teleport, not a motion through the net. */
@@ -647,6 +650,11 @@ const BARRICADE_WEB_JUMP_M = 10;
 /** Slower than this along the deck (m/s) for this long (s), a web-held aircraft is stopped: HELD. */
 const BARRICADE_WEB_STILL_MPS = 0.3;
 const BARRICADE_WEB_STILL_S = 1;
+/**
+ * A net-held airframe's own skin (its drawn airframe, gear left out) meets the deck this close (m):
+ * no oleo travel to allow for, unlike a collision mesh with its wheels in it (GEAR_TERRAIN_MARGIN_M).
+ */
+const BARRICADE_HULL_DECK_MARGIN_M = 0.02;
 
 export class CombatSim implements ProjectileSink {
 
@@ -662,6 +670,8 @@ export class CombatSim implements ProjectileSink {
     private readonly barricadeExpended: number[] = [];
     /** Per carrier, the rigid-body webbing while it is rigged, and the ship pose it is in. */
     private barricadeWebs: (BarricadeWeb | undefined)[] = [];
+    private barricadeDecks: (WebDeck | undefined)[] = [];
+    private barricadeDeckWorld: unknown;
     /** Which aircraft each web last stepped with, for its snapshot. */
     private barricadeWebHeld: (string | undefined)[] = [];
     private barricadeFrames: { origin: THREE.Vector3; quaternion: THREE.Quaternion; inverse: THREE.Quaternion }[] = [];
@@ -840,10 +850,18 @@ export class CombatSim implements ProjectileSink {
             const quaternion = new THREE.Quaternion().fromArray(b.quaternion);
             return { origin: new THREE.Vector3(b.originX, b.originY, b.originZ), quaternion, inverse: quaternion.clone().invert() };
         });
+        // The carrier's deck under each barricade (its mesh, as the gear meets it), kept while the world is.
+        if (this.barricadeDeckWorld !== this.world) {
+            this.barricadeDecks = [];
+            this.barricadeDeckWorld = this.world;
+        }
+        const world = this.world;
+        this.barricadeDecks = barricades.map((_b, i) => this.barricadeDecks[i]
+            ?? (world ? new WebDeck((x, z) => world.carrierHeightAt(x, z), () => this.barricadeFrames[i]) : undefined));
         this.barricadeWebs = barricades.map((b, i) => {
             const web = this.barricadeWebs[i];
             if (!(b.webbing ?? b.armed)) return undefined;
-            return web && web.generation === b.generation ? web : new BarricadeWeb(b.generation);
+            return web && web.generation === b.generation ? web : new BarricadeWeb(b.generation, undefined, this.barricadeDecks[i]);
         });
         for (const a of this.aircraft.values()) {
             if (a.barricadeState === BarricadeEngagement.NONE) continue;
@@ -870,6 +888,26 @@ export class CombatSim implements ProjectileSink {
         into.set(id, 'collider' in airframe ? airframe : buildAirframeCollider(airframe));
     }
 
+    /**
+     * The airframe the webbing holds aircraft `a` with (its gear left out, withoutGear: the gear
+     * has its own springs), as a collision mesh for the deck: only while a web has it.
+     */
+    private barricadeDeckHull(a: SimAircraft): AircraftCollisionMesh | undefined {
+        if (a.barricadeState === BarricadeEngagement.NONE) return undefined;
+        const af = this.barricadeCollider(a.id);
+        if (!af) return undefined;
+        let hull = this.barricadeDeckHulls.get(af);
+        if (!hull) {
+            const b = af.box;
+            hull = { triangles: Array.from(af.collider.bvh.tri), aabb: { min: [b[0], b[1], b[2]], max: [b[3], b[4], b[5]] } };
+            this.barricadeDeckHulls.set(af, hull);
+        }
+        return hull;
+    }
+    private readonly barricadeDeckHulls = new WeakMap<AirframeCollider, AircraftCollisionMesh>();
+    /** The contact findSolidWorldContact found is on a net-held airframe's skin (barricadeDeckHull). */
+    private contactOnNetHull = false;
+
     /** What the webbing meets aircraft `id` with: its drawn airframe, else its type's hull. */
     private barricadeCollider(id: string): AirframeCollider | undefined {
         return this.barricadeAirframes.get(id) ?? this.barricadeHulls.get(id);
@@ -888,7 +926,7 @@ export class CombatSim implements ProjectileSink {
                 body: Number.isNaN(web.bodyPose[0]) ? undefined : Array.from(web.bodyPose),
                 bodyBox: Number.isNaN(web.bodyPose[0]) ? undefined : this.barricadeCollider(this.barricadeWebHeld[i] ?? '')?.box,
                 warm: web.ready && [...this.barricadeAirframes.values(), ...this.barricadeHulls.values()].every(af => web.isWarm(af)),
-                pendantsHeld: web.layout.pendants.map(k => !web.solver.tieBroken[k]),
+                pendantsHeld: [...web.layout.pendants, ...web.layout.lowerPendants].map(k => !web.solver.tieBroken[k]),
                 scriptedCatch: [...this.aircraft.values()].some(a => a.barricadeState !== BarricadeEngagement.NONE
                     && a.barricadeFieldIndex === i && !a.barricadeWebCoupled),
             };
@@ -1597,6 +1635,11 @@ export class CombatSim implements ProjectileSink {
                     break;
                 }
             }
+            if (!held || web.asleep) {
+                // Idle: sample the deck ahead (WebDeck), a millisecond's worth.
+                const t0 = performance.now();
+                while (web.deck && performance.now() - t0 < BARRICADE_DECK_FILL_MS && !web.deck.fill(8)) { /* more */ }
+            }
             if (!held) {
                 web.step(delta, null);
                 continue;
@@ -1779,11 +1822,16 @@ export class CombatSim implements ProjectileSink {
         const quat = a.model.quaternion;
         const gearDown = a.isGearDeployed();
         const groundAt = (x: number, z: number) => this.world!.groundHeightAt(x, z);
+        // In the net, an aircraft with no collision mesh still has its drawn airframe: a wing the
+        // webbing rolls down meets the deck with it, as a real one does, not just the CG's belly point.
+        const netHull = a.collision ? undefined : this.barricadeDeckHull(a);
+        this.contactOnNetHull = netHull !== undefined;
+        const mesh = a.collision ?? netHull;
 
-        if (a.collision) {
-            const terrainMargin = gearDown ? GEAR_TERRAIN_MARGIN_M : BELLY_TERRAIN_MARGIN_M;
+        if (mesh) {
+            const terrainMargin = netHull ? BARRICADE_HULL_DECK_MARGIN_M : gearDown ? GEAR_TERRAIN_MARGIN_M : BELLY_TERRAIN_MARGIN_M;
             const contact = findCollisionMeshTerrainContact(
-                pos, quat, a.collision, groundAt, terrainMargin,
+                pos, quat, mesh, groundAt, terrainMargin,
                 this.contactPoint, this.contactNormal,
             );
             if (contact && this.isUnresolvedTerrain(contact.point.x, contact.point.z)) {
@@ -1792,7 +1840,7 @@ export class CombatSim implements ProjectileSink {
             // Every point of the hull on or near the ground, for a rigid-body response.
             this.contactSampleCount = contact && !gearDown
                 ? collectCollisionMeshTerrainContacts(
-                    pos, quat, a.collision, groundAt, terrainMargin, CONTACT_ACTIVE_SLOP_M, this.contactSamples)
+                    pos, quat, mesh, groundAt, terrainMargin, CONTACT_ACTIVE_SLOP_M, this.contactSamples)
                 : 0;
             return contact;
         }
