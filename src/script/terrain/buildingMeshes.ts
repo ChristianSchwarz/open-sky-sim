@@ -47,6 +47,20 @@ export const BUILDING_BUILD_MS = 3;
  */
 export const BUILDING_GROW_SECONDS = 8;
 const BUILDING_GROW_MIN_PER_S = 25;
+/** Main-thread time a frame may spend extruding buildings on the map; see setBuildingsAtOnce. */
+const MAP_BUILDING_BUILD_MS = 12;
+
+let atOnce = false;
+
+/**
+ * The map mode: buildings come in whole, not grown in over
+ * BUILDING_GROW_SECONDS, and extrude at MAP_BUILDING_BUILD_MS a frame. Both
+ * paces are there to keep a flight smooth; on the map nobody is flying and a
+ * town trickling in reads as the map being slow.
+ */
+export function setBuildingsAtOnce(on: boolean): void {
+    atOnce = on;
+}
 /**
  * Patches a side a tile's buildings are split into. Two: the tile under the
  * camera loses the half behind it, for three more draws a tile at most.
@@ -346,6 +360,9 @@ export class BuildingMeshes {
             return;
         }
         const start = performance.now();
+        if (atOnce) {
+            budgetMs = Math.max(budgetMs, MAP_BUILDING_BUILD_MS);
+        }
         while (this.pending.length > 0 && performance.now() - start < budgetMs) {
             const job = this.pending[0];
             if (job.meshes.disposed || job.meshes.buildings !== 'pending') {
@@ -559,7 +576,7 @@ export class BuildingMeshes {
             // Out of view it still grows, so turning to it shows no fade-in.
             const want = countAtLeast(patch.prominence, px * nearM * pixelAngle);
             // Shrinking is at once, so the budget holds; growing is one by one.
-            if (want <= patch.count) {
+            if (want <= patch.count || atOnce) {
                 patch.count = want;
                 this.owed.delete(patch);
             } else {

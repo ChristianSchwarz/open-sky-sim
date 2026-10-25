@@ -67,6 +67,7 @@ import { OceanPatch, buildOceanPatch, disposeOceanPatch } from './oceanPatch';
 import { PtmTile, decodePtm } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
 import { seamFillVisibleAt, stitchSeams } from './seamStitch';
+import { canCarryFill, fillVersionOf, showFill, writeFill } from './seamFillTail';
 import { TileIndex } from './tileIndex';
 import {
     TileMeshes, TileRailBed, buildTileMeshes, disposeTileMeshes, smoothGeometryFromWeld,
@@ -1674,9 +1675,7 @@ export class TerrainEntity implements Entity {
                 // twice a refresh for a small, half-resolution display.
                 this.roads.showTrackDetail(meshes, true);
                 this.buildings.showAll(meshes);
-                if (meshes.seamFill) {
-                    meshes.seamFill.visible = true;
-                }
+                this.syncSeamFill(meshes, true);
                 for (const trees of meshes.trees ?? []) {
                     trees.count = treeInstancesToDraw(trees, meshes.group, undefined, 0);
                     trees.visible = true;
@@ -1690,9 +1689,7 @@ export class TerrainEntity implements Entity {
             this.roads.showTrackDetail(meshes, nearM <= reach);
             this.roads.showLevel(meshes, roadLevelFor(nearM * pixelAngle));
             this.bridges.showLevel(meshes, camera.position, pixelAngle);
-            if (meshes.seamFill) {
-                meshes.seamFill.visible = seamFillVisibleAt(meshes, nearM * pixelAngle);
-            }
+            const fillVisible = seamFillVisibleAt(meshes, nearM * pixelAngle);
             for (const trees of meshes.trees ?? []) {
                 trees.count = treeInstancesToDraw(trees, meshes.group, camera.position, pixelAngle);
                 // A patch thinned to nothing is still a draw call.
@@ -1708,6 +1705,8 @@ export class TerrainEntity implements Entity {
             const near = smooth ? meshes.landGeometrySmooth ?? meshes.landGeometryFaceted : meshes.landGeometryFaceted;
             this.farLand.show(node.id, meshes, FAR_LAND_MAX_PIXELS * nearM * pixelAngle,
                 PRIORITY_IN_FRUSTUM - nearM, near, smooth && near === meshes.landGeometrySmooth);
+            // After the far land: the fill rides on whichever geometry it chose.
+            this.syncSeamFill(meshes, fillVisible);
         }
         if (camera) {
             this.reorderTrees(camera.position, pixelAngle);
@@ -1718,6 +1717,58 @@ export class TerrainEntity implements Entity {
     }
 
     private readonly treeSphere = new THREE.Sphere();
+    /**
+     * Show a tile's T-junction fill, or not: at the end of its land draw
+     * when the land drawn this frame is SMOOTH (seamFillTail.ts), else as
+     * the fill's own mesh. The copy in a geometry is brought up to date only
+     * when it is shown. `__debugSeamFillMeshes = true` from the console draws
+     * every fill as its own mesh again, for comparison.
+     */
+    private syncSeamFill(meshes: TileMeshes, visible: boolean): void {
+        const g = meshes.land?.geometry;
+        if (g && (globalThis as Record<string, unknown>).__debugSeamFillMeshes) {
+            showFill(g, false);
+            if (meshes.seamFill) {
+                meshes.seamFill.visible = visible;
+            }
+            return;
+        }
+        if (!g || !canCarryFill(g)) {
+            if (meshes.seamFill) {
+                meshes.seamFill.visible = visible;
+            }
+            return;
+        }
+        if (meshes.seamFill) {
+            meshes.seamFill.visible = false;
+        }
+        const fill = meshes.seamFillData;
+        if (!fill) {
+            showFill(g, false);
+            return;
+        }
+        let carrier = g;
+        if (visible && fillVersionOf(g) !== fill.version) {
+            carrier = writeFill(g, fill);
+            if (carrier !== g) {
+                this.replaceLandGeometry(meshes, g, carrier);
+            }
+        }
+        showFill(carrier, visible && fillVersionOf(carrier) === fill.version);
+    }
+
+    /** Every reference to a land geometry rebuilt bigger by writeFill, then the old one gone. */
+    private replaceLandGeometry(meshes: TileMeshes, from: THREE.BufferGeometry, to: THREE.BufferGeometry): void {
+        if (meshes.landGeometrySmooth === from) {
+            meshes.landGeometrySmooth = to;
+        }
+        this.farLand.replaceGeometry(meshes, from, to);
+        if (meshes.land && meshes.land.geometry === from) {
+            meshes.land.geometry = to;
+        }
+        from.dispose();
+    }
+
     /** Tree patches that asked to be ordered this frame (treeReorderWanted). */
     private readonly treeReorders: Array<{ mesh: THREE.InstancedMesh; group: THREE.Object3D }> = [];
 

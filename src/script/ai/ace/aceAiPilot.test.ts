@@ -9,6 +9,7 @@ import { PilotableAircraft } from '../aircraftControls';
 import { createAiPilot } from '../createAiPilot';
 import { Runway, WorldQuery } from '../worldQuery';
 import { AceAiPilot } from './aceAiPilot';
+import { AirframeSlowSpeeds } from '../airfield/airframePerformance';
 
 const FORWARD = new THREE.Vector3(0, 0, 1);
 
@@ -43,6 +44,7 @@ class FakeAircraft implements PilotableAircraft {
     getAngleOfAttack(): number { return 0; }
     getLoadFactorG(): number { return 1; }
     getStallStatus(): number { return -1; }
+    getSlowSpeeds(): AirframeSlowSpeeds { return { minFlyingSpeed: 68, maxTouchdownSpeed: 90 }; }
     isLanded(): boolean { return false; }
     isCrashed(): boolean { return this.crashed; }
     isGearDeployed(): boolean { return false; }

@@ -72,3 +72,21 @@ test('switching mode mid-hold neutralises the stick', () => {
     input.setKeyboardPitchStickMode(KeyboardPitchStickMode.HOLD);
     assert.equal(input.tick(0.016, sink).pitch, 0);
 });
+
+test('the autopilot key switches the autopilot off again; nothing else gets through while it flies', () => {
+    const input = new SimPlayerInput();
+    let toggles = 0;
+    let gear = 0;
+    const flying: SimPlayerInputSink = {
+        ...sink,
+        control: 'ai',
+        toggleAutopilot: () => { toggles++; },
+        toggleGear: () => { gear++; },
+    };
+    input.keyDown('g', false, flying);
+    input.keyDown('a', true, flying);
+    assert.equal(gear, 0, 'gear key acted while the autopilot flew');
+    assert.equal(toggles, 0, 'a held-key repeat toggled the autopilot');
+    input.keyDown('a', false, flying);
+    assert.equal(toggles, 1);
+});

@@ -39,6 +39,7 @@ import {
     PTM_SIDE_E, PTM_SIDE_N, PTM_SIDE_S, PTM_SIDE_W, PtmBorder, borderEntryIndex, borderEntrySide,
 } from './ptm';
 import { TileKey, tileKeyString, xCount, yCount } from './tiling';
+import type { SeamFillData } from './seamFillTail';
 
 /** What the stitcher needs of a drawn tile; a TileMeshes has all of it. */
 export interface StitchableTile {
@@ -57,6 +58,12 @@ export interface StitchableTile {
      * fill is still worth a draw (seamFillVisibleAt).
      */
     seamFillGap?: number;
+    /**
+     * The fill as arrays, while there is one: a SMOOTH land geometry carries
+     * it at the end of its own draw (seamFillTail.ts) rather than drawing
+     * `seamFill`, which then only serves faceted land.
+     */
+    seamFillData?: SeamFillData;
 }
 
 /**
@@ -395,7 +402,11 @@ export function disposeSeamFill(tile: StitchableTile): void {
         tile.seamFill = undefined;
         tile.seamFillGap = undefined;
     }
+    tile.seamFillData = undefined;
 }
+
+/** Bumped by every rebuilt fill: what a geometry's copy is checked against. */
+let fillVersion = 0;
 
 /** One fill vertex: where it is, and which border vertices it takes its look from. */
 export interface FillVertex {
@@ -571,4 +582,5 @@ function rebuildFill(id: TileKey, tile: StitchableTile, state: SeamState, master
     tile.group.add(mesh);
     tile.seamFill = mesh;
     tile.seamFillGap = gap;
+    tile.seamFillData = { position, normals, attrs, sizes, count: n, version: ++fillVersion };
 }

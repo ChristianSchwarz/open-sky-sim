@@ -27,7 +27,8 @@ const SUN_SKYLINE_RANGE_M = 100_000;
 const SUN_SKYLINE_EVERY_FRAMES = 4;
 import { paintSkyDome, SkyDome, skyDomeOf } from '../scene/models/lib/skyDomeModelBuilder';
 import { paintSunBloom } from '../scene/models/lib/sunModelBuilder';
-import { ATMOSPHERE_SHELL_UNIFORMS } from '../scene/models/lib/atmosphereShellModelBuilder';
+import { ATMOSPHERE_SHELL_UNIFORMS, SHELL_MAX_AREAS } from '../scene/models/lib/atmosphereShellModelBuilder';
+import { earthMap } from '../scene/earthMap';
 import { SPACE_FOG } from '../scene/materials/shaders/spaceFog';
 import { Model } from '../scene/models/models';
 import { terrainMaxZoomForAltitudeM } from '../terrain/lod';
@@ -49,13 +50,18 @@ import {
     AIRFIELD_SURFACE_EPS_M, GroundStrip, buildAirfieldModel, buildingHeightM, combineCover, repaintGroundStrip,
     sampleGroundStrip,
 } from '../scene/airfield/airfieldModel';
-import { WGS84_A, WGS84_B, cloneEnuBasis, ecefToEnu, geodeticToEcef, geodeticToWorld, sceneFromEnu, seaLevelSceneY, worldToGeodetic } from '../terrain/geodesy';
+import { WGS84_A, WGS84_B, cloneEnuBasis, ecefToEnu, enuFrameRotation, geodeticOnSurfaceAtEnu, geodeticToEcef, geodeticToWorld, makeEnuBasis, sceneFromEnu, seaLevelSceneY, worldToGeodetic } from '../terrain/geodesy';
 import { openSettingsDialog } from '../ui/settings/settingsLauncher';
+import { FogQuality } from '../config/profiles/profile';
+import { MAP_FOV_DEG, MAP_TRIANGLE_BUDGET, MapView, isMapViewPage, mapViewUrl } from './mapView';
+import { setMapDetailScale, setMapLod } from '../terrain/quadtree';
+import { setCoverUnderlay, setLeafCoverFromM } from '../terrain/coverTextures';
+import { setBuildingsAtOnce } from '../terrain/buildingMeshes';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { BarricadeEntity, BarricadeRigPhase } from '../scene/entities/barricadeEntity';
 import type { AirframeCollider } from '../physics/barricade/webBarricade';
-import { BarricadeEngagement, BARRICADE_DECK_Y, BARRICADE_LOCAL_Z } from '../scene/entities/barricadeSpec';
 import { WebDeck } from '../physics/barricade/webDeck';
+import { BarricadeEngagement, BARRICADE_DECK_Y } from '../scene/entities/barricadeSpec';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
 import { ShipWakeEntity } from '../scene/entities/shipWake';
 import {
@@ -121,6 +127,7 @@ import { Obstacle, Runway } from '../ai/worldQuery';
 import { AiFlightPhase, AiPilotOptions, AiSkillLevel, FORMATION_SLOT } from '../ai/aiPilot';
 import { AiAircraftEntity } from '../scene/entities/aiAircraft';
 import { WeaponsField } from '../scene/entities/weaponsField';
+import { advanceFxClock } from '../scene/fxClock';
 import { Faction } from '../weapons/combatant';
 import { CombatSimClient } from '../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../physics/model/simProxyFlightModel';
@@ -135,7 +142,7 @@ import { rebaseMeshCollider, rebaseRunway, rebaseSkiJump, rebaseSurfacePad } fro
 import { FlightRecorder, ReplayPlayer, newReplayPose } from './flightRecorder';
 import { SimAircraftSpawn, SimFlightModelKind, SimGunConfig, SimHitEvent } from '../physics/sim/simTypes';
 import { PLAYER_SIM_ID, WINGMAN_SIM_ID, aiSimId } from '../physics/sim/simIds';
-import { AiPilotModels } from './gameDefs';
+import { AiPilotModels, TerrainShading } from './gameDefs';
 import {
     DEFAULT_TERRAIN_URL, SPACE_SKY_ALTITUDE_M, TerrainEntity, cameraFarForAltitudeM,
     isTerrainWireframe, loadTerrainManifest, setTerrainWireframe,
@@ -165,7 +172,36 @@ const WING_ROOT_SMOULDER_S = 80;
 /** How many AI opponents the combat sim spawns. */
 /** Loose cloud deck: base altitude and per-puff undulation, well under HIGH_ALTITUDE_M. */
 /** Altitude at which the atmosphere shell starts to fade in over the sky dome. */
-const ATMOSPHERE_SHELL_FADE_IN_M = 30_000;
+const ATMOSPHERE_SHELL_FADE_IN_M = 15_000;
+/**
+ * The map's detail fit (Game.fitMapDetail): how often it looks, how far one
+ * step moves the cut, and the share of the budget under which it refines.
+ * A step changes the tile count by about its square (1.56x), so after a
+ * finer step from under half the budget the view is still inside it.
+ */
+const MAP_DETAIL_CHECK_MS = 1000;
+const MAP_DETAIL_STEP = 1.25;
+const MAP_DETAIL_FINER_BELOW = 0.5;
+const MAP_DETAIL_SCALE_MAX = 8;
+/** The map's time of day, hours; see Game.enterMapView. */
+const MAP_SUN_HOURS = 12;
+/** Altitude by which the shell's sky has wholly replaced the dome. */
+const SHELL_SKY_FULL_M = 30_000;
+/**
+ * Exposure boost for the shell's open sky while the camera is still in the
+ * stratosphere, falling to none by SHELL_SKY_GAIN_END_M. The shell's exposure
+ * is set for the planet seen from orbit, which leaves the sky above 25 km
+ * near black where it should still be a deep blue over a bright horizon band.
+ */
+const SHELL_SKY_GAIN = 16;
+const SHELL_SKY_GAIN_START_M = 25_000;
+const SHELL_SKY_GAIN_END_M = 80_000;
+/**
+ * The globe map takes over from the baked tiles between these heights (m):
+ * from that far out the coarse tiles are flat facets, and the map is better.
+ */
+const GLOBE_MAP_FADE_START_M = 35_000;
+const GLOBE_MAP_FADE_END_M = 60_000;
 /** How long the terrain backlog must stay empty before the boot blur lifts; see Game.holdUntilStreamed. */
 const STREAM_SETTLE_MS = 600;
 /** The boot blur lifts after this even if streaming never goes quiet (a failing tile, a slow link). */
@@ -212,6 +248,16 @@ const CLOSE_WING_SIDE_M = 4;
 const CLOSE_WING_ABOVE_M = 2;
 /** Airspeed (m/s) the wingman is spawned with when holding overhead. */
 const WINGMAN_HOLD_SPEED_MPS = 180;
+/** The scrambling wingman parks this far (m) behind the player on the runway ... */
+const WINGMAN_SCRAMBLE_TRAIL_M = 100;
+/** ... and up to this far (m) to its right, inside the runway edge. */
+const WINGMAN_SCRAMBLE_SIDE_MAX_M = 15;
+/** Opponents that take off do so from another airfield this far (m) from the player, at least ... */
+const OPPONENT_FIELD_MIN_M = 8000;
+/** ... and at most: further out the field may not be streamed in yet. */
+const OPPONENT_FIELD_MAX_M = 40000;
+/** An angle wrapped to [-pi, pi]. */
+const wrapAngle = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
 
 /** Player/AI hit-sphere radius (m) — shared airframe. */
 const PLAYER_HIT_RADIUS_M = 10;
@@ -384,7 +430,7 @@ const BARRICADE_AIRFRAME_BAKE_M = 3000;
  * of flying, which is the whole point — a hook-failure arrival, with none of
  * the 2.5 km pattern in front of it.
  */
-const CARRIER_GROOVE_DISTANCE_M = 50;
+const CARRIER_GROOVE_DISTANCE_M = 20;
 /**
  * On-speed, not the 400 km/h the other airborne spawns transit at: from here
  * there is no room to slow down, and the flight model wrecks any touchdown
@@ -394,14 +440,18 @@ const CARRIER_GROOVE_DISTANCE_M = 50;
 const CARRIER_GROOVE_SPEED_KMH = 250;
 const CARRIER_GROOVE_SPEED_MPS = CARRIER_GROOVE_SPEED_KMH / 3.6;
 /**
- * Aimed at the webbing rather than at the wires the ball is rigged for: with
- * the hook up the wires are scenery, and the flatter path clears the ramp by
- * ~5 m instead of the ~1 m that put the gear through the rounddown.
+ * Spawn height: level, the wheels 3.5 m over the deck (the CG rides ~2.05 m
+ * above it on the gear), which clears the ramp and then lets the jet settle.
+ *
+ * Hands off, the FCS lets the nose fall to near zero AoA, which at approach
+ * speed holds up only about half the weight: the jet sinks away from where it
+ * points at ~5 m/s², and the sink keeps growing until it meets the deck. So it
+ * must meet it early. A 3° path aimed at the webbing met the deck ~30 m short
+ * at 8.2 m/s, past the gear's 8 m/s limit; aimed higher it only met it later
+ * and harder (9–10 m/s, before or just after the net). From this height the
+ * wheels touch ~1 s in, ~70 m short of the net, at ~6 m/s, and roll into it.
  */
-const CARRIER_GROOVE_AIM_FROM_STERN_M = KUZ_HULL.maxZ - BARRICADE_LOCAL_Z;
-/** ~3° glideslope, the same one the ILS needles and the ball are drawn from. */
-const CARRIER_GROOVE_ALTITUDE_M = CARRIER_DECK_Y
-    + (CARRIER_GROOVE_DISTANCE_M + CARRIER_GROOVE_AIM_FROM_STERN_M) * ILS_GLIDESLOPE_TAN;
+const CARRIER_GROOVE_ALTITUDE_M = BARRICADE_DECK_Y + 2.05 + 3.5;
 
 /** On-deck takeoff: 120 m aft of the bow tip, facing the ski jump (-Z). */
 const CARRIER_TAKEOFF_FROM_BOW_M = 120;
@@ -711,6 +761,23 @@ export class Game {
     private fixedCameraUpdater: FixedCameraUpdater;
     /** The fixed camera asked for in the page URL, if any. */
     private cameraRoute: CameraRoute | undefined = cameraRouteFromLocation();
+    /** Opened by F12 as the map: the fixed camera, looking straight down (mapView.ts). */
+    private readonly mapMode = isMapViewPage();
+    private mapView: MapView | undefined;
+    /** The map's detail scale and when it was last checked; see fitMapDetail. */
+    private mapDetailScale = 1;
+    private mapDetailCheckMs = 0;
+    /** Finest scale allowed for the current view: one that overflowed it stays its floor. */
+    private mapDetailFloor = 1;
+    private mapDetailView = -1;
+    /** The map's centre on the ground; see placeMapCamera. */
+    private mapCentre = { lat: 0, lon: 0 };
+    /** Its ground point and local up, in scene space, as last placed. */
+    private readonly mapGround = new THREE.Vector3();
+    private readonly mapUp = new THREE.Vector3(0, 1, 0);
+    private readonly _mapOffset = new THREE.Vector3();
+    private readonly _mapRay = new THREE.Ray();
+    private readonly _mapPlane = new THREE.Plane();
     /** Set while the boot spawns on its way to the URL's fixed camera; see boot. */
     private urlCameraPending = false;
     /** Arrow / page keys held while looking from the fixed camera. */
@@ -936,6 +1003,10 @@ export class Game {
 
     async setup() {
         setBootProgress(5, 'Initializing renderer...');
+        if (this.mapMode) {
+            // Before any tile binds its texture: see setCoverUnderlay.
+            setCoverUnderlay(true);
+        }
 
         this.renderer.setPalette(this.getPalette());
         this.materials.setPalette(this.getPalette());
@@ -961,8 +1032,14 @@ export class Game {
         this.urlCameraPending = false;
         if (urlCameraRoute) {
             this.enterFixedCamera(urlCameraRoute);
+            if (this.mapMode) {
+                this.enterMapView();
+            }
         }
-        await this.waitForRequiredTerrain(90, 99);
+        // The map fills in as its tiles arrive; there is no flight to hold for.
+        if (!this.mapView) {
+            await this.waitForRequiredTerrain(90, 99);
+        }
         setBootProgress(100, 'Ready');
         window.addEventListener('resize', () => this.onViewportResize());
     }
@@ -1515,6 +1592,12 @@ export class Game {
      * overlay and the wait are skipped and only the countdown runs.
      */
     async holdUntilStreamed(stream = true): Promise<void> {
+        if (this.mapView) {
+            // The map has no flight to hold still: it fills in as tiles arrive.
+            this.kernelRunning = true;
+            fadeOutBootProgress();
+            return;
+        }
         const token = ++this.streamHoldToken;
         this.streamHeld = true;
         this.kernelRunning = true;
@@ -1984,21 +2067,18 @@ export class Game {
     }
 
     /**
-     * Short final: on speed and already on the glidepath.
+     * Short final: on speed, level, over the ramp.
      *
-     * The 2.5 km spawn starts level and fast and lets the pilot fly the ball
-     * down. From a second out there is no time for that, so this one arrives
-     * trimmed the way the arrival ends — approach speed, and a velocity
-     * carrying the sink that holds 3° relative to the deck. Sink is scaled by
-     * the closure on the ship, not by groundspeed: the glidepath is drawn on a
-     * deck that is itself moving away.
+     * The 2.5 km spawn starts fast and lets the pilot fly the ball down. From
+     * a second out there is no time for that, and hands off the jet sinks on
+     * its own ({@link CARRIER_GROOVE_ALTITUDE_M}), so it starts level and low
+     * and settles onto the deck before the sink builds, then rolls into the net.
      */
     private carrierBarricadeSpawn(): PlayerSpawnState {
         const speed = this.carrierSpeedMps + CARRIER_GROOVE_SPEED_MPS;
         const velocity = FORWARD.clone()
             .applyAxisAngle(UP, PLAYER_CARRIER_HEADING)
             .multiplyScalar(speed);
-        velocity.y = -CARRIER_GROOVE_SPEED_MPS * ILS_GLIDESLOPE_TAN;
         return { velocity, throttle: 0.3, airborne: true };
     }
 
@@ -2154,6 +2234,7 @@ export class Game {
         if (this.menuPaused || this.streamHeld) {
             return;
         }
+        advanceFxClock(delta);
         if (this.replaying) {
             // The world holds still; only the recorded aircraft moves.
             this.replayPlayer.advance(delta);
@@ -2188,6 +2269,7 @@ export class Game {
             this.syncBarricade(false);
             this.syncBarricadeAirframe();
             this.updateAiStraightTimer(delta);
+            this.publishAiStats();
             this.followFlightCameraInUrl(delta);
 
             if (this.player.isCrashed) {
@@ -2197,7 +2279,12 @@ export class Game {
             }
         } else if (this.state === GameState.SPAWN_MENU || this.state === GameState.FIXED_CAMERA) {
             if (this.state === GameState.FIXED_CAMERA) {
-                this.moveFixedCamera(delta);
+                if (this.mapView) {
+                    this.placeMapCamera();
+                    this.fitMapDetail();
+                } else {
+                    this.moveFixedCamera(delta);
+                }
                 this.streamAirfields();
                 this.maybeRebase();
             }
@@ -2742,6 +2829,22 @@ export class Game {
             }
             this.playerCamera.update();
             this.applyAltitudeCameraFar();
+            if (this.mapView) {
+                // Straight down from high up, the sky and the weather are
+                // between the camera and the map, and stay off. The shell
+                // stays on, but only for the globe map where nothing was baked.
+                this.updateAtmosphereShell();
+                ATMOSPHERE_SHELL_UNIFORMS.uMapMode.value = 1;
+                (ATMOSPHERE_SHELL_UNIFORMS.uMapWater.value as THREE.Color)
+                    .set(PaletteColor(this.palette, PaletteCategory.TERRAIN_WATER));
+                // Never the globe over baked terrain: the map keeps the bake.
+                ATMOSPHERE_SHELL_UNIFORMS.uGlobe.value = 0;
+                SPACE_FOG.scale = 0;
+                this.updateHdResolution();
+                this.renderer.render(this.scene, this.exteriorRenderLayersHd);
+                this.mapView.updateOverlay();
+                return;
+            }
             // Aim the target-window camera before the MFD's 3D layer is drawn (and
             // before its orientation is copied to the background cameras), so a
             // moving target stays centred instead of lagging a frame and stuttering.
@@ -2800,7 +2903,10 @@ export class Game {
 
     /** Raise main / target far planes with altitude so the planetary limb stays in range. */
     private applyAltitudeCameraFar(): void {
-        const far = cameraFarForAltitudeM(this.playerCamera.main.position.y);
+        const altitude = this.playerCamera.main.position.y;
+        // The map's camera can be higher than a flight's far plane reaches.
+        const far = this.mapView ? Math.max(cameraFarForAltitudeM(altitude), altitude * 1.5)
+            : cameraFarForAltitudeM(altitude);
         if (Math.abs(this.playerCamera.main.far - far) > 1) {
             this.playerCamera.main.far = far;
             this.playerCamera.main.updateProjectionMatrix();
@@ -2856,7 +2962,10 @@ export class Game {
         }
         const camera = this.playerCamera.main;
         const altitude = camera.position.y;
-        const weight = THREE.MathUtils.smoothstep(altitude, ATMOSPHERE_SHELL_FADE_IN_M, SPACE_SKY_ALTITUDE_M);
+        // The map draws the shell at any height, for the globe map outside
+        // the baked areas (uMapMode), and without the air.
+        const weight = this.mapView ? 1
+            : THREE.MathUtils.smoothstep(altitude, ATMOSPHERE_SHELL_FADE_IN_M, SPACE_SKY_ALTITUDE_M);
         const show = weight > 0 && this.view !== PlayerViewState.SHOWCASE;
         SPACE_FOG.scale = show ? 1 - weight : 1;
         this.atmosphereShell.enabled = show;
@@ -2880,9 +2989,33 @@ export class Game {
         const u = ATMOSPHERE_SHELL_UNIFORMS;
         u.uCentre.value.copy(centre).sub(camera.position);
         u.uAxis.value.copy(SHELL_AXIS);
+        // The equator's 0 E and 90 E directions, the same way: ECEF x and y.
+        u.uEcefX.value.set(m[0], m[6], -m[3]).normalize();
+        u.uEcefY.value.set(m[1], m[7], -m[4]).normalize();
+        // The point under the camera, for the colour map's detail block. The
+        // stretch already put a / b on the polar part; geodetic latitude takes
+        // it once more.
+        const px = stretched.dot(u.uEcefX.value);
+        const py = stretched.dot(u.uEcefY.value);
+        const pz = stretched.dot(SHELL_AXIS) * (WGS84_A / WGS84_B);
+        earthMap().update(
+            THREE.MathUtils.radToDeg(Math.atan2(pz, Math.hypot(px, py))),
+            THREE.MathUtils.radToDeg(Math.atan2(py, px)), height);
+        const areas = this.areaList;
+        const count = Math.min(areas.length, SHELL_MAX_AREAS);
+        const rad = THREE.MathUtils.DEG2RAD;
+        for (let i = 0; i < count; i++) {
+            const a = areas[i];
+            u.uAreas.value[i].set(a.west * rad, a.south * rad, a.east * rad, a.north * rad);
+        }
+        u.uAreaCount.value = count;
+        u.uGlobe.value = THREE.MathUtils.smoothstep(height, GLOBE_MAP_FADE_START_M, GLOBE_MAP_FADE_END_M);
         u.uSun.value.copy(SUN_DIRECTION);
         u.uCamHeight.value = height;
         u.uWeight.value = weight;
+        u.uSkyWeight.value = THREE.MathUtils.smoothstep(altitude, ATMOSPHERE_SHELL_FADE_IN_M, SHELL_SKY_FULL_M);
+        u.uSkyGain.value = THREE.MathUtils.lerp(SHELL_SKY_GAIN, 1,
+            THREE.MathUtils.smoothstep(altitude, SHELL_SKY_GAIN_START_M, SHELL_SKY_GAIN_END_M));
         SHELL_MATRIX.makeRotationFromQuaternion(camera.quaternion);
         u.uCamRot.value.setFromMatrix4(SHELL_MATRIX);
         const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
@@ -2894,14 +3027,19 @@ export class Game {
         if (!this.skyEntity) {
             return;
         }
-        const inSpace = this.playerCamera.main.position.y >= SPACE_SKY_ALTITUDE_M
-            && this.view !== PlayerViewState.SHOWCASE;
+        const altitude = this.playerCamera.main.position.y;
+        const showcase = this.view === PlayerViewState.SHOWCASE;
+        const inSpace = altitude >= SPACE_SKY_ALTITUDE_M && !showcase;
         this.skyEntity.enabled = !inSpace;
+        // The weather fades out under the globe map as it takes over (the
+        // shell paints the map over every scene pixel, clouds included), and
+        // is switched off only once the map covers it completely.
+        const cloudsShown = altitude < GLOBE_MAP_FADE_END_M || showcase;
         if (this.cloudField) {
-            this.cloudField.enabled = !inSpace;
+            this.cloudField.enabled = cloudsShown;
         }
         if (this.cirrusField) {
-            this.cirrusField.enabled = !inSpace;
+            this.cirrusField.enabled = cloudsShown;
         }
     }
 
@@ -3106,6 +3244,22 @@ export class Game {
                 this.triggerModImport();
                 return;
             }
+            if (this.mapView) {
+                // The map is the whole page: its keys, nothing of the free
+                // camera's, and no menu on Escape.
+                if (this.mapView.handleKey(event) || event.code === 'Escape' || event.code === 'F12') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+                return;
+            }
+            if (event.code === 'F12' && !event.shiftKey) {
+                event.preventDefault();
+                if (!event.repeat) {
+                    this.openTerrainView();
+                }
+                return;
+            }
             if (event.code === 'F4') {
                 event.preventDefault();
                 if (!event.repeat) {
@@ -3206,6 +3360,7 @@ export class Game {
                     break;
                 }
                 case 'F12': {
+                    // Shift+F12 only: plain F12 opens the terrain view, above.
                     event.preventDefault();
                     this.toggleShowcaseView();
                     break;
@@ -3353,6 +3508,180 @@ export class Game {
         this.scene.setRenderFilter(undefined);
         this.viewBeforeShowcase = null;
         this.clearShowcasePickingState();
+    }
+
+    /**
+     * F12: the terrain seen straight down, in a tab of its own, centred on
+     * the aircraft in flight and on the camera anywhere else.
+     */
+    /**
+     * The map mode: this page was opened by F12 as the map. The fixed camera
+     * turns straight down through a long lens, the fog and the sky's altitude
+     * effects go, and the map's own input (mapView.ts) drives the camera.
+     */
+    private enterMapView(): void {
+        const fixed = this.fixedCameraUpdater;
+        this.materials.setFog(FogQuality.NONE);
+        for (const e of [this.cloudField, this.cirrusField]) {
+            if (e) {
+                e.enabled = false;
+            }
+        }
+        // The fog is by distance whatever the fog setting, and the map camera
+        // is kilometres up: with it, the whole map washes to sky colour.
+        this.materials.setFogDensityScale(0);
+        setMapLod(true);
+        setLeafCoverFromM(1e9);
+        // The map is always at noon, whatever the flight's time of day. Set
+        // here, not through config.daytime, whose listener saves the setting.
+        setSunTime(MAP_SUN_HOURS);
+        this.refreshDaytimePalette();
+        this.updateSunEntity();
+        setBuildingsAtOnce(true);
+        // Smooth shading reads better as a map: the slopes as relief, not
+        // facets. Not saved, like the budget below.
+        this.configService.terrainShading.setActive(TerrainShading.SMOOTH);
+        // Leaves held further out (setMapLod) cost triangles: at the flight
+        // budget a wide map merged patches of them back into flat parents,
+        // squares that came and went. Not saved: only the settings dialog
+        // writes this setting, and the map never opens it.
+        this.configService.triangleBudget.setActive(
+            Math.max(this.configService.triangleBudget.getActive(), MAP_TRIANGLE_BUDGET));
+        SPACE_FOG.scale = 0;
+        if (this.perfHud) {
+            this.perfHud.enabled = false;
+        }
+        // The boot parked an aircraft at the base; the map marks the real one instead.
+        this.player.enabled = false;
+        const route = this.cameraRoute;
+        this.mapCentre = route ? { lat: route.lat, lon: route.lon } : { ...this.playArea.origin };
+        const basis = () => this.planetTerrain.basis;
+        const centre = this.mapCentre;
+        this.mapView = new MapView({
+            container: document.getElementById('container')!,
+            camera: this.playerCamera.main,
+            pan: (dx, dz) => {
+                const w = geodeticToWorld(basis(), centre.lat, centre.lon, 0);
+                const g = geodeticOnSurfaceAtEnu(basis(), w.x + dx, -(w.z + dz));
+                centre.lat = g.lat;
+                centre.lon = g.lon;
+            },
+            centre: () => geodeticToWorld(basis(), centre.lat, centre.lon, 0),
+            worldOf: (lat, lon) => geodeticToWorld(basis(), lat, lon, 0),
+            geodeticOf: (x, z) => geodeticOnSurfaceAtEnu(basis(), x, -z),
+            writeRoute: (lat, lon) => writeCameraRouteToLocation({
+                lat, lon, altM: fixed.getPosition(this._fixedCameraPos).y, headingDeg: 0, pitchDeg: -89,
+            }),
+            groundAt: (px, py) => this.mapGroundAt(px, py),
+        });
+        this.placeMapCamera();
+    }
+
+    /**
+     * Hold the map camera over its centre, at the height its zoom asks for.
+     *
+     * The centre is kept as latitude and longitude, and the camera is put on
+     * the true vertical there and turned to look down it: the scene's own
+     * vertical leans away from it by degrees far from the frame's origin, and
+     * a camera stood up along that would look at the wrong place - and carry
+     * the next re-base (maybeRebase, read off the camera) there with it.
+     */
+    private placeMapCamera(): void {
+        const map = this.mapView!;
+        const { lat, lon } = this.mapCentre;
+        const basis = this.planetTerrain.basis;
+        const ground = geodeticToWorld(basis, lat, lon, 0, this._fixedCameraPos);
+        const groundAlt = Math.max(0, this.planetTerrain.heightAtWorld(ground.x, ground.z) - ground.y);
+        const above = map.cameraHeightAboveGround();
+        // Tilted, the camera swings south round the centre at the same
+        // distance, so the scale there holds; straight down it is right above.
+        const localToScene = enuFrameRotation(makeEnuBasis(lat, lon, 0), basis);
+        const tilt = map.tiltRad;
+        const groundPoint = geodeticToWorld(basis, lat, lon, groundAlt);
+        this.mapGround.copy(groundPoint);
+        this.mapUp.set(0, 1, 0).applyQuaternion(localToScene);
+        const offset = this._mapOffset.set(0, Math.cos(tilt), Math.sin(tilt))
+            .multiplyScalar(above).applyQuaternion(localToScene);
+        this.fixedCameraUpdater.setPosition(groundPoint.add(offset));
+        this.fixedCameraUpdater.setStraightDown(localToScene, tilt);
+        const camera = this.playerCamera.main;
+        const near = Math.max(PLANE_DISTANCE_TO_GROUND, above * 0.02);
+        if (camera.fov !== MAP_FOV_DEG || Math.abs(camera.near - near) > near * 0.1) {
+            camera.fov = MAP_FOV_DEG;
+            camera.near = near;
+            camera.updateProjectionMatrix();
+        }
+    }
+
+    /**
+     * Keep the map's request inside the triangle budget. Over it, the budget
+     * folds tiles into their parents, and which ones changes with every tile
+     * that arrives: the map flickers. So once streaming has gone quiet, a
+     * view that needed folding asks for a coarser cut, and one well under the
+     * budget for a finer one - but never finer than a scale that has already
+     * overflowed for this view. The count does not move smoothly with the
+     * scale (a leaf holds several times its parent's triangles), so without
+     * that floor the two rules took turns, a level flip every second.
+     */
+    private fitMapDetail(): void {
+        const now = performance.now();
+        if (now - this.mapDetailCheckMs < MAP_DETAIL_CHECK_MS) {
+            return;
+        }
+        this.mapDetailCheckMs = now;
+        const s = this.planetTerrain.stats;
+        if (s.queued > 0 || s.inflight > 0 || s.pendingUploads > 0) {
+            return;
+        }
+        const view = this.mapView!.viewVersion;
+        if (view !== this.mapDetailView) {
+            this.mapDetailView = view;
+            this.mapDetailFloor = 1;
+        }
+        const budget = this.configService.triangleBudget.getActive();
+        let scale = this.mapDetailScale;
+        if (s.coarsenedTiles > 0 || s.triangleBudgetHit) {
+            scale = Math.min(MAP_DETAIL_SCALE_MAX, scale * MAP_DETAIL_STEP);
+            this.mapDetailFloor = scale;
+        } else if (s.triangles < budget * MAP_DETAIL_FINER_BELOW && scale > this.mapDetailFloor) {
+            scale = Math.max(this.mapDetailFloor, scale / MAP_DETAIL_STEP);
+        }
+        if (scale !== this.mapDetailScale) {
+            this.mapDetailScale = scale;
+            setMapDetailScale(scale);
+        }
+    }
+
+    /** The map's ground plane (through its centre, square to the local up) under a CSS pixel. */
+    private mapGroundAt(px: number, py: number): THREE.Vector3 | undefined {
+        const container = document.getElementById('container')!;
+        const camera = this.playerCamera.main;
+        camera.updateMatrixWorld();
+        const ndc = this._mapOffset.set(
+            (px / container.clientWidth) * 2 - 1, -(py / container.clientHeight) * 2 + 1, 0.5);
+        const ray = this._mapRay;
+        ray.origin.copy(camera.position);
+        ray.direction.copy(ndc.unproject(camera)).sub(camera.position).normalize();
+        this._mapPlane.setFromNormalAndCoplanarPoint(this.mapUp, this.mapGround);
+        return ray.intersectPlane(this._mapPlane, new THREE.Vector3()) ?? undefined;
+    }
+
+    private openTerrainView(): void {
+        let aircraft: { lat: number; lon: number; headingDeg?: number } | undefined;
+        if (this.state === GameState.PLAYER) {
+            const p = this.player.position;
+            const g = worldToGeodetic(this.planetTerrain.basis, p.x, p.y, p.z);
+            const f = FORWARD.clone().applyQuaternion(this.player.quaternion);
+            const headingDeg = (Math.atan2(f.x, -f.z) * 180 / Math.PI + 360) % 360;
+            aircraft = { lat: g.lat, lon: g.lon, headingDeg };
+        } else {
+            const route = this.state === GameState.FIXED_CAMERA ? this.fixedCameraRoute() : this.cameraRoute;
+            if (route) {
+                aircraft = { lat: route.lat, lon: route.lon };
+            }
+        }
+        const at = aircraft ?? this.playArea.origin;
+        window.open(mapViewUrl({ lat: at.lat, lon: at.lon, aircraft }), '_blank');
     }
 
     private toggleShowcaseView() {
@@ -3880,7 +4209,10 @@ export class Game {
             }
         };
         place();
-        await this.preloadTerrainAroundPlane(center.x, center.z, seedMode);
+        // The map has no flight to seed: its own tiles stream in on screen.
+        if (!this.mapMode) {
+            await this.preloadTerrainAroundPlane(center.x, center.z, seedMode);
+        }
         // Again, now that the DEM under the spawn is resident: a runway or
         // final picked at another airfield was placed above whatever height
         // the coarse tier answered.
@@ -3906,7 +4238,7 @@ export class Game {
             this.setCarrierOverSternView();
         } else {
             this.spawnOpponent(spawn === 'headon');
-            this.spawnWingman(closeWing);
+            this.spawnWingman(closeWing, at === undefined && spawn === 'runway');
             this.setCockpitFrontView();
         }
         if (this.aiOpponent?.enabled) {
@@ -4339,6 +4671,14 @@ export class Game {
 
         const standoff = headOn ? AI_HEADON_SPAWN_DISTANCE_M : AI_ENGAGE_SPAWN_DISTANCE_M;
         const pilotOptions = this.opponentPilotOptions();
+        const scramble = this.configService.opponentsScramble.getActive();
+        const field = scramble ? this.opponentField() : undefined;
+        this.opponentSpawnNote = field ? `scramble ${field.runway.icao || field.runway.name} ${field.runway.ref}`
+            : scramble ? `merge: no field (${this.sceneRunways.length} runways, base ${this.activeRunway?.ref ?? 'authored'})` : 'merge';
+        if (field) {
+            this.scrambleOpponents(field, pilotOptions);
+            return;
+        }
         const LATERAL_SPACING_M = 80;
         for (let i = 0; i < this.aiOpponents.length; i++) {
             const ai = this.aiOpponents[i];
@@ -4348,15 +4688,21 @@ export class Game {
                 .addScaledVector(playerForward, standoff)
                 .addScaledVector(right, lateral);
 
+            // With the player parked there is no merge to fly: the opponent
+            // used to be parked too, on the player's runway in ENGAGE, a
+            // ground obstacle that got airborne only on its terrain guard. It
+            // starts in the air above the field instead, as the wingman would.
+            let throttle = this.player.throttleUnit;
+            let aiVelocity = velocity;
+            if (this.player.isLanded) {
+                position.y = this.groundHeightAt(position.x, position.z) + WINGMAN_HOLD_ALTITUDE_AGL_M;
+                aiVelocity = headingForward(aiHeading).multiplyScalar(WINGMAN_HOLD_SPEED_MPS);
+                throttle = 1;
+            }
+
             // Rebuild pilot so OSD AI-model changes apply on this merge.
             this.combatSim.setPilotOptions(ai.simId, pilotOptions);
-            ai.respawn({
-                position,
-                heading: aiHeading,
-                airborne: !this.player.isLanded,
-                throttle: this.player.throttleUnit,
-                velocity,
-            });
+            ai.respawn({ position, heading: aiHeading, airborne: true, throttle, velocity: aiVelocity });
             // Fight the whole friendly side — the player *and* the wingman —
             // re-picking as the fight develops, rather than tunnelling on the
             // one aircraft handed over at spawn.
@@ -4365,10 +4711,7 @@ export class Game {
         }
         this.aiStraightTimer = 0;
 
-        // The player's in-worker autopilot flies home and lands (RTB); it also
-        // knows about the primary opponent should combat logic be enabled for it later.
-        this.combatSim.setTarget(PLAYER_SIM_ID, this.aiOpponents[0].simId);
-        this.combatSim.setPhase(PLAYER_SIM_ID, AiFlightPhase.RTB);
+        this.armPlayerAutopilot();
     }
 
     /**
@@ -4377,13 +4720,17 @@ export class Game {
      * to sit in, so it starts overhead at {@link WINGMAN_HOLD_ALTITUDE_AGL_M}
      * and its pilot holds there until the player is actually flying.
      */
-    private spawnWingman(close = false): void {
+    private spawnWingman(close = false, onRunway = false): void {
         const wingman = this.wingman;
         if (!wingman) {
             return;
         }
         if (close) {
             this.spawnCloseWingman(wingman);
+            return;
+        }
+        if (onRunway) {
+            this.spawnScrambleWingman(wingman);
             return;
         }
         const p = this.player.position;
@@ -4421,6 +4768,99 @@ export class Game {
     }
 
     /**
+     * The runway opponents take off from when they scramble, and which way:
+     * the nearest of another airfield's runways between OPPONENT_FIELD_MIN_M
+     * and _MAX_M from the player. Failing that - an island with its
+     * neighbours 100 km off - another runway of the player's own field, from
+     * its far end, so they roll towards the player rather than in line behind.
+     * Neither means an ordinary airborne merge.
+     */
+    private opponentField(): { runway: SceneRunway; heading: number } | undefined {
+        const p = this.player.position;
+        const home = this.activeRunway;
+        const sameField = (r: SceneRunway) => home !== undefined && r.icao === home.icao && r.name === home.name;
+        let best: SceneRunway | undefined;
+        let bestD = Infinity;
+        for (const r of this.sceneRunways) {
+            if (sameField(r) || r.startOnly) continue;
+            const d = Math.hypot(r.center.x - p.x, r.center.z - p.z);
+            if (d >= OPPONENT_FIELD_MIN_M && d <= OPPONENT_FIELD_MAX_M && d < bestD) {
+                bestD = d;
+                best = r;
+            }
+        }
+        if (best) {
+            return { runway: best, heading: best.heading };
+        }
+        const other = this.sceneRunways.find(r => r !== home && sameField(r) && !r.startOnly);
+        return other && home ? { runway: other, heading: wrapAngle(home.heading + Math.PI) } : undefined;
+    }
+
+    /**
+     * Opponents parked on a threshold of `field`, lined up one behind another
+     * facing `heading`, taking off to fight the friendly side: the pilot goes
+     * from climb-out straight to its target.
+     */
+    private scrambleOpponents(field: { runway: SceneRunway; heading: number }, pilotOptions: AiPilotOptions): void {
+        const r = field.runway;
+        // The runway axis the way it is flown, to whichever end that starts from.
+        const fwd = headingForward(field.heading);
+        const reciprocal = Math.abs(wrapAngle(field.heading - r.heading)) > Math.PI / 2;
+        const axis = reciprocal ? wrapAngle(r.heading + Math.PI) : r.heading;
+        const axisFwd = headingForward(axis);
+        for (let i = 0; i < this.aiOpponents.length; i++) {
+            const ai = this.aiOpponents[i];
+            const along = r.halfLength - RUNWAY_SPAWN_INSET_M - i * WINGMAN_SCRAMBLE_TRAIL_M;
+            const x = r.center.x - axisFwd.x * along;
+            const z = r.center.z - axisFwd.z * along;
+            const position = new THREE.Vector3(x, this.groundHeightAt(x, z) + this.gearRestHeight(), z);
+            this.combatSim.setPilotOptions(ai.simId, pilotOptions);
+            ai.respawn({ position, heading: Math.atan2(fwd.x, fwd.z), airborne: false, throttle: 0, velocity: new THREE.Vector3() });
+            this.combatSim.setTargetFaction(ai.simId, Faction.PLAYER);
+            this.combatSim.setPhase(ai.simId, AiFlightPhase.TAKEOFF_ROLL);
+        }
+        this.aiStraightTimer = 0;
+        this.armPlayerAutopilot();
+    }
+
+    /**
+     * The player's in-worker autopilot (the `a` key) takes off, flies home and
+     * lands; it does not fight. It used to be handed the opponent as a target
+     * "for later", which now would turn every autopilot climb-out - and its
+     * loiter - into a dogfight flown for the player.
+     */
+    private armPlayerAutopilot(): void {
+        this.combatSim.setTarget(PLAYER_SIM_ID, null);
+        this.combatSim.setPhase(PLAYER_SIM_ID, AiFlightPhase.RTB);
+    }
+
+    /**
+     * The wingman parked on the runway behind the player, a little to the
+     * right, nose down the runway: it rolls when the player does, holding its
+     * own line, and joins the wing after climb-out (see
+     * {@link AiFlightPhase.GROUND_IDLE} and the pilot's scramble).
+     */
+    private spawnScrambleWingman(wingman: AiAircraftEntity): void {
+        const f = this.spawnFrame;
+        const fwd = headingForward(f.heading);
+        const side = THREE.MathUtils.clamp(f.halfWidth * 0.5, 5, WINGMAN_SCRAMBLE_SIDE_MAX_M);
+        const p = this.player.position;
+        const x = p.x - fwd.x * WINGMAN_SCRAMBLE_TRAIL_M + Math.cos(f.heading) * side;
+        const z = p.z - fwd.z * WINGMAN_SCRAMBLE_TRAIL_M - Math.sin(f.heading) * side;
+        const position = new THREE.Vector3(x, this.groundHeightAt(x, z) + this.gearRestHeight(), z);
+        this.combatSim.setPilotOptions(wingman.simId, this.opponentPilotOptions());
+        wingman.respawn({ position, heading: f.heading, airborne: false, throttle: 0, velocity: new THREE.Vector3() });
+        this.combatSim.setFormationLead(wingman.simId, PLAYER_SIM_ID);
+        this.combatSim.setTargetFaction(wingman.simId, Faction.ENEMY);
+        this.combatSim.setPhase(wingman.simId, AiFlightPhase.GROUND_IDLE);
+    }
+
+    /** Height (m) of the current airframe's CG above the ground, resting on its gear. */
+    private gearRestHeight(): number {
+        return this.currentDef.flight ? fm2GroundRestHeight(this.currentDef.flight) : PLANE_DISTANCE_TO_GROUND;
+    }
+
+    /**
      * The wingman right beside the player on a parallel course: 4 m to the
      * right and 2 m above, abreast, at the player's speed, flying straight. It
      * holds heading, altitude and speed (it does not fly a formation slot of its
@@ -4438,6 +4878,32 @@ export class Game {
         this.combatSim.setPilotOptions(wingman.simId, this.opponentPilotOptions());
         wingman.respawn({ position, heading, airborne: true, throttle: this.player.throttleUnit, velocity });
         this.combatSim.setPhase(wingman.simId, AiFlightPhase.STRAIGHT);
+    }
+
+    /**
+     * Dev telemetry, like __kernelStats: what each sim-flown aircraft's pilot
+     * is doing, where it is and how fast, for the browser pane and headless
+     * checks of the airfield phases. Read-only; nothing in the game uses it.
+     */
+    /** How the last opponent spawn was decided, for __aiStats. */
+    private opponentSpawnNote = '';
+
+    private publishAiStats(): void {
+        const row = (id: string, pos: THREE.Vector3, enabled = true) => ({
+            label: this.combatSim.getManeuverLabel(id) ?? '-', enabled,
+            x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z),
+            agl: Math.round(pos.y - this.groundHeightAt(pos.x, pos.z)),
+        });
+        const stats: Record<string, unknown> = {
+            opponentSpawn: this.opponentSpawnNote,
+            player: { ...row(PLAYER_SIM_ID, this.player.position), autopilot: this.player.isAutopilotEnabled,
+                speed: Math.round(this.player.velocityVector.length()), landed: this.player.isLanded,
+                vy: Math.round(this.player.velocityVector.y * 10) / 10,
+                pitch: Math.round(Math.asin(FORWARD.clone().applyQuaternion(this.player.quaternion).y) * 573) / 10 },
+        };
+        if (this.wingman) stats.wingman = row(this.wingman.simId, this.wingman.position, this.wingman.enabled);
+        this.aiOpponents.forEach((ai, i) => { stats[`opponent${i}`] = row(ai.simId, ai.position, ai.enabled); });
+        (globalThis as Record<string, unknown>).__aiStats = stats;
     }
 
     /** After the straight-flight hold, promote AI opponents into ENGAGE. */
@@ -4594,8 +5060,10 @@ export class Game {
         // The airbase flatten pad is baked into both the mesh and the height
         // field, so there is no pad to lock here any more — that DEM sample and
         // the re-mesh it forced were the slowest step in the old boot.
-        await this.preloadTerrainAroundPlane(center.x, center.z, spawn);
-        if (this.cameraRoute) {
+        if (!this.mapMode) {
+            await this.preloadTerrainAroundPlane(center.x, center.z, spawn);
+        }
+        if (this.cameraRoute && !this.mapMode) {
             const at = this.cameraRouteWorld(this.cameraRoute);
             await this.preloadTerrainAroundPlane(at.x, at.z, 'highAlt');
         }
@@ -4982,8 +5450,8 @@ export class Game {
             return;
         }
         this.lastAirfieldStreamMs = now;
-        // A camera placed from the URL has no aircraft flying: its airfields
-        // come in around the camera.
+        // The map and a camera placed from the URL have no aircraft flying:
+        // their airfields come in around the camera.
         const p = this.state === GameState.FIXED_CAMERA
             ? this.fixedCameraUpdater.getPosition(this._fixedCameraPos) : this.player.position;
         this.airfieldStreamBusy = true;
@@ -5488,14 +5956,18 @@ export class Game {
             scene.add(shipWake);
         }
 
-        // Carrier-style ski jump 90 m ahead of the runway spawn, rising toward +Z (takeoff).
+        // Carrier-style ski jump down the home runway from the spawn, rising
+        // toward +Z (takeoff). It used to stand 90 m ahead, which a standing
+        // start reached at ~40 m/s - far under the 68 m/s the jet flies at - and
+        // was thrown off it into the ground (the autopilot, at GCXO). 400 m of
+        // run-up brings it to the ramp at ~70.
         this.skiJumps.length = 0;
         this.skiJumps.push(...this.osmSkiJumps);
-        const skiJumpAheadM = 90;
+        const skiJumpAheadM = 400;
         const home = this.baseFrame;
         const skiJumpHeading = home.heading;
         const fwd = headingForward(skiJumpHeading);
-        // Ninety metres past where an aircraft lines up on the home runway.
+        // That far past where an aircraft lines up on the home runway.
         const fromCentre = home.halfLength - RUNWAY_SPAWN_INSET_M - skiJumpAheadM;
         const skiJumpOrigin = new THREE.Vector3(
             home.centerX - fwd.x * fromCentre, 0, home.centerZ - fwd.z * fromCentre);

@@ -13,12 +13,36 @@
  */
 
 import * as THREE from 'three';
-import { EnuBasis, ecefToEnu, geodeticToEcef, sceneZFromNorth } from './geodesy';
+import { EnuBasis, WGS84_A, ecefToEnu, geodeticToEcef, sceneZFromNorth } from './geodesy';
 import { TileKey, tileBounds } from './tiling';
 import { TerrainTone } from './tones';
 
 /** Surface subdivision per side. 2 keeps the patch flat but not degenerate. */
 const DIVISIONS = 2;
+
+/**
+ * Least skirt depth, metres. The level's own figure is set for baked tiles,
+ * which the runtime stitches to each other; a patch is not stitched, and the
+ * 25 m skirt at z8 left its seam against a baked neighbour open to the sky,
+ * a dashed white crack across the sea from altitude. A patch's skirt only
+ * ever hangs under open sea, so a deep one cannot show as a wall.
+ */
+const MIN_SKIRT_M = 1_000;
+
+/**
+ * How many levels coarser a neighbour may be. A coarse ancestor padding the
+ * open sea can have a whole edge as one chord, sagging under the curve by
+ * edge^2 / 8R - about 7 km for a z6 edge beside a z8 patch - and from near
+ * the horizon the sky showed through under a skirt shallower than that.
+ */
+const NEIGHBOUR_LEVELS = 2;
+
+/** Depth that covers the sag of a neighbour's single-chord edge. */
+function coarseNeighbourSagM(z: number): number {
+    // Longest edge at that zoom: a parallel at the equator.
+    const edge = (2 * Math.PI * WGS84_A) / 2 ** Math.max(0, z - NEIGHBOUR_LEVELS);
+    return edge * edge / (8 * WGS84_A);
+}
 
 export interface OceanPatch {
     group: THREE.Group;
@@ -38,6 +62,9 @@ export function buildOceanPatch(
     onBeforeRender?: THREE.Mesh['onBeforeRender'],
 ): OceanPatch {
     const b = tileBounds(id);
+    const skirt = skirtDepthM > 0
+        ? Math.max(skirtDepthM, MIN_SKIRT_M, 1.2 * coarseNeighbourSagM(id.z))
+        : 0;
     const centreLon = (b.west + b.east) / 2;
     const centreLat = (b.south + b.north) / 2;
     const origin = ecefToEnu(basis, geodeticToEcef(centreLat, centreLon, seaLevel));
@@ -71,7 +98,7 @@ export function buildOceanPatch(
     }
 
     // Skirt: drop the boundary ring so the seam against a DEM tile is sealed.
-    if (skirtDepthM > 0) {
+    if (skirt > 0) {
         const ring: number[] = [];
         for (let col = 0; col < n; col++) ring.push(col);
         for (let row = 1; row < n; row++) ring.push(row * n + (n - 1));
@@ -82,7 +109,7 @@ export function buildOceanPatch(
         for (const idx of ring) {
             positions.push(
                 positions[idx * 3],
-                positions[idx * 3 + 1] - skirtDepthM,
+                positions[idx * 3 + 1] - skirt,
                 positions[idx * 3 + 2],
             );
         }

@@ -152,8 +152,9 @@ MIN_RUNWAY_LENGTH_M = 500.0
 METAL_SURFACES = ('metal', 'metal_grid', 'steel')
 
 # Ski-jump ramps. OSM has no tag for one; Saki maps its T2 as a structure with
-# no storeys under a single sloping roof (`building:levels=0
-# roof:shape=skillion roof:height=8`), and that or a name saying so is a ramp.
+# nothing under a single sloping roof - no storeys (`building:levels=0`) or no
+# height below the roof (`height=0`), with `roof:shape=skillion roof:height=8`
+# - and that or a name saying so is a ramp.
 # Its run-up is a runway one of whose ends is within this of the ramp, kept
 # however short (Saki's is 213 m).
 SKI_JUMP_RUNWAY_REACH_M = 30.0
@@ -897,7 +898,9 @@ def ski_jump_tags(tags: dict) -> bool:
     name = str(tags.get('name', '')).lower()
     if any(n in name for n in SKI_JUMP_NAMES):
         return True
-    return str(tags.get('building:levels', '')) == '0' and tags.get('roof:shape') == 'skillion'
+    if tags.get('roof:shape') != 'skillion':
+        return False
+    return str(tags.get('building:levels', '')) == '0' or str(tags.get('height', '')) == '0'
 
 
 def gear_tags(tags: dict) -> bool:
@@ -980,7 +983,8 @@ def overpass_airports(
         return _aeroway_query(
             [f'way["barrier"="cable_barrier"]({c.as_overpass()})']
             + [f'way["surface"="{s}"]["area"="yes"]({c.as_overpass()})' for s in METAL_SURFACES]
-            + [f'way["building:levels"="0"]["roof:shape"="skillion"]({c.as_overpass()})'])
+            + [f'way["{k}"="0"]["roof:shape"="skillion"]({c.as_overpass()})'
+               for k in ('building:levels', 'height')])
 
     # Same tag test as the query closures above, for the PBF path.
 

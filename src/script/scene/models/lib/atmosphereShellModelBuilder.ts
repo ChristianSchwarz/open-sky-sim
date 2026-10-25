@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { EARTH_ATMOSPHERE } from '../../atmosphere/atmosphere';
+import { EARTH_MAP_PARS_FRAGMENT, EARTH_MAP_UNIFORMS } from '../../earthMap';
 import { SCENE_DEPTH_PARS_FRAGMENT, SCENE_DEPTH_SKY_CUT, SCENE_DEPTH_UNIFORMS } from '../../materials/shaders/sceneDepth';
 import { WGS84_A, WGS84_B } from '../../../terrain/geodesy';
 import { Model, ModelLibBuilder } from '../models';
@@ -38,8 +39,21 @@ const SHELL_HEIGHT_M = 100_000;
  */
 const SHELL_TURBIDITY_SCALE = 0.2;
 
-/** Height of the global cloud deck above the ellipsoid, metres. */
-const CLOUD_HEIGHT_M = 8_000;
+/**
+ * Up to this many baked areas are told apart from the sea-level fill that
+ * pads their ancestor tiles out to whole quadrants.
+ */
+export const SHELL_MAX_AREAS = 8;
+
+/** Width of the blend at an area's edge, degrees of arc (about 55 km). */
+const AREA_FEATHER_DEG = 0.5;
+
+/**
+ * How far terrain may lie from the ellipsoid and still be believed: the
+ * highest ground plus the geoid, with room to spare. A coarse flat tile
+ * further out than this is drawn as the globe instead.
+ */
+const TERRAIN_SLACK_M = 12_000;
 
 /** View-ray samples on each side of the closest approach. */
 const VIEW_STEPS = 12;
@@ -68,11 +82,32 @@ const FRAGMENT_PROGRAM = `
   uniform float uCamHeight;
   /** 0 = shell off, 1 = full. Faded in with altitude on the CPU. */
   uniform float uWeight;
+  /**
+   * The same for open sky, which fades in lower and faster: the dome stays a
+   * pale day blue however high the camera goes, and fading that into the
+   * black of space reads as grey, so the shell's own sky - still blue that
+   * low - takes over before it darkens.
+   */
+  uniform float uSkyWeight;
+  /** Exposure multiplier for open sky. */
+  uniform float uSkyGain;
   uniform float uExposure;
-  /** 1 draws the cloud deck, 0 hides it. */
-  uniform float uClouds;
-  /** Radiance of the ellipsoid where no terrain is drawn. */
+  /** Radiance of open ocean where no terrain is drawn. */
   uniform vec3 uSurface;
+  /** ECEF x (0 N 0 E) and y (0 N 90 E) in scene axes; uAxis is ECEF z. */
+  uniform vec3 uEcefX;
+  uniform vec3 uEcefY;
+  /** Baked areas as (west, south, east, north), radians. */
+  uniform vec4 uAreas[${SHELL_MAX_AREAS}];
+  uniform int uAreaCount;
+  /** How far the globe map is drawn over baked terrain, 0 to 1, by altitude. */
+  uniform float uGlobe;
+  // The map mode (state/mapView.ts): the globe map outside every baked area
+  // and on the bare ellipsoid, nothing over baked terrain, and no air at all.
+  uniform float uMapMode;
+  // The bake's sea colour: the map's water is drawn in it, so a baked area's
+  // sea does not stand out as a darker box in the map's.
+  uniform vec3 uMapWater;
 ${SCENE_DEPTH_PARS_FRAGMENT}
 
   const float A = ${WGS84_A.toFixed(1)};
@@ -88,7 +123,9 @@ ${SCENE_DEPTH_PARS_FRAGMENT}
   const float OZ_C = ${EARTH_ATMOSPHERE.ozoneCentre.toFixed(1)};
   const float OZ_W = ${EARTH_ATMOSPHERE.ozoneHalfWidth.toFixed(1)};
   const float PI = 3.14159265;
-  const float CLOUD_H = ${CLOUD_HEIGHT_M.toFixed(1)};
+  const float TERRAIN_SLACK = ${TERRAIN_SLACK_M.toFixed(1)};
+  const float AREA_FEATHER = ${(AREA_FEATHER_DEG * Math.PI / 180).toFixed(6)};
+${EARTH_MAP_PARS_FRAGMENT}
 
   // The ellipsoid becomes a sphere of radius A when the polar axis is stretched
   // by a/b, and the shell is close enough to concentric with it that the same
@@ -146,39 +183,31 @@ ${SCENE_DEPTH_PARS_FRAGMENT}
     return total;
   }
 
-  float vnoise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(
-      mix(mix(hash(i), hash(i + vec3(1, 0, 0)), f.x),
-          mix(hash(i + vec3(0, 1, 0)), hash(i + vec3(1, 1, 0)), f.x), f.y),
-      mix(mix(hash(i + vec3(0, 0, 1)), hash(i + vec3(1, 0, 1)), f.x),
-          mix(hash(i + vec3(0, 1, 1)), hash(i + vec3(1, 1, 1)), f.x), f.y),
-      f.z);
+  // Geodetic latitude and longitude of a point in the stretched frame. The
+  // stretch put a / b on the polar component, which is what turns the sphere's
+  // parametric latitude back into a geodetic one.
+  vec2 latLon(vec3 p) {
+    float x = dot(p, uEcefX);
+    float y = dot(p, uEcefY);
+    float z = dot(p, uAxis);
+    return vec2(atan(z * (1.0 + SQUASH), length(vec2(x, y))), atan(y, x));
   }
 
-  // Cloud cover at a point on the unit sphere. Procedural until there is real
-  // data: broad fronts and cells from low octaves, weather bands by latitude
-  // (storm tracks near 50 degrees, the tropical convergence on the equator,
-  // clear subtropics), and fine breakup from the high ones.
-  float cloudDensity(vec3 n) {
-    float f = 0.0;
-    float amp = 0.5;
-    vec3 q = n * 5.0 + vec3(3.7, 1.3, 9.1);
-    for (int i = 0; i < 6; i++) {
-      f += amp * vnoise(q);
-      q = q * 2.03 + vec3(5.2, 1.7, 3.3);
-      amp *= 0.5;
+  // How far inside a baked area a point is: 0 outside every area, rising to
+  // 1 at AREA_FEATHER in from the nearest edge. Boxes clip coasts their bake
+  // may not have mapped, so their edges are blended rather than drawn.
+  float bakedAreaDepth(vec2 ll) {
+    float depth = 0.0;
+    for (int i = 0; i < ${SHELL_MAX_AREAS}; i++) {
+      if (i >= uAreaCount) {
+        break;
+      }
+      vec4 r = uAreas[i];
+      float ew = min(ll.y - r.x, r.z - ll.y) * cos(ll.x);
+      float ns = min(ll.x - r.y, r.w - ll.x);
+      depth = max(depth, smoothstep(0.0, AREA_FEATHER, min(ew, ns)));
     }
-    float lat = abs(dot(n, normalize(uAxis)));
-    // Squared by hand: GLSL leaves pow() undefined for a negative base.
-    float storm = (lat - 0.77) * 4.0;
-    float dry = (lat - 0.42) * 5.0;
-    float band = 0.14 * exp(-storm * storm)
-      + 0.10 * exp(-lat * lat * 30.0)
-      - 0.16 * exp(-dry * dry);
-    return smoothstep(0.50, 0.68, f + band);
+    return depth;
   }
 
   void main() {
@@ -223,6 +252,16 @@ ${SCENE_DEPTH_PARS_FRAGMENT}
       return;
     }
 
+    if (terrain) {
+      // The tiles are believed only near the ellipsoid: the coarsest are flat
+      // facets whose middles sag hundreds of kilometres under the curve, and
+      // from far enough out those are all there is. Once the map has fully
+      // taken over, the air is marched to the ellipsoid too.
+      vec3 th = o + d * terrainT;
+      if (uGlobe >= 1.0 || abs(length(th) - A) > TERRAIN_SLACK) {
+        terrain = false;
+      }
+    }
     bool fallback = false;
     float tEnd = tFar;
     if (terrain) {
@@ -238,6 +277,7 @@ ${SCENE_DEPTH_PARS_FRAGMENT}
       gl_FragColor = vec4(0.0);
       return;
     }
+    vec2 hitLatLon = latLon(o + d * tEnd);
 
     // Closest approach splits the ray in two; each half is sampled densest at
     // the split, which is where the air is thickest for a ray skimming the limb
@@ -291,31 +331,21 @@ ${SCENE_DEPTH_PARS_FRAGMENT}
 
     vec3 transmittance = exp(-tau);
     vec3 emission = radiance;
-    float alpha;
+    float alpha = 1.0;
+    // Outside every baked area the tiles are sea-level fill padding the
+    // ancestors out to whole quadrants: real only where the map says sea.
+    float fill = terrain ? 1.0 - bakedAreaDepth(hitLatLon) : 0.0;
+    // How much of the globe map is drawn: over baked terrain as the camera
+    // climbs, on the bare ellipsoid as the shell itself fades in, never on
+    // open sky. The map is opaque: once it is in, nothing under it shows.
+    // No scene there at all - the bare ellipsoid, or a crack between tiles -
+    // takes the map almost as soon as the shell is on, as nothing else could
+    // show through but the sky behind the ground.
+    float globe = fallback ? max(uGlobe, min(1.0, uWeight * 10.0)) : (terrain ? uGlobe : 0.0);
+    vec4 globeColour = vec4(0.0);
+    bool openSky = false;
+    float mapWater = 0.0;
 
-    // The cloud deck: a sphere at CLOUD_H, seen from above. It sits in the thin
-    // air near the ground, so the transmittance to the surface stands in for
-    // the transmittance to the cloud.
-    float dens = 0.0;
-    vec3 cloudLight = vec3(0.0);
-    if (uCamHeight > CLOUD_H + 4000.0) {
-      float cC = (uCamHeight - CLOUD_H) * (2.0 * A + uCamHeight + CLOUD_H);
-      float dC = b * b - a * cC;
-      if (dC > 0.0) {
-        float tcl = (-b - sqrt(dC)) / a;
-        if (tcl > 0.0 && tcl < tEnd) {
-          vec3 pc = o + d * tcl;
-          vec3 n = normalize(pc);
-          dens = cloudDensity(n) * uClouds;
-          if (dens > 0.0) {
-            float mu = dot(n, sun);
-            vec3 sunT = exp(-sunDepth(pc, sun));
-            cloudLight = sunT * (max(mu, 0.0) * 0.95 + 0.02) + 0.04 * smoothstep(-0.25, 0.1, mu);
-            cloudLight *= 1.0 - 0.3 * dens;
-          }
-        }
-      }
-    }
     if (terrain) {
       // Daylight on the far side of the terminator: the scene was lit for one
       // sun direction all over, so the shell dims it by the local sun height.
@@ -323,9 +353,19 @@ ${SCENE_DEPTH_PARS_FRAGMENT}
       float mu = dot(normalize(hit), sun);
       float day = mix(0.06, 1.0, smoothstep(-0.08, 0.18, mu));
       float shell = mix(1.0, day, uWeight);
-      float mean = dot(transmittance, vec3(1.0 / 3.0)) * shell * (1.0 - dens);
+      float mean = dot(transmittance, vec3(1.0 / 3.0)) * shell;
       alpha = 1.0 - mean;
-    } else if (fallback) {
+    } else if (!fallback) {
+      // Open sky over the limb: the stars shine through what air is in front.
+      emission += star * transmittance;
+      // The shell's own sky takes the place of the dome (crossfaded by
+      // uSkyWeight) rather than lying over it, so the dome has nothing left to
+      // show when it is switched off.
+      alpha = 1.0;
+      openSky = true;
+    }
+    vec3 toned = 1.0 - exp(-emission * uExposure * (openSky ? uSkyGain : 1.0));
+    if (globe > 0.0 || terrain) {
       vec3 hit = o + d * tEnd;
       float mu = dot(normalize(hit), sun);
       vec3 sunT = exp(-sunDepth(hit, sun));
@@ -335,21 +375,50 @@ ${SCENE_DEPTH_PARS_FRAGMENT}
       vec3 toEye = normalize(-d);
       vec3 nrm = normalize(hit);
       float glint = pow(max(dot(nrm, normalize(sun + toEye)), 0.0), 4000.0) * 60.0;
-      emission += (transmittance * (uSurface * (sunT * direct * 3.0 + 0.02) + sunT * glint * step(0.0, mu))) * (1.0 - dens);
-      alpha = 1.0;
-    } else {
-      // Open sky over the limb: the stars shine through what air is in front.
-      emission += star * transmittance;
-      alpha = 1.0 - dot(transmittance, vec3(1.0 / 3.0)) * (1.0 - dens);
+
+      // The pixel's footprint on the ground picks the map's filtering.
+      float pixel = 2.0 * uTanHalfFov.y / uSceneDepthSize.y;
+      float incidence = max(abs(dot(nrm, toEye)), 0.02);
+      vec3 albedo = earthAlbedo(hitLatLon, tEnd * pixel / sqrt(incidence));
+      // The map's oceans are near black with a blue cast; they take the
+      // ocean radiance the rest of the planet is drawn with, and the glint.
+      // Open ocean is so dark that JPEG noise swamps the blue cast, so near
+      // black counts as water too; the darkest forest is several times brighter.
+      float water = max(smoothstep(1.6, 3.0, albedo.b / max(albedo.g, 1e-4)),
+        smoothstep(0.006, 0.002, max(albedo.r, albedo.g)));
+      vec3 surface = mix(albedo, uSurface, water);
+      mapWater = water;
+      vec3 lit = (transmittance * (surface * (sunT * direct * 3.0 + 0.02) + sunT * glint * water * step(0.0, mu)));
+      globeColour = vec4(1.0 - exp(-(emission + lit) * uExposure), 1.0);
+      // Over terrain the map's sea comes in on the later schedule, inside an
+      // area or out: the fill is the same water as an area's sea, so an
+      // area's edge does not show as a step in it. The map's land comes in
+      // with the shell over baked land - softly, as the bake is the sharper
+      // picture - but at once over fill, which has nothing to show there.
+      if (terrain) {
+        float land = mix(uWeight, min(1.0, uWeight * 10.0), fill);
+        globe = max(uGlobe, land * (1.0 - water));
+      }
     }
-    vec3 toned = 1.0 - exp(-emission * uExposure);
-    // Clouds are bright surfaces in their own right, not scattered light, so
-    // they skip the exposure curve and are added as lit white.
-    toned += cloudLight * dens * transmittance;
-    if (dens > 0.0) {
-      alpha = max(alpha, dens * dot(transmittance, vec3(1.0 / 3.0)));
+    if (uMapMode > 0.5) {
+      // Premultiplied: the map where nothing was baked, see-through elsewhere.
+      float g = fallback ? 1.0 : (terrain ? fill : 0.0);
+      gl_FragColor = mix(globeColour, vec4(uMapWater, 1.0), mapWater) * g;
+      return;
     }
-    gl_FragColor = vec4(toned * uWeight, alpha * uWeight);
+    // Premultiplied, so drawing the globe over the faded air is a plain mix.
+    float weight = openSky ? uSkyWeight : uWeight;
+    gl_FragColor = mix(vec4(toned * weight, alpha * weight), globeColour, globe);
+
+    // The scene target holds linear colour in 8 bits, so the dark end of the
+    // sky - a few 1/255 steps, each a big jump once encoded to sRGB - comes
+    // out as coloured bands. A triangular dither of one step breaks them up.
+    // It fades out towards zero so black space stays black.
+    vec2 fc = gl_FragCoord.xy;
+    float n = fract(52.9829189 * fract(dot(fc, vec2(0.06711056, 0.00583715))))
+      + fract(52.9829189 * fract(dot(fc + vec2(47.0, 17.0), vec2(0.06711056, 0.00583715)))) - 1.0;
+    vec3 c = gl_FragColor.rgb;
+    gl_FragColor.rgb = max(c + n * min(c * 255.0, vec3(1.0)) / 255.0, 0.0);
   }
 `;
 
@@ -362,10 +431,19 @@ export const ATMOSPHERE_SHELL_UNIFORMS = {
     uSun: { value: new THREE.Vector3(0, 1, 0) },
     uCamHeight: { value: 0 },
     uWeight: { value: 0 },
+    uSkyWeight: { value: 0 },
+    uSkyGain: { value: 1 },
     uExposure: { value: 4 },
-    uClouds: { value: 1 },
     uSurface: { value: new THREE.Vector3(0.03, 0.09, 0.22) },
+    uEcefX: { value: new THREE.Vector3(1, 0, 0) },
+    uEcefY: { value: new THREE.Vector3(0, 0, -1) },
+    uGlobe: { value: 0 },
+    uMapMode: { value: 0 },
+    uMapWater: { value: new THREE.Color() },
+    uAreas: { value: Array.from({ length: SHELL_MAX_AREAS }, () => new THREE.Vector4()) },
+    uAreaCount: { value: 0 },
 };
+
 
 export class AtmosphereShellModelLibBuilder implements ModelLibBuilder {
 
@@ -379,7 +457,7 @@ export class AtmosphereShellModelLibBuilder implements ModelLibBuilder {
         const material = new THREE.ShaderMaterial({
             vertexShader: VERTEX_PROGRAM,
             fragmentShader: FRAGMENT_PROGRAM,
-            uniforms: { ...ATMOSPHERE_SHELL_UNIFORMS, ...SCENE_DEPTH_UNIFORMS },
+            uniforms: { ...ATMOSPHERE_SHELL_UNIFORMS, ...EARTH_MAP_UNIFORMS, ...SCENE_DEPTH_UNIFORMS },
             depthTest: false,
             depthWrite: false,
             transparent: true,

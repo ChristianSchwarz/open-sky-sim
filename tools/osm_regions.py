@@ -92,7 +92,13 @@ def _polys_of(geom: BaseGeometry) -> List[Polygon]:
         return [geom]
     if isinstance(geom, MultiPolygon):
         return [g for g in geom.geoms if not g.is_empty]
-    return [g for g in getattr(geom, 'geoms', []) if isinstance(g, Polygon) and not g.is_empty]
+    # A collection's members are flattened, not just filtered: make_valid on
+    # a leaf's land with a ring of too few points among its parts returns the
+    # land as a MultiPolygon *inside* a GeometryCollection, and keeping only
+    # bare Polygon members threw the whole land away - every landuse piece
+    # was then clipped to nothing and the leaf baked as plain ground
+    # (Brandenburg an der Havel, Berlin; found 2026-10-24).
+    return [p for g in getattr(geom, 'geoms', []) for p in _polys_of(g)]
 
 
 def _valid(geom: BaseGeometry) -> BaseGeometry:

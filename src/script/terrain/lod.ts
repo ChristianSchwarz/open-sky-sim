@@ -11,7 +11,7 @@ const TERRAIN_VIEW_RANGE_MAX_M = 3_000_000;
  * The sky dome, clouds and cirrus are gone above this altitude (m), and the
  * atmosphere shell has finished fading in over them.
  */
-export const SPACE_SKY_ALTITUDE_M = 100_000;
+export const SPACE_SKY_ALTITUDE_M = 60_000;
 
 /** Subtracted from the altitude zoom curve for inland / open-ocean tiles only. */
 const TERRAIN_ZOOM_OFFSET = 1;

@@ -23,7 +23,7 @@ import {
 } from './lod';
 import { TerrainManifest } from './manifest';
 import {
-    TileKey, childrenOf, rootTiles, tileKeyString,
+    TileKey, approxTileEdgeMetres, childrenOf, rootTiles, tileKeyString,
 } from './tiling';
 import { TileWant } from './tileStreamer';
 
@@ -101,6 +101,43 @@ export interface QuadtreeUpdate {
 
 const _sphereCenter = new THREE.Vector3();
 
+let mapLod = false;
+/** Cover texels across a tile, counted low: z4-z9 rasters are 256, z10-11 512. */
+const MAP_TEXELS_PER_TILE = 256;
+/** Screen pixels a texel may cover on the map before its tile refines. */
+const MAP_TEXEL_PX = 2;
+/** How much further out the leaf level comes in on the map, on top of leafScale. */
+const MAP_LEAF_REACH = 2;
+
+/**
+ * Refine by screen-space error alone, for every quadtree: no altitude cap
+ * (terrainMaxZoomForAltitudeM), no far-field falloff (detailDistanceM), no
+ * turn margin on the frustum, ocean refined by curvature alone, and the leaf
+ * level - the land-use polygons, the vector picture - kept MAP_LEAF_REACH
+ * times further out before the textured level above it takes over; and the
+ * frame governor's detail scale ignored, so a still map does not flicker.
+ * Both are tuned for a view out toward the horizon, where distance stands for
+ * how small a tile is on screen. The map mode looks straight down from
+ * kilometres up through a narrow lens; there every tile is far and still
+ * large on screen, and either would hold the map far too coarse. The frame
+ * governor and the triangle budget still bound the cost.
+ */
+export function setMapLod(on: boolean): void {
+    mapLod = on;
+}
+
+let mapDetailScale = 1;
+
+/**
+ * The map's detail scale, in place of the frame governor's (1 = full, larger
+ * coarser). Game.fitMapDetail sets it so the view fits the triangle budget:
+ * over it, the budget folds tiles into their parents, and which ones changes
+ * with every tile that arrives, which is flicker.
+ */
+export function setMapDetailScale(scale: number): void {
+    mapDetailScale = scale;
+}
+
 export class Quadtree {
     private readonly roots: QuadNode[];
     private readonly nodes = new Map<string, QuadNode>();
@@ -166,9 +203,17 @@ export class Quadtree {
      * fills only it carries - takes over that much further out.
      */
     private drawErrorM(node: QuadNode, leafScale: number): number {
-        const err = node.ocean
+        let err = node.ocean
             ? Math.max(node.geometricErrorM, ellipsoidSagittaM(node.id))
             : node.geometricErrorM;
+        if (mapLod && !node.ocean) {
+            // Straight down the colour is what is seen, and the header error
+            // measures only the shape: flat steppe kept a z4 tile, 5 km a
+            // texel, filling the screen in blocks (Crimea, 2026-10-24). On the
+            // map a texel counts as an error too, so a tile gives way once its
+            // texels would cover more than MAP_TEXEL_PX pixels.
+            err = Math.max(err, approxTileEdgeMetres(node.id) / MAP_TEXELS_PER_TILE / MAP_TEXEL_PX);
+        }
         return node.id.z === this.maxZoom - 1 ? err * leafScale : err;
     }
 
@@ -206,6 +251,14 @@ export class Quadtree {
         this.generation++;
         const draw: QuadNode[] = [];
         const wants: TileWant[] = [];
+        if (mapLod) {
+            leafScale *= MAP_LEAF_REACH;
+            // A still map must hold still: the frame governor nudging every
+            // tile's threshold up and down with the frame time reads as the
+            // whole map flickering between levels. The map's own scale, which
+            // moves only when the view does not fit the budget, stands in.
+            detailScale = mapDetailScale;
+        }
 
         const frustum = new THREE.Frustum().setFromProjectionMatrix(
             new THREE.Matrix4().multiplyMatrices(
@@ -215,11 +268,14 @@ export class Quadtree {
         );
         const camPos = camera.position;
         const altitude = camPos.y;
-        const range = terrainViewRangeM(altitude);
+        // The map looks straight down from as high as its zoom needs, past
+        // the view range a flight ever wants (3000 km): the ground under it
+        // must stay in range, with room for the view's edges.
+        const range = mapLod ? Math.max(terrainViewRangeM(altitude), altitude * 1.5) : terrainViewRangeM(altitude);
         const zoomCap = Math.min(
             this.maxZoom,
             visibleZoomCap,
-            terrainMaxZoomForAltitudeM(altitude, this.maxZoom, true),
+            mapLod ? Infinity : terrainMaxZoomForAltitudeM(altitude, this.maxZoom, true),
         );
 
         const visit = (node: QuadNode): void => {
@@ -247,7 +303,8 @@ export class Quadtree {
             // rotation. Culling exactly to the edge means a fast turn sweeps
             // past tiles that were correctly dropped a moment ago and are not
             // back yet, which reads as the screen edges going empty.
-            const margin = centreDist * FRUSTUM_CULL_MARGIN_TAN;
+            // The map never turns, so it needs none.
+            const margin = mapLod ? 0 : centreDist * FRUSTUM_CULL_MARGIN_TAN;
             if (!sphereInFrustum(_sphereCenter, node.radius + margin, frustum)) {
                 return;
             }
@@ -278,9 +335,12 @@ export class Quadtree {
             // The far-field falloff rides on the same scale as the governor, so
             // the two multiply rather than fight. Like the governor it is a
             // *detail* knob, so the sagitta bound below still ignores it.
-            const farScale = detailScale * detailFalloff(d, detailDistanceM);
+            const farScale = detailScale * (mapLod ? 1 : detailFalloff(d, detailDistanceM));
+            // Without the altitude cap an ocean node would refine on its level's
+            // worst land error and split to the leaf across a whole sea; the
+            // ellipsoid's sagitta is its only real shape error.
             const canRefine = node.id.z < zoomCap && (
-                shouldRefine(
+                !(mapLod && node.ocean) && shouldRefine(
                     this.drawErrorM(node, leafScale), d, screenHeightPx, fovYDeg, farScale,
                 )
                 || node.ocean && shouldRefine(
@@ -357,6 +417,16 @@ export class Quadtree {
         screenHeightPx: number, fovYDeg: number, leafScale: number, nowMs: number,
         draw: QuadNode[],
     ): void {
+        // The crossfade is a band of distance, a ring on the ground ahead in
+        // flight. Straight down every leaf is about as far as every other, so
+        // the band would dither whole screens of them: on the map they are
+        // opaque, and take over from their parent outright.
+        if (mapLod) {
+            for (const c of node.children!) {
+                c.fadeM = 0;
+            }
+            return;
+        }
         if (node.takeoverAt === undefined) {
             node.takeoverAt = nowMs;
             node.dissolving = node.resident;

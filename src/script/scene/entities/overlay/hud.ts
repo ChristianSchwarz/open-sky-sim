@@ -95,6 +95,8 @@ export class HUDEntity implements Entity {
     private machNumber: number = 0;
     private isLanded: boolean = true;
     private isAutopilotEnabled: boolean = false;
+    /** What the autopilot is doing, HUD-sized, while engaged. */
+    private autopilotPhase: string | undefined;
     private hasGun: boolean = false;
     private gunAmmo: number = 0;
     private healthFraction: number = 1;
@@ -129,6 +131,7 @@ export class HUDEntity implements Entity {
         this.loadFactorG = this.actor.loadFactorG;
         this.isLanded = this.actor.isLanded;
         this.isAutopilotEnabled = this.actor.isAutopilotEnabled;
+        this.autopilotPhase = this.actor.autopilotPhase;
         this.hasGun = this.actor.hasGun;
         this.gunAmmo = this.actor.gunAmmo;
         this.healthFraction = this.actor.healthFraction;
@@ -251,7 +254,8 @@ export class HUDEntity implements Entity {
         this.renderThrottle(throttleX, throttleY, painter, hudColor, font);
 
         if (this.isAutopilotEnabled) {
-            painter.text(font, throttleX, throttleY - font.charHeight - 2, 'AP', hudColor);
+            const ap = this.autopilotPhase ? `AP ${this.autopilotPhase}` : 'AP';
+            painter.text(font, throttleX, throttleY - font.charHeight - 2, ap, hudColor);
         }
 
         this.renderFlightDataIndicators(layout, airSpeedX, airSpeedY, painter, hudColor, hudWarnColor, fontSmall);

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import http.client
 import io
 import json
 import math
@@ -137,7 +138,9 @@ def http_get(url: str, timeout: float = 120.0, tries: int = 4) -> Optional[bytes
                 return None
             if attempt == tries - 1:
                 raise
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
+        # IncompleteRead: a body cut off mid-transfer (http.client.HTTPException),
+        # which killed a whole leaf re-bake on the first try (2026-10-24).
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
             if attempt == tries - 1:
                 raise
         time.sleep(2 * (attempt + 1))

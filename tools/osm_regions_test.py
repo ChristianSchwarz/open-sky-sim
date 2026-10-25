@@ -245,6 +245,31 @@ class InvalidGeometryTest(unittest.TestCase):
         regions = assemble_tile_regions(TILE, HALO, land, None, [], [])
         self.assertAlmostEqual(_total_area(regions), TILE.area, places=6)
 
+    def test_a_collapsed_ring_among_the_land_parts_keeps_the_land_and_its_landuse(self):
+        # Brandenburg an der Havel and Berlin leaves (2026-10-24): one land
+        # part a ring of too few points, so make_valid hands the land back as
+        # a MultiPolygon *inside* a GeometryCollection. Only the collection's
+        # bare Polygon members used to be kept, which dropped the land whole:
+        # every landuse piece was clipped to nothing and the leaf baked as
+        # plain ground.
+        from shapely import make_valid
+
+        a = box(0.0, 0.0, 0.4, 1.0)
+        b = box(0.6, 0.0, 1.0, 1.0)
+        collapsed = Polygon([(0.5, 0.5), (0.5, 0.6), (0.5, 0.5), (0.5, 0.5)])
+        land = MultiPolygon([a, b, collapsed])
+        repaired = make_valid(land)
+        self.assertEqual(repaired.geom_type, 'GeometryCollection', 'test setup: the repair must nest')
+        self.assertIn('MultiPolygon', [g.geom_type for g in repaired.geoms], 'test setup: the repair must nest')
+
+        field = box(0.1, 0.1, 0.3, 0.9)
+        regions = assemble_tile_regions(
+            TILE, HALO, land, build_landuse_index([field]), [field], [CLS_CROP])
+        crops = [r for r in regions if r.landuse_class == CLS_CROP]
+        self.assertEqual(len(crops), 1)
+        self.assertAlmostEqual(crops[0].geom.area, field.area, places=6)
+        self.assertAlmostEqual(_total_area([r for r in regions if r.is_land]), 0.8, places=6)
+
 
 
 

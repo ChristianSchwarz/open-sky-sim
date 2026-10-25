@@ -72,10 +72,21 @@ const MIN_TRIANGLE_AREA_TEXELS = 1e-4;
  * tile is from the frame's origin. Height is the geodetic one from the same
  * conversion, and it orders overlapping facets: a land-use fill is lifted a
  * hair above the ground it covers and has to win the texel.
+ *
+ * `supersample` is samples per texel along each axis: the leaf is drawn at
+ * `size * supersample` and box-filtered down (downsample2x2's mean colour,
+ * majority class), so a field edge crossing a texel blends instead of
+ * stair-stepping. 2 is 4x SSAA. A power of two, so the filter is halvings.
  */
 export function rasterizeLeaf(
-    tile: PtmTile, basis: EnuBasis, size: number, buildings?: PbhTile,
+    tile: PtmTile, basis: EnuBasis, size: number, buildings?: PbhTile, supersample = 1,
 ): Uint8Array {
+    if (!Number.isInteger(supersample) || supersample < 1 || (supersample & (supersample - 1)) !== 0) {
+        throw new Error(`supersample must be a power of two, got ${supersample}`);
+    }
+    if (supersample > 1) {
+        return shrinkTo(rasterizeLeaf(tile, basis, size * supersample, buildings), size * supersample, size);
+    }
     const out = emptyRaster(size);
     const height = new Float32Array(size * size).fill(-Infinity);
     const bounds = tileBounds(tile.id.z, tile.id.x, tile.id.y);

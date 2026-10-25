@@ -28,6 +28,7 @@ export type VisibleZoomChangeListener = (zoom: number) => void;
 export type LanduseRevealChangeListener = (px: number) => void;
 export type TriangleBudgetChangeListener = (triangles: number) => void;
 export type FarTileTexturesChangeListener = (enabled: boolean) => void;
+export type OpponentsScrambleChangeListener = (enabled: boolean) => void;
 export type BuildingsChangeListener = (enabled: boolean) => void;
 export type RoadsChangeListener = (mode: RoadsMode) => void;
 export type RenderScaleChangeListener = (scale: number) => void;
@@ -58,6 +59,7 @@ export class ConfigService {
     readonly landuseReveal: LanduseRevealSetting;
     readonly triangleBudget: TriangleBudgetSetting;
     readonly farTileTextures: FarTileTexturesSetting;
+    readonly opponentsScramble: OpponentsScrambleSetting;
     readonly buildings: BuildingsSetting;
     readonly roads: RoadsSetting;
     readonly renderScale: RenderScaleSetting;
@@ -87,6 +89,7 @@ export class ConfigService {
         initialVisibleZoom?: number,
         initialColourAdjust?: ColourAdjust,
         initialBuildings?: boolean,
+        initialOpponentsScramble?: boolean,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -101,6 +104,7 @@ export class ConfigService {
         this.landuseReveal = new LanduseRevealSetting(initialLanduseRevealPx);
         this.triangleBudget = new TriangleBudgetSetting(initialTriangleBudget);
         this.farTileTextures = new FarTileTexturesSetting(initialFarTileTextures);
+        this.opponentsScramble = new OpponentsScrambleSetting(initialOpponentsScramble);
         this.buildings = new BuildingsSetting(initialBuildings);
         this.roads = new RoadsSetting(initialRoads);
         this.renderScale = new RenderScaleSetting(initialRenderScale);
@@ -351,6 +355,39 @@ export class BuildingsSetting {
  * them (see CoverTextures) or one colour per facet. Off is how a pyramid
  * baked without textures always looks; on costs nothing where there are none.
  */
+/**
+ * Whether opponents start parked at another airfield and take off to the fight,
+ * instead of appearing in the air near the player. Applies on the next spawn.
+ */
+export class OpponentsScrambleSetting {
+    private active: boolean;
+    private listeners: Set<OpponentsScrambleChangeListener> = new Set();
+
+    constructor(initialActive: boolean = false) {
+        this.active = initialActive;
+    }
+
+    getActive(): boolean {
+        return this.active;
+    }
+
+    setActive(enabled: boolean) {
+        if (enabled === this.active) return;
+        this.active = enabled;
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: OpponentsScrambleChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: OpponentsScrambleChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
 export class FarTileTexturesSetting {
     private active: boolean;
     private listeners: Set<FarTileTexturesChangeListener> = new Set();

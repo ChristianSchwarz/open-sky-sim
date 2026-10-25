@@ -309,6 +309,7 @@ export class SceneMaterialManager implements KernelTask {
     private readonly colorCache: ColorCache = new ColorCache();
     private palette: Palette;
     private fog: FogQuality;
+    private fogDensityScale = 1;
     private shading: DisplayShading;
     /** Every live material; a disposed one leaves (see build). */
     private materials = new Set<THREE.ShaderMaterial>();
@@ -785,6 +786,17 @@ export class SceneMaterialManager implements KernelTask {
         assertExpr(false, 'This should never happen');
     }
 
+    /**
+     * Scale every material's distance fog, 0 to switch it off. The fog is by
+     * distance whatever the FogQuality - the terrain's included - so the map
+     * mode, looking down from kilometres up, turns it off here.
+     */
+    setFogDensityScale(scale: number): void {
+        this.fogDensityScale = scale;
+        this.paintedPalette = undefined;
+        this.setPalette(this.palette);
+    }
+
     setPalette(palette: Palette) {
         this.palette = palette;
         const toPaint = palette === this.paintedPalette ? this.unpainted : this.materials;
@@ -846,7 +858,7 @@ export class SceneMaterialManager implements KernelTask {
             u.uMarkColorA.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[0])));
             u.uMarkColorB.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[1])));
         }
-        u.fogDensity.value = palette.values[FogValueCategory(c)];
+        u.fogDensity.value = palette.values[FogValueCategory(c)] * this.fogDensityScale;
         u.fogColor.value.copy(this.colorCache.getColor(PaletteColor(palette, FogColorCategory(c))));
         if (d.particles && d.ramp) {
             if (d.category === PaletteCategory.FX_SMOKE) {

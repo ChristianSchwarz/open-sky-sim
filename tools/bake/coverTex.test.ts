@@ -115,6 +115,25 @@ describe('rasterizeLeaf', () => {
             assert.notEqual(texel(raster, SIZE, 0, y)[3], 9, `wall painted at row ${y}`);
         }
     });
+
+    it('blends a texel an edge crosses when supersampled', () => {
+        // A fill over the west 8.4 texels: column 8's centre (8.5) misses it,
+        // its 2x2 samples at 8.25 and 8.75 split half and half.
+        const f = 8.4 / SIZE;
+        const fill: Tri[] = [
+            { corners: [at(-0.01, -0.01, 100.05), at(f, -0.01, 100.05), at(f, 1.01, 100.05)], cls: 7, rgb: [200, 200, 0] },
+            { corners: [at(-0.01, -0.01, 100.05), at(f, 1.01, 100.05), at(-0.01, 1.01, 100.05)], cls: 7, rgb: [200, 200, 0] },
+        ];
+        const tile = leaf([...groundQuad(5, [10, 20, 30]), ...fill]);
+        const point = rasterizeLeaf(tile, BASIS, SIZE);
+        assert.deepEqual(texel(point, SIZE, 8, 4), [10, 20, 30, 5]);
+        const ssaa = rasterizeLeaf(tile, BASIS, SIZE, undefined, 2);
+        // Mean colour; the 2-2 class tie goes to the first sample, the fill.
+        assert.deepEqual(texel(ssaa, SIZE, 8, 4), [105, 110, 15, 7]);
+        assert.deepEqual(texel(ssaa, SIZE, 7, 4), [200, 200, 0, 7]);
+        assert.deepEqual(texel(ssaa, SIZE, 9, 4), [10, 20, 30, 5]);
+        assert.throws(() => rasterizeLeaf(tile, BASIS, SIZE, undefined, 3), /power of two/);
+    });
 });
 
 describe('downsample2x2', () => {

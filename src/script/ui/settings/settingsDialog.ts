@@ -119,7 +119,8 @@ const VIEWS_HELP: HelpEntry[] = [
     { keys: ['F2'], action: 'Exterior back/front' },
     { keys: ['F3'], action: 'Exterior left/right' },
     { keys: ['F6'], action: 'Exterior back/front of AI plane (looks at player)' },
-    { keys: ['F12'], action: 'Aircraft showcase (black background, orbit with numpad)' },
+    { keys: ['F12'], action: 'Terrain from above in a new tab (drag/arrows move, wheel/+/- zoom)' },
+    { keys: ['Shift+F12'], action: 'Aircraft showcase (black background, orbit with numpad)' },
     { keys: ['F4'], action: 'Replay the flight so far (Space pause, arrows seek and speed, or move the camera in the Free view; F4/Esc exit)' },
     { keys: ['4'], action: 'To/from target' },
     { keys: ['Num 4', 'Num 6', 'Num 8', 'Num 2'], action: 'Move camera around aircraft' },
@@ -243,7 +244,7 @@ const DATA_SOURCES: DataSourceGroup[] = [
                 credit: 'Contains modified Copernicus Sentinel data', licence: 'Copernicus Sentinel data terms',
             },
             {
-                name: 'Blue Marble Next Generation', scope: 'The whole planet, 500 m',
+                name: 'Blue Marble Next Generation', scope: 'The whole planet seen from orbit, 1.85 km',
                 credit: 'NASA Earth Observatory', licence: 'Public domain',
             },
         ],
@@ -869,6 +870,14 @@ function sliderValue(event: Event): number {
                                 }
                             </mat-radio-group>
                         </section>
+
+                        <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Opponents</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">Applies on the next spawn. From another airfield within 40 km, else from another runway of yours.</p>
+                            <mat-slide-toggle [checked]="opponentsScramble()" (change)="setOpponentsScramble($event)">
+                                Take off from another airfield
+                            </mat-slide-toggle>
+                        </section>
                     </div>
                 }
 
@@ -1101,6 +1110,7 @@ export class SettingsDialog {
     readonly triangleBudget = signal(this.config.triangleBudget.getActive());
 
     readonly farTileTextures = signal(this.config.farTileTextures.getActive());
+    readonly opponentsScramble = signal(this.config.opponentsScramble.getActive());
     readonly buildings = signal(this.config.buildings.getActive());
     readonly roadsOptions = ROADS_OPTIONS;
     readonly roads = signal(this.config.roads.getActive());
@@ -1206,6 +1216,12 @@ export class SettingsDialog {
         this.config.farTileTextures.setActive(event.checked);
         updateSettings({ farTileTextures: event.checked });
         this.farTileTextures.set(event.checked);
+    }
+
+    setOpponentsScramble(event: MatSlideToggleChange) {
+        this.config.opponentsScramble.setActive(event.checked);
+        updateSettings({ opponentsScramble: event.checked });
+        this.opponentsScramble.set(event.checked);
     }
 
     setBuildings(event: MatSlideToggleChange) {

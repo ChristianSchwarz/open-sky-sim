@@ -7,6 +7,7 @@ import { PaletteCategory } from '../../config/palettes/palette';
 import { SceneMaterialManager, SceneMaterialPrimitiveType, SceneMaterialUniforms } from '../materials/materials';
 import { updateUniforms } from '../utils';
 import { attachToRenderList } from '../../render/renderList';
+import { fxClockS } from '../fxClock';
 
 /** Body space: +Z forward, −Z aft. Last-resort defaults when no tips are passed. */
 const DEFAULT_WINGTIP_OUTWARD = F16_PROFILE.wingSpanM * 0.5;
@@ -26,10 +27,17 @@ const MIN_TRAIL_SPEED_MPS = 0;
 const SAMPLE_SPACING_SPEED_FACTOR = 0.028;
 const MIN_SAMPLE_SPACING_M = 0.45;
 const MAX_SAMPLE_SPACING_M = 3.5;
+/** Seconds a trail sample stays visible; it thins out linearly to nothing over this time. */
+const TRAIL_LIFETIME_S = 1.5;
 const _basis = new THREE.Matrix4();
 
 function segmentDither(index: number): number {
     return DITHER_MIN + (DITHER_MAX - DITHER_MIN) * (index / (SEGMENT_COUNT - 1));
+}
+
+/** Dither level a segment of this age may reach at most: full when fresh, 0 at TRAIL_LIFETIME_S. */
+function ageDither(ageS: number): number {
+    return DITHER_MAX * Math.max(0, 1 - ageS / TRAIL_LIFETIME_S);
 }
 
 function sampleSpacingM(speedMps: number): number {
@@ -44,6 +52,8 @@ class WingTrailSide {
         { length: POSITION_COUNT },
         () => new THREE.Vector3(),
     );
+    /** When each history sample was recorded (seconds, fxClockS: stops while paused). */
+    private readonly times = new Float64Array(POSITION_COUNT);
     private head = 0;
     private count = 0;
     /**
@@ -87,9 +97,10 @@ class WingTrailSide {
         this.root.visible = false;
     }
 
-    tryPush(tipWorld: THREE.Vector3, spacingM: number): void {
+    tryPush(tipWorld: THREE.Vector3, spacingM: number, nowS: number): void {
         if (!this.hasLastSample || this.lastSample.distanceToSquared(tipWorld) >= spacingM * spacingM) {
             this.history[this.head].copy(tipWorld);
+            this.times[this.head] = nowS;
             this.head = (this.head + 1) % POSITION_COUNT;
             this.count = Math.min(this.count + 1, POSITION_COUNT);
             this.lastSample.copy(tipWorld);
@@ -102,7 +113,11 @@ class WingTrailSide {
         return this.history[index];
     }
 
-    layoutSegments(camera: THREE.Camera, currentTip: THREE.Vector3): void {
+    private timeAt(ageFromNewest: number): number {
+        return this.times[(this.head - 1 - ageFromNewest + POSITION_COUNT * 2) % POSITION_COUNT];
+    }
+
+    layoutSegments(camera: THREE.Camera, currentTip: THREE.Vector3, nowS: number): void {
         if (this.count === 0) {
             this.root.visible = false;
             return;
@@ -117,6 +132,12 @@ class WingTrailSide {
             const age = SEGMENT_COUNT - 1 - i;
 
             if (age >= segmentLimit) {
+                continue;
+            }
+            // A segment fades with the age of its older end, so a trail left
+            // behind (aircraft slowed or stopped) thins out and disappears.
+            const level = Math.min(segmentDither(i), ageDither(nowS - this.timeAt(age)));
+            if (level <= 0) {
                 continue;
             }
 
@@ -157,7 +178,7 @@ class WingTrailSide {
             mesh.scale.set(SEGMENT_WIDTH * 2, length, 1);
             mesh.updateMatrix();
             this.mesh.setMatrixAt(drawn, mesh.matrix);
-            this.levels.array[drawn] = segmentDither(i);
+            this.levels.array[drawn] = level;
             drawn++;
         }
         this.mesh.count = drawn;
@@ -251,7 +272,8 @@ export class WingtipTrails {
         displayVelocity: THREE.Vector3,
     ): void {
         const speed = displayVelocity.length();
-        
+        const nowS = fxClockS();
+
         this.applyWhiteColors();
 
         if (speed >= MIN_TRAIL_SPEED_MPS) {
@@ -262,8 +284,8 @@ export class WingtipTrails {
             this._rightTip.copy(this.rightTipBody);
             this._rightTip.z -= WINGTIP_TRAIL_AFT_OFFSET_M;
             this._rightTip.applyQuaternion(displayQuaternion).add(displayPosition);
-            this.left.tryPush(this._leftTip, spacing);
-            this.right.tryPush(this._rightTip, spacing);
+            this.left.tryPush(this._leftTip, spacing, nowS);
+            this.right.tryPush(this._rightTip, spacing, nowS);
         }
     }
 
@@ -271,8 +293,9 @@ export class WingtipTrails {
         if (!lists.has(fxId)) {
             return;
         }
-        this.left.layoutSegments(camera, this._leftTip);
-        this.right.layoutSegments(camera, this._rightTip);
+        const nowS = fxClockS();
+        this.left.layoutSegments(camera, this._leftTip, nowS);
+        this.right.layoutSegments(camera, this._rightTip, nowS);
         this.left.addToRenderList(fxId, lists);
         this.right.addToRenderList(fxId, lists);
     }

@@ -465,6 +465,7 @@ import io
 import re
 
 import bake_osm_airports
+from bake_osm_airports import ski_jump_tags
 from bake_osm_airports import (
     AerodromeIndex,
     LandMask,
@@ -598,6 +599,17 @@ class OwnerTest(unittest.TestCase):
         line_nodes = {400: line_nodes[1], 401: line_nodes[2]}
         found = assemble_airfields(elements_and_nodes(field, main, (deck, deck_nodes), (line, line_nodes)))
         self.assertEqual(sorted(r.surface for r in found[0].runways), ['gravel', 'metal'])
+
+    def test_a_skillion_with_no_height_below_its_roof_is_a_ramp(self):
+        # How Saki's T2 is tagged now: `height=0`, no `building:levels`.
+        self.assertTrue(ski_jump_tags({
+            'building': 'yes', 'height': '0', 'roof:shape': 'skillion', 'roof:height': '8'}))
+        self.assertTrue(ski_jump_tags({
+            'building': 'yes', 'building:levels': '0', 'roof:shape': 'skillion'}))
+        # A lean-to shed has storeys under its skillion roof.
+        self.assertFalse(ski_jump_tags({
+            'building': 'yes', 'building:levels': '1', 'roof:shape': 'skillion'}))
+        self.assertFalse(ski_jump_tags({'building': 'yes', 'height': '0', 'roof:shape': 'gabled'}))
 
     def test_a_short_runway_with_no_ramp_is_still_a_farm_strip(self):
         field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)

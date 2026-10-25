@@ -29,6 +29,7 @@ import { TerrainManifest, TextureStreamManifest, textureTileUrl } from './manife
 import { PTX_NO_DATA, PtxTile, decodePtx } from './ptx';
 import { TileIndex } from './tileIndex';
 import { TileMeshes } from './tileMesh';
+import { LAND_TONE_BASE, TerrainTone } from './tones';
 import { TileStore } from './tileStore';
 import { TileKey, tileBounds } from './tiling';
 
@@ -54,6 +55,41 @@ export interface CoverBinding {
 
 /** How far from the camera a leaf's own cover texture replaces its facet colour. */
 export const LEAF_COVER_FROM_M = 3000;
+
+let leafCoverFromM = LEAF_COVER_FROM_M;
+let underlay = false;
+
+/**
+ * The map mode: a coarse tile's water and coastline come from its cover
+ * texture, not its mesh. Below the leaf the mesh draws coasts and lakes as a
+ * few big triangles - lakes cut as triangular holes, sea poking into land and
+ * land into sea, holes with nothing under them - while the texture has them at
+ * its texel size, with no data wherever there is water. So a textured coarse
+ * tile gets two sheets under its land, a textured land sheet and a water
+ * sheet below it; its land facets give way over no-data texels (a negative
+ * fromM tells terrainFP to discard there) and its water mesh is hidden. Bound
+ * from then on: set it before the map's tiles arrive.
+ */
+export function setCoverUnderlay(on: boolean): void {
+    underlay = on;
+}
+
+/** Below sea level, so no land is drawn over (polders, the Caspian). */
+const UNDERLAY_LAND_M = -100;
+const UNDERLAY_WATER_M = -150;
+/** Cells a side: at z4 a cell is 0.7 degrees, its chord sagging well under a metre... at z9 far less. */
+const UNDERLAY_CELLS = 32;
+
+/**
+ * Move where a leaf's cover texture takes over from its facets, for every
+ * leaf bound now or later. The map mode looks down from kilometres up, where
+ * LEAF_COVER_FROM_M - a distance standing in for "too small to see" - would
+ * put every town under its texture: there it is out of reach, and the facets and
+ * the houses (cut by size on screen, not by distance) stay.
+ */
+export function setLeafCoverFromM(m: number): void {
+    leafCoverFromM = m;
+}
 
 export interface CoverFrame {
     east: THREE.Vector3;
@@ -297,14 +333,95 @@ export class CoverTextures {
         }
         const frame = coverFrame(id, this.bakeBasis, meshes.group.scale.x);
         const texture = buildCoverTexture(tile);
+        const leaf = id.z === this.leafZoom;
+        const sheets = underlay && !leaf;
         const binding: CoverBinding = {
             texture, east: frame.east, north: frame.north, k: frame.k,
-            fromM: id.z === this.leafZoom ? LEAF_COVER_FROM_M : 0,
+            // Read per draw, so setLeafCoverFromM reaches leaves bound before it.
+            get fromM() {
+                return leaf ? leafCoverFromM : sheets ? -1 : 0;
+            },
         };
         land.userData.cover = binding;
+        if (sheets) {
+            this.addUnderlay(id, meshes, binding);
+        }
         meshes.cover = texture;
         meshes.bytes += coverTextureBytes(tile.size);
         this.attached++;
+    }
+
+    /** The map mode's two sheets under a coarse tile's land; see setCoverUnderlay. */
+    private addUnderlay(id: TileKey, meshes: TileMeshes, binding: CoverBinding): void {
+        const land = meshes.land!;
+        const q = meshes.group.scale.x;
+        const b = tileBounds(id);
+        const at = (lat: number, lon: number, h: number): THREE.Vector3 => {
+            const enu = ecefToEnu(this.bakeBasis, geodeticToEcef(lat, lon, h));
+            return new THREE.Vector3(enu.e, enu.u, -enu.n);
+        };
+        const latC = (b.south + b.north) / 2;
+        const lonC = (b.west + b.east) / 2;
+        const origin = at(latC, lonC, meshes.centerHeightM ?? 0);
+        const up = at(latC, lonC, 1).sub(at(latC, lonC, 0)).normalize();
+        const n = UNDERLAY_CELLS;
+        const count = (n + 1) * (n + 1);
+        const sheet = (h: number): THREE.BufferAttribute => {
+            const pos = new Float32Array(count * 3);
+            for (let j = 0; j <= n; j++) {
+                for (let i = 0; i <= n; i++) {
+                    const p = at(b.north - (b.north - b.south) * j / n, b.west + (b.east - b.west) * i / n, h)
+                        .sub(origin).divideScalar(q);
+                    pos.set([p.x, p.y, p.z], (j * (n + 1) + i) * 3);
+                }
+            }
+            return new THREE.BufferAttribute(pos, 3);
+        };
+        const index: number[] = [];
+        for (let j = 0; j < n; j++) {
+            for (let i = 0; i < n; i++) {
+                const a = j * (n + 1) + i;
+                index.push(a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2);
+            }
+        }
+        const normals = new Float32Array(count * 3);
+        for (let v = 0; v < count; v++) {
+            normals.set([up.x, up.y, up.z], v * 3);
+        }
+
+        // The land sheet: the land's own material, so it is lit, coloured and
+        // depth-tested as the land is; its colour is the texel's wherever there
+        // is one, and no-data fragments are discarded for the water below.
+        const lg = new THREE.BufferGeometry();
+        lg.setAttribute('position', sheet(UNDERLAY_LAND_M));
+        lg.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+        lg.setAttribute('coverColor', new THREE.BufferAttribute(new Uint8Array(count * 3), 3, true));
+        lg.setAttribute('coverClass', new THREE.BufferAttribute(new Float32Array(count), 1));
+        lg.setAttribute('regionSize', new THREE.BufferAttribute(new Float32Array(count), 1));
+        lg.setIndex(index);
+        lg.addGroup(0, index.length, LAND_TONE_BASE);
+        const landSheet = new THREE.Mesh(lg, land.material);
+        landSheet.userData.cover = binding;
+        landSheet.userData.landuseFills = false;
+
+        // The water sheet: deep water, in the tile's own water material.
+        const wg = new THREE.BufferGeometry();
+        wg.setAttribute('position', sheet(UNDERLAY_WATER_M));
+        wg.setAttribute('secondTone', new THREE.BufferAttribute(new Float32Array(count), 1));
+        wg.setIndex(index);
+        wg.addGroup(0, index.length, TerrainTone.Water);
+        const waterSheet = new THREE.Mesh(wg, (meshes.water ?? land).material);
+
+        for (const s of [landSheet, waterSheet]) {
+            s.frustumCulled = false;
+            s.matrixAutoUpdate = false;
+            s.onBeforeRender = (meshes.water && s === waterSheet ? meshes.water : land).onBeforeRender;
+            meshes.group.add(s);
+        }
+        if (meshes.water) {
+            meshes.water.visible = false;
+        }
+        meshes.coverUnderlay = [landSheet, waterSheet];
     }
 
     /** Zoom range the bake wrote sidecars for; `max < min` when it wrote none. */

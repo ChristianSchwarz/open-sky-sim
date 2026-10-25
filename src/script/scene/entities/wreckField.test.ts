@@ -602,8 +602,32 @@ describe('WreckField', () => {
             expect(up).toBeGreaterThan(0);
             expect(down).toBeGreaterThan(0);
             expect(sideways + up + down).toBe(80);
-            // Up is the usual vertical fold.
-            expect(up).toBeGreaterThan(down);
+            // Drooping (the tail end going down, inertia carrying it on) is the usual vertical fold.
+            expect(down).toBeGreaterThan(up);
+        });
+
+        it('droops under the blow: the wing tips and the tail end go down more often than up', () => {
+            let tipsDown = 0;
+            let tipsUp = 0;
+            for (let run = 0; run < 60; run++) {
+                const field = new WreckField();
+                spawnJet(field, new THREE.Vector3((run % 5 - 2) * 4, -50, 40));
+                const wing = vertices(field, wingMat);
+                // The wing was level at the height of the fuselage; its far ends say which way it folded.
+                const tipY = wing.filter(v => Math.abs(v.x) > 5).map(v => v.y);
+                if (tipY.length === 0) {
+                    continue;
+                }
+                const mean = tipY.reduce((a, b) => a + b, 0) / tipY.length;
+                const rootY = wing.filter(v => Math.abs(v.x) < 1).map(v => v.y);
+                const root = rootY.reduce((a, b) => a + b, 0) / Math.max(1, rootY.length);
+                if (mean < root - 0.05) {
+                    tipsDown++;
+                } else if (mean > root + 0.05) {
+                    tipsUp++;
+                }
+            }
+            expect(tipsDown).toBeGreaterThan(tipsUp);
         });
 
         it('shifts further for a harder hit, but never so far that the sections stop overlapping', () => {

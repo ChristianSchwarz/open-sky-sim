@@ -193,6 +193,19 @@ export class FarLandTiles {
     }
 
     /** Copy the near border, as the stitcher left it, onto each level's border corners. */
+    /** A level's welded geometry was rebuilt bigger (seamFillTail.ts writeFill): point the level at the new one. */
+    replaceGeometry(meshes: TileMeshes, from: THREE.BufferGeometry, to: THREE.BufferGeometry): void {
+        const far = meshes.far;
+        if (far === undefined || far === 'pending' || far === 'none') {
+            return;
+        }
+        for (const level of far.levels) {
+            if (level.smooth === from) {
+                level.smooth = to;
+            }
+        }
+    }
+
     private followSeam(meshes: TileMeshes, far: FarLandMeshes): void {
         const version = meshes.seam?.version ?? 0;
         if (far.seamVersion === version) {

@@ -111,6 +111,8 @@ module.exports = (_env, argv) => ({
                 },
                 // Development serves assets/terrain from the repo; only a
                 // production build copies it into dist/ (see the note above).
+                // The planet's colour map from orbit, tiled (tools/prep_earth_tiles.py).
+                { from: 'assets/earth', to: 'assets/earth', noErrorOnMissing: true },
                 ...(argv && argv.mode === 'production' && !process.env.TERRAIN_URL
                     ? [{ from: 'assets/terrain', to: 'assets/terrain', noErrorOnMissing: true }]
                     : []),

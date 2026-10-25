@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { AirframeSlowSpeeds } from './airfield/airframePerformance';
 
 /**
  * Command sink for an aircraft: exactly the normalized inputs a human pilot
@@ -48,6 +49,8 @@ interface AircraftObservation {
     isGearDeployed(): boolean;
     isFlapsExtended(): boolean;
     isAirbrakesExtended(): boolean;
+    /** The slow end of the envelope, for flying an approach. */
+    getSlowSpeeds(): AirframeSlowSpeeds;
 }
 
 /** An aircraft an {@link AiPilot} can fully fly: it both accepts commands and reports state. */

@@ -28,6 +28,7 @@ import { TerrainShading } from '../state/gameDefs';
 import { EnuBasis, ecefToEnu, geodeticToEcef, sceneFromEnu } from './geodesy';
 import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmBorder, PtmTile } from './ptm';
 import type { SeamState } from './seamStitch';
+import type { SeamFillData } from './seamFillTail';
 import { GROUND_CLASS, SmoothWeld, hasLanduseGround, weldSmoothLand } from './smoothWeld';
 import type { BridgeMeshSet } from './bridgeMeshes';
 import type { BuildingMeshSet } from './buildingMeshes';
@@ -44,6 +45,10 @@ export interface TileRailBed {
 
 export interface TileMeshes {
     group: THREE.Group;
+    /** The height (m above the ellipsoid) the group's local origin sits at; see tileOriginWorld. */
+    centerHeightM?: number;
+    /** The map mode's texture underlay, land and water sheets; see CoverTextures. */
+    coverUnderlay?: THREE.Mesh[];
     /**
      * The tile's own LOD error, from its header. Kept on the GPU record so
      * the quadtree can read it after the decoded bytes are evicted.
@@ -147,6 +152,8 @@ export interface TileMeshes {
     seamFill?: THREE.Mesh;
     /** See StitchableTile.seamFillGap. */
     seamFillGap?: number;
+    /** The fill as arrays, for a SMOOTH land geometry to carry (seamFillTail.ts). */
+    seamFillData?: SeamFillData;
     /** Bytes of GPU buffer, for the cache budget. */
     bytes: number;
 }
@@ -541,7 +548,10 @@ export function buildTileMeshes(
     group.matrixAutoUpdate = false;
 
     let bytes = 0;
-    const meshes: TileMeshes = { group, bytes: 0, geometricErrorM: tile.geometricErrorM, border: tile.border };
+    const meshes: TileMeshes = {
+        group, bytes: 0, geometricErrorM: tile.geometricErrorM, border: tile.border,
+        centerHeightM: tile.centerHeightM,
+    };
 
     const lg = landGeometry(tile);
     if (lg) {
@@ -641,6 +651,9 @@ export function disposeTileMeshes(m: TileMeshes): void {
     m.rivers?.geometry.dispose();
     m.outlines?.geometry.dispose();
     m.railWalls?.geometry.dispose();
+    for (const sheet of m.coverUnderlay ?? []) {
+        sheet.geometry.dispose();
+    }
     if (m.cover instanceof THREE.DataTexture) {
         m.cover.dispose();
     }

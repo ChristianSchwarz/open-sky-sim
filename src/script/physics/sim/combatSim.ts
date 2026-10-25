@@ -5,6 +5,7 @@ import { AiFlightPhase, AiPilotOptions } from '../../ai/aiPilot';
 import { AiPilotController } from '../../ai/aiPilotController';
 import { createAiPilot } from '../../ai/createAiPilot';
 import { PilotableAircraft } from '../../ai/aircraftControls';
+import { AirframeSlowSpeeds } from '../../ai/airfield/airframePerformance';
 import { SceneWorldQuery } from '../../ai/worldQuery';
 import { Combatant, Faction } from '../../weapons/combatant';
 import { Gun, GunConfig, ProjectileSink } from '../../weapons/gun';
@@ -12,7 +13,7 @@ import { clamp, FORWARD } from '../../utils/math';
 import { PLANE_DISTANCE_TO_GROUND } from '../../defs';
 import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
 import { FcsPitchLimiter } from '../fm2/fcs';
-import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
+import { Fm2AircraftConfig, defaultFm2Config } from '../fm2/fm2AircraftConfig';
 import { ForceVectorSample } from '../model/flightModel';
 import {
     deserializeWorldQuery,
@@ -293,6 +294,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.maxHealth = desc.maxHealth;
         this.health = desc.maxHealth;
         this.afterburner = fm2UsesAfterburner(desc.aircraftConfig);
+        this.setSlowSpeedsFromConfig(desc.aircraftConfig ?? defaultFm2Config);
         const hook = desc.aircraftConfig?.hook ?? DEFAULT_ARRESTOR_HOOK_BODY;
         this.hookBody.set(hook[0], hook[1], hook[2]);
         this.model = createSimFlightModel(this.modelKind, desc.aircraftConfig);
@@ -482,8 +484,17 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.inHook = deployed;
     }
 
+    /**
+     * Hand the aircraft to its in-worker pilot, or take it back. Engaging
+     * gives the pilot the job an autopilot key means here: off the ground,
+     * take off; in the air, fly home and land. (Already on its way home, it
+     * carries on rather than re-planning.)
+     */
     toggleAutopilot(): void {
         this.control = this.control === 'ai' ? 'external' : 'ai';
+        if (this.control === 'ai' && this.pilot) {
+            this.pilot.setPhase(this.model.isLanded() ? AiFlightPhase.TAKEOFF_ROLL : AiFlightPhase.RTB);
+        }
     }
 
     setPitchLimiterMode(mode: FcsPitchLimiter): void {
@@ -492,6 +503,13 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
 
     setAfterburnerFromConfig(config: Fm2AircraftConfig): void {
         this.afterburner = fm2UsesAfterburner(config);
+    }
+
+    private readonly slowSpeeds: AirframeSlowSpeeds = { minFlyingSpeed: 0, maxTouchdownSpeed: 0 };
+
+    setSlowSpeedsFromConfig(config: Fm2AircraftConfig): void {
+        this.slowSpeeds.minFlyingSpeed = config.envelope.minFlyingSpeedMps;
+        this.slowSpeeds.maxTouchdownSpeed = config.envelope.landingMaxSpeedMps;
     }
 
     // --- PilotableAircraft: observation --------------------------------------
@@ -509,6 +527,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     isGearDeployed(): boolean { return this.inGear; }
     isFlapsExtended(): boolean { return this.inFlaps; }
     isAirbrakesExtended(): boolean { return this.inAirbrakes; }
+    getSlowSpeeds(): AirframeSlowSpeeds { return this.slowSpeeds; }
     /** AI pilots have no hook control of their own: theirs follows the gear. */
     isHookDeployed(): boolean { return this.control === 'ai' ? this.inGear : this.inHook; }
 
@@ -1139,6 +1158,7 @@ export class CombatSim implements ProjectileSink {
         a.modelKind = model;
         a.collision = collision;
         a.setAfterburnerFromConfig(config);
+        a.setSlowSpeedsFromConfig(config);
         const hook = config.hook ?? DEFAULT_ARRESTOR_HOOK_BODY;
         a.hookBody.set(hook[0], hook[1], hook[2]);
         a.bindWorld(this.world);
@@ -1910,7 +1930,8 @@ export class CombatSim implements ProjectileSink {
 
         // Soft rolling contact: gear springs own the vertical constraint — do not
         // push the body or apply scrapes that fight taxi on deck.
-        if (a.isGearDeployed() && impactSpeed < SOLID_SCRAPE_FX_MPS && contact.penetration < 0.35) {
+        // (Not the net-held airframe's skin: no gear in it, its touch is a wing or a tail on the deck.)
+        if (a.isGearDeployed() && !this.contactOnNetHull && impactSpeed < SOLID_SCRAPE_FX_MPS && contact.penetration < 0.35) {
             return;
         }
 

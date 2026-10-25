@@ -186,3 +186,85 @@ a:hover {
 .hidden {
     display: none;
 }
+
+/* The map mode (F12, state/mapView.ts): the game page as a map, no menu. */
+body.map-view #settings-button,
+body.map-view #countdown {
+    display: none;
+}
+
+body.map-view #container {
+    cursor: grab;
+    touch-action: none;
+}
+
+body.map-view #container.map-dragging {
+    cursor: grabbing;
+}
+
+.map-aircraft {
+    position: fixed;
+    left: -10px;
+    top: -12px;
+    width: 20px;
+    height: 24px;
+    pointer-events: none;
+    transform-origin: 10px 12px;
+    z-index: 5;
+}
+
+.map-aircraft.no-heading svg {
+    display: none;
+}
+
+.map-aircraft.no-heading::after {
+    content: '';
+    position: absolute;
+    left: 4px;
+    top: 6px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #ffcc33;
+    border: 2px solid #000;
+    box-sizing: border-box;
+}
+
+.map-info,
+.map-help {
+    position: fixed;
+    bottom: 12px;
+    padding: 6px 8px;
+    background: rgba(12, 18, 26, 0.82);
+    border: 1px solid #3c5468;
+    border-radius: 4px;
+    color: #d8e4ee;
+    font: 13px/1.3 ui-monospace, Consolas, monospace;
+    pointer-events: none;
+    z-index: 5;
+}
+
+.map-info {
+    left: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.map-help {
+    right: 12px;
+    color: #8aa0b2;
+    font-size: 12px;
+}
+
+.map-scale {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.map-scale-bar {
+    height: 6px;
+    border: 2px solid #d8e4ee;
+    border-top: none;
+}

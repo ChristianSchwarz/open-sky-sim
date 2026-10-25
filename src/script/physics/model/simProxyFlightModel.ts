@@ -180,6 +180,11 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
         return this.simAutopilot;
     }
 
+    /** What the in-worker pilot is doing (its maneuver label), when it has one. */
+    getSimPilotLabel(): string | undefined {
+        return this.client.getManeuverLabel(this.simId);
+    }
+
     getSimWheelBrakes(): boolean {
         return this.simWheelBrakes;
     }

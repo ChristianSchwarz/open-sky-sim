@@ -7,6 +7,7 @@ import { angleOff } from './dogfightGeometry';
 import { PilotableAircraft } from './aircraftControls';
 import { Runway, WorldQuery } from './worldQuery';
 import { Combatant, Faction } from '../weapons/combatant';
+import { AirframeSlowSpeeds } from './airfield/airframePerformance';
 
 /**
  * Scenario tests for the ENGAGE-phase dogfight sub-state-machine in aiPilot.ts.
@@ -54,6 +55,7 @@ class FakeAircraft implements PilotableAircraft {
     getAngleOfAttack(): number { return 0; }
     getLoadFactorG(): number { return 1; }
     getStallStatus(): number { return -1; }
+    getSlowSpeeds(): AirframeSlowSpeeds { return { minFlyingSpeed: 68, maxTouchdownSpeed: 90 }; }
     isLanded(): boolean { return false; }
     isCrashed(): boolean { return this.crashed; }
     isGearDeployed(): boolean { return false; }

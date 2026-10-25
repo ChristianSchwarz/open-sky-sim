@@ -77,6 +77,8 @@ export interface AppSettings {
     farTileTextures: boolean;
     /** Draw the OSM buildings the bake shipped. */
     buildings: boolean;
+    /** Opponents take off from another airfield instead of appearing in the air. */
+    opponentsScramble: boolean;
     /** Which baked roads are stroked over the terrain: none, major only, or all. */
     roads: RoadsMode;
     /** Fraction of the screen the 3D view is rendered at (see RENDER_SCALES); 1 is off. */
@@ -109,6 +111,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     terrainTriangleBudget: TERRAIN_TRIANGLE_BUDGET,
     farTileTextures: true,
     buildings: true,
+    opponentsScramble: false,
     roads: RoadsMode.ALL,
     renderScale: 1,
     supersampling: false,
@@ -167,6 +170,8 @@ export function loadSettings(): AppSettings {
             farTileTextures: typeof parsed.farTileTextures === 'boolean'
                 ? parsed.farTileTextures : DEFAULT_SETTINGS.farTileTextures,
             buildings: typeof parsed.buildings === 'boolean' ? parsed.buildings : DEFAULT_SETTINGS.buildings,
+            opponentsScramble: typeof parsed.opponentsScramble === 'boolean'
+                ? parsed.opponentsScramble : DEFAULT_SETTINGS.opponentsScramble,
             roads: isValidRoadsMode(parsed.roads) ? parsed.roads : DEFAULT_SETTINGS.roads,
             renderScale: isValidRenderScale(parsed.renderScale) ? parsed.renderScale : DEFAULT_SETTINGS.renderScale,
             supersampling: typeof parsed.supersampling === 'boolean'

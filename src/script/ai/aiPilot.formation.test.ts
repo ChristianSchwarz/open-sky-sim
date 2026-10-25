@@ -6,6 +6,7 @@ import { Combatant, Faction } from '../weapons/combatant';
 import { AiFlightPhase, AiPilot, FORMATION_SLOT } from './aiPilot';
 import { PilotableAircraft } from './aircraftControls';
 import { Runway, WorldQuery } from './worldQuery';
+import { AirframeSlowSpeeds } from './airfield/airframePerformance';
 
 /**
  * Scenario tests for the FORMATION (wingman) phase in aiPilot.ts: rejoining a
@@ -47,6 +48,7 @@ class FakeAircraft implements PilotableAircraft {
     getAngleOfAttack(): number { return 0; }
     getLoadFactorG(): number { return 1; }
     getStallStatus(): number { return -1; }
+    getSlowSpeeds(): AirframeSlowSpeeds { return { minFlyingSpeed: 68, maxTouchdownSpeed: 90 }; }
     isLanded(): boolean { return false; }
     isCrashed(): boolean { return this.crashed; }
     isGearDeployed(): boolean { return false; }

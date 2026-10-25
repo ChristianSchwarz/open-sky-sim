@@ -85,6 +85,10 @@ ${TERRAIN_COVER_PARS}
       float coverClass = floor(texel.a * 255.0 + 0.5);
       if (coverClass < 254.5) {
         base = facetColor(texel.rgb, coverClass, 1.0);
+      } else if (uCoverFromM < 0.0) {
+        // The map mode (a negative reach, see setCoverUnderlay): no data is
+        // water, drawn by the texture underlay beneath, not this facet.
+        discard;
       }
     }
     vec3 diffuse = base * vLight;

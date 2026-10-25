@@ -62,6 +62,12 @@ const DEFAULT_NEAR_ZOOM = 10;
  * (11 degrees), but a dozen at z3. Below z4 the facets stay.
  */
 const DEFAULT_MIN_ZOOM = 4;
+/**
+ * Leaf rasters are drawn at twice their size and box-filtered down: 4x SSAA.
+ * Every 256 and 512 texture is folded from these, so all of them get it.
+ * Roads are painted per level afterwards and stay crisp, one texel wide.
+ */
+const LEAF_SUPERSAMPLE = 2;
 const CACHE_META_FILE = 'meta.json';
 
 interface Args {
@@ -140,6 +146,8 @@ interface CachedLeaf {
     size: number;
     mtimeMs: number;
     texSize: number;
+    /** Samples per texel along each axis; absent on a cache from before SSAA. */
+    supersample?: number;
     /** The road vectors painted in, `size:mtime`, or absent when there were none. */
     roads?: string;
     /** The .pbh footprints painted in, `size:mtime`, or absent when there were none. */
@@ -225,6 +233,7 @@ function main(): void {
     const cacheMeta = loadCacheMeta(args.cache);
     console.log(`bake_planet_tex: ${leaves.length} leaves at z${leafZoom}, `
         + `${args.nearSize} texels from z${args.nearZoom}, ${args.size} below, `
+        + `${LEAF_SUPERSAMPLE * LEAF_SUPERSAMPLE}x SSAA, `
         + `textures z${args.minZoom}..z${leafZoom - 1}${args.bbox ? ' (scoped)' : ''}`);
     let rasterised = 0;
     let fromCache = 0;
@@ -250,18 +259,21 @@ function main(): void {
         const pbhStat = args.buildings && fs.existsSync(pbhPath) ? fs.statSync(pbhPath) : undefined;
         const pbhSig = pbhStat ? `${pbhStat.size}:${pbhStat.mtimeMs}` : undefined;
         if (known && known.size === st.size && known.mtimeMs === st.mtimeMs
-            && known.texSize === leafSize && known.roads === undefined
+            && known.texSize === leafSize && (known.supersample ?? 1) === LEAF_SUPERSAMPLE
+            && known.roads === undefined
             && known.buildings === pbhSig && fs.existsSync(cachePath)) {
             fromCache++;
         } else {
             const tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
             const pbh = pbhStat ? decodePbh(zlib.gunzipSync(fs.readFileSync(pbhPath))) : undefined;
-            const raster = rasterizeLeaf(tile, basis, leafSize, pbh);
+            const raster = rasterizeLeaf(tile, basis, leafSize, pbh, LEAF_SUPERSAMPLE);
             fs.mkdirSync(path.dirname(cachePath), { recursive: true });
             // Lightly compressed: a megabyte of mostly flat colour per leaf
             // shrinks twentyfold, and the cache holds thousands of them.
             fs.writeFileSync(cachePath, zlib.gzipSync(encodePtx(k, leafSize, raster), { level: 1 }));
-            cacheMeta[key] = { size: st.size, mtimeMs: st.mtimeMs, texSize: leafSize, buildings: pbhSig };
+            cacheMeta[key] = {
+                size: st.size, mtimeMs: st.mtimeMs, texSize: leafSize, supersample: LEAF_SUPERSAMPLE, buildings: pbhSig,
+            };
             rasterised++;
         }
         if (Date.now() - lastLine > 500 || i === leaves.length - 1) {

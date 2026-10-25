@@ -244,10 +244,12 @@ const BEND_PER_SEVERITY_RAD = 1.6;
 const BEND_MAX_RAD = 2.4;
 /**
  * The plane it folds in: how much of its angle (from sideways to vertical) follows the
- * blow, the rest being chance; and how often a vertical fold has the tail rising.
+ * blow, the rest being chance. Folding vertically, the parts go the way their inertia
+ * takes them when the ground stops the middle of the airframe: they droop (the tail end
+ * and the wings go down) in this share of cases, and are thrown up in the rest.
  */
 const BEND_PLANE_BLOW_SHARE = 0.5;
-const BEND_UP_SHARE = 0.75;
+const BEND_DROOP_SHARE = 0.75;
 /**
  * In the water: most of the speed goes at the surface, then it drags the piece
  * to a halt sideways (per second) and eases its fall to a slow sink.
@@ -1362,8 +1364,10 @@ export class WreckField implements Entity {
             }
             const speed = Math.hypot(vb.x, vb.z);
             if (speed > 1) {
-                dx = 0.5 * dx + 0.5 * vb.x / speed;
-                dz = 0.5 * dz + 0.5 * vb.z / speed;
+                // The foot drags on the ground the aircraft is going over, so the leg folds back
+                // against the way it was travelling (and away from the blow).
+                dx = 0.5 * dx - 0.5 * vb.x / speed;
+                dz = 0.5 * dz - 0.5 * vb.z / speed;
             }
             const dl = Math.hypot(dx, dz) || 1;
             dx /= dl;
@@ -1432,8 +1436,9 @@ export class WreckField implements Entity {
         };
         for (const side of [0, 1]) {
             const sign = side === 0 ? -1 : 1; // left wing is at -x
-            // The way this blow folds this wing: mostly up (the tip rises), sometimes down.
-            const wingDir = Math.random() < BEND_UP_SHARE ? 1 : -1;
+            // The way this blow folds this wing: mostly down (the tip droops, as the wing's own
+            // weight carries on while the ground stops the fuselage), sometimes up.
+            const wingDir = Math.random() < BEND_DROOP_SHARE ? -1 : 1;
             // The turn so far: a point is first turned by the inner hinge, then by the outer.
             const hinges: { x: number; y: number; cos: number; sin: number }[] = [];
             let yMean = 0;
@@ -1793,13 +1798,13 @@ export class WreckField implements Entity {
 
         // In which plane it folds: from sideways (0) to vertical (pi/2), by how much of the blow was
         // sideways and how much was straight into the ground, and a good deal of chance (a fuselage
-        // folds where it is weakest). Vertically it mostly folds upward, the tail rising.
+        // folds where it is weakest). Vertically it mostly droops, the tail end going down.
         const lateral = Math.abs(vb.x);
         const vertical = Math.abs(vb.y);
         const planeByBlow = Math.atan2(0.6 * vertical + 1, lateral + 1);
         const plane = THREE.MathUtils.clamp(
             BEND_PLANE_BLOW_SHARE * planeByBlow + (1 - BEND_PLANE_BLOW_SHARE) * Math.random() * Math.PI / 2, 0, Math.PI / 2);
-        const upSign = Math.random() < BEND_UP_SHARE ? 1 : -1;
+        const upSign = Math.random() < BEND_DROOP_SHARE ? -1 : 1;
 
         // How wide the fuselage is (its sections 0-2), and where its centreline runs (height).
         let halfWidth = 0;

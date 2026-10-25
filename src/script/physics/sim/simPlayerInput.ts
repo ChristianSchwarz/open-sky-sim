@@ -135,7 +135,15 @@ export class SimPlayerInput {
         }
         this.keysDown.add(key);
 
-        if (!this.inputEnabled || sink.control === 'ai') {
+        if (!this.inputEnabled) {
+            return;
+        }
+        // The one key the autopilot leaves live is its own: with every key
+        // dropped while it flew, it could be switched on but never off.
+        if (sink.control === 'ai') {
+            if (key === 'a' && !repeat) {
+                sink.toggleAutopilot();
+            }
             return;
         }
         if (sink.health <= 0 || sink.isCrashed()) {

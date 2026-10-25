@@ -29,6 +29,7 @@ import { nextWingSweepMode, poseSurface, stepWingSweep, WingSweepMode, wingSweep
 import { Combatant, Faction } from '../../weapons/combatant';
 import { CombatSimClient } from '../../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../../physics/model/simProxyFlightModel';
+import { shortPhaseLabel } from '../../ai/phaseLabels';
 import { PLAYER_SIM_ID } from '../../physics/sim/simIds';
 import {
     arrestorCableStartWorld,
@@ -883,6 +884,14 @@ export class PlayerEntity implements Entity {
             return this.flightModel.getSimAutopilot();
         }
         return false;
+    }
+
+    /** What the autopilot is doing, HUD-sized (T/O, APP, G/A...), while it is engaged. */
+    get autopilotPhase(): string | undefined {
+        if (this.flightModel instanceof SimProxyFlightModel && this.flightModel.getSimAutopilot()) {
+            return shortPhaseLabel(this.flightModel.getSimPilotLabel());
+        }
+        return undefined;
     }
 
     get forceVectorsEnabled(): boolean {
