@@ -30,6 +30,12 @@ Usage::
 
     python tools/measure_lidar.py --bbox 11.03,47.46,11.17,47.60 [--jobs 6]
     python tools/measure_lidar.py --leaf 4348,966 --force
+    python tools/measure_lidar.py --todo --bbox ...   # the leaves to measure, one JSON [x, y] a line
+    python tools/measure_lidar.py --serve             # measure leaves asked for on stdin
+
+--serve and --todo are the tile pool's (tools/py_leaf_pool.ts, and a bake
+satellite's; tools/leaf_serve.py). RFS_LIDAR_PLANET, RFS_LIDAR_STORE and
+RFS_LIDAR_CACHE move the three directories below.
 """
 
 from __future__ import annotations
@@ -58,11 +64,12 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bake_osm_roads import decode_rvr  # noqa: E402
 from osm_bridges import decode_rbr  # noqa: E402
+import leaf_serve  # noqa: E402
 
 LEAF_ZOOM = 12
-PLANET_DIR = 'assets/planet'
-STORE_DIR = 'data/imports/lidar/store'
-CACHE_DIR = 'data/imports/lidar/.cache'
+PLANET_DIR = os.environ.get('RFS_LIDAR_PLANET', 'assets/planet')
+STORE_DIR = os.environ.get('RFS_LIDAR_STORE', 'data/imports/lidar/store')
+CACHE_DIR = os.environ.get('RFS_LIDAR_CACHE', 'data/imports/lidar/.cache')
 USER_AGENT = 'retroflightsim-terrain-bake (lidar corridor sampler)'
 
 # Keep in step with tools/bake/lidarStore.ts.
@@ -969,7 +976,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--force', action='store_true', help='measure leaves already up to date')
     ap.add_argument('--cache-gb', type=float, default=2.0)
     ap.add_argument('--min-free-gb', type=float, default=3.0)
+    ap.add_argument('--serve', action='store_true', help='measure leaves asked for on stdin (the tile pool)')
+    ap.add_argument('--todo', action='store_true', help='print the leaves that need measuring and stop')
     args = ap.parse_args(argv)
+    if args.serve:
+        return leaf_serve.serve(sys.modules[__name__], measure_leaf, lambda: trim_cache(args.cache_gb * 1e9))
     if args.leaf:
         leaves = [tuple(int(v) for v in args.leaf.split(','))]
     elif args.bbox:
@@ -978,6 +989,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ap.error('give --bbox or --leaf')
     todo = [k for k in leaves if args.force or not up_to_date(*k)]
     todo = [k for k in todo if leaf_sources(*k)]
+    if args.todo:
+        return leaf_serve.print_todo(todo)
     print(f'measure_lidar: {len(leaves)} leaves with vectors, {len(todo)} to measure '
           f'({len(leaves) - len(todo)} up to date or outside every source)', flush=True)
     t0 = time.time()

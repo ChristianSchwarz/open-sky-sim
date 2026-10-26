@@ -1209,10 +1209,11 @@ serves until then. It used to be copied from the height pyramid's manifest,
 which is a monotone max across every merge ever run — one long-gone mountain
 pinned z4–z10 at 1.6 km and had flat sea refining to z11 out to 130 km.
 
-### Satellites: other machines grading tiles
+### Satellites: other machines baking tiles
 
-The grade and the far land can hand tiles to other machines on the LAN as
-well as to this one's workers. Build the satellite once:
+The mesh bake, the far-tile textures (their leaf rasters), the grade and the
+far land can hand tiles to other machines on the LAN as well as to this
+one's workers. Build the satellite once:
 
 ```
 npm run build:satellite
@@ -1225,9 +1226,14 @@ broadcast (port 47810), works, and waits for the next. Then bake with
 `--satellites`:
 
 ```
+npm run bake:mesh -- --bbox ... --satellites
 npm run bake:grade -- --bbox ... --satellites
 npm run bake:farland -- --bbox ... --satellites --jobs 0   # satellites only
 ```
+
+`bake:tex` takes the same flags. The satellite's screen shows the bake, its
+progress, every thread and a log; F2..F6 change the cache folder, threads,
+cache size, name and the bake's address while it runs (F1 lists them).
 
 - **What moves.** A satellite gets each tile's inputs by content hash and
   caches them, so a neighbour tile is not sent twice. It sends back only the
@@ -1245,10 +1251,17 @@ npm run bake:farland -- --bbox ... --satellites --jobs 0   # satellites only
   asks once to let Node in. Satellites need no inbound port. Over a VPN or
   across subnets, where broadcast does not reach, start the satellite with
   `--coordinator HOST:47811`.
-- **A satellite that disappears** has its tiles handed out again after 90 s.
+- **A satellite that disappears** has its tiles handed out again after 90 s;
+  one quit with F10 hands them back at once.
+- **Two bakes on one machine.** Only one can answer the broadcast. The other
+  says so and retries every 10 s; give a bake `--no-discovery` when its
+  satellites are started with its address anyway (the check below does).
 - **Checking it.** `npm run verify:satellite` bakes a small box twice, once
-  locally and once by satellite only, and compares every file byte for byte.
-  A difference means `tools/bake/remoteTiles.ts` misses an input file.
+  locally and once by satellite only (meshes, textures, grading, far land),
+  and compares every file byte for byte, bar the bake's `utc` stamps and the
+  texture cache's mtimes. A difference means `tools/bake/remoteTiles.ts`
+  misses an input file, or a result lost something on the way back (typed
+  arrays travel through `encodeWire`). It needs `data/satellite/token`.
 
 ### Serving
 

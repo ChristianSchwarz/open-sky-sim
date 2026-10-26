@@ -18,7 +18,8 @@ export async function bundleCompute(): Promise<{ code: string; sha: string }> {
     const esbuild = await import('esbuild');
     const r = await esbuild.build({
         entryPoints: [path.join(ROOT, 'tools', 'satellite', 'computeWorker.ts')], absWorkingDir: ROOT,
-        bundle: true, platform: 'node', format: 'cjs', target: 'node24', write: false, logLevel: 'silent',
+        // An IIFE: a satellite evaluates it as a worker script, where a top-level `var crypto` would clash with the global.
+        bundle: true, platform: 'node', format: 'iife', target: 'node24', write: false, logLevel: 'silent',
     });
     const code = r.outputFiles[0].text;
     return { code, sha: crypto.createHash('sha256').update(code).digest('hex') };

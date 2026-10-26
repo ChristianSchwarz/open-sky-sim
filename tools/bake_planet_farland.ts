@@ -17,6 +17,8 @@
  *                      (tools/bake/tilePool.ts, npm run build:satellite);
  *                      with --jobs 0, to them alone
  *     --satellite-port N  their HTTP port (default 47811)
+ *     --no-discovery   do not answer the satellites' broadcast (they are given
+ *                      the address; leaves the port to another bake)
  *     --levels a,b     tolerances in metres (default 1,4)
  *     --resume         skip leaves whose sidecar is newer than their mesh
  *                      (an interrupted run); the index still covers them all
@@ -50,6 +52,7 @@ interface Args {
     resume: boolean;
     skipNewerMs?: number;
     satellitePort?: number;
+    noDiscovery?: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -67,6 +70,7 @@ function parseArgs(argv: string[]): Args {
         } else if (k === '--jobs') a.jobs = Math.max(0, Number(next()));
         else if (k === '--satellites') a.satellitePort ??= DEFAULT_SATELLITE_PORT;
         else if (k === '--satellite-port') a.satellitePort = Number(next());
+        else if (k === '--no-discovery') a.noDiscovery = true;
         else if (k === '--levels') a.levelsM = next().split(',').map(Number);
         else if (k === '--no-bundle') a.noBundle = true;
         else if (k === '--resume') a.resume = true;
@@ -135,7 +139,7 @@ async function main(): Promise<void> {
     const pool = new TilePool<FarLandResult>({
         local: { ...await prepareWorker(args.noBundle), jobs }, cfg, kindOf: () => 'farland',
         roots: { terrain: args.dir },
-        satellites: args.satellitePort ? { port: args.satellitePort } : undefined,
+        satellites: args.satellitePort ? { port: args.satellitePort, discovery: !args.noDiscovery } : undefined,
         diskLow: () => freeBytes(args.dir) < MIN_FREE_BYTES, label: () => '', t0,
     });
     await pool.start();

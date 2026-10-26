@@ -41,26 +41,38 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { Tui, InfoRow, formatBytes, formatDuration } from './tui';
+import { ensureRuntime } from './pyRuntime';
 
 declare const __SAT_TOKEN__: string | undefined;
 declare const __SAT_COMPUTE__: string | undefined;
 
 const DISCOVERY_PORT = 47810;
-const PROTOCOL = 3;
+const PROTOCOL = 5;
 const HEARTBEAT_MS = 15_000;
-const REL_PATTERN = /^(terrain|lidar|planet)\/\d+\/-?\d+\/-?\d+\.[a-z0-9]+$/;
+/**
+ * A root name (new ones need no new exe), then z/x/y.ext, or a Python stage's
+ * script: nothing that climbs out of the job directory.
+ */
+const REL_PATTERN = /^(?:[a-z]+\/\d+\/-?\d+\/-?\d+\.[a-z0-9]+|pytools\/[A-Za-z0-9_]+\.py)$/;
 
 interface Args { coordinator?: string; threads: number; cache: string; cacheGb: number; name: string; once: boolean }
 
 interface Job {
-    id: number; kind: string; key: { z: number; x: number; y: number }; cfg: unknown;
+    id: number; kind: string; key: { z: number; x: number; y: number };
+    /** The config as text (decoded by the tile code), inline or as the hash of a blob holding it. */
+    cfgText?: string; cfgSha?: string;
     inputs: Record<string, string | null>; outputs: string[]; codeSha: string;
     /** The whole bake's progress in the running pass when the job was handed out. */
     progress?: { done: number; total: number; pass: number };
 }
 
-const KIND_LABEL: Record<string, string> = { grade1: 'beds', grade2: 'grading', farland: 'far land' };
-const PASS_LABEL: Record<string, string> = { grade1: 'grading, pass 1 (beds)', grade2: 'grading, pass 2', farland: 'far land' };
+const KIND_LABEL: Record<string, string> = {
+    grade1: 'beds', grade2: 'grading', farland: 'far land', mesh: 'mesh', texleaf: 'texture', lidarleaf: 'lidar',
+};
+const PASS_LABEL: Record<string, string> = {
+    grade1: 'grading, pass 1 (beds)', grade2: 'grading, pass 2', farland: 'far land', mesh: 'meshes',
+    texleaf: 'far-tile textures', lidarleaf: 'lidar measurements',
+};
 
 /** What one compute thread is doing, for the status block. */
 interface SlotView { phase: 'idle' | 'fetching' | 'computing' | 'sending'; kind?: string; key?: string; since: number }
@@ -299,6 +311,8 @@ class Satellite {
         fs.writeFileSync(probe, 'x');
         fs.rmSync(probe);
         this.args.cache = resolved;
+        // The compute threads read it for the Python stages' download caches; new threads see the change.
+        process.env.RFS_SAT_CACHE = resolved;
         this.pruneCache();
     }
 
@@ -388,7 +402,13 @@ class Satellite {
             view.kind = job?.kind;
             view.key = job ? `${job.key.z}/${job.key.x}/${job.key.y}` : undefined;
         };
-        let worker = new Worker(code.text, { eval: true });
+        // An error event with no listener would end the whole satellite; a thread that fails is logged, its job failed.
+        const spawnWorker = () => {
+            const w = new Worker(code.text, { eval: true });
+            w.on('error', (err: Error) => log(`a compute thread failed: ${err.message.split('\n')[0]}`));
+            return w;
+        };
+        let worker = spawnWorker();
         try {
             for (;;) {
                 if (this.quitting) {
@@ -428,7 +448,7 @@ class Satellite {
                         this.stats.failed++;
                         log(`tile ${view.key} failed: ${err.message.split('\n')[0]}`);
                         await worker.terminate();
-                        worker = new Worker(code.text, { eval: true });
+                        worker = spawnWorker();
                         return frame({ error: err.message, outputs: [] }, []);
                     });
                     phase('sending', job);
@@ -461,10 +481,13 @@ class Satellite {
                     fs.copyFileSync(this.blobPath(sha), p);
                 }
             }
+            const cfgText = job.cfgText ?? await this.configText(job.cfgSha!).catch((err: Error) => {
+                throw err instanceof SessionOver ? err : new Retry(err.message);
+            });
             computing();
             const t0 = Date.now();
-            const reply = await new Promise<{ result?: unknown; error?: string }>((resolve, reject) => {
-                const onMsg = (m: { id: number; result?: unknown; error?: string }) => {
+            const reply = await new Promise<{ result?: unknown; resultText?: string; error?: string }>((resolve, reject) => {
+                const onMsg = (m: { id: number; result?: unknown; resultText?: string; error?: string }) => {
                     if (m.id === job.id) {
                         worker.off('message', onMsg);
                         worker.off('error', reject);
@@ -473,7 +496,7 @@ class Satellite {
                 };
                 worker.on('message', onMsg);
                 worker.once('error', reject);
-                worker.postMessage({ id: job.id, kind: job.kind, cfg: job.cfg, key: job.key, jobDir });
+                worker.postMessage({ id: job.id, kind: job.kind, cfgText, key: job.key, jobDir });
             });
             if (reply.error !== undefined) {
                 this.stats.failed++;
@@ -493,7 +516,8 @@ class Satellite {
                 }
                 const p = path.join(jobDir, ...rel.split('/'));
                 if (!fs.existsSync(p)) {
-                    outputs.push({ rel, state: 'deleted', size: 0 });
+                    // Removed by the tile function only if it was here to begin with; else never touched.
+                    outputs.push({ rel, state: job.inputs[rel] ? 'deleted' : 'unchanged', size: 0 });
                     continue;
                 }
                 const b = fs.readFileSync(p);
@@ -504,11 +528,24 @@ class Satellite {
                     bytes.push(b);
                 }
             }
-            return frame({ result: reply.result, outputs }, bytes);
+            return frame({ result: reply.result, resultText: reply.resultText, outputs }, bytes);
         } finally {
             fs.rmSync(jobDir, { recursive: true, force: true });
         }
     }
+
+    /** A config sent by hash: fetched into the cache once, kept in memory after. */
+    private async configText(sha: string): Promise<string> {
+        let text = this.configs.get(sha);
+        if (text === undefined) {
+            await this.blob(sha);
+            text = fs.readFileSync(this.blobPath(sha), 'utf8');
+            this.configs.set(sha, text);
+        }
+        return text;
+    }
+
+    private readonly configs = new Map<string, string>();
 
     private blobPath(sha: string): string {
         return path.join(this.args.cache, 'blobs', sha.slice(0, 2), sha);
@@ -632,6 +669,17 @@ function frame(head: unknown, bytes: Uint8Array[]): Buffer<ArrayBuffer> {
     return Buffer.concat([len, h, ...bytes]);
 }
 
+/** The packed Python runtime built into the exe, if this is the exe and it has one. */
+function pythonArchive(): Uint8Array | undefined {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const sea = require('node:sea') as { isSea(): boolean; getRawAsset(name: string): ArrayBuffer };
+        return sea.isSea() ? new Uint8Array(sea.getRawAsset('python.bin')) : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 /** The tile code: built in, or under tsx bundled from the checkout as the bake does. */
 async function computeCode(): Promise<{ sha: string; text: string }> {
     if (typeof __SAT_COMPUTE__ === 'string') {
@@ -662,6 +710,8 @@ const HELP = [
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2));
     const code = await computeCode();
+    // The tile code's Python stages find this machine's cache and interpreter here (tools/bake/lidarLeaf.ts).
+    process.env.RFS_SAT_CACHE = path.resolve(args.cache);
     const sat = new Satellite(args, code);
     let dialogOpen = false;
     const ui: Tui = new Tui(sat, ['Help', 'Cache', 'Threads', 'Size', 'Name', 'Bake', '', '', '', 'Quit'], n => {
@@ -753,6 +803,16 @@ async function main(): Promise<void> {
     };
     tui = ui;
     ui.start();
+    // The Python stages' interpreter: built into the exe (tools/satellite/pack_python.py), unpacked
+    // once per build. Under tsx from a checkout there is none, and the machine's own Python runs them.
+    const python = pythonArchive();
+    if (python) {
+        try {
+            process.env.RFS_SAT_PYTHON = ensureRuntime(python, args.cache, log);
+        } catch (err) {
+            log(`the built-in Python could not be unpacked (${(err as Error).message}); Python stages will fail here`);
+        }
+    }
     log(`started: ${args.threads} threads, tile code ${code.sha.slice(0, 12)}, cache ${args.cache}`);
     await sat.serve();
     ui.stop();

@@ -36,6 +36,8 @@
  *                      (tools/bake/tilePool.ts, npm run build:satellite);
  *                      with --jobs 0, to them alone
  *     --satellite-port N  their HTTP port (default 47811)
+ *     --no-discovery   do not answer the satellites' broadcast (they are given
+ *                      the address; leaves the port to another bake)
  *
  * Leaves are graded in two passes. The first lays out every leaf's beds -
  * the box's and the ring of leaves round it - into a temporary .pbd1; the
@@ -74,6 +76,7 @@ interface Args {
     src: string;
     lidar: boolean;
     satellitePort?: number;
+    noDiscovery?: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -92,6 +95,7 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--no-bundle') a.noBundle = true;
         else if (k === '--satellites') a.satellitePort ??= DEFAULT_SATELLITE_PORT;
         else if (k === '--satellite-port') a.satellitePort = Number(next());
+        else if (k === '--no-discovery') a.noDiscovery = true;
         else if (k === '--no-free-border') a.freeBorder = false;
         else if (k === '--simplify') a.simplifyM = Math.max(0, Number(next()));
         else if (k === '--lidar-store') a.lidarStore = next();
@@ -212,7 +216,7 @@ async function main(): Promise<void> {
     const pool = new TilePool<GradeResult>({
         local: { ...await prepareWorker(args.noBundle), jobs }, cfg, kindOf: pass => (pass === 1 ? 'grade1' : 'grade2'),
         roots: { terrain: args.dir, lidar: args.lidarStore, planet: args.src },
-        satellites: args.satellitePort ? { port: args.satellitePort } : undefined,
+        satellites: args.satellitePort ? { port: args.satellitePort, discovery: !args.noDiscovery } : undefined,
         diskLow, label: pass => `pass ${pass}: `, t0,
     });
     await pool.start();
