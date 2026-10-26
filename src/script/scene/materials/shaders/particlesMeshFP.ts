@@ -27,7 +27,12 @@ ${DITHER_PARS_FRAGMENT}
 void main() {
   vec2 screen = gl_FragCoord.xy;
 
-  if (shadingType != 3) {
+  // Wake foam (GROUND_PLANE) fades by its alpha in every shading mode: solid
+  // discs made the bow arms hard white bars all the way out.
+#ifndef GROUND_PLANE
+  if (shadingType != 3)
+#endif
+  {
     float alpha = vColor.a + bayerThreshold(screen);
     if (alpha < 0.5) {
       discard;
