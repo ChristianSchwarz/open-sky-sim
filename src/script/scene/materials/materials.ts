@@ -295,6 +295,8 @@ interface SceneShadedMaterialUniforms {
     normalModelMatrix: { value: THREE.Matrix3; };
     /** World-Y clip; very negative = disabled. */
     clipBelowY: { value: number; };
+    /** 0..1: deeper light-to-shadow ramp (see shadedVP); aircraft under Gouraud. */
+    uShadeContrast: { value: number; };
     [uniform: string]: THREE.IUniform<any>;
 }
 
@@ -688,6 +690,7 @@ export class SceneMaterialManager implements KernelTask {
             ...(properties.type === SceneMaterialPrimitiveType.MESH && properties.shaded) ? {
                 distance: { value: 0 },
                 normalModelMatrix: { value: new THREE.Matrix3() },
+                uShadeContrast: { value: 0 },
                 clipBelowY: {
                     value: typeof properties.clipBelowY === 'number'
                         ? properties.clipBelowY

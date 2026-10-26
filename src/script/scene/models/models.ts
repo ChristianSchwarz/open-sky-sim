@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTF, GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PaletteCategory, PaletteTime } from '../../config/palettes/palette';
 import { assertIsDefined } from '../../utils/asserts';
 import { isZero } from '../../utils/math';
@@ -30,6 +31,16 @@ const GLASS_COLOR = '#333333';
 const GLASS_ALPHA_DITHER = 0.35;
 // Legacy mod imports tagged glass as the default import_mod.py hex instead of GLASS.
 const LEGACY_GLASS_MATERIAL_NAMES = new Set(['GLASS', '#d1f7ff']);
+/**
+ * Faces meeting at more than this keep a hard edge under Gouraud shading:
+ * the fuselage and intake facets blend, the thin edges of wings and tails
+ * (top and bottom meeting at ~170 degrees) do not. The F-22's side panels
+ * meet at around 90 degrees, so anything below that left Gouraud looking
+ * the same as flat.
+ */
+const SMOOTH_SHADING_CREASE_RAD = THREE.MathUtils.degToRad(120);
+/** uShadeContrast for Gouraud-shaded aircraft (0 standard ramp, 1 deepest). */
+const SMOOTH_SHADING_CONTRAST = 1;
 /** Reserved material token from import_mod.py for TCA collider meshes. */
 const COLLISION_MATERIAL = 'COLLISION';
 
@@ -86,6 +97,7 @@ export class ModelManager {
     private libBuilders: Map<string, ModelLibBuilder> = new Map();
     private models: Map<string, ModelWrapper> = new Map();
     private gltfLoader: GLTFLoader = new GLTFLoader();
+    private smoothShading = false;
 
     constructor(private materials: SceneMaterialManager, libBuilders: ModelLibBuilder[]) {
         libBuilders.forEach(b => this.libBuilders.set(b.type, b));
@@ -157,6 +169,25 @@ export class ModelManager {
         }
     }
 
+    /**
+     * Gouraud- or flat-shade aircraft. Clones share their source geometry and
+     * material, so swapping the normal set (and the shade contrast that goes
+     * with it) on the cached models restyles every aircraft already in the
+     * scene as well as the ones loaded later.
+     */
+    setSmoothShading(on: boolean): void {
+        this.smoothShading = on;
+        for (const wrapper of this.models.values()) {
+            for (const level of wrapper.model.lod) {
+                for (const obj of [...level.flats, ...level.volumes]) {
+                    if ('isMesh' in obj) {
+                        ModelManager.applyShading(obj as THREE.Mesh, on);
+                    }
+                }
+            }
+        }
+    }
+
     /** Resolves when the model at {@link url} has finished loading (no-op if cached). */
     waitForModel(url: string): Promise<void> {
         return new Promise((resolve) => {
@@ -191,6 +222,7 @@ export class ModelManager {
         const worldAABB = new THREE.Box3();
         const isShadowModel = ModelManager.isShadowModelUrl(url);
         const isKuzModel = ModelManager.isKuzModelUrl(url);
+        const isAircraftModel = ModelManager.isAircraftModelUrl(url);
         model.lod = scenes.map(scene => {
             const level: ModelLodLevel = {
                 flats: [],
@@ -293,6 +325,11 @@ export class ModelManager {
                         if (rawColor || srcMat?.side === THREE.DoubleSide) {
                             (obj.material as THREE.ShaderMaterial).side = THREE.DoubleSide;
                         }
+                        if (isAircraftModel && !isFlat) {
+                            const mesh = obj as THREE.Mesh;
+                            mesh.geometry = ModelManager.withSmoothNormals(mesh.geometry);
+                            ModelManager.applyShading(mesh, this.smoothShading);
+                        }
                     }
                 } else if ('isLineSegments' in child) {
                     const lineCategory = isShadowModel
@@ -345,6 +382,47 @@ export class ModelManager {
         const flat = geometry.index ? geometry.toNonIndexed() : geometry;
         flat.computeVertexNormals();
         return flat;
+    }
+
+    /**
+     * Keeps the geometry's own (flat) normals and adds a creased, averaged set
+     * beside them for Gouraud shading; {@link applyShading} picks one. Both
+     * sets need one vertex per corner, so an indexed mesh is expanded first.
+     */
+    private static withSmoothNormals(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
+        const expanded = geometry.index ? geometry.toNonIndexed() : geometry;
+        if (!expanded.getAttribute('normal')) {
+            expanded.computeVertexNormals();
+        }
+        expanded.computeBoundingBox();
+        expanded.userData.flatNormal = expanded.getAttribute('normal');
+        expanded.userData.smoothNormal = toCreasedNormals(expanded.clone(), SMOOTH_SHADING_CREASE_RAD)
+            .getAttribute('normal');
+        return expanded;
+    }
+
+    /**
+     * Flat normals and the standard light ramp, or smooth normals and a deeper
+     * one: on a faceted airframe a Gouraud gradient under the standard ramp is
+     * too faint to see.
+     */
+    private static applyShading(mesh: THREE.Mesh, smooth: boolean): void {
+        const geometry = mesh.geometry;
+        const normal = (smooth ? geometry.userData.smoothNormal : geometry.userData.flatNormal) as
+            THREE.BufferAttribute | undefined;
+        if (!normal) return;
+        if (geometry.getAttribute('normal') !== normal) {
+            geometry.setAttribute('normal', normal);
+        }
+        const contrast = (mesh.material as THREE.ShaderMaterial).uniforms?.uShadeContrast;
+        if (contrast) {
+            contrast.value = smooth ? SMOOTH_SHADING_CONTRAST : 0;
+        }
+    }
+
+    /** True for flyable aircraft: built-in F-22 parts and every aircraft pack asset. */
+    private static isAircraftModelUrl(url: string): boolean {
+        return isPackUrl(url) || /(^|\/)f22[^/]*\.(gltf|glb)(\?|#|$)/i.test(url);
     }
 
     /** True for flyable-aircraft ground-shadow assets (`*_shadow.gltf` / `.glb`). */

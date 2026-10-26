@@ -66,6 +66,7 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
         settings.colourAdjust,
         settings.buildings,
         settings.opponentsScramble,
+        settings.aircraftSmoothShading,
     );
     config.flightModels.getActive().activate();
     // Place the sun before the first material is built, so the shaded ramp and
@@ -98,6 +99,8 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
         new TailhookModelLibBuilder('tailhook'),
         new TracerModelLibBuilder('tracer'),
     ]);
+    models.setSmoothShading(config.aircraftSmoothShading.getActive());
+    config.aircraftSmoothShading.addChangeListener(on => models.setSmoothShading(on));
     const audio = new AudioSystem();
     const game = new Game(config, models, materials, renderer, audio, combatSim);
     // Apply persisted settings after Game registers change listeners.

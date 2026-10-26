@@ -33,6 +33,7 @@ export type BuildingsChangeListener = (enabled: boolean) => void;
 export type RoadsChangeListener = (mode: RoadsMode) => void;
 export type RenderScaleChangeListener = (scale: number) => void;
 export type SupersamplingChangeListener = (enabled: boolean) => void;
+export type AircraftSmoothShadingChangeListener = (enabled: boolean) => void;
 
 /**
  * Selectable 3D render scales, as fractions of the screen. 1 is off: the
@@ -64,6 +65,7 @@ export class ConfigService {
     readonly roads: RoadsSetting;
     readonly renderScale: RenderScaleSetting;
     readonly supersampling: SupersamplingSetting;
+    readonly aircraftSmoothShading: AircraftSmoothShadingSetting;
     readonly daytime: DaytimeSetting;
     readonly colourAdjust: ColourAdjustSetting;
 
@@ -90,6 +92,7 @@ export class ConfigService {
         initialColourAdjust?: ColourAdjust,
         initialBuildings?: boolean,
         initialOpponentsScramble?: boolean,
+        initialAircraftSmoothShading?: boolean,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -109,6 +112,7 @@ export class ConfigService {
         this.roads = new RoadsSetting(initialRoads);
         this.renderScale = new RenderScaleSetting(initialRenderScale);
         this.supersampling = new SupersamplingSetting(initialSupersampling);
+        this.aircraftSmoothShading = new AircraftSmoothShadingSetting(initialAircraftSmoothShading);
         this.treeDensity = new TreeDensitySetting(initialTreeDensity);
         this.daytime = new DaytimeSetting(initialDaytime);
         this.colourAdjust = new ColourAdjustSetting(initialColourAdjust);
@@ -531,6 +535,44 @@ export class SupersamplingSetting {
     }
 
     removeChangeListener(listener: SupersamplingChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/**
+ * Gouraud-shade aircraft: light interpolated across faces from vertex normals
+ * averaged over neighbouring faces, instead of one flat shade per face. Edges
+ * sharper than the crease angle stay hard (see ModelManager.setSmoothShading).
+ */
+export class AircraftSmoothShadingSetting {
+    private active: boolean;
+    private listeners: Set<AircraftSmoothShadingChangeListener> = new Set();
+
+    constructor(initialActive: boolean = false) {
+        this.active = initialActive;
+    }
+
+    getActive(): boolean {
+        return this.active;
+    }
+
+    setActive(enabled: boolean) {
+        if (enabled === this.active) return;
+        this.active = enabled;
+        this.notifyActive();
+    }
+
+    notifyActive() {
+        for (const listener of this.listeners.values()) {
+            listener(this.active);
+        }
+    }
+
+    addChangeListener(listener: AircraftSmoothShadingChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: AircraftSmoothShadingChangeListener) {
         this.listeners.delete(listener);
     }
 }

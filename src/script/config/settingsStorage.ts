@@ -85,6 +85,8 @@ export interface AppSettings {
     renderScale: number;
     /** Supersample (SSAA) the 3D view where the resolution affords it. */
     supersampling: boolean;
+    /** Gouraud-shade aircraft (smoothed vertex normals) instead of flat faces. */
+    aircraftSmoothShading: boolean;
     /** Master audio volume level (0.0 to 1.0). */
     volume: number;
 }
@@ -115,6 +117,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     roads: RoadsMode.ALL,
     renderScale: 1,
     supersampling: false,
+    aircraftSmoothShading: false,
     volume: 0.7,
 };
 
@@ -176,6 +179,8 @@ export function loadSettings(): AppSettings {
             renderScale: isValidRenderScale(parsed.renderScale) ? parsed.renderScale : DEFAULT_SETTINGS.renderScale,
             supersampling: typeof parsed.supersampling === 'boolean'
                 ? parsed.supersampling : DEFAULT_SETTINGS.supersampling,
+            aircraftSmoothShading: typeof parsed.aircraftSmoothShading === 'boolean'
+                ? parsed.aircraftSmoothShading : DEFAULT_SETTINGS.aircraftSmoothShading,
             volume: isValidVolume(parsed.volume) ? parsed.volume : DEFAULT_SETTINGS.volume,
         };
     } catch {

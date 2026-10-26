@@ -18,6 +18,12 @@ export const ShadedVertProgram: string = `
   uniform vec3 uSunAmbient;
   uniform vec3 uSunDirect;
   uniform vec3 uSunTint;
+  /**
+   * 0 is the standard ramp; 1 deepens the shadow side (less skylight on faces
+   * turned from the sun or looking down) and lifts the beam, so a gradient
+   * across a Gouraud-shaded aircraft reads. Set per material (aircraft only).
+   */
+  uniform float uShadeContrast;
 
   /**
    * Skylight arrives from the dome overhead, not from all around, so how much
@@ -32,6 +38,10 @@ export const ShadedVertProgram: string = `
   /** Skylight kept on a face fully turned from the sun, and the beam boost toward it. */
   const float SHADE_AWAY_AMBIENT = 0.95;
   const float SUN_FACING_GAIN = 1.0;
+  /** The same three at uShadeContrast = 1. */
+  const float AMBIENT_SKY_FLOOR_CONTRAST = 0.4;
+  const float SHADE_AWAY_AMBIENT_CONTRAST = 0.6;
+  const float SUN_FACING_GAIN_CONTRAST = 1.25;
 
   /** Fresnel rim: how sharply it tightens to the edge, and how far it lifts. */
   const float RIM_POWER = 3.0;
@@ -88,14 +98,16 @@ ${LOG_DEPTH_PARS_VERTEX}
     float ndl = pow(rawNdl, SHADOW_CONTRAST_POWER);
     // How much of the sky this surface can see, 1 looking up and a floor's
     // worth looking straight down.
-    float skyView = mix(AMBIENT_SKY_FLOOR, 1.0, 0.5 + 0.5 * worldNormal.y);
+    float skyFloor = mix(AMBIENT_SKY_FLOOR, AMBIENT_SKY_FLOOR_CONTRAST, uShadeContrast);
+    float skyView = mix(skyFloor, 1.0, 0.5 + 0.5 * worldNormal.y);
 
     // Ambient floor so land keeps the palette base colour in shadow. The direct
     // weight fades to 0 as the sun sets, leaving night lit flat by its palette.
     // Faces turned from the sun lose part of their skylight, faces toward it
     // gain a boosted beam: contrast both ways around the old mid-tone.
-    float ambientScale = mix(SHADE_AWAY_AMBIENT, 1.0, rawNdl);
-    float directGain = SUN_FACING_GAIN;
+    float awayAmbient = mix(SHADE_AWAY_AMBIENT, SHADE_AWAY_AMBIENT_CONTRAST, uShadeContrast);
+    float ambientScale = mix(awayAmbient, 1.0, rawNdl);
+    float directGain = mix(SUN_FACING_GAIN, SUN_FACING_GAIN_CONTRAST, uShadeContrast);
     shade = uSunShade.x * skyView * ambientScale + uSunShade.y * ndl * directGain;
     // Same ramp in colour: a reddened beam over a blue skylight fill, so a low
     // sun leaves the faces it strikes warmer than the ones it misses. Both

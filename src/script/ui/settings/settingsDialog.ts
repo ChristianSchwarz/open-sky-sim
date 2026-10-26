@@ -574,6 +574,20 @@ function sliderValue(event: Event): number {
                         </section>
 
                         <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">Aircraft shading</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">
+                                Aircraft are drawn with one flat shade per face, the classic
+                                polygon look. Gouraud shading blends the light smoothly across
+                                neighbouring faces so fuselages and intakes read as round, with
+                                deeper shadows on the side away from the sun; the thin edges of
+                                wings and tails stay crisp.
+                            </p>
+                            <mat-slide-toggle [checked]="aircraftSmoothShading()" (change)="setAircraftSmoothShading($event)">
+                                Gouraud-shade aircraft
+                            </mat-slide-toggle>
+                        </section>
+
+                        <section>
                             <h3 class="m-0 mb-1 text-base font-medium">Terrain detail distance</h3>
                             <p class="m-0 mb-2 text-sm opacity-70">
                                 How far out terrain keeps full detail. Past it the far field is drawn
@@ -1120,6 +1134,7 @@ export class SettingsDialog {
     }));
     readonly renderScale = signal(this.config.renderScale.getActive());
     readonly supersampling = signal(this.config.supersampling.getActive());
+    readonly aircraftSmoothShading = signal(this.config.aircraftSmoothShading.getActive());
     readonly triangleBudgetK = computed(() => this.triangleBudget() / 1000);
     readonly triangleBudgetLabel = computed(() => {
         const n = this.triangleBudget();
@@ -1246,6 +1261,12 @@ export class SettingsDialog {
         this.config.supersampling.setActive(event.checked);
         updateSettings({ supersampling: event.checked });
         this.supersampling.set(event.checked);
+    }
+
+    setAircraftSmoothShading(event: MatSlideToggleChange) {
+        this.config.aircraftSmoothShading.setActive(event.checked);
+        updateSettings({ aircraftSmoothShading: event.checked });
+        this.aircraftSmoothShading.set(event.checked);
     }
 
     setTriangleBudget(event: Event) {
