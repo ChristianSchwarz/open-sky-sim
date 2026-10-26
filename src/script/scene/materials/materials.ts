@@ -26,6 +26,23 @@ import { LANDUSE_BLEND_DEFAULT } from '../../terrain/tones';
 import { VERTEX_TONE_COUNT } from './shaders/shadedVP';
 import { makeNoCoverTexture } from '../../terrain/coverTextures';
 
+/**
+ * The particle material is a RawShaderMaterial, to which three.js adds none of
+ * its defines - not the depth buffer's either. Without USE_LOGARITHMIC_DEPTH_BUFFER
+ * the particles wrote plain z/w into a logarithmic depth buffer, where nearly
+ * everything already drawn beat them: ship wake foam vanished under the sea.
+ * A subclass, so `clone()` keeps the hook.
+ */
+class ParticleMeshMaterial extends THREE.RawShaderMaterial {
+    override onBeforeCompile(shader: THREE.WebGLProgramParametersWithUniforms): void {
+        const p = shader as unknown as { logarithmicDepthBuffer: boolean; reversedDepthBuffer: boolean };
+        const defines = (p.logarithmicDepthBuffer ? '#define USE_LOGARITHMIC_DEPTH_BUFFER\n' : '')
+            + (p.reversedDepthBuffer ? '#define USE_REVERSED_DEPTH_BUFFER\n' : '');
+        shader.vertexShader = defines + shader.vertexShader;
+        shader.fragmentShader = defines + shader.fragmentShader;
+    }
+}
+
 export enum SceneMaterialPrimitiveType {
     MESH,
     LINE,
@@ -415,9 +432,11 @@ export class SceneMaterialManager implements KernelTask {
             userData: {},
             uniforms: {}
         });
-        this.particleMeshProto = new THREE.RawShaderMaterial({
+        this.particleMeshProto = new ParticleMeshMaterial({
             vertexShader: ParticleMeshVertProgram,
             fragmentShader: ParticleMeshFragProgram,
+            // ES 3.00 for gl_FragDepth, which the logarithmic depth writes.
+            glslVersion: THREE.GLSL3,
             // Discs are billboarded in view-space XY; FrontSide culls them (normal +Z
             // faces away from the camera). DoubleSide keeps smoke/debris visible.
             side: THREE.DoubleSide,

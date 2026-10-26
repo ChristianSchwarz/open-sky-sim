@@ -74,8 +74,14 @@ const FOAM_SURFACE_Y = 0.18;
 const STERN_LIFE_MIN = 10;
 const STERN_LIFE_SPAN = 6;
 
-/** Speed of foam along each Kelvin arm (m/s), world frame. */
-const BOW_ARM_SPEED_MPS = 4.5;
+/**
+ * Arm foam stays where the water is; the ship sails on and the V opens behind
+ * the bow. A puff drifting sideways at `shipSpeed * tan(arm angle)` therefore
+ * sits on the arm at that angle in the ship's frame. It used to move at a fixed
+ * 4.5 m/s along the arm in the world, which the ship's own 12.5 m/s folded
+ * back to 5-10 deg: the arms ran along under the hull flare and never showed.
+ */
+const BOW_ARM_MIN_SHIP_SPEED_MPS = 2;
 
 /**
  * Denser than the ribbon head (0.6) at the transom, fading to the ribbon's own
@@ -108,6 +114,13 @@ export class ShipWakeEntity implements Entity {
     private readonly root = new THREE.Object3D();
     private readonly emitPos = new THREE.Vector3();
     private readonly emitAccum = new Float32Array(ALL_EMITTERS.length);
+    /**
+     * Puffs already given to an emitter this frame. The four bow emitters share
+     * one point and one rate, so they fire on the same frame, and each used to
+     * claim "a fresh puff at the bow" - the ones the arm before it had just
+     * taken. The last arm kept them all; the rest sat at the bow unclaimed.
+     */
+    private readonly claimed = new Uint8Array(FOAM_PARTICLE_COUNT);
     /** Local aft-out arm direction before quaternion. */
     private readonly armLocal = new THREE.Vector3();
     private readonly armWorld = new THREE.Vector3();
@@ -210,7 +223,10 @@ export class ShipWakeEntity implements Entity {
         const pose = this.getCarrierPose();
         const q = pose.quaternion;
         this.updateSternRibbon(pose);
+        const v = pose.velocity;
+        const shipSpeed = Math.max(BOW_ARM_MIN_SHIP_SPEED_MPS, v ? Math.hypot(v.x, v.z) : 0);
 
+        this.claimed.fill(0);
         for (let e = 0; e < ALL_EMITTERS.length; e++) {
             const emitter = ALL_EMITTERS[e];
             this.emitAccum[e] += emitter.rate * delta;
@@ -231,7 +247,7 @@ export class ShipWakeEntity implements Entity {
             let left = spawned;
             for (let i = 0; i < this.system.particles.length && left > 0; i++) {
                 const p = this.system.particles[i];
-                if (!p.isActive || p.life > 1e-6) {
+                if (!p.isActive || p.life > 1e-6 || this.claimed[i]) {
                     continue;
                 }
                 if (p.position.distanceToSquared(this.emitPos) > 0.05) {
@@ -247,13 +263,14 @@ export class ShipWakeEntity implements Entity {
                     p.sizeEnd = 8 + Math.random() * 6;
                     const armDeg = emitter.armDeg ?? KELVIN_HALF_ANGLE_DEG;
                     const armRad = armDeg * Math.PI / 180;
-                    // Aft = +Z local; rotate about Y so |armDeg| is off the track.
-                    this.armLocal.set(Math.sin(armRad), 0, Math.cos(armRad));
+                    // Sideways in the hull frame (+X starboard); the sign of
+                    // armDeg picks the side.
+                    this.armLocal.set(Math.sign(armRad), 0, 0);
                     this.armWorld.copy(this.armLocal);
                     if (q) {
                         this.armWorld.applyQuaternion(q);
                     }
-                    const speed = BOW_ARM_SPEED_MPS * (0.85 + Math.random() * 0.3);
+                    const speed = shipSpeed * Math.tan(Math.abs(armRad)) * (0.9 + Math.random() * 0.2);
                     p.velocity.copy(this.armWorld).multiplyScalar(speed);
                     extra.r = BOW_COLOR.r;
                     extra.g = BOW_COLOR.g;
@@ -272,6 +289,7 @@ export class ShipWakeEntity implements Entity {
                     extra.g = STERN_COLOR.g;
                     extra.b = STERN_COLOR.b;
                 }
+                this.claimed[i] = 1;
                 left--;
             }
         }

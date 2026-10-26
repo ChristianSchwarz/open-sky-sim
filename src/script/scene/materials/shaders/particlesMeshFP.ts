@@ -5,6 +5,10 @@ export const ParticleMeshFragProgram: string = `
 precision highp float;
 // Must match ParticleMeshVertProgram — see the note there.
 precision highp int;
+// GLSL ES 3.00 with ES 1.00 spellings - see ParticleMeshVertProgram.
+#define varying in
+layout(location = 0) out highp vec4 pc_fragColor;
+#define gl_FragColor pc_fragColor
 
 uniform vec3 vCameraPos;
 uniform vec3 vCameraNormal;

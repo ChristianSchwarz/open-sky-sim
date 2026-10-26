@@ -7,6 +7,10 @@ precision highp float;
 // int uniforms (shadingType) would then mismatch and ANGLE refuses to link the
 // program — silently dropping every particle effect. Both stages state it.
 precision highp int;
+// Compiled as GLSL ES 3.00 (glslVersion GLSL3) with ES 1.00 spellings, as
+// three.js does for a ShaderMaterial; the shared depth chunks use them too.
+#define attribute in
+#define varying out
 
 uniform mat4 viewMatrix;
 uniform mat4 projectionMatrix;
