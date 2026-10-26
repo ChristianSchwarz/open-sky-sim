@@ -13,6 +13,10 @@
  *     --dir DIR        the mesh tree (default assets/terrain)
  *     --bbox w,s,e,n   only leaves in this box; the index is merged
  *     --jobs N         worker threads (default: CPUs - 1)
+ *     --satellites     also hand leaves to satellite machines on the LAN
+ *                      (tools/bake/tilePool.ts, npm run build:satellite);
+ *                      with --jobs 0, to them alone
+ *     --satellite-port N  their HTTP port (default 47811)
  *     --levels a,b     tolerances in metres (default 1,4)
  *     --resume         skip leaves whose sidecar is newer than their mesh
  *                      (an interrupted run); the index still covers them all
@@ -24,12 +28,12 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Worker } from 'node:worker_threads';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import { boundsOf } from './bake/coverTex';
 import { LonLatBounds } from './bake/shoreline';
 import { FAR_LAND_EXT, FarLandConfig, FarLandResult } from './bake/farLandTile';
 import { tileFile } from './bake/railBedInputs';
+import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'farLandWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'farLandWorker.cjs');
@@ -45,6 +49,7 @@ interface Args {
     noBundle: boolean;
     resume: boolean;
     skipNewerMs?: number;
+    satellitePort?: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -59,7 +64,9 @@ function parseArgs(argv: string[]): Args {
                 throw new Error('--bbox wants west,south,east,north');
             }
             a.bbox = { west, south, east, north };
-        } else if (k === '--jobs') a.jobs = Math.max(1, Number(next()));
+        } else if (k === '--jobs') a.jobs = Math.max(0, Number(next()));
+        else if (k === '--satellites') a.satellitePort ??= DEFAULT_SATELLITE_PORT;
+        else if (k === '--satellite-port') a.satellitePort = Number(next());
         else if (k === '--levels') a.levelsM = next().split(',').map(Number);
         else if (k === '--no-bundle') a.noBundle = true;
         else if (k === '--resume') a.resume = true;
@@ -120,74 +127,20 @@ async function main(): Promise<void> {
         }
         return !(args.skipNewerMs !== undefined && own > args.skipNewerMs);
     });
-    const jobs = Math.max(1, Math.min(args.jobs ?? os.cpus().length - 1, todo.length));
+    const jobs = Math.max(args.satellitePort ? 0 : 1, Math.min(args.jobs ?? os.cpus().length - 1, todo.length));
     console.log(`bake_planet_farland: ${todo.length} leaves${todo.length < tiles.length ? ` of ${tiles.length} (resumed)` : ''}`
         + `${args.bbox ? ' (scoped)' : ''}, levels ${args.levelsM.join(', ')} m, `
         + `${jobs} workers, ${(freeBytes(args.dir) / 1e9).toFixed(1)} GB free`);
     const cfg: FarLandConfig = { dir: args.dir, enuOrigin: manifest.enuOrigin, levelsM: args.levelsM };
-    const worker = await prepareWorker(args.noBundle);
-
-    const results: Array<FarLandResult | undefined> = new Array(todo.length);
-    const errors: string[] = [];
-    let stoppedForDisk = false;
-    await new Promise<void>((resolve, reject) => {
-        if (todo.length === 0) {
-            resolve();
-            return;
-        }
-        let next = 0, done = 0, running = 0, lastLine = 0;
-        const workers: Worker[] = [];
-        const dispatch = (w: Worker): boolean => {
-            if (next >= todo.length || stoppedForDisk) {
-                return false;
-            }
-            if (next % 50 === 0 && freeBytes(args.dir) < MIN_FREE_BYTES) {
-                stoppedForDisk = true;
-                return false;
-            }
-            const idx = next++;
-            running++;
-            w.postMessage({ idx, key: todo[idx] });
-            return true;
-        };
-        const finish = () => {
-            for (const w of workers) {
-                w.postMessage(null);
-            }
-            resolve();
-        };
-        for (let i = 0; i < jobs; i++) {
-            const w = new Worker(worker.file, { execArgv: worker.execArgv, workerData: cfg });
-            workers.push(w);
-            w.on('message', (msg: { idx: number; result: FarLandResult | { error: string } }) => {
-                running--;
-                done++;
-                if ('error' in msg.result) {
-                    errors.push(msg.result.error);
-                } else {
-                    results[msg.idx] = msg.result;
-                }
-                if (Date.now() - lastLine > 1000 || done === todo.length) {
-                    const el = (Date.now() - t0) / 1000;
-                    process.stdout.write(`\r  ${done}/${todo.length} (${((done / todo.length) * 100).toFixed(1)}%)  ${(el / 60).toFixed(1)} min   `);
-                    lastLine = Date.now();
-                }
-                if (!dispatch(w) && running === 0) {
-                    finish();
-                }
-            });
-            w.on('error', err => {
-                for (const x of workers) {
-                    void x.terminate();
-                }
-                reject(err);
-            });
-            if (!dispatch(w) && running === 0) {
-                finish();
-            }
-        }
+    const pool = new TilePool<FarLandResult>({
+        local: { ...await prepareWorker(args.noBundle), jobs }, cfg, kindOf: () => 'farland',
+        roots: { terrain: args.dir },
+        satellites: args.satellitePort ? { port: args.satellitePort } : undefined,
+        diskLow: () => freeBytes(args.dir) < MIN_FREE_BYTES, label: () => '', t0,
     });
-    process.stdout.write('\n');
+    await pool.start();
+    const { results, errors, stoppedForDisk } = await pool.runPass(todo, 1);
+    await pool.close();
 
     // The index: every leaf with a sidecar, merged with the rest when scoped.
     // A leaf in the box that is no longer in the mesh index went with a

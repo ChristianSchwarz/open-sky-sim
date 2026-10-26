@@ -35,3 +35,4 @@ dist
 
 # Scratch output of tools/rebake_all.mjs
 /rebake_all.log
+/data/satellite/

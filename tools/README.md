@@ -1209,6 +1209,43 @@ serves until then. It used to be copied from the height pyramid's manifest,
 which is a monotone max across every merge ever run — one long-gone mountain
 pinned z4–z10 at 1.6 km and had flat sea refining to z11 out to 130 km.
 
+### Satellites: other machines grading tiles
+
+The grade and the far land can hand tiles to other machines on the LAN as
+well as to this one's workers. Build the satellite once:
+
+```
+npm run build:satellite
+```
+
+That writes `dist/satellite/retroflightsim-satellite.exe` (one ~90 MB file,
+`--out DIR` for elsewhere). Copy it to any Windows machine and run it: no
+checkout, Node or Python needed there. It waits for a bake, finds it by UDP
+broadcast (port 47810), works, and waits for the next. Then bake with
+`--satellites`:
+
+```
+npm run bake:grade -- --bbox ... --satellites
+npm run bake:farland -- --bbox ... --satellites --jobs 0   # satellites only
+```
+
+- **What moves.** A satellite gets each tile's inputs by content hash and
+  caches them, so a neighbour tile is not sent twice. It sends back only the
+  leaf files. The index and the manifest are still written here.
+- **Which code runs.** The tile code is not in the exe. The bake bundles
+  `tools/satellite/computeWorker.ts` from this tree and sends it, signed with
+  the token in `data/satellite/token`, which is built into the exe. So the
+  exe needs rebuilding only for a new token or protocol, and a satellite
+  refuses code from anyone without the token.
+- **Firewall.** The bake listens on TCP 47811 (`--satellite-port`), so Windows
+  asks once to let Node in. Satellites need no inbound port. Over a VPN or
+  across subnets, where broadcast does not reach, start the satellite with
+  `--coordinator HOST:47811`.
+- **A satellite that disappears** has its tiles handed out again after 90 s.
+- **Checking it.** `npm run verify:satellite` bakes a small box twice, once
+  locally and once by satellite only, and compares every file byte for byte.
+  A difference means `tools/bake/remoteTiles.ts` misses an input file.
+
 ### Serving
 
 `assets/terrain` is **self-contained**: the mesh bake copies the height tiles

@@ -33,6 +33,8 @@
         "bake:lidar": "node tools/run-python.mjs tools/measure_lidar.py",
         "bake:grade": "node --import tsx tools/bake_planet_grade.ts",
         "bake:farland": "node --import tsx tools/bake_planet_farland.ts",
+        "build:satellite": "node tools/build_satellite.mjs",
+        "verify:satellite": "node --import tsx tools/verify_satellite.ts",
         "rebake:box": "node --import tsx tools/rebake_box.ts",
         "bake:tree-sprites": "node --import tsx tools/bake_tree_sprites.ts",
         "verify:planet": "node --import tsx tools/verify_planet.ts",

@@ -32,6 +32,10 @@
  *                      assets/planet): a leaf whose .rvr changed since is
  *                      graded without its measurements
  *     --no-lidar       ignore the store
+ *     --satellites     also hand tiles to satellite machines on the LAN
+ *                      (tools/bake/tilePool.ts, npm run build:satellite);
+ *                      with --jobs 0, to them alone
+ *     --satellite-port N  their HTTP port (default 47811)
  *
  * Leaves are graded in two passes. The first lays out every leaf's beds -
  * the box's and the ring of leaves round it - into a temporary .pbd1; the
@@ -45,7 +49,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
-import { Worker } from 'node:worker_threads';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import { boundsOf } from './bake/coverTex';
 import { LonLatBounds } from './bake/shoreline';
@@ -53,6 +56,7 @@ import { GradeConfig, GradeResult, PASS1_EXT } from './bake/gradeTile';
 import { tileFile } from './bake/railBedInputs';
 import { LIDAR_STORE_DIR } from './bake/lidarStore';
 import { LAND_SIMPLIFY_M } from './bake/simplifyLand';
+import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'gradeTileWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'gradeTileWorker.cjs');
@@ -69,6 +73,7 @@ interface Args {
     lidarStore: string;
     src: string;
     lidar: boolean;
+    satellitePort?: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -83,8 +88,10 @@ function parseArgs(argv: string[]): Args {
                 throw new Error('--bbox wants west,south,east,north');
             }
             a.bbox = { west, south, east, north };
-        } else if (k === '--jobs') a.jobs = Math.max(1, Number(next()));
+        } else if (k === '--jobs') a.jobs = Math.max(0, Number(next()));
         else if (k === '--no-bundle') a.noBundle = true;
+        else if (k === '--satellites') a.satellitePort ??= DEFAULT_SATELLITE_PORT;
+        else if (k === '--satellite-port') a.satellitePort = Number(next());
         else if (k === '--no-free-border') a.freeBorder = false;
         else if (k === '--simplify') a.simplifyM = Math.max(0, Number(next()));
         else if (k === '--lidar-store') a.lidarStore = next();
@@ -161,75 +168,6 @@ function freeBytes(dir: string): number {
     return s.bavail * s.bsize;
 }
 
-/** Run one pass over `tiles` on a pool of workers; results in `tiles` order. */
-async function runPass(
-    worker: { file: string; execArgv: string[] }, cfg: GradeConfig, tiles: readonly TileKey[], pass: 1 | 2, t0: number,
-    jobs: number, diskLow: () => boolean,
-): Promise<{ results: Array<GradeResult | undefined>; errors: string[]; stoppedForDisk: boolean }> {
-    const results: Array<GradeResult | undefined> = new Array(tiles.length);
-    const errors: string[] = [];
-    let stoppedForDisk = false;
-    await new Promise<void>((resolve, reject) => {
-        if (tiles.length === 0) {
-            resolve();
-            return;
-        }
-        let next = 0, done = 0, running = 0, lastLine = 0;
-        const workers: Worker[] = [];
-        const dispatch = (w: Worker): boolean => {
-            if (next >= tiles.length || stoppedForDisk) {
-                return false;
-            }
-            if (next % 50 === 0 && diskLow()) {
-                stoppedForDisk = true;
-                return false;
-            }
-            const idx = next++;
-            running++;
-            w.postMessage({ idx, key: tiles[idx], pass });
-            return true;
-        };
-        const finish = () => {
-            for (const w of workers) {
-                w.postMessage(null);
-            }
-            resolve();
-        };
-        for (let i = 0; i < Math.min(jobs, tiles.length); i++) {
-            const w = new Worker(worker.file, { execArgv: worker.execArgv, workerData: cfg });
-            workers.push(w);
-            w.on('message', (msg: { idx: number; result: GradeResult | { error: string } }) => {
-                running--;
-                done++;
-                if ('error' in msg.result) {
-                    errors.push(msg.result.error);
-                } else {
-                    results[msg.idx] = msg.result;
-                }
-                if (Date.now() - lastLine > 1000 || done === tiles.length) {
-                    const el = (Date.now() - t0) / 1000;
-                    process.stdout.write(`\r  pass ${pass}: ${done}/${tiles.length} (${((done / tiles.length) * 100).toFixed(1)}%)  ${(el / 60).toFixed(1)} min   `);
-                    lastLine = Date.now();
-                }
-                if (!dispatch(w) && running === 0) {
-                    finish();
-                }
-            });
-            w.on('error', err => {
-                for (const x of workers) {
-                    void x.terminate();
-                }
-                reject(err);
-            });
-            if (!dispatch(w) && running === 0) {
-                finish();
-            }
-        }
-    });
-    process.stdout.write('\n');
-    return { results, errors, stoppedForDisk };
-}
-
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2));
     const t0 = Date.now();
@@ -262,16 +200,22 @@ async function main(): Promise<void> {
             }
         }
     }
-    const jobs = Math.max(1, Math.min(args.jobs ?? os.cpus().length - 1, tiles.length));
+    const jobs = Math.max(args.satellitePort ? 0 : 1, Math.min(args.jobs ?? os.cpus().length - 1, tiles.length));
     console.log(`bake_planet_grade: ${tiles.length} tiles with strokes${args.bbox ? ' (scoped)' : ''}, ${jobs} workers, `
         + `${(freeBytes(args.dir) / 1e9).toFixed(1)} GB free`);
     const lidar = args.lidar && fs.existsSync(args.lidarStore) ? { store: args.lidarStore, planet: args.src } : undefined;
     console.log(lidar ? `lidar: lines fitted to the measurements in ${args.lidarStore}` : 'lidar: none, the beds follow the land');
     const cfg: GradeConfig = { dir: args.dir, enuOrigin: manifest.enuOrigin, leafZoom, centreHeights, freeBorder: args.freeBorder, lidar, simplifyM: args.simplifyM };
-    const worker = await prepareWorker(args.noBundle);
     const errors: string[] = [];
     let stoppedForDisk = false;
     const diskLow = () => freeBytes(args.dir) < MIN_FREE_BYTES;
+    const pool = new TilePool<GradeResult>({
+        local: { ...await prepareWorker(args.noBundle), jobs }, cfg, kindOf: pass => (pass === 1 ? 'grade1' : 'grade2'),
+        roots: { terrain: args.dir, lidar: args.lidarStore, planet: args.src },
+        satellites: args.satellitePort ? { port: args.satellitePort } : undefined,
+        diskLow, label: pass => `pass ${pass}: `, t0,
+    });
+    await pool.start();
     // A run killed before its cleanup left its .pbd1 files behind; they ship
     // with the tiles (31,696 of them, 0.5 GB, across DACH) unless swept.
     const stale = sweepPass1(args.dir, leafZoom);
@@ -301,13 +245,14 @@ async function main(): Promise<void> {
             }
         }
         console.log(`pass 1: beds of ${pass1.length} leaves (the box and the ring round it)`);
-        const p1 = await runPass(worker, cfg, pass1, 1, t0, jobs, diskLow);
+        const p1 = await pool.runPass(pass1, 1);
         errors.push(...p1.errors);
         stoppedForDisk ||= p1.stoppedForDisk;
         console.log('pass 2: grading');
     }
     const p2 = stoppedForDisk ? { results: [] as Array<GradeResult | undefined>, errors: [] as string[], stoppedForDisk: true }
-        : await runPass(worker, cfg, tiles, 2, t0, jobs, diskLow);
+        : await pool.runPass(tiles, 2);
+    await pool.close();
     const results = p2.results;
     errors.push(...p2.errors);
     stoppedForDisk ||= p2.stoppedForDisk;
