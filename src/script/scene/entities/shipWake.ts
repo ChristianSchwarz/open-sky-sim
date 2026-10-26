@@ -90,8 +90,12 @@ const BOW_ARM_MIN_SHIP_SPEED_MPS = 2;
  */
 const STERN_DITHER_START = 0.72;
 const STERN_DITHER_END = 0.55;
-const BOW_DITHER_START = 0.7;
-const BOW_DITHER_END = 0.1;
+/**
+ * Bow arms: half foam, half water at the bow, thinning to nothing at their
+ * ends. The stipple is screen-space, so overlapping puffs never add up past it.
+ */
+const BOW_DITHER_START = 0.5;
+const BOW_DITHER_END = 0;
 
 type FoamParticleExtra = {
     kind: FoamKind;
