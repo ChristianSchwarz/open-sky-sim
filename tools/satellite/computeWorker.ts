@@ -1,8 +1,8 @@
 /**
- * A satellite's compute thread (tools/satellite/satellite.ts). Not built into
- * the exe: the coordinator bundles this file from its own tree and sends it
- * (tools/bake/tilePool.ts), so a satellite always runs the tile code the bake
- * it serves would run locally.
+ * A satellite's compute thread (tools/satellite/satellite.ts), bundled into
+ * the exe as a script (computeBundle.ts). The bake bundles it from its own
+ * tree as well; a satellite whose copy hashes differently runs the bake's,
+ * so it always runs the tile code the bake would run locally.
  *
  * Handed a job directory with the inputs in place, it runs the job and
  * answers with the tile function's result; the satellite reads the outputs

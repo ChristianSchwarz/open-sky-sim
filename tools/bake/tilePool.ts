@@ -13,9 +13,12 @@
  *
  * The satellites find this machine by a UDP broadcast on DISCOVERY_PORT and
  * talk HTTP on `satellites.port`, every request carrying the shared token
- * (data/satellite/token, built into the exe). They are sent their compute code
- * too (tools/satellite/computeWorker.ts, bundled here), signed with the token,
- * so a satellite exe copied once runs whatever the tree here holds now.
+ * (data/satellite/token, built into the exe). The tile code is built into the
+ * exe too (tools/satellite/computeBundle.ts). This bake bundles the same code
+ * from its own tree; a satellite whose hash differs (built before the tile
+ * code last changed) fetches this bake's, signed with the token, before it
+ * joins, so two versions' tiles never mix and the exe needs no rebuild. Only
+ * a satellite on an older protocol is turned away.
  *
  * A satellite that stops heartbeating for LEASE_TIMEOUT_MS has its jobs put
  * back in the queue; a result that arrives after that is dropped.
@@ -30,13 +33,13 @@ import * as path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { TileKey } from '../../src/script/terrain/tiling';
 import { RemoteConfig, RemoteKind, RemoteRoot, inputsOf, outputsOf, wireConfig } from './remoteTiles';
+import { bundleCompute } from '../satellite/computeBundle';
 
 export const DISCOVERY_PORT = 47810;
 export const DEFAULT_SATELLITE_PORT = 47811;
-/** Bumped when the satellite's side of the HTTP protocol changes; the code it runs is sent, not built in. */
-export const SATELLITE_PROTOCOL = 1;
+/** Bumped when the satellite's side of the HTTP protocol changes. */
+export const SATELLITE_PROTOCOL = 3;
 export const TOKEN_FILE = path.join('data', 'satellite', 'token');
-const COMPUTE_SOURCE = path.join(__dirname, '..', 'satellite', 'computeWorker.ts');
 
 const LEASE_TIMEOUT_MS = 90_000;
 const LONG_POLL_MS = 20_000;
@@ -50,16 +53,6 @@ export function satelliteToken(): string {
         fs.writeFileSync(TOKEN_FILE, crypto.randomBytes(24).toString('hex'));
     }
     return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
-}
-
-/** The satellites' compute code, bundled from this tree: what they run is what a local run would. */
-export async function bundleComputeWorker(): Promise<string> {
-    const esbuild = await import('esbuild');
-    const r = await esbuild.build({
-        entryPoints: [COMPUTE_SOURCE], bundle: true, platform: 'node', format: 'cjs', write: false,
-        target: 'node24', logLevel: 'silent',
-    });
-    return r.outputFiles[0].text;
 }
 
 export interface PoolOptions {
@@ -77,7 +70,11 @@ export interface PoolOptions {
 }
 
 interface Lease { idx: number; pass: number; satId: string; beat: number; job: Job }
-interface Job { id: number; kind: RemoteKind; key: TileKey; cfg: RemoteConfig; inputs: Record<string, string | null>; outputs: string[]; codeSha: string }
+interface Job {
+    id: number; kind: RemoteKind; key: TileKey; cfg: RemoteConfig; inputs: Record<string, string | null>; outputs: string[]; codeSha: string;
+    /** The pass's progress, for the satellite's screen. */
+    progress: { done: number; total: number; pass: number };
+}
 interface Satellite { id: string; name: string; threads: number; done: number; seen: number }
 interface Waiter { res: http.ServerResponse; satId: string; timer: NodeJS.Timeout }
 
@@ -91,7 +88,10 @@ export class TilePool<R extends { key: string }> {
     private token = '';
     private code = '';
     private codeSha = '';
+    /** The code signed with the token: a satellite runs only code from a bake that holds it. */
     private codeHmac = '';
+    /** Satellites already told they are too old, by name: said once, not every retry. */
+    private readonly refused = new Set<string>();
     private readonly sats = new Map<string, Satellite>();
     private readonly leases = new Map<number, Lease>();
     private readonly waiters: Waiter[] = [];
@@ -252,8 +252,9 @@ export class TilePool<R extends { key: string }> {
 
     private async startServer(port: number): Promise<void> {
         this.token = satelliteToken();
-        this.code = await bundleComputeWorker();
-        this.codeSha = crypto.createHash('sha256').update(this.code).digest('hex');
+        const compute = await bundleCompute();
+        this.code = compute.code;
+        this.codeSha = compute.sha;
         this.codeHmac = crypto.createHmac('sha256', this.token).update(this.code).digest('hex');
         this.server = http.createServer((req, res) => {
             this.handle(req, res).catch((err: Error) => {
@@ -277,7 +278,7 @@ export class TilePool<R extends { key: string }> {
         this.udp.bind(DISCOVERY_PORT);
         this.expiry = setInterval(() => this.expireLeases(), 5000);
         const ips = Object.values(os.networkInterfaces()).flat().filter(i => i && i.family === 'IPv4' && !i.internal).map(i => i!.address);
-        console.log(`satellites: listening on port ${port} (${ips.join(', ')}), discovery on UDP ${DISCOVERY_PORT}`);
+        console.log(`satellites: listening on port ${port} (${ips.join(', ')}), discovery on UDP ${DISCOVERY_PORT}, tile code ${this.codeSha.slice(0, 12)}`);
     }
 
     private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -292,18 +293,29 @@ export class TilePool<R extends { key: string }> {
             sat.seen = Date.now();
         }
         if (req.method === 'POST' && url.pathname === '/sat/hello') {
-            const body = JSON.parse((await readBody(req)).toString()) as { name: string; threads: number; protocol: number };
+            const body = JSON.parse((await readBody(req)).toString()) as { name: string; threads: number; protocol: number; codeSha?: string };
             if (body.protocol !== SATELLITE_PROTOCOL) {
-                res.writeHead(426, { 'content-type': 'application/json' }).end(JSON.stringify({ protocol: SATELLITE_PROTOCOL }));
-                console.warn(`\nwarning: satellite ${body.name} speaks protocol ${body.protocol}, this bake ${SATELLITE_PROTOCOL}: rebuild it (npm run build:satellite)`);
+                // Too old to fetch code it can speak to: only a new exe helps.
+                res.writeHead(409, { 'content-type': 'application/json' })
+                    .end(JSON.stringify({ protocol: SATELLITE_PROTOCOL, codeSha: this.codeSha }));
+                if (!this.refused.has(body.name)) {
+                    this.refused.add(body.name);
+                    console.warn(`\nwarning: turned away satellite ${body.name}: it speaks protocol ${body.protocol}, this bake `
+                        + `${SATELLITE_PROTOCOL}; rebuild it (npm run build:satellite) and copy it over`);
+                }
+                return;
+            }
+            if (body.codeSha !== this.codeSha) {
+                // Not joined yet: it fetches /sat/code and says hello again with this bake's hash.
+                res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ codeSha: this.codeSha }));
+                console.log(`\nsatellite ${body.name} has tile code ${String(body.codeSha).slice(0, 12)}; it is fetching this bake's`);
                 return;
             }
             if (!this.sats.has(satId)) {
                 console.log(`\nsatellite ${body.name} joined with ${body.threads} threads`);
             }
             this.sats.set(satId, { id: satId, name: body.name, threads: body.threads, done: sat?.done ?? 0, seen: Date.now() });
-            res.writeHead(200, { 'content-type': 'application/json' })
-                .end(JSON.stringify({ codeSha: this.codeSha }));
+            res.writeHead(204).end();
         } else if (req.method === 'GET' && url.pathname === '/sat/code') {
             res.writeHead(200, { 'content-type': 'application/json' })
                 .end(JSON.stringify({ code: this.code, sha: this.codeSha, hmac: this.codeHmac }));
@@ -311,6 +323,19 @@ export class TilePool<R extends { key: string }> {
             res.writeHead(403).end();
         } else if (req.method === 'POST' && url.pathname === '/sat/lease') {
             this.lease(sat, res);
+        } else if (req.method === 'POST' && url.pathname === '/sat/bye') {
+            // Quitting: its tiles go back in the queue now, not after LEASE_TIMEOUT_MS.
+            for (const [id, l] of this.leases) {
+                if (l.satId === satId) {
+                    this.leases.delete(id);
+                    if (this.run && this.run.pass === l.pass && !this.run.finished[l.idx]) {
+                        this.requeue(l.idx);
+                    }
+                }
+            }
+            console.log(`\nsatellite ${sat.name} left after ${sat.done} tiles`);
+            this.sats.delete(satId);
+            res.writeHead(204).end();
         } else if (req.method === 'POST' && url.pathname === '/sat/heartbeat') {
             const ids = JSON.parse((await readBody(req)).toString()) as number[];
             for (const id of ids) {
@@ -376,6 +401,7 @@ export class TilePool<R extends { key: string }> {
         const job: Job = {
             id: this.nextJobId++, kind, key, cfg: wireConfig(kind, this.opts.cfg, key),
             inputs, outputs: outputsOf(kind, key), codeSha: this.codeSha,
+            progress: { done: run.done, total: run.tiles.length, pass: run.pass },
         };
         this.leases.set(job.id, { idx, pass: run.pass, satId: sat.id, beat: Date.now(), job });
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(job));

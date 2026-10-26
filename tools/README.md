@@ -1232,11 +1232,15 @@ npm run bake:farland -- --bbox ... --satellites --jobs 0   # satellites only
 - **What moves.** A satellite gets each tile's inputs by content hash and
   caches them, so a neighbour tile is not sent twice. It sends back only the
   leaf files. The index and the manifest are still written here.
-- **Which code runs.** The tile code is not in the exe. The bake bundles
-  `tools/satellite/computeWorker.ts` from this tree and sends it, signed with
-  the token in `data/satellite/token`, which is built into the exe. So the
-  exe needs rebuilding only for a new token or protocol, and a satellite
-  refuses code from anyone without the token.
+- **Which code runs.** The exe has the tile code
+  (`tools/satellite/computeWorker.ts`) and the token in
+  `data/satellite/token` built in. Each bake bundles the tile code from this
+  tree as it is now, committed or not. When the hashes differ (the code
+  changed since the exe was built), the satellite fetches the bake's copy,
+  checks it is signed with its token, and runs that. So it always bakes what
+  a local run would, and a code change needs no new exe. Only a protocol
+  change (`SATELLITE_PROTOCOL`) or a new token does: the bake then turns the
+  satellite away with a "rebuild it" warning on both sides.
 - **Firewall.** The bake listens on TCP 47811 (`--satellite-port`), so Windows
   asks once to let Node in. Satellites need no inbound port. Over a VPN or
   across subnets, where broadcast does not reach, start the satellite with
