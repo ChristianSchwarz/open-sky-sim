@@ -18,7 +18,7 @@ import { FrameShift, WGS84_A } from './geodesy';
 import {
     DETAIL_DISTANCE_OFF, FRUSTUM_CULL_MARGIN_TAN, LEAF_REFINE_DISTANCE_SCALE,
     LOD_FADE_MS, LOD_FADE_NEAR, LOD_FADE_SOFTNESS,
-    detailFalloff, ellipsoidSagittaM, refineDistanceM,
+    detailFalloff, ellipsoidSagittaM, leafParentErrorFloorM, refineDistanceM,
     shouldRefine, terrainMaxZoomForAltitudeM, terrainViewRangeM,
 } from './lod';
 import { TerrainManifest } from './manifest';
@@ -200,7 +200,9 @@ export class Quadtree {
      * The node one level above the leaf is inflated by `leafScale` (the
      * *Land-use detail reach* setting, default
      * {@link LEAF_REFINE_DISTANCE_SCALE}), so the leaf - and the exact landuse
-     * fills only it carries - takes over that much further out.
+     * fills only it carries - takes over that much further out. Before that
+     * its error is floored at one cover texel ({@link leafParentErrorFloorM}),
+     * since flat ground reports next to no height error.
      */
     private drawErrorM(node: QuadNode, leafScale: number): number {
         let err = node.ocean
@@ -214,7 +216,13 @@ export class Quadtree {
             // texels would cover more than MAP_TEXEL_PX pixels.
             err = Math.max(err, approxTileEdgeMetres(node.id) / MAP_TEXELS_PER_TILE / MAP_TEXEL_PX);
         }
-        return node.id.z === this.maxZoom - 1 ? err * leafScale : err;
+        if (node.id.z !== this.maxZoom - 1) {
+            return err;
+        }
+        if (!node.ocean) {
+            err = Math.max(err, leafParentErrorFloorM(node.id));
+        }
+        return err * leafScale;
     }
 
     get nodeCount(): number {

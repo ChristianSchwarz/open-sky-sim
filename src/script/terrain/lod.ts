@@ -44,6 +44,32 @@ const SSE_TARGET_PX = 1;
  * else: no other level's cut moves, and the governor still scales on top.
  */
 export const LEAF_REFINE_DISTANCE_SCALE = 1.5;
+
+/** Cover texels across a near tile (bake_planet_tex `--near-size`): z10 and z11 are 512. */
+const LEAF_PARENT_COVER_TEXELS = 512;
+/** First level whose rasters are the near size (bake_planet_tex `--near-zoom`). */
+const LEAF_PARENT_COVER_MIN_ZOOM = 10;
+
+/**
+ * The least error the leaf's parent may claim, in metres: one of its cover
+ * texels.
+ *
+ * A tile's baked error is a height error (buildTile.ts: the DEM's child loss
+ * plus what the decimator gave up, clamped to the relief), so flat ground
+ * reports almost none. Over the Krim spit and its lagoons the z11 parent said
+ * 4.25 m and handed over to its leaves at 1.3 km; from there out it drew its
+ * coast, beach and rail out of 13 x 19 m texels, sampled nearest, which read
+ * as a staircase beach and a zig-zag railway (2026-10-26). What the parent
+ * actually gets wrong there is where things are, not how high: the position
+ * of every edge is only good to a texel. Counting that as its error keeps the
+ * leaves out to where a texel is no bigger on screen than the height error
+ * would be anywhere else.
+ */
+export function leafParentErrorFloorM(id: TileKey): number {
+    return id.z >= LEAF_PARENT_COVER_MIN_ZOOM
+        ? approxTileEdgeMetres(id) / LEAF_PARENT_COVER_TEXELS
+        : 0;
+}
 /** Range of the *Land-use detail reach* slider: 1 is no bias at all. */
 export const LEAF_REFINE_DISTANCE_SCALE_MIN = 1;
 export const LEAF_REFINE_DISTANCE_SCALE_MAX = 10;

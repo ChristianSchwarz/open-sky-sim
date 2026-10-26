@@ -4,7 +4,7 @@ import {
     DETAIL_DISTANCE_OFF, DETAIL_SCALE_MAX, DETAIL_SCALE_MIN,
     TARGET_FRAME_MS, TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_DETAIL_DISTANCE_MAX_M,
     TERRAIN_DETAIL_DISTANCE_MIN_M, adjustDetailScale, clampDetailDistanceM, detailFalloff,
-    LANDUSE_REVEAL_MIN_PX, landuseRevealScale, refineDistanceM, shouldRefine,
+    LANDUSE_REVEAL_MIN_PX, landuseRevealScale, leafParentErrorFloorM, refineDistanceM, shouldRefine,
 } from './lod';
 
 /** Reconciles needed to get from `from` to `to` at a steady frame time. */
@@ -127,6 +127,19 @@ describe('refineDistanceM', () => {
 
     it('ignores an off knee', () => {
         assert.equal(refineDistanceM(15, H, FOV, 1, DETAIL_DISTANCE_OFF), refineDistanceM(15, H, FOV, 1));
+    });
+});
+
+describe('leafParentErrorFloorM', () => {
+    it('is one 512-texel cover texel of a z11 tile: 19 m on the Krim spit', () => {
+        // 11/2428/510 drew the staircase beach; its height error was 4.25 m.
+        const floor = leafParentErrorFloorM({ z: 11, x: 2428, y: 510 });
+        assert.ok(Math.abs(floor - 9718 / 512) < 0.5, `${floor}`);
+        assert.ok(floor > 4.25);
+    });
+
+    it('leaves levels with coarse rasters alone', () => {
+        assert.equal(leafParentErrorFloorM({ z: 9, x: 600, y: 120 }), 0);
     });
 });
 
