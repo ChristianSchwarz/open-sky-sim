@@ -18,14 +18,14 @@
  * aircraft the sim has no collider for.
  */
 import * as THREE from 'three';
-import { ARRESTOR_DECK_MID_X } from './arrestorCables';
+import { ARRESTOR_CABLE_LOCAL_Z, ARRESTOR_DECK_MID_X } from './arrestorCables';
 
 /** Stanchion pair centre, carrier-local X (the landing centreline). */
 export const BARRICADE_MID_X = ARRESTOR_DECK_MID_X;
 /** Half the distance between the stanchions (m); the wires' lane is ±18 m too. */
 export const BARRICADE_HALF_SPAN_M = 18;
-/** Carrier-local Z of the webbing: 19 m forward of wire 4, landing along −Z. */
-export const BARRICADE_LOCAL_Z = 40;
+/** Carrier-local Z of the webbing: rigged across wire 4, the forward-most wire, landing along −Z. */
+export const BARRICADE_LOCAL_Z = ARRESTOR_CABLE_LOCAL_Z[3];
 /** Deck height under the barricade, carrier-local Y (as under the wires). */
 export const BARRICADE_DECK_Y = 13.55;
 /** Stanchion and upper-strap height above the deck (20 ft). */

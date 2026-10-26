@@ -39,12 +39,14 @@ const CABLE_W_M = 0.05;
 const PLY_GAP_M = 0.025;
 /** Swung flat, the webbing lies this far above the deck (m). */
 const DECK_CLEARANCE_M = 0.02;
-/** Stanchion cross-section (m). */
-const STANCHION_SIDE_M = 0.45;
-/** Nylon webbing, black wire rope, deck-grey stanchions. */
+/** Stanchion cross-section (m): stout enough to read against the deck from the groove. */
+const STANCHION_SIDE_M = 0.7;
+/** A stanchion foot further than this (m) from the net's deck height has no deck under it in the map. */
+const STANCHION_FOOT_TOLERANCE_M = 2;
+/** Nylon webbing, black wire rope, light-grey stanchions (deck grey vanished into the deck). */
 const WEBBING_COLOR = '#d6d0bf';
 const CABLE_COLOR = '#000000';
-const STANCHION_COLOR = '#7c8186';
+const STANCHION_COLOR = '#c4c9ce';
 /** Camera distance at which ribbons give way to lines, with hysteresis (m). */
 const LOD_LINE_M = 350;
 const LOD_HYSTERESIS_M = 25;
@@ -92,7 +94,11 @@ const FLAT_DECK: BarricadeDeck = { heightAt: () => BARRICADE_DECK_Y, reference: 
 function stanchionPoses(raise: number, deck: BarricadeDeck): [StanchionPose, StanchionPose] {
     const theta = THREE.MathUtils.clamp(raise, 0, 1) * Math.PI * 0.5;
     const make = (x: number) => {
-        const base = new THREE.Vector3(x, deck.heightAt(x, BARRICADE_LOCAL_Z), BARRICADE_LOCAL_Z);
+        // Where the deck map has no deck under the foot (the stanchions stand at its very edge),
+        // it answers far below the ship: stand on the net's own deck height instead.
+        const h = deck.heightAt(x, BARRICADE_LOCAL_Z);
+        const footY = Math.abs(h - deck.reference) > STANCHION_FOOT_TOLERANCE_M ? deck.reference : h;
+        const base = new THREE.Vector3(x, footY, BARRICADE_LOCAL_Z);
         const top = base.clone().add(new THREE.Vector3(0, BARRICADE_HEIGHT_M * Math.sin(theta), BARRICADE_HEIGHT_M * Math.cos(theta)));
         return { base, top };
     };
