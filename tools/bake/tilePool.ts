@@ -32,16 +32,19 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { TileKey } from '../../src/script/terrain/tiling';
-import { RemoteConfig, RemoteKind, RemoteRoot, inputsOf, outputsOf, wireConfig } from './remoteTiles';
+import { RemoteConfig, RemoteKind, RemoteRoot, decodeWire, encodeWire, inputsOf, outputsOf, wireConfig } from './remoteTiles';
 import { bundleCompute } from '../satellite/computeBundle';
 
 export const DISCOVERY_PORT = 47810;
 export const DEFAULT_SATELLITE_PORT = 47811;
 /** Bumped when the satellite's side of the HTTP protocol changes. */
-export const SATELLITE_PROTOCOL = 3;
+export const SATELLITE_PROTOCOL = 4;
 export const TOKEN_FILE = path.join('data', 'satellite', 'token');
 
+/** A job config longer than this goes by hash, as a blob the satellite caches. */
+const INLINE_CONFIG_BYTES = 8192;
 const LEASE_TIMEOUT_MS = 90_000;
+const DISCOVERY_RETRY_MS = 10_000;
 const LONG_POLL_MS = 20_000;
 /** Recently read input files kept for the satellites' blob requests, bytes. */
 const BLOB_CACHE_BYTES = 512e6;
@@ -61,7 +64,8 @@ export interface PoolOptions {
     cfg: RemoteConfig;
     kindOf: (pass: number) => RemoteKind;
     roots: Partial<Record<RemoteRoot, string>>;
-    satellites?: { port: number };
+    /** Take satellites on this HTTP port; `discovery: false` leaves the broadcast port alone (satellites given the address). */
+    satellites?: { port: number; discovery?: boolean };
     /** Checked every 50 dispatches; true stops handing out tiles. */
     diskLow: () => boolean;
     /** Printed before the progress line, e.g. 'pass 1: '. */
@@ -71,7 +75,10 @@ export interface PoolOptions {
 
 interface Lease { idx: number; pass: number; satId: string; beat: number; job: Job }
 interface Job {
-    id: number; kind: RemoteKind; key: TileKey; cfg: RemoteConfig; inputs: Record<string, string | null>; outputs: string[]; codeSha: string;
+    id: number; kind: RemoteKind; key: TileKey; inputs: Record<string, string | null>; outputs: string[]; codeSha: string;
+    /** The config (remoteTiles.ts encodeWire): inline, or the hash of a blob holding it. */
+    cfgText?: string;
+    cfgSha?: string;
     /** The pass's progress, for the satellite's screen. */
     progress: { done: number; total: number; pass: number };
 }
@@ -80,11 +87,13 @@ interface Waiter { res: http.ServerResponse; satId: string; timer: NodeJS.Timeou
 
 const keyOf = (k: TileKey) => `${k.z}/${k.x}/${k.y}`;
 
-export class TilePool<R extends { key: string }> {
+export class TilePool<R> {
     private readonly workers: Worker[] = [];
     private readonly idle = new Set<Worker>();
     private server?: http.Server;
     private udp?: dgram.Socket;
+    private discoveryRetry?: NodeJS.Timeout;
+    private discoveryWarned = false;
     private token = '';
     private code = '';
     private codeSha = '';
@@ -101,6 +110,10 @@ export class TilePool<R extends { key: string }> {
     private readonly shaPath = new Map<string, string>();
     private readonly blobs = new Map<string, Buffer>();
     private blobBytes = 0;
+    /** Job configs sent by hash, kept for the whole bake. */
+    private readonly configBlobs = new Map<string, Buffer>();
+    /** The config of a kind whose config is the same for every tile. */
+    private readonly wires = new Map<RemoteKind, { cfgText?: string; cfgSha?: string }>();
     /** The pass running now, or undefined between passes. */
     private run?: {
         pass: number; tiles: readonly TileKey[]; queue: number[]; results: Array<R | undefined>; finished: boolean[];
@@ -169,7 +182,12 @@ export class TilePool<R extends { key: string }> {
             clearTimeout(w.timer);
             w.res.writeHead(410).end();
         }
-        this.udp?.close();
+        if (this.discoveryRetry) {
+            clearTimeout(this.discoveryRetry);
+        }
+        const udp = this.udp;
+        this.udp = undefined;
+        udp?.close();
         if (this.server) {
             await new Promise<void>(r => this.server!.close(() => r()));
             this.server.closeAllConnections();
@@ -221,10 +239,11 @@ export class TilePool<R extends { key: string }> {
         }
         run.finished[idx] = true;
         run.done++;
-        if ('error' in result) {
-            run.errors.push(result.error);
+        // A tile function may return nothing (the mesh bake, for a tile with no heights).
+        if (result !== null && typeof result === 'object' && 'error' in result) {
+            run.errors.push((result as { error: string }).error);
         } else {
-            run.results[idx] = result;
+            run.results[idx] = (result ?? undefined) as R | undefined;
         }
         if (Date.now() - run.lastLine > 1000 || run.done === run.tiles.length) {
             const el = (Date.now() - this.opts.t0) / 1000;
@@ -268,17 +287,47 @@ export class TilePool<R extends { key: string }> {
             this.server!.once('error', reject);
             this.server!.listen(port, () => resolve());
         });
-        this.udp = dgram.createSocket('udp4');
-        this.udp.on('message', (msg, rinfo) => {
-            if (msg.toString() === 'rfs-satellite?') {
-                this.udp!.send(JSON.stringify({ rfs: 'coordinator', port, host: os.hostname() }), rinfo.port, rinfo.address);
-            }
-        });
-        this.udp.on('error', err => console.warn(`warning: satellite discovery off (${err.message}); start satellites with --coordinator`));
-        this.udp.bind(DISCOVERY_PORT);
+        if (this.opts.satellites!.discovery !== false) {
+            this.listenForSatellites(port);
+        }
         this.expiry = setInterval(() => this.expireLeases(), 5000);
         const ips = Object.values(os.networkInterfaces()).flat().filter(i => i && i.family === 'IPv4' && !i.internal).map(i => i!.address);
-        console.log(`satellites: listening on port ${port} (${ips.join(', ')}), discovery on UDP ${DISCOVERY_PORT}, tile code ${this.codeSha.slice(0, 12)}`);
+        console.log(`satellites: listening on port ${port} (${ips.join(', ')}), `
+            + `${this.opts.satellites!.discovery === false ? 'no discovery' : `discovery on UDP ${DISCOVERY_PORT}`}, tile code ${this.codeSha.slice(0, 12)}`);
+    }
+
+    /**
+     * Answer the satellites' broadcasts. Only one bake on a machine can hold
+     * the port; another that finds it taken tries again every
+     * DISCOVERY_RETRY_MS, and takes it over when the first bake ends.
+     */
+    private listenForSatellites(port: number): void {
+        const udp = dgram.createSocket('udp4');
+        udp.on('message', (msg, rinfo) => {
+            if (msg.toString() === 'rfs-satellite?') {
+                udp.send(JSON.stringify({ rfs: 'coordinator', port, host: os.hostname() }), rinfo.port, rinfo.address);
+            }
+        });
+        udp.on('error', err => {
+            udp.close();
+            if (this.udp !== udp) {
+                return;
+            }
+            this.udp = undefined;
+            if (!this.discoveryWarned) {
+                this.discoveryWarned = true;
+                console.warn(`\nwarning: satellite discovery port taken (${err.message}) - another bake on this machine holds it; `
+                    + `retrying every ${DISCOVERY_RETRY_MS / 1000} s, or start satellites with --coordinator HOST:${port}`);
+            }
+            this.discoveryRetry = setTimeout(() => this.listenForSatellites(port), DISCOVERY_RETRY_MS);
+        });
+        udp.bind(DISCOVERY_PORT, () => {
+            if (this.discoveryWarned) {
+                console.log('\nsatellite discovery is on again');
+                this.discoveryWarned = false;
+            }
+        });
+        this.udp = udp;
     }
 
     private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -386,6 +435,33 @@ export class TilePool<R extends { key: string }> {
         }
     }
 
+    /**
+     * A job's config: inline when small, else by hash (a blob the satellite
+     * fetches once and caches - the mesh config carries every airfield pad
+     * and the ground colours, megabytes, the same for every tile).
+     */
+    private wire(kind: RemoteKind, key: TileKey): { cfgText?: string; cfgSha?: string } {
+        const perTile = kind === 'grade1' || kind === 'grade2';
+        const known = perTile ? undefined : this.wires.get(kind);
+        if (known) {
+            return known;
+        }
+        const text = encodeWire(wireConfig(kind, this.opts.cfg, key));
+        let w: { cfgText?: string; cfgSha?: string };
+        if (text.length <= INLINE_CONFIG_BYTES) {
+            w = { cfgText: text };
+        } else {
+            const bytes = Buffer.from(text);
+            const sha = crypto.createHash('sha1').update(bytes).digest('hex');
+            this.configBlobs.set(sha, bytes);
+            w = { cfgSha: sha };
+        }
+        if (!perTile) {
+            this.wires.set(kind, w);
+        }
+        return w;
+    }
+
     private sendJob(sat: Satellite, res: http.ServerResponse): boolean {
         const idx = this.take();
         if (idx === undefined) {
@@ -399,7 +475,7 @@ export class TilePool<R extends { key: string }> {
             inputs[rel] = this.hashOf(rel);
         }
         const job: Job = {
-            id: this.nextJobId++, kind, key, cfg: wireConfig(kind, this.opts.cfg, key),
+            id: this.nextJobId++, kind, key, ...this.wire(kind, key),
             inputs, outputs: outputsOf(kind, key), codeSha: this.codeSha,
             progress: { done: run.done, total: run.tiles.length, pass: run.pass },
         };
@@ -442,7 +518,7 @@ export class TilePool<R extends { key: string }> {
         this.leases.delete(jobId);
         const headLen = body.readUInt32LE(0);
         const head = JSON.parse(body.subarray(4, 4 + headLen).toString()) as {
-            result?: R; error?: string; retry?: boolean; outputs: Array<{ rel: string; state: 'bytes' | 'deleted' | 'unchanged'; size: number }>;
+            result?: R; resultText?: string; error?: string; retry?: boolean; outputs: Array<{ rel: string; state: 'bytes' | 'deleted' | 'unchanged'; size: number }>;
         };
         if (head.retry) {
             this.requeue(lease.idx);
@@ -466,7 +542,7 @@ export class TilePool<R extends { key: string }> {
             }
         }
         sat.done++;
-        this.complete(lease.idx, head.result!);
+        this.complete(lease.idx, (head.resultText !== undefined ? decodeWire<R>(head.resultText) : head.result) as R);
     }
 
     // --- the input files --------------------------------------------------------
@@ -520,7 +596,7 @@ export class TilePool<R extends { key: string }> {
     }
 
     private blob(sha: string): Buffer | undefined {
-        const kept = this.blobs.get(sha);
+        const kept = this.configBlobs.get(sha) ?? this.blobs.get(sha);
         if (kept) {
             return kept;
         }

@@ -7,26 +7,35 @@
  *
  * Paths are `<root>/<z>/<x>/<y><ext>` with a root of
  *
- *   terrain  the mesh tree (--dir)
+ *   terrain  the mesh tree (--dir / --out)
  *   lidar    the lidar store (data/imports/lidar/store)
- *   planet   the planet pyramid the store's signatures are checked against
+ *   planet   the planet pyramid: heights, vectors, cover
+ *   texcache the far-tile texture bake's leaf rasters
  *
  * An input list may name files that do not exist: the coordinator sends
  * "absent" for those, so the satellite sees the same holes it would see here.
  * A list that misses a file the tile function reads makes the satellite's
  * output differ from a local run - tools/verify_satellite.ts checks that.
+ *
+ * An output the satellite finds missing after the run is removed here only
+ * if it was among the inputs (the tile function deleted it); one that was
+ * never sent and never written was not touched, and stays as it is.
  */
 
 import * as path from 'node:path';
 import { FarLandConfig, FarLandResult, farLandOfTile, FAR_LAND_EXT } from './farLandTile';
 import { GradeConfig, GradeResult, PASS1_EXT, bedsOfTile, gradeTile } from './gradeTile';
+import { MeshTileConfig, TileProcessResult, processTile } from './meshTile';
+import { MIN_SEAM_ZOOM } from './borderConform';
+import { TexLeafConfig, TexLeafResult, texLeaf } from './texLeaf';
 import { TileKey } from '../../src/script/terrain/tiling';
 
-export type RemoteRoot = 'terrain' | 'lidar' | 'planet';
-export type RemoteKind = 'grade1' | 'grade2' | 'farland';
+export type RemoteRoot = 'terrain' | 'lidar' | 'planet' | 'texcache';
+export type RemoteKind = 'grade1' | 'grade2' | 'farland' | 'mesh' | 'texleaf';
 
 /** What a kind's config looks like on the wire: its directories are root names, not paths. */
-export type RemoteConfig = GradeConfig | FarLandConfig;
+export type RemoteConfig = GradeConfig | FarLandConfig | MeshTileConfig | TexLeafConfig;
+export type RemoteResult = GradeResult | FarLandResult | TileProcessResult | TexLeafResult | undefined;
 
 const rel = (root: RemoteRoot, k: TileKey, ext: string) => `${root}/${k.z}/${k.x}/${k.y}${ext}`;
 
@@ -42,8 +51,25 @@ function ring(k: TileKey, r: number): TileKey[] {
 
 /** Every file `kind` may read for tile `k`, as root-relative paths. */
 export function inputsOf(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): string[] {
+    if (kind === 'mesh') {
+        // meshTile.ts processTile: the tile's heights, road grade, coast and
+        // land use, cover and road vectors; the parent's heights for the
+        // skirt; and the ancestors' down to MIN_SEAM_ZOOM, whose borders
+        // conformBorders follows.
+        const out = ['.pdm', '.rgr', '.lvr', '.plc', '.rvr'].map(ext => rel('planet', k, ext));
+        for (let az = k.z - 1; az >= 0 && (az >= MIN_SEAM_ZOOM || az === k.z - 1); az--) {
+            const s = k.z - az;
+            out.push(rel('planet', { z: az, x: k.x >> s, y: k.y >> s }, '.pdm'));
+        }
+        return out;
+    }
+    if (kind === 'texleaf') {
+        // texLeaf.ts: the leaf's land, and its footprints when buildings are painted.
+        return (cfg as TexLeafConfig).buildings ? [rel('terrain', k, '.ptm'), rel('terrain', k, '.pbh')] : [rel('terrain', k, '.ptm')];
+    }
     if (kind === 'farland') {
-        return [rel('terrain', k, '.ptm'), rel('terrain', k, '.ptr')];
+        // The tile's own sidecar too: a leaf with nothing worth simplifying removes it.
+        return [rel('terrain', k, '.ptm'), rel('terrain', k, '.ptr'), rel('terrain', k, FAR_LAND_EXT)];
     }
     const g = cfg as GradeConfig;
     // railBedInputs.ts: the tile's land and strokes, the 3x3 bridges; the
@@ -69,6 +95,8 @@ export function outputsOf(kind: RemoteKind, k: TileKey): string[] {
         case 'grade1': return [rel('terrain', k, PASS1_EXT)];
         case 'grade2': return [rel('terrain', k, '.ptm'), rel('terrain', k, '.ptr'), rel('terrain', k, '.pbd')];
         case 'farland': return [rel('terrain', k, FAR_LAND_EXT)];
+        case 'mesh': return [rel('terrain', k, '.ptm')];
+        case 'texleaf': return [rel('texcache', k, '.ptx')];
     }
 }
 
@@ -77,6 +105,12 @@ export function outputsOf(kind: RemoteKind, k: TileKey): string[] {
  * grade's centre heights cut down to the 5x5 round the tile (all it reads).
  */
 export function wireConfig(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): RemoteConfig {
+    if (kind === 'mesh') {
+        return { ...(cfg as MeshTileConfig), src: 'planet', out: 'terrain' };
+    }
+    if (kind === 'texleaf') {
+        return { ...(cfg as TexLeafConfig), dir: 'terrain', cache: 'texcache' };
+    }
     if (kind === 'farland') {
         return { ...(cfg as FarLandConfig), dir: 'terrain' };
     }
@@ -92,7 +126,15 @@ export function wireConfig(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): Rem
 }
 
 /** Run one job against `jobDir`, which holds the job's inputs under their root names. */
-export function runRemoteJob(kind: RemoteKind, cfg: RemoteConfig, k: TileKey, jobDir: string): GradeResult | FarLandResult {
+export function runRemoteJob(kind: RemoteKind, cfg: RemoteConfig, k: TileKey, jobDir: string): RemoteResult {
+    if (kind === 'mesh') {
+        const m = cfg as MeshTileConfig;
+        return processTile({ ...m, src: path.join(jobDir, m.src), out: path.join(jobDir, m.out) }, k);
+    }
+    if (kind === 'texleaf') {
+        const t = cfg as TexLeafConfig;
+        return texLeaf({ ...t, dir: path.join(jobDir, t.dir), cache: path.join(jobDir, t.cache) }, k);
+    }
     if (kind === 'farland') {
         const f = cfg as FarLandConfig;
         return farLandOfTile({ ...f, dir: path.join(jobDir, f.dir) }, k);
@@ -104,4 +146,36 @@ export function runRemoteJob(kind: RemoteKind, cfg: RemoteConfig, k: TileKey, jo
         lidar: g.lidar ? { store: path.join(jobDir, g.lidar.store), planet: path.join(jobDir, g.lidar.planet) } : undefined,
     };
     return kind === 'grade1' ? bedsOfTile(local, k) : gradeTile(local, k);
+}
+
+// --- the config on the wire ---------------------------------------------------
+
+/**
+ * JSON that keeps typed arrays (the mesh config's ENU bases hold
+ * Float64Arrays, which plain JSON turns into objects with numbered keys).
+ * The satellite decodes it in its compute thread, so this format travels with
+ * the tile code and not with the exe.
+ */
+export function encodeWire(value: unknown): string {
+    return JSON.stringify(value, (_k, v: unknown) => (ArrayBuffer.isView(v) && !(v instanceof DataView)
+        ? { $typed: v.constructor.name, v: Array.from(v as unknown as ArrayLike<number>) }
+        : v));
+}
+
+const TYPED: Record<string, new (v: number[]) => unknown> = {
+    Float64Array, Float32Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array, Uint8ClampedArray,
+};
+
+export function decodeWire<T>(text: string): T {
+    return JSON.parse(text, (_k, v: unknown) => {
+        if (v && typeof v === 'object' && '$typed' in v) {
+            const t = v as { $typed: string; v: number[] };
+            const Ctor = TYPED[t.$typed];
+            if (!Ctor) {
+                throw new Error(`unknown typed array ${t.$typed}`);
+            }
+            return new Ctor(t.v);
+        }
+        return v;
+    }) as T;
 }

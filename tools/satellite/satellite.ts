@@ -46,21 +46,26 @@ declare const __SAT_TOKEN__: string | undefined;
 declare const __SAT_COMPUTE__: string | undefined;
 
 const DISCOVERY_PORT = 47810;
-const PROTOCOL = 3;
+const PROTOCOL = 4;
 const HEARTBEAT_MS = 15_000;
-const REL_PATTERN = /^(terrain|lidar|planet)\/\d+\/-?\d+\/-?\d+\.[a-z0-9]+$/;
+/** A root name (new ones need no new exe), then z/x/y.ext: nothing that climbs out of the job directory. */
+const REL_PATTERN = /^[a-z]+\/\d+\/-?\d+\/-?\d+\.[a-z0-9]+$/;
 
 interface Args { coordinator?: string; threads: number; cache: string; cacheGb: number; name: string; once: boolean }
 
 interface Job {
-    id: number; kind: string; key: { z: number; x: number; y: number }; cfg: unknown;
+    id: number; kind: string; key: { z: number; x: number; y: number };
+    /** The config as text (decoded by the tile code), inline or as the hash of a blob holding it. */
+    cfgText?: string; cfgSha?: string;
     inputs: Record<string, string | null>; outputs: string[]; codeSha: string;
     /** The whole bake's progress in the running pass when the job was handed out. */
     progress?: { done: number; total: number; pass: number };
 }
 
-const KIND_LABEL: Record<string, string> = { grade1: 'beds', grade2: 'grading', farland: 'far land' };
-const PASS_LABEL: Record<string, string> = { grade1: 'grading, pass 1 (beds)', grade2: 'grading, pass 2', farland: 'far land' };
+const KIND_LABEL: Record<string, string> = { grade1: 'beds', grade2: 'grading', farland: 'far land', mesh: 'mesh', texleaf: 'texture' };
+const PASS_LABEL: Record<string, string> = {
+    grade1: 'grading, pass 1 (beds)', grade2: 'grading, pass 2', farland: 'far land', mesh: 'meshes', texleaf: 'far-tile textures',
+};
 
 /** What one compute thread is doing, for the status block. */
 interface SlotView { phase: 'idle' | 'fetching' | 'computing' | 'sending'; kind?: string; key?: string; since: number }
@@ -461,10 +466,13 @@ class Satellite {
                     fs.copyFileSync(this.blobPath(sha), p);
                 }
             }
+            const cfgText = job.cfgText ?? await this.configText(job.cfgSha!).catch((err: Error) => {
+                throw err instanceof SessionOver ? err : new Retry(err.message);
+            });
             computing();
             const t0 = Date.now();
-            const reply = await new Promise<{ result?: unknown; error?: string }>((resolve, reject) => {
-                const onMsg = (m: { id: number; result?: unknown; error?: string }) => {
+            const reply = await new Promise<{ result?: unknown; resultText?: string; error?: string }>((resolve, reject) => {
+                const onMsg = (m: { id: number; result?: unknown; resultText?: string; error?: string }) => {
                     if (m.id === job.id) {
                         worker.off('message', onMsg);
                         worker.off('error', reject);
@@ -473,7 +481,7 @@ class Satellite {
                 };
                 worker.on('message', onMsg);
                 worker.once('error', reject);
-                worker.postMessage({ id: job.id, kind: job.kind, cfg: job.cfg, key: job.key, jobDir });
+                worker.postMessage({ id: job.id, kind: job.kind, cfgText, key: job.key, jobDir });
             });
             if (reply.error !== undefined) {
                 this.stats.failed++;
@@ -493,7 +501,8 @@ class Satellite {
                 }
                 const p = path.join(jobDir, ...rel.split('/'));
                 if (!fs.existsSync(p)) {
-                    outputs.push({ rel, state: 'deleted', size: 0 });
+                    // Removed by the tile function only if it was here to begin with; else never touched.
+                    outputs.push({ rel, state: job.inputs[rel] ? 'deleted' : 'unchanged', size: 0 });
                     continue;
                 }
                 const b = fs.readFileSync(p);
@@ -504,11 +513,24 @@ class Satellite {
                     bytes.push(b);
                 }
             }
-            return frame({ result: reply.result, outputs }, bytes);
+            return frame({ result: reply.result, resultText: reply.resultText, outputs }, bytes);
         } finally {
             fs.rmSync(jobDir, { recursive: true, force: true });
         }
     }
+
+    /** A config sent by hash: fetched into the cache once, kept in memory after. */
+    private async configText(sha: string): Promise<string> {
+        let text = this.configs.get(sha);
+        if (text === undefined) {
+            await this.blob(sha);
+            text = fs.readFileSync(this.blobPath(sha), 'utf8');
+            this.configs.set(sha, text);
+        }
+        return text;
+    }
+
+    private readonly configs = new Map<string, string>();
 
     private blobPath(sha: string): string {
         return path.join(this.args.cache, 'blobs', sha.slice(0, 2), sha);

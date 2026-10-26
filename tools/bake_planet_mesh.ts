@@ -28,6 +28,12 @@
  *     --bbox w,s,e,n   bake only tiles overlapping this box, and merge the
  *                      index and swatch table with what is already there
  *                      (see tools/README.md, "Adding an area")
+ *     --jobs N         worker threads (default: CPUs - 1)
+ *     --satellites     also hand tiles to satellite machines on the LAN
+ *                      (tools/bake/tilePool.ts); with --jobs 0, to them alone
+ *     --satellite-port N  their HTTP port (default 47811)
+ *     --no-discovery   do not answer the satellites' broadcast (they are given
+ *                      the address; leaves the port to another bake)
  */
 
 import * as fs from 'node:fs';
@@ -35,7 +41,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as zlib from 'node:zlib';
-import { Worker } from 'node:worker_threads';
 import { decodePdm, encodePdmUncompressed } from '../src/script/terrain/demTile';
 import { GradeLine, carveGrid, decodeRgr } from './bake/roadGrade';
 import { decodePtm } from '../src/script/terrain/ptm';
@@ -56,6 +61,7 @@ import {
     MeshTileConfig, TileProcessResult, TileTask, tileBounds,
 } from './bake/meshTile';
 import { GROUND_MEANS_FILE, regionalGroundMeans } from './bake/groundColor';
+import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 
 // Triangles per tile. Measured on real Canary z12 tiles: the coast alone costs
 // ~18k at full resolution and roughly halves per coarsening step, so this buys
@@ -84,6 +90,9 @@ interface Args {
     jobs?: number;
     /** Run the worker from its .ts source under tsx instead of the esbuild bundle. */
     noBundle: boolean;
+    /** Also hand tiles to satellite machines (tools/bake/tilePool.ts), on this HTTP port. */
+    satellitePort?: number;
+    noDiscovery?: boolean;
 }
 
 /**
@@ -132,6 +141,9 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else if (k === '--jobs') a.jobs = Number(next());
         else if (k === '--no-bundle') a.noBundle = true;
+        else if (k === '--satellites') a.satellitePort ??= DEFAULT_SATELLITE_PORT;
+        else if (k === '--satellite-port') a.satellitePort = Number(next());
+        else if (k === '--no-discovery') a.noDiscovery = true;
         else throw new Error(`unknown argument ${k}`);
     }
     return a;
@@ -400,7 +412,8 @@ async function prepareWorker(): Promise<{ file: string; execArgv: string[] }> {
 }
 
 /**
- * Runs `processTile` for every tile across a pool of worker threads.
+ * Runs `processTile` for every tile across the tile pool: worker threads
+ * here and, with `satellitePort`, satellite machines (tools/bake/tilePool.ts).
  *
  * Tiles only read their own input files and write their own `.ptm`, so the
  * *computation* is safe to run in any order or in parallel. What must stay
@@ -411,65 +424,34 @@ async function prepareWorker(): Promise<{ file: string; execArgv: string[] }> {
 async function runTilesInParallel(
     cfg: MeshTileConfig,
     tasks: TileTask[],
-    onProgress: (done: number, total: number) => void,
+    roots: { src: string; out: string },
     jobs?: number,
     noBundle = false,
+    satellitePort?: number,
+    noDiscovery = false,
 ): Promise<Array<TileProcessResult | undefined>> {
-    const worker = tasks.length > 0 && !noBundle
-        ? await prepareWorker()
-        : { file: WORKER_SOURCE, execArgv: process.execArgv };
-    return new Promise((resolve, reject) => {
-        const results: Array<TileProcessResult | undefined> = new Array(tasks.length);
-        if (tasks.length === 0) {
-            resolve(results);
-            return;
-        }
-        const workerCount = Math.max(1, Math.min(jobs ?? (os.cpus().length - 1), tasks.length));
-        let nextTask = 0;
-        let completed = 0;
-        let failed: unknown;
-        const workers: Worker[] = [];
-
-        const settle = (): void => {
-            for (const w of workers) {
-                w.postMessage(null);
-            }
-            resolve(results);
-        };
-
-        const dispatch = (worker: Worker): void => {
-            if (failed !== undefined || nextTask >= tasks.length) {
-                return;
-            }
-            const idx = nextTask++;
-            worker.postMessage({ idx, task: tasks[idx] });
-        };
-
-        for (let i = 0; i < workerCount; i++) {
-            const w = new Worker(worker.file, { execArgv: worker.execArgv, workerData: cfg });
-            workers.push(w);
-            w.on('message', (msg: { idx: number; result: TileProcessResult | undefined }) => {
-                results[msg.idx] = msg.result;
-                completed++;
-                onProgress(completed, tasks.length);
-                if (completed === tasks.length) {
-                    settle();
-                } else {
-                    dispatch(w);
-                }
-            });
-            w.on('error', (err) => {
-                if (failed === undefined) {
-                    failed = err;
-                    for (const w of workers) {
-                        void w.terminate();
-                    }
-                    reject(failed);
-                }
-            });
-            dispatch(w);
-        }
+    if (tasks.length === 0) {
+        return [];
+    }
+    const worker = noBundle ? { file: WORKER_SOURCE, execArgv: process.execArgv } : await prepareWorker();
+    const workerCount = Math.max(satellitePort ? 0 : 1, Math.min(jobs ?? (os.cpus().length - 1), tasks.length));
+    const pool = new TilePool<TileProcessResult>({
+        local: { ...worker, jobs: workerCount }, cfg, kindOf: () => 'mesh',
+        roots: { planet: roots.src, terrain: roots.out },
+        satellites: satellitePort ? { port: satellitePort, discovery: !noDiscovery } : undefined,
+        diskLow: () => false, label: () => '', t0: Date.now(),
     });
+    await pool.start();
+    const { results, errors } = await pool.runPass(tasks, 1);
+    await pool.close();
+    if (errors.length > 0) {
+        // A tile that failed has no .ptm: stop before the index and manifest say otherwise.
+        for (const e of errors.slice(0, 10)) {
+            console.error(`error: ${e}`);
+        }
+        throw new Error(`${errors.length} tiles failed to mesh`);
+    }
+    return results;
 }
 
 /**
@@ -659,11 +641,8 @@ async function main(): Promise<void> {
         groundMeans: regionalGroundMeans(args.src, path.join(args.out, GROUND_MEANS_FILE)),
     };
     const tMesh = Date.now();
-    const results = await runTilesInParallel(meshCfg, tiles, (done, total) => {
-        const pct = ((done / total) * 100).toFixed(1);
-        process.stdout.write(`\r  ${done}/${total} (${pct}%)`);
-    }, args.jobs, args.noBundle);
-    process.stdout.write('\n');
+    const results = await runTilesInParallel(meshCfg, tiles, { src: args.src, out: args.out },
+        args.jobs, args.noBundle, args.satellitePort, args.noDiscovery);
     console.log(`  meshed ${tiles.length} tiles in ${((Date.now() - tMesh) / 1000).toFixed(1)}s `
         + `after ${((tMesh - t0) / 1000).toFixed(1)}s of setup`);
 

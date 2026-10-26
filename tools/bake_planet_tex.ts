@@ -25,9 +25,17 @@
  *     --no-buildings   leave the .pbh building footprints out of the leaf rasters
  *     --bbox w,s,e,n   re-rasterise only the leaves in this box, refold their
  *                      ancestors, and merge the index with what is there
+ *     --jobs N         worker threads rasterising leaves (default: CPUs - 1)
+ *     --no-bundle      run the worker under tsx instead of an esbuild bundle
+ *     --satellites     also hand leaves to satellite machines on the LAN
+ *                      (tools/bake/tilePool.ts); with --jobs 0, to them alone
+ *     --satellite-port N  their HTTP port (default 47811)
+ *     --no-discovery   do not answer the satellites' broadcast (they are given
+ *                      the address; leaves the port to another bake)
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { makeEnuBasis } from '../src/script/terrain/geodesy';
@@ -42,6 +50,11 @@ import { decodeRvr } from './bake/rvr';
 import { LonLatBounds } from './bake/shoreline';
 import { ROAD_MAJOR_MAX_CLASS } from '../src/script/terrain/ptr';
 import { TerrainClass } from '../src/script/terrain/tones';
+import { TexLeafConfig, TexLeafResult } from './bake/texLeaf';
+import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
+
+const WORKER_SOURCE = path.join(__dirname, 'bake', 'texLeafWorker.ts');
+const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'texLeafWorker.cjs');
 
 const DEFAULT_SIZE = 256;
 /**
@@ -79,6 +92,10 @@ interface Args {
     nearZoom: number;
     minZoom: number;
     buildings: boolean;
+    jobs?: number;
+    noBundle: boolean;
+    satellitePort?: number;
+    noDiscovery?: boolean;
     bbox?: LonLatBounds;
 }
 
@@ -103,6 +120,7 @@ function parseArgs(argv: string[]): Args {
         dir: 'assets/terrain',
         src: 'assets/planet',
         cache: path.join('assets', 'planet', 'tex_cache'),
+        noBundle: false,
         size: DEFAULT_SIZE,
         nearSize: DEFAULT_NEAR_SIZE,
         nearZoom: DEFAULT_NEAR_ZOOM,
@@ -120,6 +138,11 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--near-zoom') a.nearZoom = Number(next());
         else if (k === '--min-zoom') a.minZoom = Number(next());
         else if (k === '--no-buildings') a.buildings = false;
+        else if (k === '--jobs') a.jobs = Math.max(0, Number(next()));
+        else if (k === '--no-bundle') a.noBundle = true;
+        else if (k === '--satellites') a.satellitePort ??= DEFAULT_SATELLITE_PORT;
+        else if (k === '--satellite-port') a.satellitePort = Number(next());
+        else if (k === '--no-discovery') a.noDiscovery = true;
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else throw new Error(`unknown argument ${k}`);
     }
@@ -201,7 +224,24 @@ function writePtx(p: string, id: TileKey, size: number, texels: Uint8Array): num
     return gz.byteLength;
 }
 
-function main(): void {
+async function prepareWorker(noBundle: boolean): Promise<{ file: string; execArgv: string[] }> {
+    if (!noBundle) {
+        try {
+            const esbuild = await import('esbuild');
+            fs.mkdirSync(path.dirname(WORKER_BUNDLE), { recursive: true });
+            await esbuild.build({
+                entryPoints: [WORKER_SOURCE], outfile: WORKER_BUNDLE, bundle: true, platform: 'node', format: 'cjs',
+                target: `node${process.versions.node.split('.')[0]}`, logLevel: 'silent',
+            });
+            return { file: WORKER_BUNDLE, execArgv: [] };
+        } catch (err) {
+            console.warn(`warning: could not bundle the texture worker (${(err as Error).message}); running it under tsx`);
+        }
+    }
+    return { file: WORKER_SOURCE, execArgv: process.execArgv };
+}
+
+async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2));
     const t0 = Date.now();
 
@@ -235,12 +275,13 @@ function main(): void {
         + `${args.nearSize} texels from z${args.nearZoom}, ${args.size} below, `
         + `${LEAF_SUPERSAMPLE * LEAF_SUPERSAMPLE}x SSAA, `
         + `textures z${args.minZoom}..z${leafZoom - 1}${args.bbox ? ' (scoped)' : ''}`);
-    let rasterised = 0;
+    // The leaves whose raster is stale go to the tile pool (texLeaf.ts); the
+    // cache's meta is this process's alone, written once they are back.
     let fromCache = 0;
     let missing = 0;
-    let lastLine = 0;
-    for (let i = 0; i < leaves.length; i++) {
-        const k = leaves[i];
+    const todo: TileKey[] = [];
+    const pending = new Map<string, CachedLeaf>();
+    for (const k of leaves) {
         const ptmPath = tilePath(args.dir, k, '.ptm');
         if (!fs.existsSync(ptmPath)) {
             missing++;
@@ -264,25 +305,41 @@ function main(): void {
             && known.buildings === pbhSig && fs.existsSync(cachePath)) {
             fromCache++;
         } else {
-            const tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
-            const pbh = pbhStat ? decodePbh(zlib.gunzipSync(fs.readFileSync(pbhPath))) : undefined;
-            const raster = rasterizeLeaf(tile, basis, leafSize, pbh, LEAF_SUPERSAMPLE);
-            fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-            // Lightly compressed: a megabyte of mostly flat colour per leaf
-            // shrinks twentyfold, and the cache holds thousands of them.
-            fs.writeFileSync(cachePath, zlib.gzipSync(encodePtx(k, leafSize, raster), { level: 1 }));
-            cacheMeta[key] = {
-                size: st.size, mtimeMs: st.mtimeMs, texSize: leafSize, supersample: LEAF_SUPERSAMPLE, buildings: pbhSig,
-            };
-            rasterised++;
+            todo.push(k);
+            pending.set(key, { size: st.size, mtimeMs: st.mtimeMs, texSize: leafSize, supersample: LEAF_SUPERSAMPLE, buildings: pbhSig });
         }
-        if (Date.now() - lastLine > 500 || i === leaves.length - 1) {
-            process.stdout.write(`\r  leaves ${i + 1}/${leaves.length}`);
-            lastLine = Date.now();
+    }
+    let rasterised = 0;
+    if (todo.length > 0) {
+        const cfg: TexLeafConfig = {
+            dir: args.dir, cache: args.cache, enuOrigin: manifest.enuOrigin, leafSize, supersample: LEAF_SUPERSAMPLE, buildings: args.buildings,
+        };
+        const jobs = Math.max(args.satellitePort ? 0 : 1, Math.min(args.jobs ?? os.cpus().length - 1, todo.length));
+        const pool = new TilePool<TexLeafResult>({
+            local: { ...await prepareWorker(args.noBundle), jobs }, cfg, kindOf: () => 'texleaf',
+            roots: { terrain: args.dir, texcache: args.cache },
+            satellites: args.satellitePort ? { port: args.satellitePort, discovery: !args.noDiscovery } : undefined,
+            diskLow: () => false, label: () => 'leaves ', t0,
+        });
+        await pool.start();
+        const { results, errors } = await pool.runPass(todo, 1);
+        await pool.close();
+        for (const r of results) {
+            if (r?.rasterised) {
+                cacheMeta[r.key] = pending.get(r.key)!;
+                rasterised++;
+            }
+        }
+        if (errors.length > 0) {
+            saveCacheMeta(args.cache, cacheMeta);
+            for (const e of errors.slice(0, 10)) {
+                console.error(`error: ${e}`);
+            }
+            throw new Error(`${errors.length} leaves failed to rasterise`);
         }
     }
     saveCacheMeta(args.cache, cacheMeta);
-    console.log(`\n  rasterised ${rasterised}, cached ${fromCache}`
+    console.log(`  rasterised ${rasterised}, cached ${fromCache}`
         + (missing > 0 ? `, ${missing} listed but absent` : ''));
 
     // --- the pyramid --------------------------------------------------------
@@ -459,4 +516,7 @@ function main(): void {
     console.log(`wrote ${written.length} textures (${roadTiles} with roads), ${mb(totalGz)} MB in ${secs}s`);
 }
 
-main();
+main().catch(err => {
+    console.error(err);
+    process.exit(1);
+});
