@@ -67,6 +67,8 @@ export const LAND_TERRAIN_CATEGORIES: ReadonlySet<PaletteCategory> = new Set([
     PaletteCategory.TERRAIN_URBAN,
     PaletteCategory.TERRAIN_SNOW,
     PaletteCategory.TERRAIN_WETLAND,
+    PaletteCategory.TERRAIN_HEATH,
+    PaletteCategory.TERRAIN_TUNDRA,
     PaletteCategory.SCENERY_MOUNTAIN_GRASS,
     PaletteCategory.SCENERY_MOUNTAIN_BARE,
 ]);

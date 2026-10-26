@@ -29,8 +29,14 @@ import { PtmTile } from './ptm';
 const TREE_CLASS = 1;
 // TerrainClass.Shrub, same const-enum workaround.
 const SHRUB_CLASS = 2;
+// TerrainClass.Mangrove: a coastal forest standing in water, scattered as one.
+const MANGROVE_CLASS = 10;
+// TerrainClass.Heath: dwarf shrubs, thinner than scrub.
+const HEATH_CLASS = 14;
 /** Shrubland is denser than woodland but each plant is small. */
 const SHRUB_SPACING_M2 = 60;
+/** Heath is open ground with the odd clump of heather or gorse, not a thicket. */
+const HEATH_SPACING_M2 = 180;
 const SHRUB_SCALE = 0.22;
 /** A bush reads as a small tree-like clump, between a shrub and a full tree - see stones.ts's greenSplit, the only place that scatters this species today. */
 const BUSH_SCALE = 0.5;
@@ -51,6 +57,26 @@ const BUSH_SCALE = 0.5;
  * ~9 FPS frame time over one such area, worse than any one tile's own cap.
  */
 const TREE_SPACING_M2 = 200;
+
+/** Every class this scatter grows something on, for terrainEntity.ts's treeSource gate. */
+export const TREE_SCATTER_CLASSES: ReadonlySet<number> = new Set([
+    TREE_CLASS, SHRUB_CLASS, MANGROVE_CLASS, HEATH_CLASS,
+]);
+
+/** Square metres per plant for a scattered class, or 0 for one that grows nothing here. */
+function spacingOf(cls: number): number {
+    switch (cls) {
+        case TREE_CLASS:
+        case MANGROVE_CLASS:
+            return TREE_SPACING_M2;
+        case SHRUB_CLASS:
+            return SHRUB_SPACING_M2;
+        case HEATH_CLASS:
+            return HEATH_SPACING_M2;
+        default:
+            return 0;
+    }
+}
 /**
  * Last-resort safety valve, not a density knob - see TREE_SPACING_M2. Kept
  * low on purpose: buildTreeMesh builds every instance's matrix in one
@@ -178,19 +204,20 @@ export function scatterTreeSpecies(
     // trees on a thin rim of the wood and none in its interior.
     let expectedTotal = 0;
     for (let t = 0; t < triCount; t++) {
-        const c = tile.landAttrs[(t * 3) * 4 + 3];
-        if (c !== TREE_CLASS && c !== SHRUB_CLASS) {
+        const spacing = spacingOf(tile.landAttrs[(t * 3) * 4 + 3]);
+        if (spacing === 0) {
             continue;
         }
         expectedTotal += triangleArea(readVert(tile, t, 0), readVert(tile, t, 1), readVert(tile, t, 2))
-            / (c === SHRUB_CLASS ? SHRUB_SPACING_M2 : TREE_SPACING_M2) * densityScale;
+            / spacing * densityScale;
     }
     const capScale = expectedTotal > cap ? cap / expectedTotal : 1;
 
     outer:
     for (let t = 0; t < triCount; t++) {
         const cls = tile.landAttrs[(t * 3) * 4 + 3];
-        if (cls !== TREE_CLASS && cls !== SHRUB_CLASS) {
+        const spacing = spacingOf(cls);
+        if (spacing === 0) {
             continue;
         }
         const v0 = readVert(tile, t, 0);
@@ -204,7 +231,7 @@ export function scatterTreeSpecies(
         const nLen = Math.hypot(nx, ny, nz) || 1;
         const nSign = ny < 0 ? -1 / nLen : 1 / nLen;
         nx *= nSign; ny *= nSign; nz *= nSign;
-        const expected = (area / (cls === SHRUB_CLASS ? SHRUB_SPACING_M2 : TREE_SPACING_M2)) * densityScale * capScale;
+        const expected = (area / spacing) * densityScale * capScale;
         const seed = t * 97.13;
         const whole = Math.floor(expected);
         const count = whole + (hash01(seed) < expected - whole ? 1 : 0);
@@ -219,10 +246,12 @@ export function scatterTreeSpecies(
             if (onRoad && onRoad(point.x, point.z, point.y)) {
                 continue;
             }
-            const species = (cls === SHRUB_CLASS ? Species.SHRUB : Math.min(
-                Math.floor(hash01(seed + i * 8.923) * TREE_SPECIES_COUNT),
-                TREE_SPECIES_COUNT - 1,
-            )) as Species;
+            const pick = hash01(seed + i * 8.923);
+            // Heath: mostly heather-sized shrubs, one clump in four a gorse
+            // or broom bush.
+            const species = (cls === SHRUB_CLASS ? Species.SHRUB
+                : cls === HEATH_CLASS ? (pick < 0.25 ? Species.BUSH : Species.SHRUB)
+                    : Math.min(Math.floor(pick * TREE_SPECIES_COUNT), TREE_SPECIES_COUNT - 1)) as Species;
 
             let group = bySpecies.get(species);
             if (!group) {

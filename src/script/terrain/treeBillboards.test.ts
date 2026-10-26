@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { describe, it } from 'node:test';
 import { TREE_MIN_SPACING_PX } from '../scene/materials/shaders/treeBillboardVP';
-import { TREE_REORDER_SLACK, orderTreesFor, treeInstancesToDraw, treeOrderSlack, treeReorderWanted } from './treeBillboards';
+import { Species } from '../scene/vegetation/treeSprites';
+import { PtmTile } from './ptm';
+import {
+    TREE_REORDER_SLACK, orderTreesFor, scatterTreeSpecies, treeInstancesToDraw, treeOrderSlack, treeReorderWanted,
+} from './treeBillboards';
 
 const SPACING_M = 3;
 /** Metres per unit of a tile group's frame, about what a z12 leaf has. */
@@ -124,5 +128,43 @@ describe('tree ordering', () => {
             const count = treeInstancesToDraw(mesh, group, moved, PIXEL_ANGLE);
             assert.ok(Math.max(...kept(mesh, moved)) < count, `moved ${dx}: kept beyond ${count}`);
         }
+    });
+});
+
+/** One 18,000 m^2 land triangle of class `cls`, enough for a tile to scatter. */
+function oneTriangleTile(cls: number): PtmTile {
+    return {
+        quantScale: 1,
+        landPositions: new Float32Array([0, 0, 0, 200, 0, 0, 0, 0, 180]),
+        landAttrs: new Uint8Array([90, 120, 60, cls, 90, 120, 60, cls, 90, 120, 60, cls]),
+    } as unknown as PtmTile;
+}
+
+function speciesCounts(cls: number): Map<Species, number> {
+    return new Map(scatterTreeSpecies(oneTriangleTile(cls)).map(g => [g.species, g.points.length]));
+}
+
+describe('scatterTreeSpecies biomes', () => {
+    it('grows a forest on mangrove, like any wood', () => {
+        const counts = speciesCounts(10);
+        const total = [...counts.values()].reduce((a, b) => a + b, 0);
+        assert.ok(total >= 85 && total <= 95, `${total} trees`);
+        assert.ok(!counts.has(Species.SHRUB) && !counts.has(Species.BUSH));
+    });
+
+    it('grows sparse shrubs and the odd bush on heath, never a tree', () => {
+        const counts = speciesCounts(14);
+        const shrubs = counts.get(Species.SHRUB) ?? 0;
+        const bushes = counts.get(Species.BUSH) ?? 0;
+        assert.equal(counts.size, 2);
+        assert.ok(shrubs + bushes >= 95 && shrubs + bushes <= 105, `${shrubs + bushes} plants`);
+        assert.ok(bushes > 10 && bushes < shrubs, `${bushes} bushes, ${shrubs} shrubs`);
+        // Thinner than scrub on the same ground.
+        assert.ok(shrubs + bushes < (speciesCounts(2).get(Species.SHRUB) ?? 0) / 2);
+    });
+
+    it('grows nothing on sand or tundra', () => {
+        assert.equal(scatterTreeSpecies(oneTriangleTile(12)).length, 0);
+        assert.equal(scatterTreeSpecies(oneTriangleTile(11)).length, 0);
     });
 });

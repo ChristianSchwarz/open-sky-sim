@@ -43,6 +43,11 @@ describe('terrain tones and classes', () => {
         assert.equal(CLASS_TO_TONE[TerrainClass.Unknown], TerrainTone.Grass);
     });
 
+    it('paints the OSM natural biomes in tones of their own', () => {
+        assert.equal(CLASS_TO_TONE[TerrainClass.Heath], TerrainTone.Heath);
+        assert.equal(CLASS_TO_TONE[TerrainClass.Moss], TerrainTone.Tundra);
+    });
+
     it('compacts every WorldCover code into the nibble range', () => {
         const codes = Object.keys(WORLDCOVER_TO_CLASS).map(Number);
         assert.ok(codes.length >= 11, 'all eleven WorldCover classes');
@@ -53,8 +58,8 @@ describe('terrain tones and classes', () => {
             assert.ok(!seen.has(cls), `code ${code} collides on class ${cls}`);
             seen.add(cls);
         }
-        // Sand is assigned by the bake from shore distance, not by the raster,
-        // so no WorldCover code may claim it.
+        // Sand and Heath come from OSM tags or the bake, never the raster.
         assert.ok(!seen.has(TerrainClass.Sand));
+        assert.ok(!seen.has(TerrainClass.Heath));
     });
 });

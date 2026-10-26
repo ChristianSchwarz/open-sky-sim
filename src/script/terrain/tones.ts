@@ -28,9 +28,11 @@ export const enum TerrainTone {
     Urban = 8,
     Snow = 9,
     Wetland = 10,
+    Heath = 11,
+    Tundra = 12,
 }
 
-export const TONE_COUNT = 11;
+export const TONE_COUNT = 13;
 
 /** The first land tone. Land tone `t` is `uToneColor[t - LAND_TONE_BASE]`. */
 export const LAND_TONE_BASE = TerrainTone.Sand;
@@ -62,8 +64,12 @@ export const enum TerrainClass {
     Water = 8,
     Wetland = 9,
     Mangrove = 10,
+    /** Moss and lichen per WorldCover; OSM natural=fell/tundra. */
     Moss = 11,
-    /** Bare ground close enough to the shore to read as beach. Bake-assigned. */
+    /**
+     * Beach, dune or desert sand: OSM natural=beach/dune/sand/desert, or bare
+     * ground close enough to the shore to read as beach (bake-assigned).
+     */
     Sand = 12,
     /**
      * Land no OSM landuse polygon claims, on a tile that has landuse. Its
@@ -73,6 +79,8 @@ export const enum TerrainClass {
      * is a placeholder grey wherever there is no cover data.
      */
     Ground = 13,
+    /** Dwarf-shrub heath and moorland: OSM natural=heath/moor only. */
+    Heath = 14,
 }
 
 export const CLASS_COUNT = 16;
@@ -128,8 +136,9 @@ export const CLASS_TO_TONE: ReadonlyArray<TerrainTone> = (() => {
     t[TerrainClass.Water] = TerrainTone.Grass;
     t[TerrainClass.Wetland] = TerrainTone.Wetland;
     t[TerrainClass.Mangrove] = TerrainTone.Wetland;
-    t[TerrainClass.Moss] = TerrainTone.Bare;
+    t[TerrainClass.Moss] = TerrainTone.Tundra;
     t[TerrainClass.Sand] = TerrainTone.Sand;
+    t[TerrainClass.Heath] = TerrainTone.Heath;
     return t;
 })();
 

@@ -18,13 +18,19 @@ from osm_landuse import (
     CLS_BUILT,
     CLS_CROP,
     CLS_GRASS,
+    CLS_HEATH,
+    CLS_MANGROVE,
+    CLS_MOSS,
+    CLS_SAND,
     CLS_SHRUB,
     CLS_SNOW,
     CLS_TREE,
     CLS_WETLAND,
     LANDUSE_TAG_TO_CLASS,
     _BUILT_TAGS,
+    _NATURAL_TAGS,
     _VEGETATION_TAGS,
+    _class_for_tags,
     _query_for,
     _reject_if_empty,
     assemble_landuse_polygons,
@@ -36,11 +42,12 @@ from osm_common import Bounds
 
 ALLOWED_CLASSES = {
     CLS_TREE, CLS_SHRUB, CLS_GRASS, CLS_CROP, CLS_BUILT, CLS_BARE, CLS_SNOW, CLS_WETLAND,
+    CLS_MANGROVE, CLS_MOSS, CLS_SAND, CLS_HEATH,
 }
-# The three ids this module must never assign: the coastline bake owns
-# land/water geometrically, and Sand is bake-assigned downstream in the mesh
-# bake's shore-adjacency logic.
-FORBIDDEN_CLASSES = {0, 8, 12}  # CLS_UNKNOWN, CLS_WATER, CLS_SAND
+# The ids this module must never assign: the coastline bake owns land/water
+# geometrically, and Ground (13) is the mesh bake's name for land no polygon
+# claims.
+FORBIDDEN_CLASSES = {0, 8, 13}  # CLS_UNKNOWN, CLS_WATER, Ground
 
 
 class TagTableTest(unittest.TestCase):
@@ -50,9 +57,35 @@ class TagTableTest(unittest.TestCase):
             self.assertIn(cls, ALLOWED_CLASSES)
             self.assertNotIn(cls, FORBIDDEN_CLASSES)
 
-    def test_vegetation_and_built_groups_partition_the_full_table(self):
-        self.assertEqual(_VEGETATION_TAGS + _BUILT_TAGS, LANDUSE_TAG_TO_CLASS)
-        self.assertEqual(len(set(_VEGETATION_TAGS) & set(_BUILT_TAGS)), 0)
+    def test_the_three_groups_partition_the_full_table(self):
+        self.assertEqual(_VEGETATION_TAGS + _BUILT_TAGS + _NATURAL_TAGS, LANDUSE_TAG_TO_CLASS)
+        pairs = [(k, v) for k, v, _cls in LANDUSE_TAG_TO_CLASS]
+        self.assertEqual(len(pairs), len(set(pairs)))
+
+    def test_natural_biomes_map_to_their_classes(self):
+        self.assertEqual(_class_for_tags({'natural': 'beach'}), CLS_SAND)
+        self.assertEqual(_class_for_tags({'natural': 'dune'}), CLS_SAND)
+        self.assertEqual(_class_for_tags({'natural': 'heath'}), CLS_HEATH)
+        self.assertEqual(_class_for_tags({'natural': 'moor'}), CLS_HEATH)
+        self.assertEqual(_class_for_tags({'natural': 'fell'}), CLS_MOSS)
+        self.assertEqual(_class_for_tags({'natural': 'scrub'}), CLS_SHRUB)
+        self.assertIsNone(_class_for_tags({'natural': 'water'}))
+
+    def test_sub_tags_refine_the_class(self):
+        self.assertEqual(_class_for_tags({'natural': 'wetland', 'wetland': 'mangrove'}), CLS_MANGROVE)
+        self.assertEqual(_class_for_tags({'natural': 'wetland', 'wetland': 'marsh'}), CLS_WETLAND)
+        self.assertEqual(_class_for_tags({'natural': 'beach', 'surface': 'shingle'}), CLS_BARE)
+        self.assertEqual(_class_for_tags({'natural': 'beach', 'surface': 'sand'}), CLS_SAND)
+        self.assertEqual(_class_for_tags({'natural': 'beach', 'surface': 'pebblestone'}), CLS_BARE)
+        self.assertEqual(_class_for_tags({'natural': 'beach', 'surface': 'pebblestone;sand'}), CLS_BARE)
+        self.assertEqual(_class_for_tags({'natural': 'beach', 'surface': 'sand;pebblestone'}), CLS_SAND)
+        self.assertEqual(_class_for_tags({'natural': 'beach', 'surface': 'concrete'}), CLS_BUILT)
+        self.assertEqual(_class_for_tags({'natural': 'beach', 'surface': 'grass'}), CLS_GRASS)
+        self.assertEqual(_class_for_tags({'natural': 'beach', 'surface': 'dirt'}), CLS_BARE)
+        # An unknown surface is still a beach.
+        self.assertEqual(_class_for_tags({'natural': 'beach', 'surface': 'whatever'}), CLS_SAND)
+        # A refinement only applies under its own parent tag.
+        self.assertEqual(_class_for_tags({'natural': 'wood', 'surface': 'shingle'}), CLS_TREE)
 
     def test_query_for_contains_expected_overpass_clauses(self):
         b = Bounds(-15.65, 27.90, -15.55, 28.00)

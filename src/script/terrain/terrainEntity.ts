@@ -26,7 +26,7 @@ import { attachToRenderList } from '../render/renderList';
 import { getTreeAtlas } from '../scene/textures/treeAtlas';
 import { getStoneAtlas } from '../scene/textures/stoneAtlas';
 import {
-    TREE_DENSITY_MULTIPLIER_DEFAULT, buildTreeMeshes, orderTreesFor, treeInstancesToDraw, treeReorderWanted, treeSpacingM, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
+    TREE_DENSITY_MULTIPLIER_DEFAULT, TREE_SCATTER_CLASSES, buildTreeMeshes, orderTreesFor, treeInstancesToDraw, treeReorderWanted, treeSpacingM, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
 } from './treeBillboards';
 import { CLUTTER_ELIGIBLE_CLASSES, buildStoneMesh, scatterGroundClutter } from './stones';
 import { sphereInFrustum } from './culling';
@@ -118,6 +118,8 @@ const TONE_CATEGORIES: Record<number, PaletteCategory> = {
     [TerrainTone.Urban]: PaletteCategory.TERRAIN_URBAN,
     [TerrainTone.Snow]: PaletteCategory.TERRAIN_SNOW,
     [TerrainTone.Wetland]: PaletteCategory.TERRAIN_WETLAND,
+    [TerrainTone.Heath]: PaletteCategory.TERRAIN_HEATH,
+    [TerrainTone.Tundra]: PaletteCategory.TERRAIN_TUNDRA,
 };
 
 /**
@@ -952,13 +954,13 @@ export class TerrainEntity implements Entity {
                 // Trees (and ground clutter - see stones.ts) are attached
                 // lazily from the draw loop (see syncGroup), for the tiles
                 // actually being drawn - not here. Keep the source for that:
-                // the store may evict it first. Class 1/2 = Tree/Shrub
-                // (attachTrees's own scatterTreeSpecies); the rest is
+                // the store may evict it first. TREE_SCATTER_CLASSES are
+                // attachTrees's own scatterTreeSpecies; the rest is
                 // whatever stones.ts also scatters onto - a tile with none
                 // of these has nothing for attachTrees() to do at all.
                 for (let i = 3; i < tile.landAttrs.length; i += 4) {
                     const cls = tile.landAttrs[i];
-                    if (cls === 1 || cls === 2 || CLUTTER_ELIGIBLE_CLASSES.has(cls)) {
+                    if (TREE_SCATTER_CLASSES.has(cls) || CLUTTER_ELIGIBLE_CLASSES.has(cls)) {
                         meshes.treeSource = tile;
                         break;
                     }

@@ -31,6 +31,8 @@ const colors: PaletteColors = {
     [PaletteCategory.TERRAIN_URBAN]: '#20201e',
     [PaletteCategory.TERRAIN_SNOW]: '#3a4048',
     [PaletteCategory.TERRAIN_WETLAND]: '#16241e',
+    [PaletteCategory.TERRAIN_HEATH]: '#1e1a1c',
+    [PaletteCategory.TERRAIN_TUNDRA]: '#22221c',
     [PaletteCategory.TERRAIN_WATER]: '#182028',
     [PaletteCategory.TERRAIN_SHALLOW_WATER]: '#1a2228',
     [PaletteCategory.SCENERY_MOUNTAIN_GRASS]: ['#0f1310', '#182018'],

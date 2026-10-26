@@ -542,7 +542,7 @@ const ZOOM_MAX = 5.0;
 const COVER_CLASS_NAMES: Record<number, string> = {
     0: 'Unknown', 1: 'Forest', 2: 'Shrub', 3: 'Grass', 4: 'Cropland', 5: 'Built-up',
     6: 'Bare ground', 7: 'Snow / ice', 8: 'Water', 9: 'Wetland', 10: 'Mangrove',
-    11: 'Moss / lichen', 12: 'Sand', 13: 'Open ground',
+    11: 'Moss / tundra', 12: 'Sand', 13: 'Open ground', 14: 'Heath',
 };
 
 export class GameUpdateTask implements KernelUpdateTask {

@@ -134,7 +134,8 @@ CLS_WATER = 8
 CLS_WETLAND = 9
 CLS_MANGROVE = 10
 CLS_MOSS = 11
-CLS_SAND = 12   # bake-assigned downstream, never read from the raster
+CLS_SAND = 12   # from OSM beach/dune tags, or bake-assigned near the shore
+CLS_HEATH = 14  # from OSM heath/moor tags, never read from the raster
 
 WORLDCOVER_TO_CLASS: Dict[int, int] = {
     10: CLS_TREE,
@@ -174,6 +175,7 @@ CLASS_COLORS: Dict[int, Tuple[int, int, int]] = {
     CLS_MANGROVE: (0x2F, 0x50, 0x40),
     CLS_MOSS: (0x7D, 0x7A, 0x5C),
     CLS_SAND: (0xCB, 0xB2, 0x87),
+    CLS_HEATH: (0x6E, 0x5E, 0x4E),
 }
 
 

@@ -53,11 +53,11 @@ from osm_common import (
 # already makes) so this module's shapely dependency loads only when
 # --osm-landuse is actually asked for.
 #
-# Deliberately missing CLS_UNKNOWN, CLS_WATER (the coastline bake already
+# Deliberately missing CLS_UNKNOWN and CLS_WATER: the coastline bake already
 # owns the land/water split geometrically, and cover_patches.py's CLS_WATER
-# is a fixed class that never gets voted over) and CLS_SAND (bake-assigned
-# downstream in the mesh bake's shore-adjacency logic, never read from a
-# source here).
+# is a fixed class that never gets voted over. CLS_SAND is shared with the
+# mesh bake's shore-adjacency logic, which promotes bare facets near the coast
+# to sand; a mapped beach, dune or desert says the same thing directly.
 CLS_TREE = 1
 CLS_SHRUB = 2
 CLS_GRASS = 3
@@ -66,6 +66,10 @@ CLS_BUILT = 5
 CLS_BARE = 6
 CLS_SNOW = 7
 CLS_WETLAND = 9
+CLS_MANGROVE = 10
+CLS_MOSS = 11
+CLS_SAND = 12
+CLS_HEATH = 14
 
 # (key, value, TerrainClass). Split into two Overpass requests below -
 # combining every clause into one query risks the same silent-truncation
@@ -78,7 +82,7 @@ _VEGETATION_TAGS: List[Tuple[str, str, int]] = [
     ('natural', 'wood', CLS_TREE),
     ('landuse', 'forest', CLS_TREE),
     ('natural', 'scrub', CLS_SHRUB),
-    ('natural', 'heath', CLS_SHRUB),
+    ('natural', 'heath', CLS_HEATH),
     ('natural', 'grassland', CLS_GRASS),
     ('landuse', 'meadow', CLS_GRASS),
     ('landuse', 'grass', CLS_GRASS),
@@ -100,7 +104,64 @@ _BUILT_TAGS: List[Tuple[str, str, int]] = [
     ('natural', 'glacier', CLS_SNOW),
     ('natural', 'wetland', CLS_WETLAND),
 ]
-LANDUSE_TAG_TO_CLASS: List[Tuple[str, str, int]] = _VEGETATION_TAGS + _BUILT_TAGS
+# The rest of natural=*: the open biomes - coast and desert sand, rock,
+# upland tundra, moorland - that the two groups above never asked for. A group
+# of its own so adding it left the other two groups' cached answers valid.
+# natural=water/bay/strait stay out for the same reason CLS_WATER does.
+_NATURAL_TAGS: List[Tuple[str, str, int]] = [
+    ('natural', 'sand', CLS_SAND),
+    ('natural', 'beach', CLS_SAND),
+    ('natural', 'dune', CLS_SAND),
+    ('natural', 'desert', CLS_SAND),
+    ('natural', 'rock', CLS_BARE),
+    ('natural', 'stone', CLS_BARE),
+    ('natural', 'mud', CLS_BARE),
+    ('natural', 'fell', CLS_MOSS),
+    ('natural', 'tundra', CLS_MOSS),
+    ('natural', 'moor', CLS_HEATH),
+    ('natural', 'shrubbery', CLS_SHRUB),
+]
+LANDUSE_TAG_TO_CLASS: List[Tuple[str, str, int]] = _VEGETATION_TAGS + _BUILT_TAGS + _NATURAL_TAGS
+
+# Sub-tags that refine what a matched key=value means on the ground:
+# (key, value, refining key, refining value, TerrainClass). The first match
+# wins over the plain table's class; no extra fetch needed, as Overpass
+# returns every tag of an element it matched.
+_REFINEMENTS: List[Tuple[str, str, str, str, int]] = [
+    ('natural', 'wetland', 'wetland', 'mangrove', CLS_MANGROVE),
+]
+
+# What a natural=beach is made of, by its surface=* tag. Sand, and a beach
+# with no surface tag, stay CLS_SAND. A list (`pebblestone;sand`) is taken by
+# its first value, the one the mapper put first.
+_BEACH_SURFACE_TO_CLASS: Dict[str, int] = {
+    'sand': CLS_SAND,
+    'fine_sand': CLS_SAND,
+    'shingle': CLS_BARE,
+    'pebbles': CLS_BARE,
+    'pebblestone': CLS_BARE,
+    'gravel': CLS_BARE,
+    'fine_gravel': CLS_BARE,
+    'rock': CLS_BARE,
+    'rocky': CLS_BARE,
+    'stone': CLS_BARE,
+    'stones': CLS_BARE,
+    'boulders': CLS_BARE,
+    'ground': CLS_BARE,
+    'dirt': CLS_BARE,
+    'earth': CLS_BARE,
+    'mud': CLS_BARE,
+    'unpaved': CLS_BARE,
+    'compacted': CLS_BARE,
+    'grass': CLS_GRASS,
+    # A paved city beach is a promenade, and reads as one from the air.
+    'concrete': CLS_BUILT,
+    'asphalt': CLS_BUILT,
+    'paved': CLS_BUILT,
+    'paving_stones': CLS_BUILT,
+    'concrete:plates': CLS_BUILT,
+    'wood': CLS_BUILT,
+}
 
 
 def _query_for(tags: Sequence[Tuple[str, str, int]], b: Bounds) -> str:
@@ -150,15 +211,15 @@ def overpass_landuse_query(
     on_progress: Optional[LanduseFetchProgress] = None,
     skip_cell: Optional[Callable[[Bounds], bool]] = None,
 ) -> dict:
-    """Fetch OSM natural/landuse polygons as two grouped Overpass requests.
+    """Fetch OSM natural/landuse polygons as three grouped Overpass requests.
 
     `on_progress`, when given, hears every download's byte count as it grows,
     tagged with which of the groups it belongs to. `skip_cell`, when given,
     names the grid cells not worth asking about at all - the ones the DEM
     says are open sea (see osm_common.sea_cell_skipper).
 
-    Both groups go out as one batch, one request per grid cell, so the
-    mirror slots stay busy across the two.
+    Every group goes out in one batch, one request per grid cell, so the
+    mirror slots stay busy across them.
 
     `bbox` crosses the module boundary as a plain (west, south, east, north)
     tuple rather than an osm_common.Bounds - bake_planet_cover.py's own
@@ -174,7 +235,8 @@ def overpass_landuse_query(
     """
     b = Bounds(*bbox)
     groups = (('vegetation/agriculture', _VEGETATION_TAGS),
-              ('built/bare/snow/wetland', _BUILT_TAGS))
+              ('built/bare/snow/wetland', _BUILT_TAGS),
+              ('natural', _NATURAL_TAGS))
     extra: Dict[str, object] = {}
     if on_progress is not None:
         def bytes_seen(index: int, received: int) -> None:
@@ -201,6 +263,12 @@ def landuse_tag_predicate(tags: dict) -> bool:
 
 
 def _class_for_tags(tags: dict) -> Optional[int]:
+    for key, value, sub_key, sub_value, cls in _REFINEMENTS:
+        if tags.get(key) == value and tags.get(sub_key) == sub_value:
+            return cls
+    if tags.get('natural') == 'beach':
+        surface = (tags.get('surface') or '').split(';')[0].strip().lower()
+        return _BEACH_SURFACE_TO_CLASS.get(surface, CLS_SAND)
     for key, value, cls in LANDUSE_TAG_TO_CLASS:
         if tags.get(key) == value:
             return cls
