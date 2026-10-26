@@ -44,17 +44,22 @@ const KELVIN_HALF_ANGLE_DEG = KELVIN_FULL_ANGLE_DEG * 0.5;
 /** Lateral centreline of the kuz hull / landing deck (not model X=0). */
 const MID_X = ARRESTOR_DECK_MID_X;
 
-/** One big stern wake on the hull centreline (carrier-local; stern ≈ +Z). */
+/** Carrier-local Z (bow -Z, stern +Z) where the stern wake and its trail start. */
+const STERN_WAKE_Z = 112;
+/** Carrier-local Z where the bow-wave arms start. */
+const BOW_WAVE_Z = -159;
+
+/** One big stern wake on the hull centreline. */
 const STERN_EMITTERS: FoamEmitter[] = [
-    { local: [MID_X, 0.25, 122], kind: 'stern', rate: 22 },
+    { local: [MID_X, 0.25, STERN_WAKE_Z], kind: 'stern', rate: 22 },
 ];
 
 /** Four bow-wave arms from the tip on the sailing centreline. */
 const BOW_EMITTERS: FoamEmitter[] = [
-    { local: [MID_X, 0.3, -176], kind: 'bow', rate: 12, armDeg: -KELVIN_FULL_ANGLE_DEG },
-    { local: [MID_X, 0.3, -176], kind: 'bow', rate: 12, armDeg: -KELVIN_HALF_ANGLE_DEG },
-    { local: [MID_X, 0.3, -176], kind: 'bow', rate: 12, armDeg: KELVIN_HALF_ANGLE_DEG },
-    { local: [MID_X, 0.3, -176], kind: 'bow', rate: 12, armDeg: KELVIN_FULL_ANGLE_DEG },
+    { local: [MID_X, 0.3, BOW_WAVE_Z], kind: 'bow', rate: 12, armDeg: -KELVIN_FULL_ANGLE_DEG },
+    { local: [MID_X, 0.3, BOW_WAVE_Z], kind: 'bow', rate: 12, armDeg: -KELVIN_HALF_ANGLE_DEG },
+    { local: [MID_X, 0.3, BOW_WAVE_Z], kind: 'bow', rate: 12, armDeg: KELVIN_HALF_ANGLE_DEG },
+    { local: [MID_X, 0.3, BOW_WAVE_Z], kind: 'bow', rate: 12, armDeg: KELVIN_FULL_ANGLE_DEG },
 ];
 
 const ALL_EMITTERS: FoamEmitter[] = [...STERN_EMITTERS, ...BOW_EMITTERS];
