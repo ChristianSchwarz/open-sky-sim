@@ -817,8 +817,45 @@ function gradeSteps(bbox: string, rebaking = false): Step[] {
     ];
 }
 
-/** The mesh, far-texture and road-stroke bakes, then bridges, grading and far land: once, over the whole import box. */
-export function meshSteps(box: readonly number[]): Step[] {
+/**
+ * The bakes that can hand their tiles to bake satellites (tools/bake/tilePool.ts):
+ * with `satellites`, each of these steps takes `--satellites`.
+ */
+const SATELLITE_STEPS = /tools[\\/](bake_planet_(mesh|tex|grade|farland)\.ts|py_leaf_pool\.ts)$/;
+
+/** Whether an import hands its tiles and chunks to bake satellites too: SATELLITES=1. */
+export const importWithSatellites = (): boolean => process.env.SATELLITES === '1';
+
+/**
+ * The mesh, far-texture and road-stroke bakes, then bridges, grading and far
+ * land: once, over the whole import box. With `satellites` the bakes that can
+ * take satellites do.
+ */
+export function meshSteps(box: readonly number[], satellites = false): Step[] {
+    const steps = meshStepsLocal(box);
+    return satellites
+        ? steps.map(s => (s.args.some(a => SATELLITE_STEPS.test(a)) ? { ...s, args: [...s.args, '--satellites'] } : s))
+        : steps;
+}
+
+/**
+ * An import's per-chunk data stages run stage by stage across every land
+ * chunk on the tile pool (tools/chunk_pool.ts), so satellites can take
+ * chunks: the coast, road vectors and building footprints, then - after the
+ * airfields, which stay here per chunk (runImport) - the cover. The heights
+ * and the OSM read stay here too. Each step bakes the chunks' leaves (here or
+ * on a satellite) and then merges the coarser tiles and the manifest here,
+ * chunk by chunk in import order.
+ */
+export function chunkPoolStep(box: readonly number[], pbf: string, stage: 'coast' | 'roads' | 'buildings' | 'cover'): Step {
+    const label = { coast: 'baking coastline', roads: 'baking road vectors', buildings: 'baking building footprints', cover: 'baking cover' }[stage];
+    return {
+        label: `${label}, every chunk`, cmd: process.execPath,
+        args: ['--import', 'tsx', 'tools/chunk_pool.ts', '--stage', stage, `--bbox=${box.join(',')}`, `--pbf=${pbf}`, '--satellites'],
+    };
+}
+
+function meshStepsLocal(box: readonly number[]): Step[] {
     const bbox = box.join(',');
     return [
         {
@@ -892,7 +929,8 @@ async function runImport(job: Job): Promise<void> {
         dataSteps({ name: job.name, bbox: chunks[ci], pbf }, landBefore).map(s => ({
             ...s, label: many ? `chunk ${ci + 1}/${chunks.length}: ${s.label}` : s.label,
         }));
-    const tail = meshSteps(job.bbox);
+    const satellites = importWithSatellites();
+    const tail = meshSteps(job.bbox, satellites);
     const foreground = (s: Step) => s.lane === undefined || FOREGROUND_LANES.has(s.lane);
     const foregroundCount = (steps: Step[]) => steps.filter(foreground).length;
     // Background lanes never take a numbered slot.
@@ -935,6 +973,29 @@ async function runImport(job: Job): Promise<void> {
                 ? `chunk ${ci + 1}/${chunks.length} is open sea - skipping its data stages`
                 : 'the import box is open sea');
         });
+        if (satellites) {
+            // Stage by stage across every land chunk on the tile pool, so
+            // satellites take chunks: see chunkPoolStep. The OSM read and the
+            // airfields stay here, chunk by chunk, around the pooled stages.
+            for (const steps of stepsPerChunk) {
+                for (const s of inLane(steps, 'prefetch')) {
+                    await runForeground(s);
+                }
+            }
+            for (const stage of ['coast', 'roads', 'buildings'] as const) {
+                await runForeground(chunkPoolStep(job.bbox, pbf, stage));
+            }
+            for (const steps of stepsPerChunk) {
+                for (const s of inLane(steps, 'airfields')) {
+                    await runForeground(s);
+                }
+            }
+            await runForeground(chunkPoolStep(job.bbox, pbf, 'cover'));
+            for (const s of tail) {
+                await runForeground(s);
+            }
+            return;
+        }
         // Then a pipeline. The foreground takes each chunk's OSM read and
         // coast bake in turn - the two stages that need most memory, never
         // two at once. Everything else runs beside it in its own lane, one

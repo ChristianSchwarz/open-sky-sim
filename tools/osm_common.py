@@ -1118,8 +1118,18 @@ def decode_pdm(blob: bytes) -> np.ndarray:
     grid[q == PDM_NODATA] = np.nan
     return grid
 
+class MissingInput(RuntimeError):
+    """A bake satellite's job lacks a file the main machine has (tools/bake/pyChunk.ts)."""
+
+
 class DemSampler:
-    """Nearest-node lookups into the .pdm pyramid at one zoom level."""
+    """Nearest-node lookups into the .pdm pyramid at one zoom level.
+
+    On a bake satellite (RFS_STRICT_INPUTS set) the pyramid holds only the
+    tiles its job brought; a tile the pyramid's index lists but the job did
+    not bring raises MissingInput instead of reading as no data, so the chunk
+    is baked on the main machine rather than with a wrong lake height.
+    """
 
     def __init__(self, out_dir: str, zoom: int, tile_size: int):
         self.out_dir = out_dir
@@ -1127,6 +1137,9 @@ class DemSampler:
         self.n = tile_size
         self.span = 180.0 / (1 << zoom)
         self._cache: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
+        self._indexed: Optional[Set[Tuple[int, int]]] = None
+        if os.environ.get('RFS_STRICT_INPUTS'):
+            self._indexed = indexed_tiles(os.path.join(out_dir, 'index.bin'), zoom)
 
     def _tile(self, x: int, y: int) -> Optional[np.ndarray]:
         key = (x, y)
@@ -1135,6 +1148,8 @@ class DemSampler:
                 self._cache.clear()
             path = os.path.join(self.out_dir, str(self.zoom), str(x), f'{y}.pdm')
             grid: Optional[np.ndarray] = None
+            if self._indexed is not None and key in self._indexed and not os.path.isfile(path):
+                raise MissingInput(f'planet/{self.zoom}/{x}/{y}.pdm')
             if os.path.isfile(path):
                 try:
                     with open(path, 'rb') as fh:
@@ -1156,6 +1171,33 @@ class DemSampler:
         col = int(round((lon - b.west) / (b.east - b.west) * cells))
         row = int(round((b.north - lat) / (b.north - b.south) * cells))
         return float(grid[min(cells, max(0, row)), min(cells, max(0, col))])
+
+def indexed_tiles(index_path: str, zoom: int) -> Set[Tuple[int, int]]:
+    """The tiles a PIX1 index.bin lists at one zoom; empty without one."""
+    out: Set[Tuple[int, int]] = set()
+    if not os.path.isfile(index_path):
+        return out
+    with open(index_path, 'rb') as fh:
+        data = fh.read()
+    if len(data) < 8 or data[:4] != b'PIX1':
+        return out
+    min_z, max_z = struct.unpack_from('<HH', data, 4)
+    offset = 8
+    for z in range(min_z, max_z + 1):
+        if offset + 16 > len(data):
+            break
+        min_x, min_y, w, h = struct.unpack_from('<IIII', data, offset)
+        offset += 16
+        nbytes = (w * h + 7) // 8
+        if z == zoom:
+            bits = data[offset:offset + nbytes]
+            for i in range(w * h):
+                if bits[i >> 3] & (1 << (i & 7)):
+                    out.add((min_x + i % w, min_y + i // w))
+            break
+        offset += nbytes
+    return out
+
 
 def decode_lwm(blob: bytes) -> Tuple[bytearray, int]:
     """Inverse of :func:`encode_lwm`: returns (grid, n)."""

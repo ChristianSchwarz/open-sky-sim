@@ -38,7 +38,7 @@ import { bundleCompute } from '../satellite/computeBundle';
 export const DISCOVERY_PORT = 47810;
 export const DEFAULT_SATELLITE_PORT = 47811;
 /** Bumped when the satellite's side of the HTTP protocol changes. */
-export const SATELLITE_PROTOCOL = 5;
+export const SATELLITE_PROTOCOL = 6;
 export const TOKEN_FILE = path.join('data', 'satellite', 'token');
 
 /** A job config longer than this goes by hash, as a blob the satellite caches. */
@@ -71,6 +71,8 @@ export interface PoolOptions {
     /** Printed before the progress line, e.g. 'pass 1: '. */
     label: (pass: number) => string;
     t0: number;
+    /** Most jobs one satellite holds at once (a chunk stage: 1, the job takes every thread). Unset: one per thread. */
+    perSatellite?: number;
 }
 
 interface Lease { idx: number; pass: number; satId: string; beat: number; job: Job }
@@ -411,7 +413,7 @@ export class TilePool<R> {
 
     /** Hand the satellite a job now, or hold the request until there is one (or LONG_POLL_MS). */
     private lease(sat: Satellite, res: http.ServerResponse): void {
-        if (this.sendJob(sat, res)) {
+        if (!this.atCapacity(sat) && this.sendJob(sat, res)) {
             return;
         }
         const w: Waiter = {
@@ -424,11 +426,32 @@ export class TilePool<R> {
         this.waiters.push(w);
     }
 
+    /** Whether `sat` holds as many jobs as `perSatellite` allows (a chunk stage: one). */
+    private atCapacity(sat: Satellite): boolean {
+        const cap = this.opts.perSatellite;
+        if (cap === undefined) {
+            return false;
+        }
+        let n = 0;
+        for (const l of this.leases.values()) {
+            n += l.satId === sat.id ? 1 : 0;
+        }
+        return n >= cap;
+    }
+
     private wakeWaiters(): void {
-        while (this.waiters.length > 0 && this.run && this.run.queue.length > 0) {
-            const w = this.waiters.shift()!;
-            clearTimeout(w.timer);
+        // A satellite at capacity keeps its waiting requests: answered at once
+        // with nothing, its threads would ask again in a tight loop.
+        for (const w of [...this.waiters]) {
+            if (!this.run || this.run.queue.length === 0) {
+                return;
+            }
             const sat = this.sats.get(w.satId);
+            if (sat && this.atCapacity(sat)) {
+                continue;
+            }
+            this.waiters.splice(this.waiters.indexOf(w), 1);
+            clearTimeout(w.timer);
             if (!sat || !this.sendJob(sat, w.res)) {
                 w.res.writeHead(204).end();
             }
@@ -476,7 +499,7 @@ export class TilePool<R> {
         }
         const job: Job = {
             id: this.nextJobId++, kind, key, ...this.wire(kind, key),
-            inputs, outputs: outputsOf(kind, key), codeSha: this.codeSha,
+            inputs, outputs: outputsOf(kind, key, this.opts.cfg), codeSha: this.codeSha,
             progress: { done: run.done, total: run.tiles.length, pass: run.pass },
         };
         this.leases.set(job.id, { idx, pass: run.pass, satId: sat.id, beat: Date.now(), job });
@@ -543,6 +566,8 @@ export class TilePool<R> {
         }
         sat.done++;
         this.complete(lease.idx, (head.resultText !== undefined ? decodeWire<R>(head.resultText) : head.result) as R);
+        // The satellite has room again (see atCapacity).
+        this.wakeWaiters();
     }
 
     // --- the input files --------------------------------------------------------

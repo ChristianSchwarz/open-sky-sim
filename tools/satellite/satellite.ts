@@ -42,18 +42,16 @@ import * as path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { Tui, InfoRow, formatBytes, formatDuration } from './tui';
 import { ensureRuntime } from './pyRuntime';
+import { isJobPath } from './jobPaths';
 
 declare const __SAT_TOKEN__: string | undefined;
 declare const __SAT_COMPUTE__: string | undefined;
 
 const DISCOVERY_PORT = 47810;
-const PROTOCOL = 5;
+const PROTOCOL = 6;
 const HEARTBEAT_MS = 15_000;
-/**
- * A root name (new ones need no new exe), then z/x/y.ext, or a Python stage's
- * script: nothing that climbs out of the job directory.
- */
-const REL_PATTERN = /^(?:[a-z]+\/\d+\/-?\d+\/-?\d+\.[a-z0-9]+|pytools\/[A-Za-z0-9_]+\.py)$/;
+/** Input files fetched at once for one job. */
+const BLOB_FETCHES = 16;
 
 interface Args { coordinator?: string; threads: number; cache: string; cacheGb: number; name: string; once: boolean }
 
@@ -468,14 +466,24 @@ class Satellite {
     private async runJob(job: Job, worker: Worker, computing: () => void): Promise<Buffer<ArrayBuffer>> {
         const jobDir = path.join(this.args.cache, 'jobs', String(job.id));
         try {
-            for (const [rel, sha] of Object.entries(job.inputs)) {
-                if (!REL_PATTERN.test(rel)) {
+            const inputs = Object.entries(job.inputs);
+            for (const [rel] of inputs) {
+                if (!isJobPath(rel)) {
                     throw new Error(`refusing input path ${rel}`);
                 }
-                if (sha) {
-                    await this.blob(sha).catch((err: Error) => {
+            }
+            // A chunk job brings thousands of files: a few downloads at once, not one by one.
+            const wanted = [...new Set(inputs.map(([, sha]) => sha).filter((sha): sha is string => !!sha))];
+            let next = 0;
+            await Promise.all(Array.from({ length: Math.min(BLOB_FETCHES, wanted.length) }, async () => {
+                while (next < wanted.length) {
+                    await this.blob(wanted[next++]).catch((err: Error) => {
                         throw err instanceof SessionOver ? err : new Retry(err.message);
                     });
+                }
+            }));
+            for (const [rel, sha] of inputs) {
+                if (sha) {
                     const p = path.join(jobDir, ...rel.split('/'));
                     fs.mkdirSync(path.dirname(p), { recursive: true });
                     fs.copyFileSync(this.blobPath(sha), p);
@@ -511,7 +519,7 @@ class Satellite {
             const outputs: Array<{ rel: string; state: string; size: number }> = [];
             const bytes: Uint8Array[] = [];
             for (const rel of job.outputs) {
-                if (!REL_PATTERN.test(rel)) {
+                if (!isJobPath(rel)) {
                     throw new Error(`refusing output path ${rel}`);
                 }
                 const p = path.join(jobDir, ...rel.split('/'));
@@ -710,8 +718,10 @@ const HELP = [
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2));
     const code = await computeCode();
-    // The tile code's Python stages find this machine's cache and interpreter here (tools/bake/lidarLeaf.ts).
+    // The tile code's Python stages find this machine's cache, interpreter and thread
+    // count here (tools/bake/pyLeaf.ts, pyChunk.ts: a chunk job takes every thread).
     process.env.RFS_SAT_CACHE = path.resolve(args.cache);
+    process.env.RFS_SAT_THREADS = String(args.threads);
     const sat = new Satellite(args, code);
     let dialogOpen = false;
     const ui: Tui = new Tui(sat, ['Help', 'Cache', 'Threads', 'Size', 'Name', 'Bake', '', '', '', 'Quit'], n => {
@@ -754,6 +764,7 @@ async function main(): Promise<void> {
             });
             if (v !== undefined) {
                 args.threads = Number(v);
+                process.env.RFS_SAT_THREADS = String(args.threads);
                 saveSettings({ threads: args.threads });
                 log(`threads: ${args.threads}${sat.inBake ? ' from the next bake on' : ''}`);
             }

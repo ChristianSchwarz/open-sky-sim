@@ -1211,17 +1211,28 @@ pinned z4–z10 at 1.6 km and had flat sea refining to z11 out to 130 km.
 
 ### Satellites: other machines baking tiles
 
-The mesh bake, the far-tile textures (their leaf rasters), the grade and the
-far land can hand tiles to other machines on the LAN as well as to this
-one's workers. Build the satellite once:
+Most of an import can run on other machines on the LAN as well as on this
+one's workers:
+
+- **Tiles:** the mesh bake, the far-tile textures (their leaf rasters), the
+  grade and the far land.
+- **Python leaf stages:** the lidar and the roof colours
+  (`tools/py_leaf_pool.ts`).
+- **Python chunk stages:** coast, road vectors, building footprints and cover,
+  one chunk at a time (`tools/chunk_pool.ts`).
+
+The heights, the OSM read, the airfields, the road strokes, the bridges and
+the building bake stay here. Build the satellite once:
 
 ```
 npm run build:satellite
 ```
 
-That writes `dist/satellite/retroflightsim-satellite.exe` (one ~90 MB file,
-`--out DIR` for elsewhere). Copy it to any Windows machine and run it: no
-checkout, Node or Python needed there. It waits for a bake, finds it by UDP
+That writes `dist/satellite/retroflightsim-satellite.exe` (one ~160 MB file,
+`--out DIR` for elsewhere). It carries its own Python, packed from this
+machine (`tools/satellite/pack_python.py`; `$PYTHON` with the packages,
+`$PYTHON_BASE` a python.org 3.12). Copy it to any Windows machine and run it:
+no checkout, Node or Python needed there. It waits for a bake, finds it by UDP
 broadcast (port 47810), works, and waits for the next. Then bake with
 `--satellites`:
 
@@ -1231,7 +1242,12 @@ npm run bake:grade -- --bbox ... --satellites
 npm run bake:farland -- --bbox ... --satellites --jobs 0   # satellites only
 ```
 
-`bake:tex` takes the same flags. The satellite's screen shows the bake, its
+`bake:tex`, `bake:lidar` and `bake:roof-colours` take the same flags. A whole
+import does it all with `SATELLITES=1` in its environment: the chunk stages
+then run stage by stage across every land chunk (coast, roads, buildings,
+the airfields here per chunk, then cover), each chunk's leaves on a satellite
+or here and the coarser tiles and manifest blocks merged here chunk by chunk
+in import order, then the whole-box bakes with `--satellites`. The satellite's screen shows the bake, its
 progress, every thread and a log; F2..F6 change the cache folder, threads,
 cache size, name and the bake's address while it runs (F1 lists them).
 
@@ -1253,6 +1269,13 @@ cache size, name and the bake's address while it runs (F1 lists them).
   `--coordinator HOST:47811`.
 - **A satellite that disappears** has its tiles handed out again after 90 s;
   one quit with F10 hands them back at once.
+- **Chunk jobs** are big: a satellite takes one at a time and gives it every
+  thread. It is sent the chunk's leaf heights (and 0.1° of them around it),
+  the stage's leaf files already there (a removal is an output), the
+  extract and the scripts, and keeps the extract and the OSM read cache
+  between chunks. A coast chunk can need 10 GB. Its height sampler raises
+  on a tile the index lists but the job did not bring (a lake reaching past
+  the margin); that chunk, like any a satellite fails, is baked here.
 - **Two bakes on one machine.** Only one can answer the broadcast. The other
   says so and retries every 10 s; give a bake `--no-discovery` when its
   satellites are started with its address anyway (the check below does).
@@ -1262,6 +1285,9 @@ cache size, name and the bake's address while it runs (F1 lists them).
   texture cache's mtimes. A difference means `tools/bake/remoteTiles.ts`
   misses an input file, or a result lost something on the way back (typed
   arrays travel through `encodeWire`). It needs `data/satellite/token`.
+  `tools/verify_chunks.ts` does the same for the chunk stages on a scratch
+  pyramid cut into small chunks (`--normal` also bakes the import's own
+  chunk-after-chunk order and compares; on a Garmisch box all three agree).
 
 ### Serving
 

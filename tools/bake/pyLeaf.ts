@@ -71,7 +71,7 @@ export type PyLeafResult = { key: string } & Record<string, unknown>;
 const serves = new Map<string, PyServe>();
 
 /** The scripts in `dir`, copied to a directory named by their content, once. */
-function stableScripts(dir: string): string {
+export function stableScripts(dir: string): string {
     const files = fs.readdirSync(dir).filter(f => f.endsWith('.py')).sort();
     const h = crypto.createHash('sha1');
     for (const f of files) {

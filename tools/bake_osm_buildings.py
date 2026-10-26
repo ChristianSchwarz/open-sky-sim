@@ -446,6 +446,20 @@ def bvr_path(out_dir: str, z: int, x: int, y: int) -> str:
 
 # --- bake --------------------------------------------------------------------
 
+def mark_buildings_coverage(manifest_path: str, bbox: Bounds, leaf: int) -> None:
+    """The buildings block, its coverage grown by `bbox` (whole tiles)."""
+    def set_buildings(manifest: dict) -> None:
+        previous = (manifest.get('buildings') or {}).get('coverage')
+        merged = {
+            'west': min(previous['west'], bbox.west) if previous else bbox.west,
+            'south': min(previous['south'], bbox.south) if previous else bbox.south,
+            'east': max(previous['east'], bbox.east) if previous else bbox.east,
+            'north': max(previous['north'], bbox.north) if previous else bbox.north,
+        }
+        manifest['buildings'] = {'path': '{z}/{x}/{y}.bvr', 'source': 'osm', 'zoom': leaf, 'coverage': merged}
+    update_manifest(manifest_path, set_buildings)
+
+
 def bake(args: argparse.Namespace) -> int:
     started = time.time()
     manifest_path = args.manifest or os.path.join(args.out, 'manifest.json')
@@ -459,6 +473,10 @@ def bake(args: argparse.Namespace) -> int:
     asked = parse_bbox(args.bbox) if args.bbox else Bounds(cov['west'], cov['south'], cov['east'], cov['north'])
     bbox = snap_bounds_to_tiles(asked, leaf)
     print(f'coverage    lon [{bbox.west:.5f}, {bbox.east:.5f}] lat [{bbox.south:.5f}, {bbox.north:.5f}]')
+    if args.mark_coverage:
+        mark_buildings_coverage(manifest_path, bbox, leaf)
+        print(f'updated {manifest_path} (buildings coverage)')
+        return 0
 
     if args.pbf:
         print(f'reading OSM buildings from {args.pbf}', flush=True)
@@ -507,16 +525,8 @@ def bake(args: argparse.Namespace) -> int:
         written += len(items)
         size += len(blob)
 
-    def set_buildings(manifest: dict) -> None:
-        previous = (manifest.get('buildings') or {}).get('coverage')
-        merged = {
-            'west': min(previous['west'], bbox.west) if previous else bbox.west,
-            'south': min(previous['south'], bbox.south) if previous else bbox.south,
-            'east': max(previous['east'], bbox.east) if previous else bbox.east,
-            'north': max(previous['north'], bbox.north) if previous else bbox.north,
-        }
-        manifest['buildings'] = {'path': '{z}/{x}/{y}.bvr', 'source': 'osm', 'zoom': leaf, 'coverage': merged}
-    update_manifest(manifest_path, set_buildings)
+    if not args.leaves_only:
+        mark_buildings_coverage(manifest_path, bbox, leaf)
     print(f'wrote {files} leaf tiles, {written} buildings, {size / 1048576:.1f} MB (.bvr)'
           + (f'; removed {removed} stale' if removed else ''))
     print(f'done in {time.time() - started:.1f}s')
@@ -533,6 +543,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                         help=f'Overpass cell grid zoom (default {BUILDING_CELL_ZOOM})')
     parser.add_argument('--refresh-osm', action='store_true', help='ignore cached answers and re-fetch')
     parser.add_argument('--fetch-only', action='store_true', help='only fill the cache; bake nothing')
+    parser.add_argument('--leaves-only', action='store_true',
+                        help='write the .bvr only, not the manifest (a bake satellite\'s chunk)')
+    parser.add_argument('--mark-coverage', action='store_true',
+                        help='only grow the manifest\'s buildings coverage by the bbox (the main machine\'s '
+                             'half of a --leaves-only chunk)')
     raw = list(argv) if argv is not None else sys.argv[1:]
     return bake(parser.parse_args(glue_negative_bbox(raw)))
 

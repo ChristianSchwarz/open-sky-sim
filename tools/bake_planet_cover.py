@@ -816,6 +816,11 @@ def main() -> None:
                     help='bypass the Overpass cache for --osm-landuse')
     ap.add_argument('--pbf', help='read --osm-landuse polygons from this local .osm.pbf '
                                    'instead of Overpass (pip install osmium)')
+    ap.add_argument('--leaves-only', action='store_true',
+                    help='bake the finest tiles only, no ancestors (a bake satellite\'s chunk)')
+    ap.add_argument('--ancestors-only', action='store_true',
+                    help='rebuild the ancestors in the bbox from the finest tiles on disk, reading no '
+                         'source (the main machine\'s half of a --leaves-only chunk)')
     args = ap.parse_args(glue_negative_bbox(sys.argv[1:]))
 
     manifest_path = os.path.join(args.src, 'manifest.json')
@@ -837,7 +842,7 @@ def main() -> None:
             imagery_paths = [found['imagery']]
         print(f'using sources from {args.sources}')
 
-    if not landcover_paths and not imagery_paths:
+    if not landcover_paths and not imagery_paths and not args.ancestors_only:
         print('error: no cover sources. Run tools/fetch_cover_sources.py, or pass',
               file=sys.stderr)
         print('       --landcover / --imagery explicitly.', file=sys.stderr)
@@ -886,7 +891,7 @@ def main() -> None:
     osm_tree = None
     osm_polys: List = []
     osm_classes: List[int] = []
-    if args.osm_landuse:
+    if args.osm_landuse and not args.ancestors_only:
         if not HAS_OSM_LANDUSE:
             print('error: --osm-landuse requires shapely (pip install shapely)', file=sys.stderr)
             sys.exit(1)
@@ -944,7 +949,7 @@ def main() -> None:
             jobs, initializer=_init_cover_worker,
             initargs=(args.src, out_root, landcover_paths, imagery_paths, args.patch_m, pads,
                       osm_tree, osm_polys, osm_classes))
-    written, with_imagery, paved_nodes, osm_nodes, total_bytes = bake_tiles(
+    written, with_imagery, paved_nodes, osm_nodes, total_bytes = (0, 0, 0, 0, 0) if args.ancestors_only else bake_tiles(
         finest, args.src, out_root, landcover, imagery,
         landcover_paths, imagery_paths, class_lut, color_lut, args.patch_m, pads, pool,
         osm_tree, osm_polys, osm_classes,
@@ -953,7 +958,7 @@ def main() -> None:
     for s in landcover + imagery:
         s.close()
 
-    if not args.only:
+    if not args.only and not args.leaves_only:
         # Every level above the finest is built by decimating its own four
         # children, never by independently resampling the raw sources again
         # - the cover-bake analogue of bake_planet_dem.py's build_parent()

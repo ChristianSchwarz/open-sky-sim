@@ -4,8 +4,24 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
     Lanes, Step, dataSteps, deletePlan, extractPathFor, formatDuration, isProgressLine, parseProgress, plan, chunkBbox,
-    snapBboxToTiles, splitStream, stepOutcome, EXIT_NO_LAND, landChunks,
+    snapBboxToTiles, splitStream, stepOutcome, EXIT_NO_LAND, landChunks, meshSteps, chunkPoolStep,
 } from './areaImport';
+
+describe('an import with satellites', () => {
+    const box = [7.6, 45.9, 7.8, 46.0];
+    it('gives --satellites to the bakes that can hand out tiles, and to no other', () => {
+        const tool = (s: Step) => s.args.find(a => a.startsWith('tools/'))!;
+        const withSat = meshSteps(box, true).filter(s => s.args.includes('--satellites')).map(tool);
+        assert.deepEqual(withSat, ['tools/bake_planet_mesh.ts', 'tools/bake_planet_tex.ts', 'tools/py_leaf_pool.ts',
+            'tools/bake_planet_grade.ts', 'tools/bake_planet_farland.ts', 'tools/py_leaf_pool.ts']);
+        assert.ok(meshSteps(box).every(s => !s.args.includes('--satellites')));
+        assert.deepEqual(meshSteps(box, true).map(tool), meshSteps(box).map(tool), 'the same steps, in the same order');
+    });
+    it('runs each chunk stage across the box from one extract', () => {
+        const s = chunkPoolStep(box, 'x.osm.pbf', 'coast');
+        assert.deepEqual(s.args.slice(2), ['tools/chunk_pool.ts', '--stage', 'coast', '--bbox=7.6,45.9,7.8,46', '--pbf=x.osm.pbf', '--satellites']);
+    });
+});
 
 /**
  * The lines below are copied from the tools that emit them. If one of those

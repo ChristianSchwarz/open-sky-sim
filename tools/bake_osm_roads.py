@@ -779,6 +779,26 @@ def known_tiles(out_dir: str, manifest: dict, min_zoom: int, max_zoom: int) -> D
     return tiles
 
 
+def mark_roads_coverage(manifest_path: str, bbox: Bounds, min_zoom: int, max_zoom: int) -> None:
+    """The roads block, its coverage grown by `bbox` (whole tiles)."""
+    def set_roads(manifest: dict) -> None:
+        previous = (manifest.get('roads') or {}).get('coverage')
+        merged = {
+            'west': min(previous['west'], bbox.west) if previous else bbox.west,
+            'south': min(previous['south'], bbox.south) if previous else bbox.south,
+            'east': max(previous['east'], bbox.east) if previous else bbox.east,
+            'north': max(previous['north'], bbox.north) if previous else bbox.north,
+        }
+        manifest['roads'] = {
+            'path': '{z}/{x}/{y}.rvr',
+            'source': 'osm',
+            'minZoom': min_zoom,
+            'coverage': merged,
+            'bridges': {'path': '{z}/{x}/{y}.rbr', 'zoom': max_zoom},
+        }
+    update_manifest(manifest_path, set_roads)
+
+
 def bake(args: argparse.Namespace) -> int:
     started = time.time()
     manifest_path = args.manifest or os.path.join(args.out, 'manifest.json')
@@ -803,6 +823,8 @@ def bake(args: argparse.Namespace) -> int:
             out_dir, known_tiles(out_dir, manifest, min_zoom, max_zoom), bbox, min_zoom, max_zoom, None)
         print(f'rebuilt {files} coarser road tiles, {parts} runs'
               + (f'; removed {removed} stale' if removed else '') + f' in {time.time() - started:.1f}s')
+        if args.mark_coverage:
+            mark_roads_coverage(manifest_path, bbox, min_zoom, max_zoom)
         return 0
 
     if args.rails_only:
@@ -880,22 +902,7 @@ def bake(args: argparse.Namespace) -> int:
     # Locked and re-read: the importer runs this alongside the coast and
     # airfield bakes, which write the same manifest meanwhile. Writing back
     # the copy loaded at start silently dropped the airfields they had added.
-    def set_roads(manifest: dict) -> None:
-        previous = (manifest.get('roads') or {}).get('coverage')
-        merged = {
-            'west': min(previous['west'], bbox.west) if previous else bbox.west,
-            'south': min(previous['south'], bbox.south) if previous else bbox.south,
-            'east': max(previous['east'], bbox.east) if previous else bbox.east,
-            'north': max(previous['north'], bbox.north) if previous else bbox.north,
-        }
-        manifest['roads'] = {
-            'path': '{z}/{x}/{y}.rvr',
-            'source': 'osm',
-            'minZoom': min_zoom,
-            'coverage': merged,
-            'bridges': {'path': '{z}/{x}/{y}.rbr', 'zoom': max_zoom},
-        }
-    update_manifest(manifest_path, set_roads)
+    mark_roads_coverage(manifest_path, bbox, min_zoom, max_zoom)
     print(f'\nwrote {total_files} road tiles, {total_parts} runs, {total_bytes / 1048576:.1f} MB (.rvr)'
           + (f'; removed {removed} stale' if removed else ''))
     print(f'updated {manifest_path} (roads)')
@@ -1008,6 +1015,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument('--rebuild-ancestors', action='store_true',
                         help='re-derive every level above the leaf in the bbox from the tiles on '
                              'disk; fetches nothing and leaves the leaf alone')
+    parser.add_argument('--mark-coverage', action='store_true',
+                        help='with --rebuild-ancestors: also grow the roads block\'s coverage by the bbox '
+                             '(the main machine\'s half of a bake satellite\'s --min-zoom 12 chunk)')
     raw = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(glue_negative_bbox(raw))
     return bake(args)

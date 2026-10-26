@@ -2340,6 +2340,36 @@ def build_parent_mask(children: Dict[Tuple[int, int], bytearray], n: int) -> byt
     return parent
 
 
+def mark_coast_coverage(manifest_path: str, bbox: Bounds) -> None:
+    """The coastMask block, its coverage grown by `bbox` (whole tiles)."""
+    def set_coast_mask(manifest: dict) -> None:
+        # Union with whatever was already masked, not a replacement: this run
+        # only looked at its own bbox, and the tiles baked outside it are
+        # still there.
+        previous = (manifest.get('coastMask') or {}).get('coverage')
+        if previous:
+            masked = {
+                'west': min(previous['west'], bbox.west),
+                'south': min(previous['south'], bbox.south),
+                'east': max(previous['east'], bbox.east),
+                'north': max(previous['north'], bbox.north),
+            }
+        else:
+            masked = {
+                'west': bbox.west, 'south': bbox.south,
+                'east': bbox.east, 'north': bbox.north,
+            }
+        manifest['version'] = 3
+        manifest['coastMask'] = {
+            'enabled': True,
+            'path': '{z}/{x}/{y}.lwm',
+            'vectorPath': '{z}/{x}/{y}.lvr',
+            'source': 'osm',
+            'coverage': masked,
+        }
+    update_manifest(manifest_path, set_coast_mask)
+
+
 def bake(args: argparse.Namespace) -> int:
     started = time.time()
     manifest_path = args.manifest or os.path.join(args.out, 'manifest.json')
@@ -2608,7 +2638,7 @@ def bake(args: argparse.Namespace) -> int:
             total_lvr_tiles += lvr_written
             print(f'level {z:2d}    wrote {written} .lwm + {lvr_written} .lvr tiles '
                   f'in {time.monotonic() - level_started:.1f}s', flush=True)
-            if z == min_zoom:
+            if z == min_zoom or args.leaves_only:
                 break
             progress.update(clip_done / max(1, clip_total), f'zoom {z - 1} building ancestors',
                             force=True)
@@ -2619,34 +2649,14 @@ def bake(args: argparse.Namespace) -> int:
 
     progress.end(f'{total_tiles} .lwm + {total_lvr_tiles} .lvr tiles')
 
-    def set_coast_mask(manifest: dict) -> None:
-        # Union with whatever was already masked, not a replacement: this run
-        # only looked at its own bbox, and the tiles baked outside it are
-        # still there.
-        previous = (manifest.get('coastMask') or {}).get('coverage')
-        if previous:
-            masked = {
-                'west': min(previous['west'], bbox.west),
-                'south': min(previous['south'], bbox.south),
-                'east': max(previous['east'], bbox.east),
-                'north': max(previous['north'], bbox.north),
-            }
-        else:
-            masked = {
-                'west': bbox.west, 'south': bbox.south,
-                'east': bbox.east, 'north': bbox.north,
-            }
-        manifest['version'] = 3
-        manifest['coastMask'] = {
-            'enabled': True,
-            'path': '{z}/{x}/{y}.lwm',
-            'vectorPath': '{z}/{x}/{y}.lvr',
-            'source': 'osm',
-            'coverage': masked,
-        }
+    if args.leaves_only:
+        # A bake satellite's chunk (tools/bake/pyChunk.ts): the main machine
+        # marks the coverage when it rebuilds the ancestors.
+        print(f'\nleaves only: wrote {total_tiles} .lwm + {total_lvr_tiles} .lvr leaf tiles')
+        return 0
     # Locked and re-read: other chunks' road and airfield bakes may have
     # written their blocks since this bake loaded the manifest.
-    update_manifest(manifest_path, set_coast_mask)
+    mark_coast_coverage(manifest_path, bbox)
 
     print(f'\nwrote {total_tiles} coast tiles, {total_bytes / (1024 * 1024):.1f} MB (.lwm)')
     print(f'wrote {total_lvr_tiles} vector tiles, {total_lvr_bytes / (1024 * 1024):.1f} MB (.lvr)')
@@ -2681,6 +2691,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument('--rebuild-ancestors', action='store_true',
                         help='re-derive every coarser tile above the bbox from the tiles on disk '
                              '(repairs ancestors written from one bake\'s land only); fetches nothing')
+    parser.add_argument('--leaves-only', action='store_true',
+                        help='write the leaf tiles only, no ancestors and no manifest (a bake satellite\'s '
+                             'chunk; the main machine runs --rebuild-ancestors --mark-coverage after)')
+    parser.add_argument('--mark-coverage', action='store_true',
+                        help='with --rebuild-ancestors: also grow the coastMask coverage by the bbox')
     raw = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(glue_negative_bbox(raw))
     if args.rebuild_ancestors:
@@ -2690,9 +2705,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         max_zoom = manifest.get('maxZoom', 12)
         asked = parse_bbox(args.bbox) if args.bbox else Bounds(
             cov['west'], cov['south'], cov['east'], cov['north'])
-        return rebuild_ancestors(args.out or os.path.dirname(manifest_path), manifest.get('tileSize', 257),
+        code = rebuild_ancestors(args.out or os.path.dirname(manifest_path), manifest.get('tileSize', 257),
                                  manifest.get('minZoom', 0), max_zoom,
                                  snap_bounds_to_tiles(asked, max_zoom), args.jobs)
+        if code == 0 and args.mark_coverage:
+            mark_coast_coverage(manifest_path, snap_bounds_to_tiles(asked, max_zoom))
+        return code
     return bake(args)
 
 

@@ -13,6 +13,7 @@
  *   planet   the planet pyramid: heights, vectors, cover
  *   texcache the far-tile texture bake's leaf rasters
  *   pytools  the Python scripts a Python stage runs (tools/*.py): `pytools/name.py`
+ *   pbf      the OSM extract a chunk stage reads (pyChunk.ts): `pbf/name.osm.pbf`
  *
  * An input list may name files that do not exist: the coordinator sends
  * "absent" for those, so the satellite sees the same holes it would see here.
@@ -31,15 +32,16 @@ import { MeshTileConfig, TileProcessResult, processTile } from './meshTile';
 import { MIN_SEAM_ZOOM } from './borderConform';
 import { TexLeafConfig, TexLeafResult, texLeaf } from './texLeaf';
 import { PY_STAGES, PyLeafConfig, PyLeafKind, PyLeafResult, pyLeaf } from './pyLeaf';
+import { PyChunkConfig, PyChunkResult, chunkInputs, chunkOutputs, pyChunk } from './pyChunk';
 import { localPyImports } from './pyServe';
 import { TileKey } from '../../src/script/terrain/tiling';
 
-export type RemoteRoot = 'terrain' | 'lidar' | 'bstore' | 'planet' | 'texcache' | 'pytools';
-export type RemoteKind = 'grade1' | 'grade2' | 'farland' | 'mesh' | 'texleaf' | PyLeafKind;
+export type RemoteRoot = 'terrain' | 'lidar' | 'bstore' | 'planet' | 'texcache' | 'pytools' | 'pbf';
+export type RemoteKind = 'grade1' | 'grade2' | 'farland' | 'mesh' | 'texleaf' | PyLeafKind | 'pychunk';
 
 /** What a kind's config looks like on the wire: its directories are root names, not paths. */
-export type RemoteConfig = GradeConfig | FarLandConfig | MeshTileConfig | TexLeafConfig | PyLeafConfig;
-export type RemoteResult = GradeResult | FarLandResult | TileProcessResult | TexLeafResult | PyLeafResult | undefined;
+export type RemoteConfig = GradeConfig | FarLandConfig | MeshTileConfig | TexLeafConfig | PyLeafConfig | PyChunkConfig;
+export type RemoteResult = GradeResult | FarLandResult | TileProcessResult | TexLeafResult | PyLeafResult | PyChunkResult | undefined;
 
 const isPyLeaf = (kind: RemoteKind): kind is PyLeafKind => kind in PY_STAGES;
 
@@ -70,6 +72,10 @@ function pyInputs(toolsDir: string, entry: string): string[] {
 
 /** Every file `kind` may read for tile `k`, as root-relative paths. */
 export function inputsOf(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): string[] {
+    if (kind === 'pychunk') {
+        const c = cfg as PyChunkConfig;
+        return chunkInputs(c, k, entry => pyInputs(c.pytools, entry));
+    }
     if (isPyLeaf(kind)) {
         // The script's measure_leaf: the leaf's planet files (pyLeaf.ts PY_STAGES), and the script itself.
         const stage = PY_STAGES[kind];
@@ -114,8 +120,9 @@ export function inputsOf(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): strin
 }
 
 /** Every file `kind` may write or remove for tile `k`. */
-export function outputsOf(kind: RemoteKind, k: TileKey): string[] {
+export function outputsOf(kind: RemoteKind, k: TileKey, cfg?: RemoteConfig): string[] {
     switch (kind) {
+        case 'pychunk': return chunkOutputs(cfg as PyChunkConfig, k);
         case 'grade1': return [rel('terrain', k, PASS1_EXT)];
         case 'grade2': return [rel('terrain', k, '.ptm'), rel('terrain', k, '.ptr'), rel('terrain', k, '.pbd')];
         case 'farland': return [rel('terrain', k, FAR_LAND_EXT)];
@@ -140,6 +147,10 @@ export function wireConfig(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): Rem
     if (isPyLeaf(kind)) {
         return { ...(cfg as PyLeafConfig), planet: 'planet', store: PY_STAGES[kind].storeRoot, pytools: 'pytools' };
     }
+    if (kind === 'pychunk') {
+        const c = cfg as PyChunkConfig;
+        return { ...c, planet: 'planet', pbf: `pbf/${path.basename(c.pbf)}`, pytools: 'pytools' };
+    }
     if (kind === 'farland') {
         return { ...(cfg as FarLandConfig), dir: 'terrain' };
     }
@@ -160,6 +171,9 @@ export function wireConfig(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): Rem
  * local worker, remoteJobWorker.ts). A Python stage answers asynchronously.
  */
 export function runRemoteJob(kind: RemoteKind, cfg: RemoteConfig, k: TileKey, jobDir: string): RemoteResult | Promise<RemoteResult> {
+    if (kind === 'pychunk') {
+        return pyChunk(cfg as PyChunkConfig, k, jobDir);
+    }
     if (isPyLeaf(kind)) {
         const l = cfg as PyLeafConfig;
         return pyLeaf(kind, {
