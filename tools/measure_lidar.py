@@ -33,10 +33,8 @@ Usage::
     python tools/measure_lidar.py --todo --bbox ...   # the leaves to measure, one JSON [x, y] a line
     python tools/measure_lidar.py --serve             # measure leaves asked for on stdin
 
---serve is the tile pool's (tools/measure_lidar_pool.ts, and a bake
-satellite's): one JSON request a line, {"x", "y", "planet", "store"}, one JSON
-answer a line, the sources and their downloads kept between leaves as a
-worker of --jobs keeps them. RFS_LIDAR_PLANET, RFS_LIDAR_STORE and
+--serve and --todo are the tile pool's (tools/py_leaf_pool.ts, and a bake
+satellite's; tools/leaf_serve.py). RFS_LIDAR_PLANET, RFS_LIDAR_STORE and
 RFS_LIDAR_CACHE move the three directories below.
 """
 
@@ -66,6 +64,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bake_osm_roads import decode_rvr  # noqa: E402
 from osm_bridges import decode_rbr  # noqa: E402
+import leaf_serve  # noqa: E402
 
 LEAF_ZOOM = 12
 PLANET_DIR = os.environ.get('RFS_LIDAR_PLANET', 'assets/planet')
@@ -969,27 +968,6 @@ def leaves_in(bbox: Sequence[float]) -> List[Tuple[int, int]]:
     return out
 
 
-def serve(cache_gb: float) -> int:
-    """Measure the leaves asked for on stdin, one JSON line each way, until stdin ends."""
-    global PLANET_DIR, STORE_DIR
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        req = json.loads(line)
-        try:
-            PLANET_DIR, STORE_DIR = req['planet'], req['store']
-            r = measure_leaf(int(req['x']), int(req['y']))
-            trim_cache(cache_gb * 1e9)
-            r['leaf'] = list(r['leaf'])
-            r['kmBySource'] = {str(k): v for k, v in r['kmBySource'].items()}
-            out = {'ok': True, 'result': r}
-        except Exception as ex:  # noqa: BLE001 - the pool counts the failure and goes on
-            out = {'ok': False, 'error': repr(ex)}
-        sys.stdout.write(json.dumps(out) + '\n')
-        sys.stdout.flush()
-    return 0
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--bbox', help='west,south,east,north')
@@ -1002,7 +980,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--todo', action='store_true', help='print the leaves that need measuring and stop')
     args = ap.parse_args(argv)
     if args.serve:
-        return serve(args.cache_gb)
+        return leaf_serve.serve(sys.modules[__name__], measure_leaf, lambda: trim_cache(args.cache_gb * 1e9))
     if args.leaf:
         leaves = [tuple(int(v) for v in args.leaf.split(','))]
     elif args.bbox:
@@ -1012,9 +990,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     todo = [k for k in leaves if args.force or not up_to_date(*k)]
     todo = [k for k in todo if leaf_sources(*k)]
     if args.todo:
-        for k in todo:
-            print(json.dumps(list(k)))
-        return 0
+        return leaf_serve.print_todo(todo)
     print(f'measure_lidar: {len(leaves)} leaves with vectors, {len(todo)} to measure '
           f'({len(leaves) - len(todo)} up to date or outside every source)', flush=True)
     t0 = time.time()

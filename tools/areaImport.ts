@@ -764,10 +764,10 @@ export function dataSteps(
 function gradeSteps(bbox: string, rebaking = false): Step[] {
     return [
         {
-            // measure_lidar.py on the tile pool (tools/measure_lidar_pool.ts): the
+            // measure_lidar.py on the tile pool (tools/py_leaf_pool.ts): the
             // same leaves and store, and satellites can take leaves too.
             label: 'measuring lines and bridge ends in the lidar', cmd: process.execPath,
-            args: ['--import', 'tsx', 'tools/measure_lidar_pool.ts', `--bbox=${bbox}`],
+            args: ['--import', 'tsx', 'tools/py_leaf_pool.ts', '--stage', 'lidar', `--bbox=${bbox}`],
             // An unreachable lidar server (IGN's WCS times out for minutes at
             // a time) is exit 1 with the rest of the leaves measured. The
             // measurements only refine the beds, so grade without them and let
@@ -795,15 +795,17 @@ function gradeSteps(bbox: string, rebaking = false): Step[] {
         // (Bavaria, Brandenburg, Berlin) and skips a leaf outside them, so for
         // any other area they finish at once. A leaf that fails to download
         // is exit 1 with the rest written: the import goes on, a re-run fills
-        // the gap, and a leaf already measured is not fetched again.
+        // the gap, and a leaf already measured is not fetched again. The roof
+        // colours run on the tile pool (tools/py_leaf_pool.ts), satellites too.
         ...['import_lod2.py', 'measure_buildings.py', 'measure_roof_shapes.py'].map((tool): Step => ({
             label: {
                 'import_lod2.py': 'matching LoD2 buildings',
                 'measure_buildings.py': 'measuring roof colours',
                 'measure_roof_shapes.py': 'fitting roof shapes',
             }[tool]!,
-            cmd: PYTHON,
-            args: [`tools/${tool}`, `--bbox=${bbox}`],
+            ...(tool === 'measure_buildings.py'
+                ? { cmd: process.execPath, args: ['--import', 'tsx', 'tools/py_leaf_pool.ts', '--stage', 'roofs', `--bbox=${bbox}`] }
+                : { cmd: PYTHON, args: [`tools/${tool}`, `--bbox=${bbox}`] }),
             partialCode: 1,
             partialWarning: 'some leaves could not be fetched or measured, so their buildings keep '
                 + 'the rule-based look - re-run the import to fill them in',

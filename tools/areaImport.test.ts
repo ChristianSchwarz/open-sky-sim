@@ -207,7 +207,7 @@ describe('the bake plans end with meshes then textures over the same box', () =>
         if (withRoads) {
             assert.equal(tools[mesh + 2], 'tools/bake_planet_roads.ts', 'road strokes do not follow the textures');
             assert.equal(bboxOf(steps[mesh + 2]), bboxOf(steps[mesh]));
-            assert.equal(tools[mesh + 3], 'tools/measure_lidar_pool.ts', 'the lidar is not measured after the road strokes');
+            assert.equal(tools[mesh + 3], 'tools/py_leaf_pool.ts', 'the lidar is not measured after the road strokes');
             assert.equal(bboxOf(steps[mesh + 3]), bboxOf(steps[mesh]));
             assert.equal(tools[mesh + 4], 'tools/bake_planet_bridges.ts', 'bridges do not follow the lidar');
             assert.equal(tools[mesh + 5], 'tools/bake_planet_grade.ts', 'grading does not follow the bridges');
@@ -215,7 +215,7 @@ describe('the bake plans end with meshes then textures over the same box', () =>
             assert.equal(tools[mesh + 6], 'tools/bake_planet_farland.ts', 'far land does not follow the grading');
             assert.equal(bboxOf(steps[mesh + 6]), bboxOf(steps[mesh]));
             assert.deepEqual(tools.slice(mesh + 7, mesh + 10),
-                ['tools/import_lod2.py', 'tools/measure_buildings.py', 'tools/measure_roof_shapes.py'],
+                ['tools/import_lod2.py', 'tools/py_leaf_pool.ts', 'tools/measure_roof_shapes.py'],
                 'the building inputs do not follow the far land');
             for (const k of [7, 8, 9]) {
                 assert.equal(bboxOf(steps[mesh + k]), bboxOf(steps[mesh]));

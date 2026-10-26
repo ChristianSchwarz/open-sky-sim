@@ -86,9 +86,10 @@ from bake_osm_buildings import Building, building_centroid, decode_bvr  # noqa: 
 from bake_osm_roads import decode_rvr  # noqa: E402
 
 LEAF_ZOOM = 12
-PLANET_DIR = 'assets/planet'
-STORE_DIR = 'data/imports/buildings/store'
-CACHE_DIR = 'data/imports/ortho/.cache'
+# RFS_BUILDINGS_* move them, for the tile pool (tools/py_leaf_pool.ts).
+PLANET_DIR = os.environ.get('RFS_BUILDINGS_PLANET', 'assets/planet')
+STORE_DIR = os.environ.get('RFS_BUILDINGS_STORE', 'data/imports/buildings/store')
+CACHE_DIR = os.environ.get('RFS_ORTHO_CACHE', 'data/imports/ortho/.cache')
 USER_AGENT = 'retroflightsim-terrain-bake (roof colour sampler)'
 
 # Keep in step with tools/bake/buildingColourStore.ts.
@@ -703,7 +704,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--force', action='store_true', help='measure leaves already up to date')
     ap.add_argument('--jobs', type=int, default=max(1, min(6, (os.cpu_count() or 2) - 1)),
                     help='leaves measured at once, each in its own process')
+    ap.add_argument('--serve', action='store_true', help='measure leaves asked for on stdin (the tile pool, tools/leaf_serve.py)')
+    ap.add_argument('--todo', action='store_true', help='print the leaves that need measuring and stop')
     args = ap.parse_args(argv)
+    if args.serve:
+        import leaf_serve
+        return leaf_serve.serve(sys.modules[__name__], measure_leaf)
     if args.leaf:
         leaves = [tuple(int(v) for v in args.leaf.split(','))]
     elif args.bbox:
@@ -711,6 +717,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         ap.error('give --bbox or --leaf')
     todo = [k for k in leaves if leaf_covered(*k) and (args.force or not up_to_date(*k))]
+    if args.todo:
+        import leaf_serve
+        return leaf_serve.print_todo(todo)
     print(f'measure_buildings: {len(leaves)} leaves with buildings, {len(todo)} to measure', flush=True)
     t0 = time.time()
     tot = {'buildings': 0, 'measured': 0, 'noData': 0, 'tooSmall': 0, 'blocks': 0, 'cacheHits': 0}

@@ -9,6 +9,7 @@
  *
  *   terrain  the mesh tree (--dir / --out)
  *   lidar    the lidar store (data/imports/lidar/store)
+ *   bstore   the building colour store (data/imports/buildings/store)
  *   planet   the planet pyramid: heights, vectors, cover
  *   texcache the far-tile texture bake's leaf rasters
  *   pytools  the Python scripts a Python stage runs (tools/*.py): `pytools/name.py`
@@ -29,16 +30,18 @@ import { GradeConfig, GradeResult, PASS1_EXT, bedsOfTile, gradeTile } from './gr
 import { MeshTileConfig, TileProcessResult, processTile } from './meshTile';
 import { MIN_SEAM_ZOOM } from './borderConform';
 import { TexLeafConfig, TexLeafResult, texLeaf } from './texLeaf';
-import { LidarLeafConfig, LidarLeafResult, lidarLeaf } from './lidarLeaf';
+import { PY_STAGES, PyLeafConfig, PyLeafKind, PyLeafResult, pyLeaf } from './pyLeaf';
 import { localPyImports } from './pyServe';
 import { TileKey } from '../../src/script/terrain/tiling';
 
-export type RemoteRoot = 'terrain' | 'lidar' | 'planet' | 'texcache' | 'pytools';
-export type RemoteKind = 'grade1' | 'grade2' | 'farland' | 'mesh' | 'texleaf' | 'lidarleaf';
+export type RemoteRoot = 'terrain' | 'lidar' | 'bstore' | 'planet' | 'texcache' | 'pytools';
+export type RemoteKind = 'grade1' | 'grade2' | 'farland' | 'mesh' | 'texleaf' | PyLeafKind;
 
 /** What a kind's config looks like on the wire: its directories are root names, not paths. */
-export type RemoteConfig = GradeConfig | FarLandConfig | MeshTileConfig | TexLeafConfig | LidarLeafConfig;
-export type RemoteResult = GradeResult | FarLandResult | TileProcessResult | TexLeafResult | LidarLeafResult | undefined;
+export type RemoteConfig = GradeConfig | FarLandConfig | MeshTileConfig | TexLeafConfig | PyLeafConfig;
+export type RemoteResult = GradeResult | FarLandResult | TileProcessResult | TexLeafResult | PyLeafResult | undefined;
+
+const isPyLeaf = (kind: RemoteKind): kind is PyLeafKind => kind in PY_STAGES;
 
 const rel = (root: RemoteRoot, k: TileKey, ext: string) => `${root}/${k.z}/${k.x}/${k.y}${ext}`;
 
@@ -67,9 +70,10 @@ function pyInputs(toolsDir: string, entry: string): string[] {
 
 /** Every file `kind` may read for tile `k`, as root-relative paths. */
 export function inputsOf(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): string[] {
-    if (kind === 'lidarleaf') {
-        // measure_lidar.py measure_leaf: the leaf's lines and bridges.
-        return [rel('planet', k, '.rvr'), rel('planet', k, '.rbr'), ...pyInputs((cfg as LidarLeafConfig).pytools, 'measure_lidar.py')];
+    if (isPyLeaf(kind)) {
+        // The script's measure_leaf: the leaf's planet files (pyLeaf.ts PY_STAGES), and the script itself.
+        const stage = PY_STAGES[kind];
+        return [...stage.inputs.map(ext => rel('planet', k, ext)), ...pyInputs((cfg as PyLeafConfig).pytools, stage.script)];
     }
     if (kind === 'mesh') {
         // meshTile.ts processTile: the tile's heights, road grade, coast and
@@ -117,7 +121,8 @@ export function outputsOf(kind: RemoteKind, k: TileKey): string[] {
         case 'farland': return [rel('terrain', k, FAR_LAND_EXT)];
         case 'mesh': return [rel('terrain', k, '.ptm')];
         case 'texleaf': return [rel('texcache', k, '.ptx')];
-        case 'lidarleaf': return [rel('lidar', k, '.lms')];
+        case 'lidarleaf':
+        case 'roofleaf': return [rel(PY_STAGES[kind].storeRoot, k, PY_STAGES[kind].storeExt)];
     }
 }
 
@@ -132,8 +137,8 @@ export function wireConfig(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): Rem
     if (kind === 'texleaf') {
         return { ...(cfg as TexLeafConfig), dir: 'terrain', cache: 'texcache' };
     }
-    if (kind === 'lidarleaf') {
-        return { ...(cfg as LidarLeafConfig), planet: 'planet', store: 'lidar', pytools: 'pytools' };
+    if (isPyLeaf(kind)) {
+        return { ...(cfg as PyLeafConfig), planet: 'planet', store: PY_STAGES[kind].storeRoot, pytools: 'pytools' };
     }
     if (kind === 'farland') {
         return { ...(cfg as FarLandConfig), dir: 'terrain' };
@@ -155,10 +160,10 @@ export function wireConfig(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): Rem
  * local worker, remoteJobWorker.ts). A Python stage answers asynchronously.
  */
 export function runRemoteJob(kind: RemoteKind, cfg: RemoteConfig, k: TileKey, jobDir: string): RemoteResult | Promise<RemoteResult> {
-    if (kind === 'lidarleaf') {
-        const l = cfg as LidarLeafConfig;
-        return lidarLeaf({
-            ...l, planet: path.join(jobDir, l.planet), store: path.join(jobDir, l.store), pytools: path.join(jobDir, l.pytools),
+    if (isPyLeaf(kind)) {
+        const l = cfg as PyLeafConfig;
+        return pyLeaf(kind, {
+            planet: path.join(jobDir, l.planet), store: path.join(jobDir, l.store), pytools: path.join(jobDir, l.pytools),
         }, k, jobDir !== '');
     }
     if (kind === 'mesh') {
