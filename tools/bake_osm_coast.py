@@ -157,7 +157,21 @@ MIN_PLAUSIBLE_LAND_FRACTION = 0.005
 # Width to assume for a watercourse OSM maps as a bare centreline with no
 # `width` tag on it, which is most of them. Used for two things: the water
 # polygon it is buffered into, and the stroke the overlay draws it with.
-WATERWAY_FALLBACK_WIDTH_M = {'river': 30.0, 'canal': 12.0}
+#
+# Only once measure_course_width has found no mapped water to read the width
+# off. In southern Brandenburg the untagged rivers that do have an area measure
+# 13 m at the median and 27 m at the 90th percentile, so the 30 m this used to
+# be drew nearly every river too wide - and the ones nobody mapped as an area
+# are the smaller ones.
+WATERWAY_FALLBACK_WIDTH_M = {'river': 12.0, 'canal': 12.0}
+
+# Measuring an untagged centreline against the water polygons mapped around it.
+# See :func:`measure_course_width`. Cross-sections per line, how many of them
+# have to land in water before the measurement is believed, and how far each
+# one reaches either side of the centreline.
+COURSE_WIDTH_SAMPLES = 40
+COURSE_WIDTH_MIN_SAMPLES = 3
+COURSE_WIDTH_REACH_M = 1000.0
 
 # Douglas-Peucker tolerance for a watercourse centreline, in grid cells of the
 # level being written.
@@ -488,6 +502,72 @@ def waterway_width_m(tags: dict) -> Optional[float]:
     return _tagged_width_m(tags) or WATERWAY_FALLBACK_WIDTH_M[kind]
 
 
+def measure_course_width(line: LineString, banks: Sequence[Polygon],
+                         tree: Optional[STRtree]) -> Optional[float]:
+    """The width of the mapped water an untagged centreline runs through, or None.
+
+    Most rivers carry no `width` tag, and the fallback for them is a guess
+    that fits nothing in particular: the Kleine Elster through Doberlug-
+    Kirchhain was drawn 30 m wide over its own 7 m `water=river` polygon. Where
+    OSM maps the water as an area as well, the area knows the width, so it is
+    read off it - cross-sections at points spread along the line, each measured
+    across the piece of water containing it, and the median taken so a weir
+    basin or a harbour does not speak for the whole way.
+
+    `banks` are the *flowing* water areas only. A lake the river passes
+    through is not its width.
+    """
+    if tree is None:
+        return None
+    near = [banks[i] for i in tree.query(line)]
+    if not near:
+        return None
+    lon0, lat0 = line.coords[0]
+    kx = 111320.0 * max(0.05, math.cos(math.radians(lat0)))
+    ky = 110540.0
+
+    def metres(geom):
+        return affine_scale(geom, xfact=kx, yfact=ky, origin=(lon0, lat0))
+
+    try:
+        water = unary_union([metres(p) for p in near])
+    except Exception:
+        return None
+    if water.is_empty:
+        return None
+    inside = prep(water)
+    course = metres(line)
+    length = course.length
+    if length <= 0.0:
+        return None
+    n = min(COURSE_WIDTH_SAMPLES, max(1, int(length / 10.0)))
+    widths: List[float] = []
+    for i in range(n):
+        d = (i + 0.5) / n * length
+        p = course.interpolate(d)
+        if not inside.contains(p):
+            continue
+        a = course.interpolate(max(0.0, d - 2.0))
+        b = course.interpolate(min(length, d + 2.0))
+        dx, dy = b.x - a.x, b.y - a.y
+        norm = math.hypot(dx, dy)
+        if norm <= 0.0:
+            continue
+        nx, ny = -dy / norm * COURSE_WIDTH_REACH_M, dx / norm * COURSE_WIDTH_REACH_M
+        cross = LineString([(p.x - nx, p.y - ny), (p.x + nx, p.y + ny)])
+        try:
+            cut = cross.intersection(water)
+        except Exception:
+            continue
+        for piece in getattr(cut, 'geoms', [cut]):
+            if piece.length > 0.0 and piece.distance(p) < 1e-3:
+                widths.append(piece.length)
+                break
+    if len(widths) < COURSE_WIDTH_MIN_SAMPLES:
+        return None
+    return float(np.median(widths))
+
+
 def buffer_waterway(line: LineString, width_m: float, lat: float) -> Optional[Polygon]:
     """Widen a centreline into a polygon, in metres rather than in degrees.
 
@@ -596,6 +676,22 @@ def _polygons_from_osm(
     inland_parts: List[Tuple[Polygon, bool]] = []
     courses: List[Watercourse] = []
     widened_lines = 0
+    # Flowing water mapped as an area, and the centrelines with no `width` tag
+    # that wait to be measured against it once the relations are in too.
+    banks: List[Polygon] = []
+    unmeasured: List[Tuple[LineString, str]] = []
+
+    def keep_course(line: LineString, width: float) -> None:
+        nonlocal widened_lines
+        courses.append(Watercourse(line, width))
+        widened = buffer_waterway(line, width, line.centroid.y)
+        if widened is None:
+            return
+        water_polys.append(widened)
+        # Flowing, never flat: a river descends across a tile, so it takes
+        # its surface from the DEM.
+        inland_parts.append((widened, False))
+        widened_lines += 1
 
     def tell(fraction: float, detail: str) -> None:
         if progress is not None:
@@ -632,6 +728,8 @@ def _polygons_from_osm(
                     water_polys.append(part)
                     if kind != 'ocean':
                         inland_parts.append((part, kind == 'flat'))
+                    if kind == 'flowing':
+                        banks.append(part)
         else:
             # A watercourse mapped as a centreline, which is how OSM maps most
             # of them: on one Berlin tile there were 36 water areas and 20
@@ -643,18 +741,16 @@ def _polygons_from_osm(
             # And, buffered to true width, as water like any other polygon - so
             # a wide river still gets a real water surface with a shoreline cut
             # around it, and the land under it is still subtracted.
+            #
+            # With no `width` tag, not until the mapped water around it has had
+            # its say - see measure_course_width.
             width = waterway_width_m(tags)
             if width is None:
                 continue
-            courses.append(Watercourse(line, width))
-            widened = buffer_waterway(line, width, line.centroid.y)
-            if widened is None:
-                continue
-            water_polys.append(widened)
-            # Flowing, never flat: a river descends across a tile, so it takes
-            # its surface from the DEM.
-            inland_parts.append((widened, False))
-            widened_lines += 1
+            if _tagged_width_m(tags) is None:
+                unmeasured.append((line, tags.get('waterway', '')))
+            else:
+                keep_course(line, width)
 
     rel_total = max(1, len(relations))
     for i, rel in enumerate(relations):
@@ -670,10 +766,26 @@ def _polygons_from_osm(
                 water_polys.append(poly)
                 if kind != 'ocean':
                     inland_parts.append((poly, kind == 'flat'))
+                if kind == 'flowing':
+                    banks.append(poly)
             elif natural == 'coastline' or place in ('island', 'islet'):
                 land_polys.append(poly)
                 if place:
                     island_polys.append(poly)
+
+    if unmeasured:
+        tell(0.4, f'measuring {len(unmeasured)} untagged watercourses')
+        tree = STRtree(banks) if banks else None
+        measured_lines = 0
+        for line, kind in unmeasured:
+            width = measure_course_width(line, banks, tree)
+            if width is None:
+                width = WATERWAY_FALLBACK_WIDTH_M[kind]
+            else:
+                measured_lines += 1
+            keep_course(line, width)
+        print(f'  {measured_lines}/{len(unmeasured)} untagged watercourses '
+              f'measured against mapped water, the rest at the fallback width')
 
     clip = bbox.as_box()
     land_from_coast: List[Polygon] = []

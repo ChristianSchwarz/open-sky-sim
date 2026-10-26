@@ -358,6 +358,50 @@ def _square(x0, y0, x1, y1):
     return [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
 
 
+class MeasuredCourseWidthTest(unittest.TestCase):
+    """An untagged river takes the width of the water area mapped around it."""
+
+    BOX = Bounds(13.50, 51.60, 13.60, 51.70)
+    LAT = 51.65
+    HALF_8M = 4.0 / 110540.0
+    LINE = [(13.52, LAT), (13.58, LAT)]
+
+    def bank(self, half=HALF_8M, x0=13.51, x1=13.59):
+        return _square(x0, self.LAT - half, x1, self.LAT + half)
+
+    def widths(self, *ways):
+        _, _, courses = _polygons_from_osm(_tagged_answer(*ways), self.BOX)
+        return [c.width_m for c in courses]
+
+    def test_a_river_inside_its_own_area_takes_the_area_width(self):
+        widths = self.widths(({'waterway': 'river'}, self.LINE),
+                             ({'natural': 'water', 'water': 'river'}, self.bank()))
+        self.assertEqual(len(widths), 1)
+        self.assertAlmostEqual(widths[0], 8.0, delta=0.2)
+
+    def test_a_tagged_width_still_wins(self):
+        widths = self.widths(({'waterway': 'river', 'width': '20'}, self.LINE),
+                             ({'natural': 'water', 'water': 'river'}, self.bank()))
+        self.assertEqual(widths, [20.0])
+
+    def test_a_lake_is_not_the_river_width(self):
+        widths = self.widths(({'waterway': 'river'}, self.LINE),
+                             ({'natural': 'water'}, self.bank(half=0.005)))
+        self.assertEqual(widths, [WATERWAY_FALLBACK_WIDTH_M['river']])
+
+    def test_no_area_falls_back(self):
+        self.assertEqual(self.widths(({'waterway': 'canal'}, self.LINE)),
+                         [WATERWAY_FALLBACK_WIDTH_M['canal']])
+
+    def test_a_short_basin_does_not_speak_for_the_whole_way(self):
+        # 8 m along the whole line, and a 200 m wide basin over a tenth of it.
+        basin = _square(13.55, self.LAT - 0.0009, 13.556, self.LAT + 0.0009)
+        widths = self.widths(({'waterway': 'river'}, self.LINE),
+                             ({'natural': 'water', 'water': 'river'}, self.bank()),
+                             ({'natural': 'water', 'water': 'river'}, basin))
+        self.assertAlmostEqual(widths[0], 8.0, delta=0.2)
+
+
 class IslandsInInlandWaterTest(unittest.TestCase):
     """A `place=island` way drawn inside a lake way is land, not lake."""
 
