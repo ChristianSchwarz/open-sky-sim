@@ -20,7 +20,8 @@
  *
  *     --dir DIR        the mesh tree (default assets/terrain)
  *     --bbox w,s,e,n   only tiles in this box; the bed index is merged
- *     --jobs N         worker threads (default: CPUs - 1)
+ *     --jobs N         worker threads (default: CPUs - 1, at most one per 5 GB of memory;
+ *                      JOBS in the environment sets it too)
  *     --no-bundle      run the worker under tsx instead of an esbuild bundle
  *     --no-free-border grade each leaf alone, its beds fading out at the border
  *     --simplify M     simplify each graded leaf's land to M metres (default
@@ -59,6 +60,7 @@ import { tileFile } from './bake/railBedInputs';
 import { LIDAR_STORE_DIR } from './bake/lidarStore';
 import { LAND_SIMPLIFY_M } from './bake/simplifyLand';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
+import { GB_PER_WORKER, localJobs } from './bake/localJobs';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'gradeTileWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'gradeTileWorker.cjs');
@@ -204,7 +206,7 @@ async function main(): Promise<void> {
             }
         }
     }
-    const jobs = Math.max(args.satellitePort ? 0 : 1, Math.min(args.jobs ?? os.cpus().length - 1, tiles.length));
+    const jobs = Math.max(args.satellitePort ? 0 : 1, Math.min(args.jobs ?? localJobs(GB_PER_WORKER.grade), tiles.length));
     console.log(`bake_planet_grade: ${tiles.length} tiles with strokes${args.bbox ? ' (scoped)' : ''}, ${jobs} workers, `
         + `${(freeBytes(args.dir) / 1e9).toFixed(1)} GB free`);
     const lidar = args.lidar && fs.existsSync(args.lidarStore) ? { store: args.lidarStore, planet: args.src } : undefined;

@@ -25,7 +25,8 @@
  *     --no-buildings   leave the .pbh building footprints out of the leaf rasters
  *     --bbox w,s,e,n   re-rasterise only the leaves in this box, refold their
  *                      ancestors, and merge the index with what is there
- *     --jobs N         worker threads rasterising leaves (default: CPUs - 1)
+ *     --jobs N         worker threads rasterising leaves (default: CPUs - 1, at most one
+ *                      per 1.5 GB of memory; JOBS in the environment sets it too)
  *     --no-bundle      run the worker under tsx instead of an esbuild bundle
  *     --satellites     also hand leaves to satellite machines on the LAN
  *                      (tools/bake/tilePool.ts); with --jobs 0, to them alone
@@ -52,6 +53,7 @@ import { ROAD_MAJOR_MAX_CLASS } from '../src/script/terrain/ptr';
 import { TerrainClass } from '../src/script/terrain/tones';
 import { TexLeafConfig, TexLeafResult } from './bake/texLeaf';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
+import { GB_PER_WORKER, localJobs } from './bake/localJobs';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'texLeafWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'texLeafWorker.cjs');
@@ -314,7 +316,7 @@ async function main(): Promise<void> {
         const cfg: TexLeafConfig = {
             dir: args.dir, cache: args.cache, enuOrigin: manifest.enuOrigin, leafSize, supersample: LEAF_SUPERSAMPLE, buildings: args.buildings,
         };
-        const jobs = Math.max(args.satellitePort ? 0 : 1, Math.min(args.jobs ?? os.cpus().length - 1, todo.length));
+        const jobs = Math.max(args.satellitePort ? 0 : 1, Math.min(args.jobs ?? localJobs(GB_PER_WORKER.tex), todo.length));
         const pool = new TilePool<TexLeafResult>({
             local: { ...await prepareWorker(args.noBundle), jobs }, cfg, kindOf: () => 'texleaf',
             roots: { terrain: args.dir, texcache: args.cache },

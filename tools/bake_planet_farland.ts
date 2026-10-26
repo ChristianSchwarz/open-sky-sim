@@ -12,7 +12,8 @@
  *
  *     --dir DIR        the mesh tree (default assets/terrain)
  *     --bbox w,s,e,n   only leaves in this box; the index is merged
- *     --jobs N         worker threads (default: CPUs - 1)
+ *     --jobs N         worker threads (default: CPUs - 1, at most one per 2 GB of memory;
+ *                      JOBS in the environment sets it too)
  *     --satellites     also hand leaves to satellite machines on the LAN
  *                      (tools/bake/tilePool.ts, npm run build:satellite);
  *                      with --jobs 0, to them alone
@@ -36,6 +37,7 @@ import { LonLatBounds } from './bake/shoreline';
 import { FAR_LAND_EXT, FarLandConfig, FarLandResult } from './bake/farLandTile';
 import { tileFile } from './bake/railBedInputs';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
+import { GB_PER_WORKER, localJobs } from './bake/localJobs';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'farLandWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'farLandWorker.cjs');
@@ -131,7 +133,7 @@ async function main(): Promise<void> {
         }
         return !(args.skipNewerMs !== undefined && own > args.skipNewerMs);
     });
-    const jobs = Math.max(args.satellitePort ? 0 : 1, Math.min(args.jobs ?? os.cpus().length - 1, todo.length));
+    const jobs = Math.max(args.satellitePort ? 0 : 1, Math.min(args.jobs ?? localJobs(GB_PER_WORKER.farland), todo.length));
     console.log(`bake_planet_farland: ${todo.length} leaves${todo.length < tiles.length ? ` of ${tiles.length} (resumed)` : ''}`
         + `${args.bbox ? ' (scoped)' : ''}, levels ${args.levelsM.join(', ')} m, `
         + `${jobs} workers, ${(freeBytes(args.dir) / 1e9).toFixed(1)} GB free`);

@@ -11,7 +11,8 @@
  *     --planet DIR     the planet pyramid (default assets/planet)
  *     --chunk-deg D    largest chunk side (default 2, as areaImport.ts)
  *     --jobs N         chunks baked here at once (default 1: a coast chunk can take 10 GB)
- *     --stage-jobs N   worker processes a stage's own pool uses here (default CPUs - 1)
+ *     --stage-jobs N   worker processes a stage's own pool uses here (default: CPUs - 1,
+ *                      at most one per 3 GB of memory; JOBS in the environment sets it too)
  *     --satellites     hand chunks to satellite machines on the LAN too; one
  *                      chunk at a time each, with every thread they have
  *     --satellite-port N  their HTTP port (default 47811)
@@ -32,6 +33,7 @@ import { chunkBbox, snapBboxToTiles } from './areaImport';
 import { decodeTileIndex, TileKey } from './bake/index';
 import { CHUNK_STAGES, ChunkStage, PyChunkConfig, PyChunkResult, mergeArgs, pyChunk } from './bake/pyChunk';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
+import { GB_PER_WORKER, localJobs } from './bake/localJobs';
 
 const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 const WORKER = path.join(__dirname, 'bake', 'remoteJobWorker.ts');
@@ -49,7 +51,7 @@ interface Args {
 }
 
 function parseArgs(argv: string[]): Args {
-    const a: Args = { planet: 'assets/planet', chunkDeg: 2, jobs: 1, stageJobs: Math.max(1, os.cpus().length - 1), noDiscovery: false };
+    const a: Args = { planet: 'assets/planet', chunkDeg: 2, jobs: 1, stageJobs: localJobs(GB_PER_WORKER.chunk), noDiscovery: false };
     for (let i = 0; i < argv.length; i++) {
         const k = argv[i];
         const next = () => argv[++i];

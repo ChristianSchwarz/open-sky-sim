@@ -28,7 +28,8 @@
  *     --bbox w,s,e,n   bake only tiles overlapping this box, and merge the
  *                      index and swatch table with what is already there
  *                      (see tools/README.md, "Adding an area")
- *     --jobs N         worker threads (default: CPUs - 1)
+ *     --jobs N         worker threads (default: CPUs - 1, at most one per 2 GB of memory;
+ *                      JOBS in the environment sets it too)
  *     --satellites     also hand tiles to satellite machines on the LAN
  *                      (tools/bake/tilePool.ts); with --jobs 0, to them alone
  *     --satellite-port N  their HTTP port (default 47811)
@@ -62,6 +63,7 @@ import {
 } from './bake/meshTile';
 import { GROUND_MEANS_FILE, regionalGroundMeans } from './bake/groundColor';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
+import { GB_PER_WORKER, localJobs } from './bake/localJobs';
 
 // Triangles per tile. Measured on real Canary z12 tiles: the coast alone costs
 // ~18k at full resolution and roughly halves per coarsening step, so this buys
@@ -434,7 +436,7 @@ async function runTilesInParallel(
         return [];
     }
     const worker = noBundle ? { file: WORKER_SOURCE, execArgv: process.execArgv } : await prepareWorker();
-    const workerCount = Math.max(satellitePort ? 0 : 1, Math.min(jobs ?? (os.cpus().length - 1), tasks.length));
+    const workerCount = Math.max(satellitePort ? 0 : 1, Math.min(jobs ?? localJobs(GB_PER_WORKER.mesh), tasks.length));
     const pool = new TilePool<TileProcessResult>({
         local: { ...worker, jobs: workerCount }, cfg, kindOf: () => 'mesh',
         roots: { planet: roots.src, terrain: roots.out },
