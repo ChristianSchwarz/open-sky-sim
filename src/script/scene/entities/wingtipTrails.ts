@@ -16,9 +16,6 @@ const DEFAULT_RIGHT_WINGTIP = new THREE.Vector3(-DEFAULT_WINGTIP_OUTWARD, -0.28,
 
 const TRAIL_WHITE = '#ffffff';
 
-const POSITION_COUNT = 51;
-const SEGMENT_COUNT = 50;
-const DITHER_MIN = 0.05;
 const DITHER_MAX = 0.9;
 const SEGMENT_WIDTH = 0.0784;
 /** Shift trail origins aft in body space (+Z forward, −Z aft). */
@@ -28,12 +25,15 @@ const SAMPLE_SPACING_SPEED_FACTOR = 0.028;
 const MIN_SAMPLE_SPACING_M = 0.45;
 const MAX_SAMPLE_SPACING_M = 3.5;
 /** Seconds a trail sample stays visible; it thins out linearly to nothing over this time. */
-const TRAIL_LIFETIME_S = 1.5;
+const TRAIL_LIFETIME_S = 3;
+/**
+ * Enough samples to cover TRAIL_LIFETIME_S at the fastest sampling rate
+ * (one per SAMPLE_SPACING_SPEED_FACTOR seconds), so age, not the buffer,
+ * ends the trail.
+ */
+const SEGMENT_COUNT = Math.ceil(TRAIL_LIFETIME_S / SAMPLE_SPACING_SPEED_FACTOR) + 2;
+const POSITION_COUNT = SEGMENT_COUNT + 1;
 const _basis = new THREE.Matrix4();
-
-function segmentDither(index: number): number {
-    return DITHER_MIN + (DITHER_MAX - DITHER_MIN) * (index / (SEGMENT_COUNT - 1));
-}
 
 /** Dither level a segment of this age may reach at most: full when fresh, 0 at TRAIL_LIFETIME_S. */
 function ageDither(ageS: number): number {
@@ -134,9 +134,9 @@ class WingTrailSide {
             if (age >= segmentLimit) {
                 continue;
             }
-            // A segment fades with the age of its older end, so a trail left
-            // behind (aircraft slowed or stopped) thins out and disappears.
-            const level = Math.min(segmentDither(i), ageDither(nowS - this.timeAt(age)));
+            // A segment fades with the age of its older end: the trail hangs
+            // where it was drawn and thins out to nothing over its lifetime.
+            const level = ageDither(nowS - this.timeAt(age));
             if (level <= 0) {
                 continue;
             }
@@ -230,7 +230,7 @@ export class WingtipTrails {
             this.rightTipBody.copy(tips.right);
         }
         // One material: each segment's dither rides its instance
-        // (vertexAlphaDither, see segmentDither).
+        // (vertexAlphaDither, see ageDither).
         const material = materials.build({
             type: SceneMaterialPrimitiveType.MESH,
             category: PaletteCategory.FX_SMOKE,
