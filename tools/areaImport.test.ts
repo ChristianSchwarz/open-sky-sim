@@ -207,7 +207,7 @@ describe('the bake plans end with meshes then textures over the same box', () =>
         if (withRoads) {
             assert.equal(tools[mesh + 2], 'tools/bake_planet_roads.ts', 'road strokes do not follow the textures');
             assert.equal(bboxOf(steps[mesh + 2]), bboxOf(steps[mesh]));
-            assert.equal(tools[mesh + 3], 'tools/measure_lidar.py', 'the lidar is not measured after the road strokes');
+            assert.equal(tools[mesh + 3], 'tools/measure_lidar_pool.ts', 'the lidar is not measured after the road strokes');
             assert.equal(bboxOf(steps[mesh + 3]), bboxOf(steps[mesh]));
             assert.equal(tools[mesh + 4], 'tools/bake_planet_bridges.ts', 'bridges do not follow the lidar');
             assert.equal(tools[mesh + 5], 'tools/bake_planet_grade.ts', 'grading does not follow the bridges');
@@ -461,6 +461,7 @@ describe('bake coverage', () => {
         'tools/verify_airports.py': 'a verifier, writes nothing',
         'tools/eval_buildings.ts': 'an evaluation against LoD2, writes nothing',
         'tools/rebake_box.ts': 'runs the import plan own mesh steps',
+        'tools/verify_satellite.ts': 'a check of the satellites against local workers, in scratch trees',
     };
 
     it('has every baking script of package.json in the plan, or says why not', () => {

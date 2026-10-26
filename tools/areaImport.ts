@@ -764,8 +764,10 @@ export function dataSteps(
 function gradeSteps(bbox: string, rebaking = false): Step[] {
     return [
         {
-            label: 'measuring lines and bridge ends in the lidar', cmd: PYTHON,
-            args: ['tools/measure_lidar.py', `--bbox=${bbox}`],
+            // measure_lidar.py on the tile pool (tools/measure_lidar_pool.ts): the
+            // same leaves and store, and satellites can take leaves too.
+            label: 'measuring lines and bridge ends in the lidar', cmd: process.execPath,
+            args: ['--import', 'tsx', 'tools/measure_lidar_pool.ts', `--bbox=${bbox}`],
             // An unreachable lidar server (IGN's WCS times out for minutes at
             // a time) is exit 1 with the rest of the leaves measured. The
             // measurements only refine the beds, so grade without them and let

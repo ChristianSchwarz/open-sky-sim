@@ -38,7 +38,7 @@ import { bundleCompute } from '../satellite/computeBundle';
 export const DISCOVERY_PORT = 47810;
 export const DEFAULT_SATELLITE_PORT = 47811;
 /** Bumped when the satellite's side of the HTTP protocol changes. */
-export const SATELLITE_PROTOCOL = 4;
+export const SATELLITE_PROTOCOL = 5;
 export const TOKEN_FILE = path.join('data', 'satellite', 'token');
 
 /** A job config longer than this goes by hash, as a blob the satellite caches. */
@@ -59,8 +59,8 @@ export function satelliteToken(): string {
 }
 
 export interface PoolOptions {
-    /** The local worker bundle (or tsx source) and how many of it; 0 is satellites only. */
-    local: { file: string; execArgv: string[]; jobs: number };
+    /** The local worker bundle (or tsx source), how many of it (0: satellites only), and its workerData if not `cfg`. */
+    local: { file: string; execArgv: string[]; jobs: number; workerData?: unknown };
     cfg: RemoteConfig;
     kindOf: (pass: number) => RemoteKind;
     roots: Partial<Record<RemoteRoot, string>>;
@@ -124,7 +124,7 @@ export class TilePool<R> {
 
     async start(): Promise<void> {
         for (let i = 0; i < this.opts.local.jobs; i++) {
-            const w = new Worker(this.opts.local.file, { execArgv: this.opts.local.execArgv, workerData: this.opts.cfg });
+            const w = new Worker(this.opts.local.file, { execArgv: this.opts.local.execArgv, workerData: this.opts.local.workerData ?? this.opts.cfg });
             w.on('message', (msg: { idx: number; result: R | { error: string } }) => {
                 this.idle.add(w);
                 this.complete(msg.idx, msg.result);

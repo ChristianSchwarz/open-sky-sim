@@ -11,6 +11,7 @@
  *   lidar    the lidar store (data/imports/lidar/store)
  *   planet   the planet pyramid: heights, vectors, cover
  *   texcache the far-tile texture bake's leaf rasters
+ *   pytools  the Python scripts a Python stage runs (tools/*.py): `pytools/name.py`
  *
  * An input list may name files that do not exist: the coordinator sends
  * "absent" for those, so the satellite sees the same holes it would see here.
@@ -28,14 +29,16 @@ import { GradeConfig, GradeResult, PASS1_EXT, bedsOfTile, gradeTile } from './gr
 import { MeshTileConfig, TileProcessResult, processTile } from './meshTile';
 import { MIN_SEAM_ZOOM } from './borderConform';
 import { TexLeafConfig, TexLeafResult, texLeaf } from './texLeaf';
+import { LidarLeafConfig, LidarLeafResult, lidarLeaf } from './lidarLeaf';
+import { localPyImports } from './pyServe';
 import { TileKey } from '../../src/script/terrain/tiling';
 
-export type RemoteRoot = 'terrain' | 'lidar' | 'planet' | 'texcache';
-export type RemoteKind = 'grade1' | 'grade2' | 'farland' | 'mesh' | 'texleaf';
+export type RemoteRoot = 'terrain' | 'lidar' | 'planet' | 'texcache' | 'pytools';
+export type RemoteKind = 'grade1' | 'grade2' | 'farland' | 'mesh' | 'texleaf' | 'lidarleaf';
 
 /** What a kind's config looks like on the wire: its directories are root names, not paths. */
-export type RemoteConfig = GradeConfig | FarLandConfig | MeshTileConfig | TexLeafConfig;
-export type RemoteResult = GradeResult | FarLandResult | TileProcessResult | TexLeafResult | undefined;
+export type RemoteConfig = GradeConfig | FarLandConfig | MeshTileConfig | TexLeafConfig | LidarLeafConfig;
+export type RemoteResult = GradeResult | FarLandResult | TileProcessResult | TexLeafResult | LidarLeafResult | undefined;
 
 const rel = (root: RemoteRoot, k: TileKey, ext: string) => `${root}/${k.z}/${k.x}/${k.y}${ext}`;
 
@@ -49,8 +52,25 @@ function ring(k: TileKey, r: number): TileKey[] {
     return out;
 }
 
+const pyClosures = new Map<string, string[]>();
+
+/** A Python stage's script and the local modules it imports, as `pytools/` paths. */
+function pyInputs(toolsDir: string, entry: string): string[] {
+    const key = `${toolsDir}|${entry}`;
+    let files = pyClosures.get(key);
+    if (!files) {
+        files = localPyImports(toolsDir, entry).map(f => `pytools/${f}`);
+        pyClosures.set(key, files);
+    }
+    return files;
+}
+
 /** Every file `kind` may read for tile `k`, as root-relative paths. */
 export function inputsOf(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): string[] {
+    if (kind === 'lidarleaf') {
+        // measure_lidar.py measure_leaf: the leaf's lines and bridges.
+        return [rel('planet', k, '.rvr'), rel('planet', k, '.rbr'), ...pyInputs((cfg as LidarLeafConfig).pytools, 'measure_lidar.py')];
+    }
     if (kind === 'mesh') {
         // meshTile.ts processTile: the tile's heights, road grade, coast and
         // land use, cover and road vectors; the parent's heights for the
@@ -97,6 +117,7 @@ export function outputsOf(kind: RemoteKind, k: TileKey): string[] {
         case 'farland': return [rel('terrain', k, FAR_LAND_EXT)];
         case 'mesh': return [rel('terrain', k, '.ptm')];
         case 'texleaf': return [rel('texcache', k, '.ptx')];
+        case 'lidarleaf': return [rel('lidar', k, '.lms')];
     }
 }
 
@@ -110,6 +131,9 @@ export function wireConfig(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): Rem
     }
     if (kind === 'texleaf') {
         return { ...(cfg as TexLeafConfig), dir: 'terrain', cache: 'texcache' };
+    }
+    if (kind === 'lidarleaf') {
+        return { ...(cfg as LidarLeafConfig), planet: 'planet', store: 'lidar', pytools: 'pytools' };
     }
     if (kind === 'farland') {
         return { ...(cfg as FarLandConfig), dir: 'terrain' };
@@ -125,8 +149,18 @@ export function wireConfig(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): Rem
     return { ...g, dir: 'terrain', centreHeights, lidar: g.lidar ? { store: 'lidar', planet: 'planet' } : undefined };
 }
 
-/** Run one job against `jobDir`, which holds the job's inputs under their root names. */
-export function runRemoteJob(kind: RemoteKind, cfg: RemoteConfig, k: TileKey, jobDir: string): RemoteResult {
+/**
+ * Run one job against `jobDir`, which holds the job's inputs under their root
+ * names. With `jobDir` empty the config's directories are the real ones (a
+ * local worker, remoteJobWorker.ts). A Python stage answers asynchronously.
+ */
+export function runRemoteJob(kind: RemoteKind, cfg: RemoteConfig, k: TileKey, jobDir: string): RemoteResult | Promise<RemoteResult> {
+    if (kind === 'lidarleaf') {
+        const l = cfg as LidarLeafConfig;
+        return lidarLeaf({
+            ...l, planet: path.join(jobDir, l.planet), store: path.join(jobDir, l.store), pytools: path.join(jobDir, l.pytools),
+        }, k, jobDir !== '');
+    }
     if (kind === 'mesh') {
         const m = cfg as MeshTileConfig;
         return processTile({ ...m, src: path.join(jobDir, m.src), out: path.join(jobDir, m.out) }, k);

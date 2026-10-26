@@ -30,7 +30,7 @@
         "bake:roof-shapes": "node tools/run-python.mjs tools/measure_roof_shapes.py",
         "bake:lod2": "node tools/run-python.mjs tools/import_lod2.py",
         "eval:buildings": "node --import tsx tools/eval_buildings.ts",
-        "bake:lidar": "node tools/run-python.mjs tools/measure_lidar.py",
+        "bake:lidar": "node --import tsx tools/measure_lidar_pool.ts",
         "bake:grade": "node --import tsx tools/bake_planet_grade.ts",
         "bake:farland": "node --import tsx tools/bake_planet_farland.ts",
         "build:satellite": "node --import tsx tools/build_satellite.ts",

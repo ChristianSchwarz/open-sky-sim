@@ -18,17 +18,18 @@ import { TileKey } from '../../src/script/terrain/tiling';
 let lastText = '';
 let lastCfg: RemoteConfig | undefined;
 
-parentPort!.on('message', (msg: { id: number; kind: RemoteKind; cfgText: string; key: TileKey; jobDir: string } | null) => {
+parentPort!.on('message', async (msg: { id: number; kind: RemoteKind; cfgText: string; key: TileKey; jobDir: string } | null) => {
     if (msg === null) {
         parentPort!.close();
-        return;
+        process.exit(0); // a Python child may still hold the event loop open
     }
     try {
         if (msg.cfgText !== lastText || !lastCfg) {
             lastCfg = decodeWire<RemoteConfig>(msg.cfgText);
             lastText = msg.cfgText;
         }
-        const result = runRemoteJob(msg.kind, lastCfg, msg.key, msg.jobDir);
+        // A Python stage answers asynchronously; the others at once.
+        const result = await runRemoteJob(msg.kind, lastCfg, msg.key, msg.jobDir);
         // Encoded here, like the config: a mesh result carries typed arrays (its land colours).
         parentPort!.postMessage({ id: msg.id, resultText: result === undefined ? undefined : encodeWire(result) });
     } catch (err) {
