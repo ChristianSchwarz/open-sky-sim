@@ -13,7 +13,7 @@ import { describeBox } from './importMath';
 import { TerrainMap } from './terrainMap';
 
 /**
- * The World tab's terrain importer (F9): pick an area on the map and bake it
+ * The World tab's terrain importer (Shift+F9): pick an area on the map and bake it
  * into the terrain, or delete one already baked. Only shown on the dev server.
  */
 @Component({

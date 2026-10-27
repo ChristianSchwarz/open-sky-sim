@@ -105,6 +105,9 @@ import { TargetToCameraUpdater } from './cameraUpdaters/targetToCameraUpdater';
 import { StaticModelCameraUpdater } from './cameraUpdaters/staticModelCameraUpdater';
 import { ShowcaseCameraUpdater } from './cameraUpdaters/showcaseCameraUpdater';
 import { FixedCameraUpdater } from './cameraUpdaters/fixedCameraUpdater';
+import { ChaseCameraUpdater } from './cameraUpdaters/chaseCameraUpdater';
+import { FlyByCameraUpdater } from './cameraUpdaters/flyByCameraUpdater';
+import { TowerCameraUpdater } from './cameraUpdaters/towerCameraUpdater';
 import {
     FixedCameraRates, FixedCameraTuning, fixedCameraInput, stepFixedCameraRates, zeroFixedCameraRates,
 } from './cameraUpdaters/fixedCameraControl';
@@ -374,6 +377,12 @@ const KUZ_HULL = {
 const KUZ_DECK_MID_X = (KUZ_HULL.minX + KUZ_HULL.maxX) * 0.5;
 /** Approximate flat-deck height for approach altitude planning (m). */
 const CARRIER_DECK_Y = 14;
+/** F7 tower: how far beside the runway edge it stands, and how high (m). */
+const TOWER_RUNWAY_OFFSET_M = 250;
+const TOWER_HEIGHT_M = 25;
+/** F7 at sea: off the carrier's starboard side, above the island top (m). */
+const TOWER_CARRIER_OFFSET_M = 80;
+const TOWER_CARRIER_HEIGHT_M = CARRIER_DECK_Y + 30;
 /** Final approach distance to the carrier stern threshold (m). */
 const CARRIER_APPROACH_FINAL_DISTANCE_M = 3500;
 /** Carrier final altitude (m); ~3° glide to the deck over {@link CARRIER_APPROACH_FINAL_DISTANCE_M}. */
@@ -485,6 +494,12 @@ enum PlayerViewState {
     SHOWCASE,
     /** Nailed to a place from the URL, see cameraRoute.ts. */
     FIXED,
+    /** F4: close behind, rolling with the aircraft. */
+    CHASE,
+    /** F3: hung ahead of the aircraft, watching it pass. */
+    FLY_BY,
+    /** F7: from the nearest airfield's tower or the carrier. */
+    TOWER,
 }
 
 /**
@@ -771,6 +786,7 @@ export class Game {
     private staticModelIndex = 0;
     private staticModelCameraUpdater: StaticModelCameraUpdater;
     private fixedCameraUpdater: FixedCameraUpdater;
+    private flyByCameraUpdater: FlyByCameraUpdater;
     /** The fixed camera asked for in the page URL, if any. */
     private cameraRoute: CameraRoute | undefined = cameraRouteFromLocation();
     /** Opened by F12 as the map: the fixed camera, looking straight down (mapView.ts). */
@@ -831,7 +847,7 @@ export class Game {
     /** A flight held by the settings dialog: it is open over it and nothing moves until it closes. */
     private menuPaused = false;
 
-    /** Flight replay: the recorder runs for the whole flight, F4 plays it back. */
+    /** Flight replay: the recorder runs for the whole flight, Shift+F4 plays it back. */
     private readonly recorder = new FlightRecorder();
     private readonly replayPlayer = new ReplayPlayer(this.recorder);
     private readonly replayPose = newReplayPose();
@@ -914,6 +930,12 @@ export class Game {
         this.cameraUpdaters.set(PlayerViewState.SHOWCASE, new ShowcaseCameraUpdater(this.player, this.playerCamera.main));
         this.fixedCameraUpdater = new FixedCameraUpdater(this.player, this.playerCamera.main);
         this.cameraUpdaters.set(PlayerViewState.FIXED, this.fixedCameraUpdater);
+        this.cameraUpdaters.set(PlayerViewState.CHASE, new ChaseCameraUpdater(this.player, this.playerCamera.main));
+        this.flyByCameraUpdater = new FlyByCameraUpdater(
+            this.player, this.playerCamera.main, (x, z) => this.groundHeightAt(x, z));
+        this.cameraUpdaters.set(PlayerViewState.FLY_BY, this.flyByCameraUpdater);
+        this.cameraUpdaters.set(PlayerViewState.TOWER, new TowerCameraUpdater(
+            this.player, this.playerCamera.main, (from, out) => this.towerFor(from, out)));
         this.cameraUpdater = this.getCameraUpdater(this.view);
         this.configService.techProfiles.addChangeListener(profile => {
             this.updateHdResolution();
@@ -2369,7 +2391,7 @@ export class Game {
         this.recorder.record(delta, pose);
     }
 
-    /** F4: watch the flight so far (up to the last ten minutes) from the replay camera. */
+    /** Shift+F4: watch the flight so far (up to the last ten minutes) from the replay camera. */
     private toggleReplay(): void {
         if (this.replaying) {
             this.stopReplay();
@@ -2405,7 +2427,7 @@ export class Game {
         }
     }
 
-    /** Replay keys: space pauses, arrows seek/speed (move the camera in the free view), F4/Esc leave. True if used. */
+    /** Replay keys: space pauses, arrows seek/speed (move the camera in the free view), Esc leaves. True if used. */
     private handleReplayKey(event: KeyboardEvent): boolean {
         switch (event.code) {
             case 'Space': this.replayPlayer.paused = !this.replayPlayer.paused; break;
@@ -2506,8 +2528,11 @@ export class Game {
         addView('Left', PlayerViewState.EXTERIOR_LEFT, 'Left side');
         addView('Right', PlayerViewState.EXTERIOR_RIGHT, 'Right side');
         addView('Free', PlayerViewState.FIXED, 'Free camera: arrows move it, Page Up/Down raise and lower, numpad 4/6/8/2 turn');
-        addView('Tower', PlayerViewState.CARRIER_OVER_STERN, 'Over-the-stern view (F3)');
-        row.append(button('Exit', 'Leave replay (F4 / Esc)', () => this.stopReplay()));
+        addView('Fly-by', PlayerViewState.FLY_BY, 'Fly-by (F3)');
+        addView('Chase', PlayerViewState.CHASE, 'Close chase, rolling with the aircraft (F4)');
+        addView('Tower', PlayerViewState.TOWER, 'From the nearest tower or the carrier (F7)');
+        addView('Carrier', PlayerViewState.CARRIER_OVER_STERN, 'Over-the-stern view (F9)');
+        row.append(button('Exit', 'Leave replay (Shift+F4 / Esc)', () => this.stopReplay()));
         root.append(seek, row);
         document.body.appendChild(root);
         return { root, play, seek, time, speed, views };
@@ -2532,6 +2557,9 @@ export class Game {
         if (v === PlayerViewState.COCKPIT_FRONT) {
             this.setCockpitFrontView();
             return;
+        }
+        if (v === PlayerViewState.FLY_BY) {
+            this.flyByCameraUpdater.reset();
         }
         restoreMainCameraParameters(this.playerCamera.main);
         this.setExteriorView(v);
@@ -2872,7 +2900,10 @@ export class Game {
         if (this.state === GameState.PLAYER || this.state === GameState.SPAWN_MENU
             || this.state === GameState.FIXED_CAMERA) {
             this.cameraUpdater.update(0);
+            // Fly-by and tower stand still on the ground or in the air; an orbit
+            // round the aircraft would carry them along with it.
             if (!this.cockpitPadlock
+                && this.view !== PlayerViewState.FLY_BY && this.view !== PlayerViewState.TOWER
                 && (this.view !== PlayerViewState.AI_CHASE
                     && (this.exteriorEnemyLock && this.isF2ExteriorView()
                         || this.viewYaw !== 0 || this.viewPitch !== 0 || this.viewZoom !== 1)
@@ -3288,12 +3319,12 @@ export class Game {
             if (isOverlayKeyEvent(event)) {
                 return;
             }
-            if (event.code === 'F9') {
+            if (event.code === 'F9' && event.shiftKey) {
                 event.preventDefault();
                 void openSettingsDialog('World');
                 return;
             }
-            if (event.code === 'F10') {
+            if (event.code === 'F10' && event.shiftKey) {
                 event.preventDefault();
                 this.triggerModImport();
                 return;
@@ -3301,20 +3332,22 @@ export class Game {
             if (this.mapView) {
                 // The map is the whole page: its keys, nothing of the free
                 // camera's, and no menu on Escape.
-                if (this.mapView.handleKey(event) || event.code === 'Escape' || event.code === 'F12') {
+                if (this.mapView.handleKey(event) || event.code === 'Escape'
+                    || event.code === 'F12' || event.code === 'F10') {
                     event.preventDefault();
                     event.stopPropagation();
                 }
                 return;
             }
-            if (event.code === 'F12' && !event.shiftKey) {
+            // F10 is Flanker's map key; F12 stays as it was.
+            if ((event.code === 'F12' || event.code === 'F10') && !event.shiftKey) {
                 event.preventDefault();
                 if (!event.repeat) {
                     this.openTerrainView();
                 }
                 return;
             }
-            if (event.code === 'F4') {
+            if (event.code === 'F4' && event.shiftKey) {
                 event.preventDefault();
                 if (!event.repeat) {
                     this.toggleReplay();
@@ -3348,7 +3381,7 @@ export class Game {
                     this.heldFixedCameraKeys.clear();
                     this.fixedCameraRates = zeroFixedCameraRates();
                     this.spawnPanel.show();
-                } else if (event.key === 'F8') {
+                } else if (event.key === 'F8' && event.shiftKey) {
                     event.preventDefault();
                     this.toggleWireframeDebug();
                 } else if (FIXED_CAMERA_MOVE_KEYS.has(event.code)) {
@@ -3389,10 +3422,24 @@ export class Game {
                     this.setExteriorBehindFrontView();
                     break;
                 }
+                // F3-F9 follow Flanker 1.5; see VIEWS_HELP for what stands in where.
                 case 'F3': {
                     event.preventDefault();
                     this.resetOrbit();
-                    this.setCarrierOverSternView();
+                    this.setFlyByView();
+                    break;
+                }
+                case 'F4': {
+                    // Shift+F4 (replay) was taken above.
+                    event.preventDefault();
+                    this.resetOrbit();
+                    this.setChaseView();
+                    break;
+                }
+                case 'F5': {
+                    event.preventDefault();
+                    this.resetOrbit();
+                    this.setTargetViewFrom(false);
                     break;
                 }
                 case 'F6': {
@@ -3401,16 +3448,27 @@ export class Game {
                     this.setAiChaseView();
                     break;
                 }
+                case 'F7': {
+                    event.preventDefault();
+                    this.resetOrbit();
+                    this.setTowerView();
+                    break;
+                }
                 case 'F8': {
                     event.preventDefault();
-                    this.toggleWireframeDebug();
+                    if (event.shiftKey) {
+                        this.toggleWireframeDebug();
+                    } else {
+                        this.resetOrbit();
+                        this.setTargetViewFrom(true);
+                    }
                     break;
                 }
                 case 'F9': {
+                    // Shift+F9 (World tab) was taken above.
                     event.preventDefault();
-                    if (this.perfHud) {
-                        this.perfHud.enabled = !this.perfHud.enabled;
-                    }
+                    this.resetOrbit();
+                    this.setCarrierOverSternView();
                     break;
                 }
                 case 'F12': {
@@ -4042,6 +4100,65 @@ export class Game {
         this.setExteriorView(PlayerViewState.CARRIER_OVER_STERN);
     }
 
+    private setFlyByView() {
+        restoreMainCameraParameters(this.playerCamera.main);
+        // Every F3 drops a fresh camera ahead, as Flanker's does.
+        this.flyByCameraUpdater.reset();
+        this.setExteriorView(PlayerViewState.FLY_BY);
+    }
+
+    private setChaseView() {
+        restoreMainCameraParameters(this.playerCamera.main);
+        this.setExteriorView(PlayerViewState.CHASE);
+    }
+
+    private setTowerView() {
+        restoreMainCameraParameters(this.playerCamera.main);
+        this.setExteriorView(PlayerViewState.TOWER);
+    }
+
+    /** F5 / F8: from the player to the target, or from the target back at the player. */
+    private setTargetViewFrom(fromTarget: boolean) {
+        if (!this.player.weaponsTarget) {
+            return;
+        }
+        restoreMainCameraParameters(this.playerCamera.main);
+        this.setExteriorView(fromTarget ? PlayerViewState.TARGET_FROM : PlayerViewState.TARGET_TO);
+    }
+
+    private readonly _towerProbe = new THREE.Vector3();
+
+    /**
+     * The F7 camera's stand for an aircraft at `from`: beside the nearest
+     * runway at tower height, or off the carrier's island when that is closer.
+     */
+    private towerFor(from: THREE.Vector3, out: THREE.Vector3): boolean {
+        let best = Infinity;
+        for (const r of this.sceneRunways) {
+            if (r.startOnly) continue;
+            const off = r.halfWidth + TOWER_RUNWAY_OFFSET_M;
+            const x = r.center.x + Math.cos(r.heading) * off;
+            const z = r.center.z - Math.sin(r.heading) * off;
+            const d = (x - from.x) ** 2 + (z - from.z) ** 2;
+            if (d < best) {
+                best = d;
+                out.set(x, this.groundHeightAt(x, z) + TOWER_HEIGHT_M, z);
+            }
+        }
+        if (this.kuz?.enabled) {
+            const p = this._towerProbe
+                .set(KUZ_HULL.maxX + TOWER_CARRIER_OFFSET_M, TOWER_CARRIER_HEIGHT_M, 0)
+                .applyQuaternion(this.kuz.quaternion)
+                .add(this.kuz.position);
+            const d = (p.x - from.x) ** 2 + (p.z - from.z) ** 2;
+            if (d < best) {
+                best = d;
+                out.copy(p);
+            }
+        }
+        return best < Infinity;
+    }
+
     private setTargetView() {
         restoreMainCameraParameters(this.playerCamera.main);
         if (this.view !== PlayerViewState.TARGET_TO) {
@@ -4082,6 +4199,9 @@ export class Game {
             this.clearExteriorEnemyLock();
         }
         this.setCockpitPadlock(false);
+        // The F4 chase and the padlock tilt it with the aircraft; views that
+        // only lookAt would inherit that roll.
+        this.playerCamera.main.up.copy(UP);
         this.view = view;
         this.player.exteriorView = true;
         this.cameraUpdater = this.getCameraUpdater(this.view);
@@ -4110,6 +4230,9 @@ export class Game {
             case PlayerViewState.AI_CHASE:
             case PlayerViewState.TARGET_TO:
             case PlayerViewState.TARGET_FROM:
+            case PlayerViewState.CHASE:
+            case PlayerViewState.FLY_BY:
+            case PlayerViewState.TOWER:
                 return true;
             default:
                 return false;
@@ -5630,6 +5753,7 @@ export class Game {
         this.scene.rebase(shift);
         this.recorder.rebase(shift);
         this.fixedCameraUpdater.rebase(shift);
+        this.flyByCameraUpdater.rebase(shift);
 
         // The game's own records, rewritten in place so references to them
         // (the active runway, the home runway) stay good.
