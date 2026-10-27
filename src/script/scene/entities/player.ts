@@ -886,6 +886,9 @@ export class PlayerEntity implements Entity {
         return false;
     }
 
+    /** A mission's next waypoint, HUD-sized (`WP2 270 12.3NM`), set by the game; none outside a mission. */
+    waypointCue: string | undefined;
+
     /** What the autopilot is doing, HUD-sized (T/O, APP, G/A...), while it is engaged. */
     get autopilotPhase(): string | undefined {
         if (this.flightModel instanceof SimProxyFlightModel && this.flightModel.getSimAutopilot()) {

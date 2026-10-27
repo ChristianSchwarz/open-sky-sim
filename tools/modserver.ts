@@ -8,6 +8,7 @@
 //   GET  /api/areas          areas the baked pyramid holds
 //   POST /api/import-area    start a bake; GET the same path + /:id for progress
 //   POST /api/delete-area    remove a baked area (same progress stream)
+// and the waypoint editor's missions, /api/missions (tools/missions.ts).
 //
 // Multi-plane mod packs are split by Unity livery material: each aircraft becomes
 // its own .aircraft.pack so liveries stay separate in the spawn menu.
@@ -22,6 +23,7 @@ import {
     areasHandler, ensureTerrain, importStream, osmExtractsHandler, osmTile, startDelete, startImport,
     terrainBootstrapHandler,
 } from './areaImport';
+import { deleteMissionHandler, getMissionHandler, missionsHandler, saveMissionHandler } from './missions';
 
 const PROJECT_ROOT = path.dirname(__dirname);
 const DIST_DIR = path.join(PROJECT_ROOT, 'dist');
@@ -1024,8 +1026,13 @@ app.get('/api/terrain-bootstrap', terrainBootstrapHandler);
 ensureTerrain();
 
 app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({ ok: true, server: 'modserver', previewMod: true });
+    res.json({ ok: true, server: 'modserver', previewMod: true, missions: true });
 });
+
+app.get('/api/missions', missionsHandler);
+app.get('/api/missions/:id', getMissionHandler);
+app.post('/api/missions', express.json({ limit: '2mb' }), saveMissionHandler);
+app.delete('/api/missions/:id', deleteMissionHandler);
 
 app.get('/api/aircraft-packs', (_req: Request, res: Response) => {
     res.json(listAircraftPacks());

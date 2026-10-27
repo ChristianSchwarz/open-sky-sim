@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { BELLY_FATAL_HARDNESS, BELLY_SOFT_HARDNESS, damageFraction } from '../model/landingLimits';
 import { createSimFlightModel, modelKindFromDesc, SimFlightModel, SimFlightModelKind } from './simFlightModel';
-import { AiFlightPhase, AiPilotOptions } from '../../ai/aiPilot';
+import { AiFlightPhase, AiPilotOptions, AiRoute } from '../../ai/aiPilot';
 import { AiPilotController } from '../../ai/aiPilotController';
 import { createAiPilot } from '../../ai/createAiPilot';
 import { PilotableAircraft } from '../../ai/aircraftControls';
@@ -210,6 +210,8 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     explicitTargetId: string | undefined;
     /** Id handed to {@link CombatSim.setFormationLead}, likewise. */
     formationLeadId: string | undefined;
+    /** Handed to {@link CombatSim.setRoute}; every pilot built for this aircraft flies it. */
+    route: AiRoute | undefined;
 
     /** Seconds since last solid-world scrape FX (smoke/sparks). */
     scrapeFxCooldown = 0;
@@ -331,6 +333,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         }
         const prevPhase = this.pilot?.getPhase();
         this.pilot = createAiPilot(this, world, this.pilotOptions);
+        this.pilot.setRoute?.(this.route);
         if (prevPhase !== undefined) {
             this.pilot.setPhase(prevPhase);
         }
@@ -493,7 +496,10 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     toggleAutopilot(): void {
         this.control = this.control === 'ai' ? 'external' : 'ai';
         if (this.control === 'ai' && this.pilot) {
-            this.pilot.setPhase(this.model.isLanded() ? AiFlightPhase.TAKEOFF_ROLL : AiFlightPhase.RTB);
+            // With a route left to fly (a mission's), that rather than home.
+            const routeLeft = this.route !== undefined && this.route.next < this.route.points.length;
+            this.pilot.setPhase(this.model.isLanded() ? AiFlightPhase.TAKEOFF_ROLL
+                : routeLeft ? AiFlightPhase.WAYPOINT : AiFlightPhase.RTB);
         }
     }
 
@@ -796,6 +802,7 @@ export class CombatSim implements ProjectileSink {
 
     /** True between a {@link rebase} and the world that must follow it. */
     private pilotsStale = false;
+    private readonly _routePoint = new THREE.Vector3();
 
     /**
      * Carry every aircraft, round and mirror into a re-based scene frame.
@@ -815,6 +822,18 @@ export class CombatSim implements ProjectileSink {
             // only in the home area, where nothing calls this.
             a.carrierParkLocalValid = false;
             a.crashedCarrierLocalValid = false;
+            for (const p of a.route?.points ?? []) {
+                shift.point(this._routePoint.set(p.x, p.y, p.z));
+                ({ x: p.x, y: p.y, z: p.z } = this._routePoint);
+            }
+            const land = a.route?.land;
+            if (land) {
+                shift.point(this._routePoint.set(land.x, 0, land.z));
+                a.route!.land = {
+                    x: this._routePoint.x, z: this._routePoint.z,
+                    heading: land.heading === undefined ? undefined : shift.heading(land.heading),
+                };
+            }
         }
         for (const ext of this.external.values()) {
             ext.rebase(shift);
@@ -1097,6 +1116,15 @@ export class CombatSim implements ProjectileSink {
         if (!a) return;
         a.buildPilot(undefined, this.world);
         a.pilot?.setPhase(phase as AiFlightPhase);
+    }
+
+    /** A route to fly in the WAYPOINT phase, or none; kept across pilot rebuilds and re-bases. */
+    setRoute(id: string, route: AiRoute | null): void {
+        const a = this.aircraft.get(id);
+        if (!a) return;
+        a.route = route ?? undefined;
+        a.buildPilot(undefined, this.world);
+        a.pilot?.setRoute?.(a.route);
     }
 
     /** Rebuild the in-worker pilot with new options (AI model switch applies here). */

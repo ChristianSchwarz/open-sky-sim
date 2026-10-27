@@ -95,6 +95,9 @@ function handleMessage(data: SimToWorkerMessage): void {
         case 'setPhase':
             sim.setPhase(data.id, data.phase);
             break;
+        case 'setRoute':
+            sim.setRoute(data.id, data.route);
+            break;
         case 'setPilotOptions':
             sim.setPilotOptions(data.id, data.options);
             break;

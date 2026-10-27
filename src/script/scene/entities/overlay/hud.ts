@@ -257,6 +257,10 @@ export class HUDEntity implements Entity {
             const ap = this.autopilotPhase ? `AP ${this.autopilotPhase}` : 'AP';
             painter.text(font, throttleX, throttleY - font.charHeight - 2, ap, hudColor);
         }
+        const cue = this.actor.waypointCue;
+        if (cue) {
+            painter.text(font, throttleX, throttleY - 2 * (font.charHeight + 2), cue, hudColor);
+        }
 
         this.renderFlightDataIndicators(layout, airSpeedX, airSpeedY, painter, hudColor, hudWarnColor, fontSmall);
         this.renderAoaIndexer(airSpeedX, airSpeedY, geomScale, painter, hudColor, hudWarnColor, hudSecondaryColor, palette);

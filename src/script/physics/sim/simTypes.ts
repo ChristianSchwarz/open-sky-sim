@@ -1,5 +1,5 @@
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
-import { AiPilotOptions } from '../../ai/aiPilot';
+import { AiPilotOptions, AiRoute } from '../../ai/aiPilot';
 import { ForceVectorSample } from '../model/flightModel';
 import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
 import { AircraftCollisionMesh } from '../../scene/entities/aircraftDef';
@@ -176,6 +176,7 @@ export type SimToWorkerMessage =
     | { type: 'setFormationLead'; id: string; leadId: string | null }
     | { type: 'setTargetFaction'; id: string; faction: number | null }
     | { type: 'setPhase'; id: string; phase: number }
+    | { type: 'setRoute'; id: string; route: AiRoute | null }
     | { type: 'setPilotOptions'; id: string; options: AiPilotOptions }
     | { type: 'respawn'; id: string; spawn: SimAircraftSpawn }
     | { type: 'reset'; id: string; position: Vec3; quaternion: Quat; velocity: Vec3; landed: boolean; throttle: number; model: SimFlightModelKind }

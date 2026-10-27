@@ -124,8 +124,13 @@ import { AircraftRegistry, buildF22Def, groupAircraftByModel } from './aircraftR
 import { FlyableAircraftDef } from '../scene/entities/aircraftDef';
 import { flightConfigWithArrestorHook } from '../scene/entities/arrestorCables';
 import { Obstacle, Runway } from '../ai/worldQuery';
-import { AiFlightPhase, AiPilotOptions, AiSkillLevel, FORMATION_SLOT } from '../ai/aiPilot';
-import { AiAircraftEntity } from '../scene/entities/aiAircraft';
+import { AiFlightPhase, AiPilotOptions, AiRoute, AiSkillLevel, FORMATION_SLOT } from '../ai/aiPilot';
+import { AiAircraftEntity, AiAircraftSpawn } from '../scene/entities/aiAircraft';
+import { Flight, FlightEndpoint, MAX_FLIGHTS, Mission } from '../mission/flightPlan';
+import { MissionEditor, RunwayEnd } from '../mission/missionEditor';
+import { loadMission } from '../mission/missionStore';
+import { MissionOverlay } from './missionOverlay';
+import { mountMissionPanel } from '../ui/mission/missionLauncher';
 import { WeaponsField } from '../scene/entities/weaponsField';
 import { advanceFxClock } from '../scene/fxClock';
 import { Faction } from '../weapons/combatant';
@@ -395,6 +400,13 @@ const PLAYER_STARTING_POSITION = new THREE.Vector3(
     APPROACH_ALTITUDE_M,
     AIRBASE_RUNWAY.z - LAND_APPROACH_FINAL_M,
 );
+/** Mission AI flights fly routes, not fights (see startMission). */
+const MISSION_PILOT: AiPilotOptions = { cruiseAltitude: 3000, cruiseSpeed: 200, hardDeck: 150 };
+/** Line-up spot past a runway's threshold, and the gap between aircraft queued behind it (m). */
+const MISSION_LINEUP_M = 150;
+const MISSION_RUNWAY_SPACING_M = 120;
+/** Seconds between AI take-offs from one runway end. */
+const MISSION_TAKEOFF_GAP_S = 20;
 const PLAYER_LAND_SPAWN: PlayerSpawnState = {
     throttle: 0,
     airborne: false,
@@ -772,6 +784,18 @@ export class Game {
     private mapDetailView = -1;
     /** The map's centre on the ground; see placeMapCamera. */
     private mapCentre = { lat: 0, lon: 0 };
+    /** The waypoint editor's routes over the map; see enterMapView. */
+    private missionOverlay: MissionOverlay | undefined;
+    /** The mission ?mission= named, flown once the boot's flight has begun (startMission). */
+    private mission: Mission | undefined;
+    /** Its AI flights, sim ids mf0.., built on first use and kept for the session (the sim never frees a row). */
+    private readonly missionAircraft: AiAircraftEntity[] = [];
+    /** The player's flight, and the waypoint its HUD cue points at. */
+    private missionPlayer: { flight: Flight; next: number } | undefined;
+    /** AI flights parked on a runway, and when each rolls, on {@link missionClock}. */
+    private missionTakeoffs: Array<{ simId: string; at: number }> = [];
+    private missionClock = 0;
+    private readonly _missionPoint = new THREE.Vector3();
     /** Its ground point and local up, in scene space, as last placed. */
     private readonly mapGround = new THREE.Vector3();
     private readonly mapUp = new THREE.Vector3(0, 1, 0);
@@ -1013,6 +1037,20 @@ export class Game {
         this.setupControls();
         setBootProgress(15, 'Loading aircraft packs...');
         await this.loadPersistedPacks();
+        const missionId = this.mapMode ? null : new URLSearchParams(location.search).get('mission');
+        if (missionId) {
+            try {
+                this.mission = await loadMission(missionId);
+            } catch (err) {
+                console.error(`Mission ${missionId} could not be loaded`, err);
+            }
+            // Made in another area: that area's terrain, then the mission.
+            if (this.mission?.area && this.mission.area !== loadSettings().terrainArea) {
+                updateSettings({ terrainArea: this.mission.area });
+                window.location.reload();
+                return;
+            }
+        }
         const settings = loadSettings();
         setBootProgress(25, 'Building scene...');
         await this.setupScene(settings.spawnMode);
@@ -1027,8 +1065,14 @@ export class Game {
         // is about to hand over to: the address bar showed the base airfield
         // for the rest of the session.
         this.urlCameraPending = urlCameraRoute !== undefined;
-        await this.beginFlight(settings.spawnMode,
-            pending !== undefined && pending.kind !== 'airfield' ? pending : undefined);
+        // A mission's player starts where its flight does: stream the terrain there.
+        const missionPlayer = this.mission?.flights.find(f => f.control === 'player');
+        if (missionPlayer) {
+            this.selectAircraftById(missionPlayer.aircraftId, settings.aircraftId);
+        }
+        await this.beginFlight(settings.spawnMode, missionPlayer
+            ? { lat: missionPlayer.start.lat, lon: missionPlayer.start.lon }
+            : pending !== undefined && pending.kind !== 'airfield' ? pending : undefined);
         this.urlCameraPending = false;
         if (urlCameraRoute) {
             this.enterFixedCamera(urlCameraRoute);
@@ -1039,6 +1083,9 @@ export class Game {
         // The map fills in as its tiles arrive; there is no flight to hold for.
         if (!this.mapView) {
             await this.waitForRequiredTerrain(90, 99);
+        }
+        if (this.mission) {
+            await this.startMission(this.mission);
         }
         setBootProgress(100, 'Ready');
         window.addEventListener('resize', () => this.onViewportResize());
@@ -2274,6 +2321,7 @@ export class Game {
             this.syncBarricade(false);
             this.syncBarricadeAirframe();
             this.updateAiStraightTimer(delta);
+            this.updateMission(delta);
             this.publishAiStats();
             this.followFlightCameraInUrl(delta);
 
@@ -2848,6 +2896,7 @@ export class Game {
                 this.updateHdResolution();
                 this.renderer.render(this.scene, this.exteriorRenderLayersHd);
                 this.mapView.updateOverlay();
+                this.missionOverlay?.update();
                 return;
             }
             // Aim the target-window camera before the MFD's 3D layer is drawn (and
@@ -3580,6 +3629,206 @@ export class Game {
             groundAt: (px, py) => this.mapGroundAt(px, py),
         });
         this.placeMapCamera();
+        // The waypoint editor: its panel in the left pane, its routes over the map.
+        const editor = new MissionEditor({
+            aircraft: this.aircraftRegistry.list().map(d => ({ id: d.id, name: d.name })),
+            defaultAircraftId: this.currentDef.id,
+            area: this.playArea.area.name,
+            centre: () => ({ ...centre }),
+            runwayEndAt: (lat, lon) => this.runwayEndAt(lat, lon),
+        });
+        this.missionOverlay = new MissionOverlay(
+            this.mapView, editor, this.playerCamera.main, () => this.areaAirfields);
+        void mountMissionPanel(document.body.appendChild(document.createElement('rfs-mission-panel')), editor);
+    }
+
+    /**
+     * The runway end a click on the map means: on or beside a runway, the end
+     * nearer the click - the threshold a take-off rolls from or a landing
+     * touches down after.
+     */
+    private runwayEndAt(lat: number, lon: number): RunwayEnd | undefined {
+        const basis = this.planetTerrain.basis;
+        const p = geodeticToWorld(basis, lat, lon, 0);
+        let best: RunwayEnd | undefined;
+        let bestAcross = Infinity;
+        for (const r of this.sceneRunways) {
+            const fwd = headingForward(r.heading);
+            const dx = p.x - r.center.x;
+            const dz = p.z - r.center.z;
+            const along = dx * fwd.x + dz * fwd.z;
+            const across = Math.abs(dx * fwd.z - dz * fwd.x);
+            if (across > Math.max(150, r.halfWidth * 3) || Math.abs(along) > r.halfLength + 500 || across >= bestAcross) {
+                continue;
+            }
+            // Landing on the low designator flies along `heading`, from the end behind the centre.
+            const [low, high] = r.ref.split('/');
+            const mid = geodeticOnSurfaceAtEnu(basis, r.center.x, -r.center.z);
+            best = { airfield: runwayKey(r), designator: along < 0 || !high ? low : high, lat: mid.lat, lon: mid.lon };
+            bestAcross = across;
+        }
+        return best;
+    }
+
+    /**
+     * Fly a mission: the player from its flight's start, every AI flight
+     * spawned with its aircraft and handed its route (AiFlightPhase.WAYPOINT).
+     * AI flights sharing a runway end line up one behind another and roll
+     * MISSION_TAKEOFF_GAP_S apart, the one furthest down the runway first.
+     */
+    private async startMission(m: Mission): Promise<void> {
+        const endKey = (f: Flight) => f.start.kind === 'runway' ? `${f.start.airfield}/${f.start.designator}` : '';
+        const onEnd = new Map<string, number>();
+        for (const f of m.flights) {
+            onEnd.set(endKey(f), (onEnd.get(endKey(f)) ?? 0) + 1);
+        }
+        const slot = new Map<string, number>();
+        let pool = 0;
+        for (const f of m.flights) {
+            const key = endKey(f);
+            const k = slot.get(key) ?? 0;
+            slot.set(key, k + 1);
+            const def = (f.control === 'player' ? this.currentDef : this.aircraftRegistry.get(f.aircraftId))
+                ?? this.currentDef;
+            const back = (onEnd.get(key)! - 1 - k) * MISSION_RUNWAY_SPACING_M;
+            const pose = await this.missionPose(f.start, def, back);
+            if (!pose) {
+                console.warn(`Mission flight ${f.name}: no runway ${f.start.kind === 'runway' ? key : ''} here`);
+                continue;
+            }
+            const route = await this.missionRoute(f);
+            if (f.control === 'player') {
+                this.player.reset(pose.position, pose.heading, {
+                    velocity: pose.velocity, throttle: pose.throttle ?? 0, airborne: pose.airborne ?? false,
+                });
+                this.combatSim.setRoute(PLAYER_SIM_ID, route);
+                this.missionPlayer = { flight: f, next: 0 };
+                continue;
+            }
+            if (pool >= MAX_FLIGHTS) {
+                break;
+            }
+            await this.preloadAircraftModels(def);
+            const simId = `mf${pool}`;
+            let ai = this.missionAircraft[pool];
+            if (ai) {
+                ai.loadAircraft(def);
+                ai.respawn(pose);
+            } else {
+                ai = new AiAircraftEntity(this.models, def, this.combatSim, simId, Faction.PLAYER, pose,
+                    this.materials, PLAYER_GUN, MISSION_PILOT);
+                ai.setGroundHeightAt((x, z) => this.drawnGroundHeightAt(x, z));
+                if (this.wreckField) ai.setWreckField(this.wreckField);
+                this.scene.add(ai);
+                this.missionAircraft.push(ai);
+            }
+            this.combatSim.setRoute(simId, route);
+            if (pose.airborne) {
+                this.combatSim.setPhase(simId, AiFlightPhase.WAYPOINT);
+            } else {
+                this.combatSim.setPhase(simId, AiFlightPhase.GROUND_IDLE);
+                this.missionTakeoffs.push({ simId, at: this.missionClock + k * MISSION_TAKEOFF_GAP_S });
+            }
+            pool++;
+        }
+    }
+
+    /** Where and how a flight starts: on a runway end `back` metres short of the usual spot, or in the air. */
+    private async missionPose(
+        e: FlightEndpoint, def: FlyableAircraftDef, back: number,
+    ): Promise<AiAircraftSpawn | undefined> {
+        const basis = this.planetTerrain.basis;
+        if (e.kind === 'air') {
+            const p = geodeticToWorld(basis, e.lat, e.lon, e.altM);
+            // A compass bearing, clockwise from north; scene heading PI is north.
+            const heading = Math.PI - THREE.MathUtils.degToRad(e.headingDeg);
+            return {
+                position: new THREE.Vector3(p.x, p.y, p.z), heading, airborne: true, throttle: 0.8,
+                velocity: headingForward(heading).multiplyScalar(e.speedMps),
+            };
+        }
+        const near = geodeticToWorld(basis, e.lat, e.lon, 0);
+        await this.buildAirfieldsNear(near.x, near.z);
+        const r = this.missionRunway(e);
+        if (!r) {
+            return undefined;
+        }
+        const heading = e.designator === r.ref.split('/')[0] ? r.heading : r.heading + Math.PI;
+        const fwd = headingForward(heading);
+        // From the threshold the take-off rolls away from, the line-up spot and then back along the runway.
+        const fromCentre = -r.halfLength + Math.max(60, MISSION_LINEUP_M + back);
+        const x = r.center.x + fwd.x * Math.min(fromCentre, r.halfLength - 200);
+        const z = r.center.z + fwd.z * Math.min(fromCentre, r.halfLength - 200);
+        const rest = def.flight ? fm2GroundRestHeight(def.flight) : PLANE_DISTANCE_TO_GROUND;
+        return {
+            position: new THREE.Vector3(x, this.groundHeightAt(x, z) + rest, z), heading,
+            airborne: false, throttle: 0, velocity: new THREE.Vector3(),
+        };
+    }
+
+    /** A flight's waypoints in the scene frame, for the worker (which re-bases them with the scene). */
+    private async missionRoute(f: Flight): Promise<AiRoute> {
+        const basis = this.planetTerrain.basis;
+        const end = f.land;
+        const at = end && geodeticToWorld(basis, end.lat, end.lon, 0);
+        let land: AiRoute['land'] = at && { x: at.x, z: at.z };
+        if (land && end?.kind === 'runway') {
+            await this.buildAirfieldsNear(land.x, land.z);
+            const r = this.missionRunway(end);
+            // The end picked: landing on the high designator is the runway turned round.
+            if (r) {
+                land = { ...land, heading: end.designator === r.ref.split('/')[0] ? r.heading : r.heading + Math.PI };
+            }
+        }
+        return {
+            points: f.waypoints.map(w => {
+                const p = geodeticToWorld(basis, w.lat, w.lon, w.altM);
+                return { x: p.x, y: p.y, z: p.z, speed: w.speedMps };
+            }),
+            next: 0,
+            land,
+        };
+    }
+
+    private missionRunway(e: FlightEndpoint & { kind: 'runway' }): SceneRunway | undefined {
+        return this.sceneRunways.find(s => runwayKey(s) === e.airfield && s.ref.split('/').includes(e.designator));
+    }
+
+    /** Per frame while flying: AI flights rolling in turn, and the player's waypoint cue. */
+    private updateMission(delta: number): void {
+        this.missionClock += delta;
+        if (this.missionTakeoffs.length > 0) {
+            this.missionTakeoffs = this.missionTakeoffs.filter(t => {
+                if (this.missionClock < t.at) {
+                    return true;
+                }
+                this.combatSim.setPhase(t.simId, AiFlightPhase.TAKEOFF_ROLL);
+                return false;
+            });
+        }
+        const mp = this.missionPlayer;
+        if (!mp) {
+            return;
+        }
+        const w = mp.flight.waypoints[mp.next];
+        if (!w) {
+            const land = mp.flight.land;
+            this.player.waypointCue = land?.kind === 'runway' ? `LAND ${land.designator}` : undefined;
+            return;
+        }
+        // Geodetic every frame, so a re-base cannot leave it pointing at the old frame.
+        const p = geodeticToWorld(this.planetTerrain.basis, w.lat, w.lon, 0, this._missionPoint);
+        const dx = p.x - this.player.position.x;
+        const dz = p.z - this.player.position.z;
+        const dist = Math.hypot(dx, dz);
+        // The capture radius the AI flies by (AiPilot.doWaypoint).
+        const v = Math.max(50, this.player.velocityVector.length());
+        if (dist < Math.max(400, 0.5 * v * v / 9.81)) {
+            mp.next++;
+            return;
+        }
+        const bearing = Math.round((540 - THREE.MathUtils.radToDeg(Math.atan2(dx, dz))) % 360);
+        this.player.waypointCue = `WP${mp.next + 1} ${String(bearing).padStart(3, '0')} ${(dist / 1852).toFixed(1)}NM`;
     }
 
     /**
@@ -4908,6 +5157,10 @@ export class Game {
         };
         if (this.wingman) stats.wingman = row(this.wingman.simId, this.wingman.position, this.wingman.enabled);
         this.aiOpponents.forEach((ai, i) => { stats[`opponent${i}`] = row(ai.simId, ai.position, ai.enabled); });
+        this.missionAircraft.forEach(ai => {
+            const g = worldToGeodetic(this.planetTerrain.basis, ai.position.x, ai.position.y, ai.position.z);
+            stats[ai.simId] = { ...row(ai.simId, ai.position, ai.enabled), lat: g.lat, lon: g.lon };
+        });
         (globalThis as Record<string, unknown>).__aiStats = stats;
     }
 

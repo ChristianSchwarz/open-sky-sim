@@ -48,6 +48,29 @@ export enum AiFlightPhase {
      * Appended for the same reason as FORMATION.
      */
     GO_AROUND,
+    /**
+     * Fly the route set by {@link AiPilot.setRoute} (the waypoint editor's
+     * missions): each leg at its waypoint's altitude and speed, then RTB to
+     * the route's landing runway, or circle the last waypoint when it has none.
+     * Entered from CLIMB_OUT when a route is set. Appended like FORMATION.
+     */
+    WAYPOINT,
+}
+
+/**
+ * A route in world space, shared with the sim, which keeps it across pilot
+ * rebuilds and re-bases it with the scene; `next` is the progress along it.
+ */
+export interface AiRoute {
+    /** `y` is the altitude to hold on the leg to the point; speed in m/s. */
+    points: Array<{ x: number; y: number; z: number; speed: number }>;
+    next: number;
+    /**
+     * Where the landing runway is: the one nearest this point, landed on along
+     * `heading` (scene, 0 = +Z) when given - the world lists each runway once,
+     * along its low designator, and the other end is that turned round.
+     */
+    land?: { x: number; z: number; heading?: number };
 }
 
 export interface AiPilotOptions {
@@ -476,6 +499,9 @@ const FORMATION_ALT_TRIM_MAX = 400;
 export class AiPilot implements AiPilotController {
 
     private phase: AiFlightPhase = AiFlightPhase.NAVIGATE;
+    private route: AiRoute | undefined;
+    /** Each runway turned round, kept so its per-runway caches stay warm. */
+    private readonly reversed = new WeakMap<Runway, Runway>();
     /** The runway this pilot committed to; see {@link homeRunway}. */
     private runwayChoice: Runway | undefined;
     /** Per runway, see {@link touchdownFromThreshold}. */
@@ -692,6 +718,10 @@ export class AiPilot implements AiPilotController {
         this.formationLead = lead;
     }
 
+    setRoute(route: AiRoute | undefined): void {
+        this.route = route;
+    }
+
     /** True while a firing solution exists this frame (read after update). */
     get isFiring(): boolean {
         return this.firing;
@@ -793,6 +823,7 @@ export class AiPilot implements AiPilotController {
             case AiFlightPhase.FLARE: this.doFlare(delta); break;
             case AiFlightPhase.ROLLOUT: this.doRollout(); break;
             case AiFlightPhase.GO_AROUND: this.doGoAround(delta); break;
+            case AiFlightPhase.WAYPOINT: this.doWaypoint(delta); break;
         }
     }
 
@@ -1232,6 +1263,22 @@ export class AiPilot implements AiPilotController {
      * long way from where it started and the nearest field is the right one.
      */
     private homeRunway(): Runway {
+        // A route's runway, by where it is and not by where the aircraft is:
+        // asked again every time, so it is the right one once its airfield
+        // has streamed in, and steady while nothing new arrives near it.
+        const land = this.route?.land;
+        if (land) {
+            const r = this.world.nearestRunway(land.x, land.z);
+            if (land.heading === undefined || Math.abs(wrapPi(land.heading - r.heading)) < Math.PI / 2) {
+                return r;
+            }
+            let back = this.reversed.get(r);
+            if (!back) {
+                back = { ...r, heading: wrapPi(r.heading + Math.PI) };
+                this.reversed.set(r, back);
+            }
+            return back;
+        }
         if (this.runwayChoice === undefined) {
             this.runwayChoice = this.world.nearestRunway(this.pos.x, this.pos.z);
         }
@@ -1300,6 +1347,10 @@ export class AiPilot implements AiPilotController {
         // Clear of the ground and cleaned up, a wingman goes to its lead and
         // a fighter with a target goes to it; otherwise climb on to patrol.
         if (agl > CLIMB_OUT_HANDOFF_AGL && !this.aircraft.isGearDeployed()) {
+            if (this.route) {
+                this.setPhase(AiFlightPhase.WAYPOINT);
+                return;
+            }
             if (this.formationLead && this.formationLead.isAlive()) {
                 this.setPhase(AiFlightPhase.FORMATION);
                 return;
@@ -1326,6 +1377,43 @@ export class AiPilot implements AiPilotController {
         this.commandHeading(desiredHeading, MAX_BANK_NAV);
         this.commandAltitudeClamped(this.cruiseAltitude);
         this.commandSpeed(this.cruiseSpeed, delta);
+    }
+
+    /**
+     * Fly the route: at each point's altitude and speed, on to the next once
+     * within a turn's radius of it, so a corner is cut rather than overshot
+     * and circled back to. Past the last point, land or circle it.
+     */
+    private doWaypoint(delta: number): void {
+        const route = this.route;
+        if (!route || route.points.length === 0) {
+            this.setPhase(route?.land ? AiFlightPhase.RTB : AiFlightPhase.NAVIGATE);
+            return;
+        }
+        if (route.next >= route.points.length && route.land) {
+            this.setPhase(AiFlightPhase.RTB);
+            return;
+        }
+        const last = route.next >= route.points.length;
+        const p = route.points[Math.min(route.next, route.points.length - 1)];
+        const dx = p.x - this.pos.x;
+        const dz = p.z - this.pos.z;
+        const speed = Math.max(this.aircraft.getAirspeed(), 50);
+        // Half the radius of a MAX_BANK_NAV turn, not under 400 m.
+        const capture = Math.max(400, 0.5 * speed * speed / (9.81 * Math.tan(MAX_BANK_NAV)));
+        if (!last && dx * dx + dz * dz < capture * capture) {
+            route.next++;
+            return;
+        }
+        this.aircraft.setLandingGearDeployed(false);
+        this.aircraft.setFlapsExtended(false);
+        this.commandHeading(this.avoidObstacles(Math.atan2(dx, dz)), MAX_BANK_NAV);
+        // Holding the path, as the airfield phases do: a leg can be flown far
+        // slower than the cruise the plain loop is tuned at, and there it
+        // levelled off hundreds of metres low.
+        const alt = Math.max(p.y, this.world.groundHeightAt(this.pos.x, this.pos.z) + this.hardDeck);
+        this.commandVerticalSpeed(clamp((alt - this.pos.y) * VS_PER_ALT, -MAX_VS, MAX_VS), true);
+        this.commandSpeed(p.speed, delta);
     }
 
     /** Fly wings-level on a latched heading; does not auto-engage even with a target. */

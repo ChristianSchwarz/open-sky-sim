@@ -293,3 +293,26 @@ body.map-view #container.map-dragging {
     border: 2px solid #d8e4ee;
     border-top: none;
 }
+
+/* The waypoint editor's routes over the map (state/missionOverlay.ts). */
+.mission-overlay {
+    position: fixed;
+    top: 0;
+    left: var(--map-split);
+    width: calc(100% - var(--map-split));
+    height: 100%;
+    pointer-events: none;
+    z-index: 4;
+    font: bold 11px ui-monospace, Consolas, monospace;
+}
+
+.mission-wp {
+    pointer-events: auto;
+    cursor: move;
+}
+
+.mission-wp-label {
+    paint-order: stroke;
+    stroke: #0d1a26;
+    stroke-width: 3px;
+}

@@ -1,5 +1,5 @@
 import type { Combatant } from '../weapons/combatant';
-import type { AiFlightPhase } from './aiPilot';
+import type { AiFlightPhase, AiRoute } from './aiPilot';
 
 /**
  * Shared surface for every in-worker AI pilot model (classic BFM and Shaw).
@@ -15,6 +15,8 @@ export interface AiPilotController {
      * bandit: a wingman needs both to peel off and to rejoin afterwards.
      */
     setFormationLead(lead: Combatant | undefined): void;
+    /** A route for {@link AiFlightPhase.WAYPOINT}; only the classic pilot flies one. */
+    setRoute?(route: AiRoute | undefined): void;
     getPhase(): AiFlightPhase;
     get isFiring(): boolean;
     /** Short maneuver / phase label for MFD telemetry and tests. */

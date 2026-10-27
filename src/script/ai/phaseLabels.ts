@@ -15,6 +15,7 @@ const SHORT: Record<string, string> = {
     FLARE: 'FLR',
     ROLLOUT: 'ROLL',
     FORMATION: 'FORM',
+    WAYPOINT: 'WPT',
 };
 
 export function shortPhaseLabel(label: string | undefined): string | undefined {

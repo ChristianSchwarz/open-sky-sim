@@ -15,7 +15,7 @@ import {
     SimSharedViews,
     tryPullSharedSnapshot,
 } from './simSharedState';
-import { AiPilotOptions } from '../../ai/aiPilot';
+import { AiPilotOptions, AiRoute } from '../../ai/aiPilot';
 import {
     SimAircraftDesc, SimAircraftSpawn, SimControlInputs,
     SimControlMode, SimFlightModelKind, SimHitEvent, SimToWorkerMessage, WorkerToSimMessage,
@@ -241,6 +241,10 @@ export class CombatSimClient {
 
     setPhase(id: string, phase: number): void {
         this.post({ type: 'setPhase', id, phase });
+    }
+
+    setRoute(id: string, route: AiRoute | null): void {
+        this.post({ type: 'setRoute', id, route });
     }
 
     /** Rebuild the in-worker pilot (used when switching AI model on spawn). */
