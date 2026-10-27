@@ -38,7 +38,16 @@ def print_todo(leaves: Iterable[Tuple[int, int]]) -> int:
 
 
 def serve(module: ModuleType, measure: Callable[[int, int], dict], after: Callable[[], None] = lambda: None) -> int:
-    """Answer leaf requests on stdin until it ends."""
+    """Answer leaf requests on stdin until it ends.
+
+    The answers go to the process's own stdout, not to whatever sys.stdout
+    is: a script that silences a library with contextlib.redirect_stdout
+    from several threads at once (measure_buildings.py's Sentinel-2 reads)
+    can leave sys.stdout pointing at a discarded buffer when the threads
+    leave it out of order, and every answer after that went nowhere - the
+    pool waited for it forever. sys.stdout is put back after each leaf too.
+    """
+    answers = sys.__stdout__
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -50,6 +59,7 @@ def serve(module: ModuleType, measure: Callable[[int, int], dict], after: Callab
             out = {'ok': True, 'result': r}
         except Exception as ex:  # noqa: BLE001 - the pool counts the failure and goes on
             out = {'ok': False, 'error': repr(ex)}
-        sys.stdout.write(json.dumps(out, default=_plain) + '\n')
-        sys.stdout.flush()
+        sys.stdout = sys.__stdout__
+        answers.write(json.dumps(out, default=_plain) + '\n')
+        answers.flush()
     return 0

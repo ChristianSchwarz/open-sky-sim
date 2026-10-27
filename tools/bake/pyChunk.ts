@@ -24,6 +24,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { stableScripts } from './pyLeaf';
+import { satelliteCaEnv } from './pyServe';
 import { decodeTileIndex } from './index';
 import { TileKey } from '../../src/script/terrain/tiling';
 
@@ -213,7 +214,7 @@ export async function pyChunk(cfg: PyChunkConfig, k: TileKey, jobDir: string): P
     fs.mkdirSync(cwd, { recursive: true });
     const coverDir = onSatellite ? path.join(jobDir, 'cover-sources') : path.join('data', 'cover', 'chunks', bbox.replace(/,/g, '_'));
     const jobs = onSatellite ? Number(process.env.RFS_SAT_THREADS ?? os.cpus().length - 1) : cfg.localJobs;
-    const env: NodeJS.ProcessEnv = { PYTHONIOENCODING: 'utf-8', ...(onSatellite ? { RFS_STRICT_INPUTS: '1' } : {}) };
+    const env: NodeJS.ProcessEnv = { PYTHONIOENCODING: 'utf-8', ...(onSatellite ? { RFS_STRICT_INPUTS: '1', ...satelliteCaEnv() } : {}) };
     let tail = '';
     for (const [script, ...args] of stageArgs(cfg.stage, planet, bbox, pbf, coverDir, Math.max(1, jobs))) {
         tail = await runScript(python, process.env.RFS_SAT_PYTHON !== undefined, path.resolve(scripts, script), args, cwd, env);

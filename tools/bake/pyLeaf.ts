@@ -19,7 +19,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { PyServe } from './pyServe';
+import { PyServe, satelliteCaEnv } from './pyServe';
 import { TileKey } from '../../src/script/terrain/tiling';
 
 export type PyLeafKind = 'lidarleaf' | 'roofleaf';
@@ -96,7 +96,7 @@ export async function pyLeaf(kind: PyLeafKind, cfg: PyLeafConfig, k: TileKey, on
     let serve = serves.get(kind);
     if (!serve || serve.script !== script || serve.python !== python) {
         serve?.close();
-        const env: NodeJS.ProcessEnv = { PYTHONIOENCODING: 'utf-8' };
+        const env: NodeJS.ProcessEnv = { PYTHONIOENCODING: 'utf-8', ...(onSatellite ? satelliteCaEnv() : {}) };
         if (onSatellite && process.env.RFS_SAT_CACHE) {
             env[stage.cacheEnv] = path.join(process.env.RFS_SAT_CACHE, stage.satCache);
         }
