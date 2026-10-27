@@ -193,13 +193,36 @@ body.map-view #countdown {
     display: none;
 }
 
+/* The map on the right; the page itself is the empty pane left of it. */
+body.map-view {
+    background: #0d1a26;
+}
+
 body.map-view #container {
+    left: var(--map-split);
     cursor: grab;
     touch-action: none;
 }
 
 body.map-view #container.map-dragging {
     cursor: grabbing;
+}
+
+.map-divider {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: var(--map-split);
+    width: 6px;
+    margin-left: -3px;
+    background: #3c5468;
+    cursor: col-resize;
+    touch-action: none;
+    z-index: 6;
+}
+
+.map-divider:hover {
+    background: #8aa0b2;
 }
 
 .map-aircraft {
@@ -245,7 +268,7 @@ body.map-view #container.map-dragging {
 }
 
 .map-info {
-    left: 12px;
+    left: calc(var(--map-split) + 12px);
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -253,6 +276,8 @@ body.map-view #container.map-dragging {
 
 .map-help {
     right: 12px;
+    /* Wraps rather than covering the scale bar when the split leaves the map narrow. */
+    max-width: calc(100% - var(--map-split) - 280px);
     color: #8aa0b2;
     font-size: 12px;
 }

@@ -13,6 +13,8 @@
  *
  * Opened as `index.html?map&@lat,lon` plus `mpp` (metres per pixel) and the
  * aircraft's `alat`, `alon`, `ahdg` for the marker; see {@link mapViewUrl}.
+ * The map fills the right of the page; `split` is the share the empty left
+ * pane takes, set by dragging the divider.
  */
 
 import * as THREE from 'three';
@@ -103,6 +105,8 @@ export class MapView {
     private readonly scaleBar: HTMLElement;
     private readonly scaleLabel: HTMLElement;
     private readonly cursor: HTMLElement;
+    /** Share of the page's width the empty left pane takes. */
+    private split = 0.5;
     private urlTimer = 0;
     private readonly _p = new THREE.Vector3();
 
@@ -130,7 +134,16 @@ export class MapView {
         this.cursor.innerHTML = '&nbsp;';
         el('div', 'map-help').textContent =
             'drag to move · wheel or double-click to zoom · left+right drag to tilt · arrows / WASD · +/- · C centres the aircraft';
+        this.setSplit(num(q, 'split') ?? this.split);
         this.bindPointer();
+        const divider = el('div', 'map-divider');
+        divider.addEventListener('pointerdown', e => divider.setPointerCapture(e.pointerId));
+        divider.addEventListener('pointermove', e => {
+            if (e.buttons & 1) {
+                this.setSplit(e.clientX / window.innerWidth);
+            }
+        });
+        divider.addEventListener('pointerup', () => this.scheduleUrl());
         // Dev aid, alongside __terrain: the map's camera and state.
         (globalThis as Record<string, unknown>).__mapView = this;
     }
@@ -205,8 +218,9 @@ export class MapView {
             const p = this.host.worldOf(this.aircraft.lat, this.aircraft.lon).project(this.host.camera);
             const sx = (p.x * 0.5 + 0.5) * c.clientWidth;
             const sy = (-p.y * 0.5 + 0.5) * c.clientHeight;
+            // The marker is placed on the page; the map starts after the left pane.
             this.marker.style.transform =
-                `translate(${sx}px, ${sy}px) rotate(${this.aircraft.headingDeg ?? 0}deg)`;
+                `translate(${sx + c.offsetLeft}px, ${sy}px) rotate(${this.aircraft.headingDeg ?? 0}deg)`;
         }
         // A round length about a sixth of the screen wide.
         const target = (c.clientWidth / 6) * this.mpp;
@@ -214,6 +228,13 @@ export class MapView {
         const len = [5, 2, 1].map(f => f * pow).find(v => v <= target) ?? pow;
         this.scaleBar.style.width = `${len / this.mpp}px`;
         this.scaleLabel.textContent = len >= 1000 ? `${len / 1000} km` : `${len} m`;
+    }
+
+    /** Neither side narrower than 15 %; the renderer and game resize from the container on 'resize'. */
+    private setSplit(v: number): void {
+        this.split = Math.max(0.15, Math.min(0.85, v));
+        document.body.style.setProperty('--map-split', `${this.split * 100}%`);
+        window.dispatchEvent(new Event('resize'));
     }
 
     /** Bumped on every pan, zoom and tilt; see Game.fitMapDetail. */
@@ -229,6 +250,7 @@ export class MapView {
             // By hand: URLSearchParams would percent-encode the route's `@lat,lon` key.
             let search = withParam(location.search, 'mpp', this.mpp.toPrecision(4));
             search = withParam(search, 'tilt', this.tiltDeg.toFixed(1));
+            search = withParam(search, 'split', this.split.toFixed(2));
             history.replaceState(history.state, '', `${location.pathname}${search}${location.hash}`);
         }, URL_WRITE_DELAY_MS);
     }
