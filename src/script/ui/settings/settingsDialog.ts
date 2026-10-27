@@ -132,7 +132,7 @@ const VIEWS_HELP: HelpEntry[] = [
     { keys: ['Num 4', 'Num 6', 'Num 8', 'Num 2'], action: 'Move camera around aircraft' },
     { keys: ['Num 5'], action: 'Recenter camera' },
     { keys: ['Num *', 'Num /'], action: 'Zoom in / out' },
-    { keys: ['Num Enter'], action: 'F1: padlock the target; F2: lock on the target (or the enemy) behind your aircraft' },
+    { keys: ['Num Enter'], action: 'F1: padlock the target; F2: lock on an aircraft behind yours (the targeted one first, then each press the next nearest, then off)' },
 ];
 
 /** A dataset the world is built from, as the About tab credits it. */

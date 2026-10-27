@@ -3,6 +3,8 @@ import { PlayerEntity } from "../../scene/entities/player";
 import { FORWARD, UP } from '../../utils/math';
 import { CameraUpdater } from "./cameraUpdater";
 
+/** Height the locked camera keeps over the ground (m). */
+const LOCK_GROUND_CLEARANCE_M = 3;
 
 export enum ExteriorViewHeading {
     FRONT,
@@ -15,7 +17,12 @@ export class ExteriorFrontBehindCameraUpdater extends CameraUpdater {
     private _p = new THREE.Vector3();
     private lookAtTarget: (() => THREE.Vector3 | undefined) | undefined;
 
-    constructor(actor: PlayerEntity, camera: THREE.PerspectiveCamera, private heading: ExteriorViewHeading) {
+    constructor(
+        actor: PlayerEntity,
+        camera: THREE.PerspectiveCamera,
+        private heading: ExteriorViewHeading,
+        private readonly groundHeightAt: (x: number, z: number) => number = () => -Infinity,
+    ) {
         super(actor, camera);
     }
 
@@ -42,6 +49,11 @@ export class ExteriorFrontBehindCameraUpdater extends CameraUpdater {
                 .copy(playerPos)
                 .addScaledVector(this._v, 40)
                 .addScaledVector(UP, 5);
+            // A target well above puts the line underground: stay over it.
+            const floor = this.groundHeightAt(this.camera.position.x, this.camera.position.z) + LOCK_GROUND_CLEARANCE_M;
+            if (this.camera.position.y < floor) {
+                this.camera.position.y = floor;
+            }
             this.camera.lookAt(playerPos);
             return;
         }

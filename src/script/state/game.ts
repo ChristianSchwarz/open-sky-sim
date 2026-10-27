@@ -86,7 +86,7 @@ import { buildSurfaceExclusion } from '../terrain/surfaceExclusion';
 import { SceneryField, SceneryFieldSettings } from '../scene/entities/sceneryField';
 import { SimpleEntity } from '../scene/entities/simpleEntity';
 import { StaticSceneryEntity } from '../scene/entities/staticScenery';
-import { Entity } from '../scene/entity';
+import { ENTITY_TAGS, Entity } from '../scene/entity';
 import { SceneMaterialManager } from "../scene/materials/materials";
 import { ModelManager } from "../scene/models/models";
 import { Scene, SceneLayers } from '../scene/scene';
@@ -839,8 +839,10 @@ export class Game {
     private viewYaw: number = 0;
     private viewPitch: number = 0;
     private viewZoom: number = 1;
-    /** F2 exterior view: numpad * toggles the camera to track the AI opponent. */
-    private exteriorEnemyLock = false;
+    /** F2 exterior view: the aircraft Num Enter locked the camera on, behind the player. */
+    private exteriorLockAircraft: AiAircraftEntity | undefined;
+    /** Aircraft already locked in this Num Enter cycle; the cycle ends (unlocks) once all are. */
+    private readonly exteriorLockVisited = new Set<AiAircraftEntity>();
     private cockpitPadlock = false;
     /** The left/right MFD overlay, for the keys that flip its pages. */
     private cockpit: CockpitEntity | undefined;
@@ -920,8 +922,9 @@ export class Game {
 
         this.cameraUpdaters.set(PlayerViewState.CRASHED, new CrashedCameraUpdater(this.player, this.playerCamera.main));
         this.cameraUpdaters.set(PlayerViewState.COCKPIT_FRONT, new CockpitFrontCameraUpdater(this.player, this.playerCamera.main));
-        this.cameraUpdaters.set(PlayerViewState.EXTERIOR_BEHIND, new ExteriorFrontBehindCameraUpdater(this.player, this.playerCamera.main, ExteriorViewHeading.FRONT));
-        this.cameraUpdaters.set(PlayerViewState.EXTERIOR_FRONT, new ExteriorFrontBehindCameraUpdater(this.player, this.playerCamera.main, ExteriorViewHeading.BACK));
+        const groundAt = (x: number, z: number) => this.groundHeightAt(x, z);
+        this.cameraUpdaters.set(PlayerViewState.EXTERIOR_BEHIND, new ExteriorFrontBehindCameraUpdater(this.player, this.playerCamera.main, ExteriorViewHeading.FRONT, groundAt));
+        this.cameraUpdaters.set(PlayerViewState.EXTERIOR_FRONT, new ExteriorFrontBehindCameraUpdater(this.player, this.playerCamera.main, ExteriorViewHeading.BACK, groundAt));
         this.cameraUpdaters.set(PlayerViewState.EXTERIOR_LEFT, new ExteriorSideCameraUpdater(this.player, this.playerCamera.main, ExteriorViewSide.LEFT));
         this.cameraUpdaters.set(PlayerViewState.EXTERIOR_RIGHT, new ExteriorSideCameraUpdater(this.player, this.playerCamera.main, ExteriorViewSide.RIGHT));
         this.cameraUpdaters.set(PlayerViewState.TARGET_TO, new TargetToCameraUpdater(this.player, this.playerCamera.main));
@@ -3216,28 +3219,58 @@ export class Game {
             || this.view === PlayerViewState.EXTERIOR_FRONT;
     }
 
+    /**
+     * Num Enter in F2: lock on other aircraft only, the T-targeted one first
+     * if it is one, then each press the nearest not yet locked this cycle;
+     * after the last one it unlocks.
+     */
     private toggleExteriorEnemyLock(): void {
-        if (!this.exteriorEnemyLock && !this.exteriorLockPosition()) {
-            return;
+        const current = this.exteriorLockAircraft;
+        if (!current || !current.isAlive()) {
+            // A fresh cycle (or the locked one died: start over).
+            this.exteriorLockVisited.clear();
         }
-        this.exteriorEnemyLock = !this.exteriorEnemyLock;
+        const next = this.nextExteriorLockAircraft();
+        this.exteriorLockAircraft = next;
+        if (next) {
+            this.exteriorLockVisited.add(next);
+        } else {
+            this.exteriorLockVisited.clear();
+        }
         this.resetOrbit();
         this.syncExteriorEnemyLockTarget();
     }
 
-    private readonly _exteriorLockPos = new THREE.Vector3();
-
-    /** What the F2 lock follows: the T-selected target, else the AI opponent; undefined when neither is there. */
-    private exteriorLockPosition(): THREE.Vector3 | undefined {
+    private nextExteriorLockAircraft(): AiAircraftEntity | undefined {
+        const p = this.player.getDisplayPosition();
         const target = this.player.weaponsTarget;
-        if (target) {
-            return this._exteriorLockPos.addVectors(target.position, target.localCenter);
+        let best: AiAircraftEntity | undefined;
+        let bestD = Infinity;
+        for (const entity of this.scene.listByTag(ENTITY_TAGS.AIRCRAFT)) {
+            if (!(entity instanceof AiAircraftEntity) || !entity.isAlive()
+                || this.exteriorLockVisited.has(entity)) {
+                continue;
+            }
+            if (entity === (target as unknown)) {
+                return entity;
+            }
+            const d = entity.getDisplayPosition().distanceToSquared(p);
+            if (d < bestD) {
+                bestD = d;
+                best = entity;
+            }
         }
-        return this.aiOpponent?.enabled ? this.aiOpponent.getDisplayPosition() : undefined;
+        return best;
+    }
+
+    /** Where the F2 lock's aircraft is; undefined once it is gone (the plain view returns). */
+    private exteriorLockPosition(): THREE.Vector3 | undefined {
+        const a = this.exteriorLockAircraft;
+        return a?.isAlive() ? a.getDisplayPosition() : undefined;
     }
 
     private syncExteriorEnemyLockTarget(): void {
-        const target = this.exteriorEnemyLock ? () => this.exteriorLockPosition() : undefined;
+        const target = this.exteriorLockAircraft ? () => this.exteriorLockPosition() : undefined;
         (this.cameraUpdaters.get(PlayerViewState.EXTERIOR_BEHIND) as ExteriorFrontBehindCameraUpdater)
             .setLookAtTarget(target);
         (this.cameraUpdaters.get(PlayerViewState.EXTERIOR_FRONT) as ExteriorFrontBehindCameraUpdater)
@@ -3245,10 +3278,11 @@ export class Game {
     }
 
     private clearExteriorEnemyLock(): void {
-        if (!this.exteriorEnemyLock) {
+        if (!this.exteriorLockAircraft) {
             return;
         }
-        this.exteriorEnemyLock = false;
+        this.exteriorLockAircraft = undefined;
+        this.exteriorLockVisited.clear();
         this.syncExteriorEnemyLockTarget();
     }
 
