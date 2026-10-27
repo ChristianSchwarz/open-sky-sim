@@ -3747,6 +3747,9 @@ export class Game {
      * MISSION_TAKEOFF_GAP_S apart, the one furthest down the runway first.
      */
     private async startMission(m: Mission): Promise<void> {
+        // Only the mission's flights: the free flight's wingman and opponent
+        // fly the player's airframe and passed for flights ignoring theirs.
+        this.clearOtherAircraft();
         const endKey = (f: Flight) => f.start.kind === 'runway' ? `${f.start.airfield}/${f.start.designator}` : '';
         const onEnd = new Map<string, number>();
         for (const f of m.flights) {
