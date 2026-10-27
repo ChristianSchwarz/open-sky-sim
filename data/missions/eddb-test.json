@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "name": "EDDB test",
+  "flights": [
+    {
+      "name": "Flight 1",
+      "aircraftId": "f22",
+      "control": "ai",
+      "start": {
+        "kind": "runway",
+        "airfield": "EDDB",
+        "designator": "06R",
+        "lat": 52.35193130935185,
+        "lon": 13.495801469237858
+      },
+      "waypoints": [
+        {
+          "lat": 52.434493553247364,
+          "lon": 13.115982444853817,
+          "altM": 3048,
+          "speedMps": 180.0554
+        },
+        {
+          "lat": 52.37061551159261,
+          "lon": 13.252207752887415,
+          "altM": 3048,
+          "speedMps": 180.0554
+        },
+        {
+          "lat": 52.29378489508459,
+          "lon": 13.158023094415242,
+          "altM": 3048,
+          "speedMps": 180.0554
+        }
+      ],
+      "land": {
+        "kind": "runway",
+        "airfield": "EDDB",
+        "designator": "24R",
+        "lat": 52.37255596860516,
+        "lon": 13.505558287330413
+      }
+    },
+    {
+      "name": "Chase",
+      "aircraftId": "f22",
+      "control": "player",
+      "start": {
+        "kind": "air",
+        "lat": 52.36,
+        "lon": 13.4,
+        "altM": 1500,
+        "speedMps": 180,
+        "headingDeg": 70
+      },
+      "waypoints": []
+    }
+  ],
+  "area": "DACH"
+}
