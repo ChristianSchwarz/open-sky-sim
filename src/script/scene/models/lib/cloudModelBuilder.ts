@@ -248,6 +248,9 @@ function mergeGeometriesSmooth(geometries: THREE.BufferGeometry[]): THREE.Buffer
     return welded;
 }
 
+/** Height step (m) between successive lobes' flattened bases; see build(). */
+const BASE_STACK_M = 3;
+
 /** Deterministic [0,1) hash — avoids Math.random() so a model's shape is stable across rebuilds. */
 function hash01(n: number): number {
     const s = Math.sin(n * 12.9898) * 43758.5453;
@@ -415,12 +418,19 @@ export class CloudModelLibBuilder implements ModelLibBuilder {
         }
 
         const baseY = Math.min(...this.lobes.map(l => l.y));
+        // Every lobe low enough is squashed onto the same base plane, so their
+        // overlapping discs were coplanar and z-fought from below. Stack the
+        // cut planes instead: largest lobe lowest, each smaller one a few
+        // metres higher — invisible as a step, but enough depth separation
+        // that the lowest disc always wins cleanly.
+        const baseRank = new Map(
+            [...this.lobes].sort((a, b) => b.r - a.r).map((l, i) => [l, i] as const));
         const geometry = mergeGeometriesSmooth(this.lobes.map(l => {
             // Detail 2 (vs. the haze puffs' detail 1) so the solid body's
             // Gouraud shading picks up finer gradients across each lobe —
             // still low-poly, just a denser vertex grain to shade across.
             const g = new THREE.IcosahedronGeometry(l.r, 2);
-            flattenBase(g, baseY - l.y);
+            flattenBase(g, baseY + baseRank.get(l)! * BASE_STACK_M - l.y);
             g.translate(l.x, l.y, l.z);
             return g;
         }));
