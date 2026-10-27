@@ -12,7 +12,7 @@
  *     --chunk-deg D    largest chunk side (default 2, as areaImport.ts)
  *     --jobs N         chunks baked here at once (default 1: a coast chunk can take 10 GB)
  *     --stage-jobs N   worker processes a stage's own pool uses here (default: CPUs - 1,
- *                      at most one per 3 GB of memory; JOBS in the environment sets it too)
+ *                      at most one per 5 GB of memory; JOBS in the environment sets it too)
  *     --satellites     hand chunks to satellite machines on the LAN too; one
  *                      chunk at a time each, with every thread they have
  *     --satellite-port N  their HTTP port (default 47811)

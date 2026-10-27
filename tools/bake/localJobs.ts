@@ -18,8 +18,8 @@ export const GB_PER_WORKER = {
     mesh: 2,
     farland: 2,
     tex: 1.5,
-    /** One chunk's coast or cover bake, per process of its own pool. */
-    chunk: 3,
+    /** One chunk's coast or cover bake, per process of its own pool: 11 of them at 3 GB grew the pagefile. */
+    chunk: 5,
 } as const;
 
 export function localJobs(gbPerWorker: number, env: NodeJS.ProcessEnv = process.env): number {

@@ -28,7 +28,11 @@ export class PyServe {
             stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...this.env }, windowsHide: true,
         });
         child.stdout!.setEncoding('utf8');
+        this.buffer = '';
         child.stdout!.on('data', (d: string) => {
+            if (this.child !== child) {
+                return;
+            }
             this.buffer += d;
             let nl: number;
             while ((nl = this.buffer.indexOf('\n')) >= 0) {
@@ -49,13 +53,20 @@ export class PyServe {
                 this.stderrTail.shift();
             }
         });
+        // A child killed for a timeout may exit after its successor started: only its own state is cleared.
         child.on('exit', code => {
+            if (this.child !== child) {
+                return;
+            }
             this.child = undefined;
             const w = this.waiting;
             this.waiting = undefined;
             w?.reject(new Error(`${path.basename(this.script)} --serve exited (${code}): ${this.stderrTail.join('').slice(-800)}`));
         });
         child.on('error', err => {
+            if (this.child !== child) {
+                return;
+            }
             const w = this.waiting;
             this.waiting = undefined;
             w?.reject(err);
@@ -63,15 +74,29 @@ export class PyServe {
         return child;
     }
 
-    /** One request; the answer's parsed JSON. One at a time. */
-    request<T>(req: unknown): Promise<T> {
+    /**
+     * One request; the answer's parsed JSON. One at a time. A script that has
+     * not answered in `timeoutMs` is killed and the request fails: a lost
+     * answer otherwise held the leaf, and the satellite's lease on it, for
+     * ever (RFS_PY_TIMEOUT_MIN, default 30 minutes).
+     */
+    request<T>(req: unknown, timeoutMs = Number(process.env.RFS_PY_TIMEOUT_MIN || 30) * 60_000): Promise<T> {
         if (this.waiting) {
             throw new Error('PyServe: one request at a time');
         }
-        this.child ??= this.start();
+        const child = this.child ??= this.start();
         return new Promise<T>((resolve, reject) => {
-            this.waiting = { resolve: v => resolve(v as T), reject };
-            this.child!.stdin!.write(`${JSON.stringify(req)}\n`);
+            const timer = setTimeout(() => {
+                this.waiting = undefined;
+                this.child = undefined;
+                child.kill();
+                reject(new Error(`${path.basename(this.script)} --serve gave no answer in ${Math.round(timeoutMs / 1000)} s`));
+            }, timeoutMs);
+            this.waiting = {
+                resolve: v => { clearTimeout(timer); resolve(v as T); },
+                reject: e => { clearTimeout(timer); reject(e); },
+            };
+            child.stdin!.write(`${JSON.stringify(req)}\n`);
         });
     }
 
@@ -79,6 +104,36 @@ export class PyServe {
         this.child?.stdin?.end();
         this.child = undefined;
     }
+}
+
+let caFile: string | undefined;
+
+/**
+ * On a satellite, the environment that has the Python stages trust what
+ * Windows trusts: the system store (an HTTPS-scanning antivirus or a company
+ * proxy puts its own root there) and Node's bundled roots, written once to a
+ * PEM in the cache, for Python's ssl (SSL_CERT_FILE), requests
+ * (REQUESTS_CA_BUNDLE) and GDAL's curl (CURL_CA_BUNDLE). The packed Python
+ * alone trusts only its bundled roots, and every download failed with
+ * "self-signed certificate in certificate chain" on such a machine.
+ */
+export function satelliteCaEnv(): NodeJS.ProcessEnv {
+    if (!process.env.RFS_SAT_CACHE) {
+        return {};
+    }
+    if (!caFile) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const tls = require('node:tls') as { getCACertificates?: (kind: string) => string[] };
+        if (!tls.getCACertificates) {
+            return {};
+        }
+        const pems = [...new Set([...tls.getCACertificates('system'), ...tls.getCACertificates('bundled')])];
+        const p = path.join(process.env.RFS_SAT_CACHE, 'trusted-roots.pem');
+        fs.writeFileSync(`${p}.${process.pid}.tmp`, `${pems.join('\n')}\n`);
+        fs.renameSync(`${p}.${process.pid}.tmp`, p);
+        caFile = p;
+    }
+    return { SSL_CERT_FILE: caFile, REQUESTS_CA_BUNDLE: caFile, CURL_CA_BUNDLE: caFile };
 }
 
 /** `entry` and every tools/*.py it imports, directly or not, as file names. */

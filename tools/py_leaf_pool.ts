@@ -105,8 +105,27 @@ async function main(): Promise<void> {
         diskLow: () => false, label: () => 'leaves ', t0,
     });
     await pool.start();
-    const { results, errors } = await pool.runPass(todo, 1);
+    const first = await pool.runPass(todo, 1);
     await pool.close();
+    const results = first.results;
+    let errors = first.errors;
+    // A leaf that failed - on a satellite whose network cannot reach the
+    // source, say - is measured here once more before it counts as failed.
+    const again = todo.map((k, i) => ({ k, i })).filter(({ i }) => !results[i]);
+    if (again.length > 0 && args.satellitePort) {
+        console.log(`${tag}: ${again.length} leaves failed, measuring them here`);
+        const local = new TilePool<PyLeafResult>({
+            local: { file: WORKER, execArgv: process.execArgv, jobs: Math.max(1, Math.min(args.jobs, again.length)), workerData: { kind, cfg } },
+            cfg, kindOf: () => kind, roots: {}, diskLow: () => false, label: () => 'again ', t0,
+        });
+        await local.start();
+        const second = await local.runPass(again.map(a => a.k), 1);
+        await local.close();
+        again.forEach(({ i }, j) => {
+            results[i] = second.results[j];
+        });
+        errors = second.errors;
+    }
     // Every number the script reports, summed: stations and bridge ends, roofs and blocks, downloads.
     const sums: Record<string, number> = {};
     for (const r of results) {
