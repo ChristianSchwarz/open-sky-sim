@@ -29,7 +29,7 @@ export class MissionOverlay {
     constructor(
         private readonly map: MapView, private readonly editor: MissionEditor,
         private readonly camera: THREE.Camera,
-        /** The area's airfields, drawn under the routes as chart symbols; a new array when they load. */
+        /** Airfields drawn under the routes as chart symbols (every area's); a new array when they load. */
         private readonly airfields: () => ReadonlyArray<{ airfield: Airfield }> = () => [],
     ) {
         this.svg = document.createElementNS(SVG, 'svg');
@@ -146,16 +146,25 @@ export class MissionOverlay {
         if (!p) {
             return '';
         }
-        const shape = kind === 'start'
-            ? '<path d="M0,-10 L9,7 L-9,7 Z"'
+        // On a runway: a hollow ring round the airfield's chart symbol, which a
+        // filled marker would hide. In the air the start is drawn like any waypoint.
+        const onRunway = e.kind === 'runway';
+        const r = onRunway ? 17 : 9;
+        const shape = onRunway || kind === 'start'
+            ? `<circle r="${r}"`
             : '<rect x="-7" y="-7" width="14" height="14"';
-        const label = kind === 'start' ? name ?? '' : e.kind === 'runway' ? e.designator : '';
-        const text = kind === 'start' && e.kind === 'runway' ? `${label} · ${e.airfield} ${e.designator}` : label;
+        // Transparent, not none: the inside still grabs the pointer for dragging.
+        const fill = onRunway ? 'transparent' : picked ? colour : '#0d1a26';
+        const label = kind === 'start' ? name ?? '' : onRunway ? e.designator : '';
+        const text = kind === 'start' && onRunway ? `${label} · ${e.airfield} ${e.designator}` : label;
         const drag = flight === undefined ? '' : ` data-wp="${flight},${kind}" class="mission-wp"`;
         return `<g${drag} transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">`
-            + (picked ? '<circle r="15" fill="none" stroke="#ffffff" stroke-width="2"/>' : '')
-            + `${shape} fill="${picked ? colour : '#0d1a26'}" stroke="${colour}" stroke-width="2"/>`
-            + `<text x="13" dy="4" class="mission-wp-label" fill="${colour}">${escapeXml(text)}</text></g>`;
+            + (picked ? `<circle r="${r + 5}" fill="none" stroke="#ffffff" stroke-width="2"/>` : '')
+            + `${shape} fill="${fill}" stroke="${colour}" stroke-width="${onRunway ? 3 : 2}"/>`
+            // Numbered 0 like the panel's list; on a runway the chart symbol is inside instead.
+            + (kind === 'start' && !onRunway
+                ? `<text text-anchor="middle" dy="4" fill="${picked ? '#0d1a26' : colour}">0</text>` : '')
+            + `<text x="${r + 4}" dy="4" class="mission-wp-label" fill="${colour}">${escapeXml(text)}</text></g>`;
     }
 }
 

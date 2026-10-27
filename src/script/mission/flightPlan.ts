@@ -18,8 +18,8 @@ export const MISSION_VERSION = 1;
  */
 export const MAX_FLIGHTS = 13;
 export const MAX_WAYPOINTS = 100;
-const MAX_ALT_M = 20_000;
-const MAX_SPEED_MPS = 700;
+export const MAX_ALT_M = 20_000;
+export const MAX_SPEED_MPS = 700;
 const MAX_NAME = 80;
 
 export type FlightControl = 'ai' | 'player';

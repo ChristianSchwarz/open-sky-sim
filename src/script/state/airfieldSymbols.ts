@@ -29,12 +29,21 @@ const SILHOUETTE_STROKE = 4;
 /** Further out than this (m/px) small fields are left off and no field is named. */
 const GA_MAX_MPP = 250;
 const LABEL_MAX_MPP = 120;
+/** Symbols closer than this (px, centre to centre) overlap; the lesser field is left off. */
+const MIN_SEPARATION_PX = 2 * BAR_HALF;
+/** Which field keeps its symbol where two would overlap: lower first, then the longer runway. */
+const KIND_RANK: Record<string, number> = { international: 0, military: 1, regional: 2, ga: 4 };
 
-/** The symbols of `airfields` that fall within `width` x `height` (page px, from `left`). */
+/**
+ * The symbols of `airfields` that fall within `width` x `height` (page px,
+ * from `left`). Zoomed out, where symbols would overlap, only the biggest
+ * field of a cluster is drawn: international before military before
+ * regional before small, then the longest runway.
+ */
 export function airfieldSymbolsSvg(
     airfields: Iterable<Airfield>, pageOf: PageOf, mpp: number, left: number, width: number, height: number,
 ): string {
-    const parts: string[] = [];
+    const placed: Array<{ a: Airfield; runway: AirfieldRunway; p: { x: number; y: number }; at: FieldPageOf }> = [];
     for (const a of airfields) {
         if (a.kind === 'ga' && mpp > GA_MAX_MPP) {
             continue;
@@ -47,6 +56,16 @@ export function airfieldSymbolsSvg(
         if (!runway || !p || p.x < left - 40 || p.x > left + width + 40 || p.y < -40 || p.y > height + 40) {
             continue;
         }
+        placed.push({ a, runway, p, at });
+    }
+    placed.sort((u, v) => (KIND_RANK[u.a.kind] ?? 3) - (KIND_RANK[v.a.kind] ?? 3) || v.runway.lengthM - u.runway.lengthM);
+    const kept: Array<{ x: number; y: number }> = [];
+    const parts: string[] = [];
+    for (const { a, runway, p, at } of placed) {
+        if (kept.some(k => (k.x - p.x) ** 2 + (k.y - p.y) ** 2 < MIN_SEPARATION_PX ** 2)) {
+            continue;
+        }
+        kept.push(p);
         const body = a.kind === 'international'
             ? patternSvg(a, p, at)
             : ringSvg(a.kind, barAngleDeg(runway, at), paved(runway));

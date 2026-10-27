@@ -13,6 +13,7 @@ function editor(): MissionEditor {
         centre: () => ({ lat: 52.4, lon: 13.06 }),
         // A runway 'under' anything east of 13.5.
         runwayEndAt: (_lat, lon) => (lon > 13.5 ? RUNWAY : undefined),
+        runwayEnds: () => [RUNWAY],
     };
     return new MissionEditor(host);
 }

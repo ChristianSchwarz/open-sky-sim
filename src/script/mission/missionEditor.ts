@@ -1,5 +1,5 @@
 import { computed, signal } from '@angular/core';
-import { Flight, FlightEndpoint, MAX_FLIGHTS, MISSION_VERSION, Mission, Waypoint, validateMission } from './flightPlan';
+import { Flight, FlightEndpoint, MAX_ALT_M, MAX_FLIGHTS, MAX_SPEED_MPS, MISSION_VERSION, Mission, Waypoint, validateMission } from './flightPlan';
 import * as store from './missionStore';
 
 /** What a click on the map does: add a waypoint to the selected flight, or set its start or landing. */
@@ -34,6 +34,8 @@ export interface MissionEditorHost {
     centre(): { lat: number; lon: number };
     /** The runway end a click at (lat, lon) means, if it was on or by one. */
     runwayEndAt(lat: number, lon: number): RunwayEnd | undefined;
+    /** Every runway end that can be picked from a list, both directions of each runway. */
+    runwayEnds(): RunwayEnd[];
 }
 
 /**
@@ -123,7 +125,7 @@ export class MissionEditor {
     }
 
     updateWaypoint(i: number, j: number, patch: Partial<Waypoint>): void {
-        this.edit(m => { Object.assign(m.flights[i].waypoints[j], patch); });
+        this.edit(m => { Object.assign(m.flights[i].waypoints[j], clampFlight(patch)); });
     }
 
     removeWaypoint(i: number, j: number): void {
@@ -140,9 +142,51 @@ export class MissionEditor {
         this.edit(m => {
             const s = m.flights[i].start;
             if (s.kind === 'air') {
-                Object.assign(s, patch);
+                Object.assign(s, clampFlight(patch));
             }
         });
+    }
+
+    /** Put flight i's start or landing on a runway end picked from a list. */
+    setRunway(i: number, which: 'start' | 'land', end: RunwayEnd): void {
+        this.edit(m => { m.flights[i][which] = { kind: 'runway', ...end }; });
+    }
+
+    /** Start flight i in the air where its start is now (a runway start keeps its position). */
+    setAirStart(i: number): void {
+        this.edit(m => {
+            const s = m.flights[i].start;
+            if (s.kind !== 'air') {
+                m.flights[i].start = {
+                    kind: 'air', lat: s.lat, lon: s.lon, altM: DEFAULT_ALT_M, speedMps: DEFAULT_SPEED_MPS, headingDeg: 0,
+                };
+            }
+        });
+    }
+
+    /** Flight i's last turning point becomes its landing on `end`. */
+    lastToLanding(i: number, end: RunwayEnd): void {
+        this.edit(m => {
+            m.flights[i].waypoints.pop();
+            m.flights[i].land = { kind: 'runway', ...end };
+        });
+        if (i === this.selected() && typeof this.selectedPoint() === 'number') {
+            this.selectedPoint.set('land');
+        }
+    }
+
+    /** Flight i's landing becomes a turning point where it was; the flight then circles there. */
+    landingToTurningPoint(i: number): void {
+        this.edit(m => {
+            const f = m.flights[i];
+            if (f.land) {
+                f.waypoints.push({ lat: f.land.lat, lon: f.land.lon, altM: DEFAULT_ALT_M, speedMps: DEFAULT_SPEED_MPS });
+                delete f.land;
+            }
+        });
+        if (i === this.selected() && this.selectedPoint() === 'land') {
+            this.selectedPoint.set(this.mission().flights[i].waypoints.length - 1);
+        }
     }
 
     clearLanding(i: number): void {
@@ -271,4 +315,17 @@ export class MissionEditor {
             location.href = `index.html?mission=${encodeURIComponent(id)}`;
         }
     }
+}
+
+/** Altitude and speed held to what {@link validateMission} accepts, so a typed value cannot make the mission unsaveable. */
+function clampFlight<T extends { altM?: number; speedMps?: number }>(patch: T): T {
+    const out = { ...patch };
+    // Not a number at all is left alone for validation to report.
+    if (out.altM !== undefined && Number.isFinite(out.altM)) {
+        out.altM = Math.min(MAX_ALT_M, Math.max(0, out.altM));
+    }
+    if (out.speedMps !== undefined && Number.isFinite(out.speedMps)) {
+        out.speedMps = Math.min(MAX_SPEED_MPS, Math.max(1, out.speedMps));
+    }
+    return out;
 }

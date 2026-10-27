@@ -610,6 +610,8 @@ export class Game {
     private osmSkiJumps: SkiJumpCollider[] = [];
     /** Every airfield of this play area with its scene position; built or not. */
     private areaAirfields: Array<{ airfield: Airfield; x: number; z: number }> = [];
+    /** Every airfield of every area, for the F12 map's chart symbols. */
+    private chartAirfields: Array<{ airfield: Airfield }> = [];
     /** Airfields already built into the scene, or being built right now. */
     private readonly builtAirfields = new Set<Airfield>();
     private airfieldStreamBusy = false;
@@ -3694,9 +3696,10 @@ export class Game {
             area: this.playArea.area.name,
             centre: () => ({ ...centre }),
             runwayEndAt: (lat, lon) => this.runwayEndAt(lat, lon),
+            runwayEnds: () => this.runwayEnds(),
         });
         this.missionOverlay = new MissionOverlay(
-            this.mapView, editor, this.playerCamera.main, () => this.areaAirfields);
+            this.mapView, editor, this.playerCamera.main, () => this.chartAirfields);
         void mountMissionPanel(document.body.appendChild(document.createElement('rfs-mission-panel')), editor);
     }
 
@@ -3705,6 +3708,16 @@ export class Game {
      * nearer the click - the threshold a take-off rolls from or a landing
      * touches down after.
      */
+    /** Every runway end loaded around the map, both designators of each runway. */
+    private runwayEnds(): RunwayEnd[] {
+        const basis = this.planetTerrain.basis;
+        return this.sceneRunways.flatMap(r => {
+            const mid = geodeticOnSurfaceAtEnu(basis, r.center.x, -r.center.z);
+            return r.ref.split('/').filter(d => d).map(designator =>
+                ({ airfield: runwayKey(r), designator, lat: mid.lat, lon: mid.lon }));
+        });
+    }
+
     private runwayEndAt(lat: number, lon: number): RunwayEnd | undefined {
         const basis = this.planetTerrain.basis;
         const p = geodeticToWorld(basis, lat, lon, 0);
@@ -5538,6 +5551,8 @@ export class Game {
         const file = await this.planetTerrain.loadAirfields();
         this.spawnPanel.setSearchIndex(
             file.items.map(airfieldEntryOf), this.areaList, this.playArea.area.name);
+        // The F12 map charts every area's airfields, not only this one's.
+        this.chartAirfields = file.items.map(airfield => ({ airfield }));
         const here = airfieldsInArea(file, this.playArea.area.name);
         this.sceneRunways = sceneRunwaysOf(
             here, this.planetTerrain.basis, AIRFIELD_SURFACE_EPS_M);
