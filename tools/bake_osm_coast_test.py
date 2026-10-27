@@ -24,6 +24,7 @@ from bake_osm_coast import (
     REGION_CLASS_NONE,
     WATERWAY_FALLBACK_WIDTH_M,
     Bounds,
+    WaterBody,
     Watercourse,
     _clip_rect,
     _clip_worker_inline,
@@ -34,6 +35,7 @@ from bake_osm_coast import (
     encode_lvr,
     snap_bounds_to_tiles,
     tile_range_for_bounds,
+    thin_water_courses,
     tile_bounds,
     waterway_width_m,
 )
@@ -447,6 +449,52 @@ class SelfIntersectingWaterTest(unittest.TestCase):
         self.assertTrue(land.contains(Point(0.5, 0.25)))
         self.assertTrue(land.contains(Point(0.05, 0.05)))
         self.assertTrue(all(b.geom.is_valid for b in inland))
+
+
+class ThinWaterCoursesTest(unittest.TestCase):
+    """Water too narrow for the node grid gets a stroke down its middle."""
+
+    LAT = 51.63
+    # A z12 leaf cell on a 257-node tile, about 19 m.
+    CELL = (180.0 / 4096) / 256
+    BOX = box(13.50, 51.60, 13.60, 51.70)
+
+    def strip(self, half_m, x0=13.58, x1=13.584):
+        half = half_m / 110540.0
+        return box(x0, self.LAT - half, x1, self.LAT + half)
+
+    def strokes(self, *geoms, courses=()):
+        return thin_water_courses([WaterBody(g, True, 100.0) for g in geoms], list(courses),
+                                  self.CELL, self.BOX)
+
+    def test_a_9m_pond_becomes_one_stroke_its_own_width_and_length(self):
+        out = self.strokes(self.strip(4.5))
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(out[0].width_m, 9.0, delta=0.5)
+        length_m = out[0].line.length * 111320.0 * 0.6207
+        self.assertAlmostEqual(length_m, 276.0, delta=12.0)
+
+    def test_a_wide_lake_gets_none(self):
+        self.assertEqual(self.strokes(self.strip(100.0)), [])
+
+    def test_a_narrow_arm_off_a_wide_lake_gets_one(self):
+        lake = self.strip(100.0, x0=13.570, x1=13.575).union(self.strip(4.0, x1=13.584))
+        out = self.strokes(lake)
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(out[0].width_m, 8.0, delta=0.5)
+        self.assertGreater(out[0].line.bounds[2], 13.583)
+
+    def test_a_square_cornered_lake_gets_no_corner_tips(self):
+        self.assertEqual(self.strokes(box(13.58, 51.63, 13.585, 51.633)), [])
+
+    def test_water_an_existing_course_already_strokes_is_left_alone(self):
+        river = Watercourse(LineString([(13.579, self.LAT), (13.585, self.LAT)]), 8.0)
+        self.assertEqual(self.strokes(self.strip(4.0), courses=[river]), [])
+
+    def test_the_sliver_of_a_wide_lake_at_the_box_edge_gets_none(self):
+        # 6 m of a big lake inside the box, the rest beyond its south edge.
+        sliver = box(13.58, 51.60 - 0.01, 13.585, 51.60 + 6.0 / 110540.0)
+        self.assertEqual(self.strokes(sliver.intersection(self.BOX)), [])
 
 
 class RiverProfile(unittest.TestCase):

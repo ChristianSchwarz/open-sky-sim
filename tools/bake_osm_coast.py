@@ -173,6 +173,25 @@ COURSE_WIDTH_SAMPLES = 40
 COURSE_WIDTH_MIN_SAMPLES = 3
 COURSE_WIDTH_REACH_M = 1000.0
 
+# Stroking inland water too narrow for the node grid. See
+# :func:`thin_water_courses`. A strip at an angle to the grid only keeps a node
+# in every cross-section once it is sqrt(2) cells across, so up to two cells
+# counts as thin. The rest: overlap allowed between the stroke and the water
+# the grid can hold, the spacing floor for the medial axis, how many times
+# its corner forks are pruned and how long one may be (in steps), how
+# elongated a strip must be to read as one, how much longer than its mouth
+# onto wide water a thin piece must be, the narrowest stroke, and the
+# Douglas-Peucker tolerance on its line.
+THIN_WATER_MAX_CELLS = 2.0
+THIN_WATER_SEAM_M = 0.5
+THIN_WATER_MIN_STEP_M = 1.0
+THIN_WATER_PRUNE_PASSES = 3
+THIN_WATER_SPUR_STEPS = 3.0
+THIN_WATER_MIN_LENGTH_RATIO = 2.0
+THIN_WATER_MOUTH_RATIO = 3.0
+THIN_WATER_MIN_WIDTH_M = 1.0
+THIN_WATER_SIMPLIFY_M = 0.5
+
 # Douglas-Peucker tolerance for a watercourse centreline, in grid cells of the
 # level being written.
 #
@@ -585,6 +604,163 @@ def buffer_waterway(line: LineString, width_m: float, lat: float) -> Optional[Po
     if widened.is_empty or not isinstance(widened, Polygon):
         return None
     return widened
+
+
+def _medial_lines(piece: Polygon, step: float) -> List[LineString]:
+    """The medial axis of a thin polygon, in its own units, spurs pruned.
+
+    Voronoi edges of points spread along the boundary, kept where they lie
+    inside: for a strip that is the line down its middle, plus a fork to the
+    two corners at each end, which is pruned away.
+    """
+    boundary = piece.boundary
+    n = max(4, int(boundary.length / step))
+    pts = shapely.line_interpolate_point(boundary, np.linspace(0.0, boundary.length, n, endpoint=False),
+                                         normalized=False)
+    edges = shapely.voronoi_polygons(shapely.multipoints(pts), only_edges=True)
+    edges = [e for e in getattr(edges, 'geoms', [edges]) if isinstance(e, LineString)]
+    inside = prep(piece)
+    edges = [e for e in edges if inside.contains(e)]
+    if not edges:
+        return []
+    from shapely.ops import linemerge
+    lines = [edges[0]] if len(edges) == 1 else edges
+    for _ in range(THIN_WATER_PRUNE_PASSES):
+        merged = linemerge(lines)
+        lines = [merged] if isinstance(merged, LineString) else list(getattr(merged, 'geoms', []))
+        degree: Dict[Tuple[float, float], int] = {}
+        for line in lines:
+            for end in (line.coords[0], line.coords[-1]):
+                key = (round(end[0], 3), round(end[1], 3))
+                degree[key] = degree.get(key, 0) + 1
+        if len(lines) == 1:
+            break
+
+        def dangling(line: LineString) -> bool:
+            ends = [(round(c[0], 3), round(c[1], 3)) for c in (line.coords[0], line.coords[-1])]
+            return any(degree[e] == 1 for e in ends) and any(degree[e] > 1 for e in ends)
+
+        kept = [ln for ln in lines if not (dangling(ln) and ln.length < THIN_WATER_SPUR_STEPS * step)]
+        if len(kept) == len(lines):
+            break
+        lines = kept
+    return lines
+
+
+def thin_water_courses(bodies: Sequence['WaterBody'], courses: Sequence['Watercourse'],
+                       cell_deg: float, clip: Optional[Polygon] = None) -> List['Watercourse']:
+    """Strokes down the middle of inland water too narrow for the node grid.
+
+    The mesh bake cuts water into the terrain along a grid of nodes, and a
+    body only shows where a node lands inside it. A pond or a backwater under
+    about a cell and a half across therefore came out as a row of blue blobs
+    with grass between them (the Plumpmuehlteich in Doberlug-Kirchhain, 9 m
+    across on a 19 m grid). A centreline stroke is how a narrow river already
+    reaches the screen, so the narrow parts of every body get one too, at the
+    width measured off the body itself.
+
+    `cell_deg` is the grid cell of the level being written, in degrees of
+    latitude. Water within reach of an existing course is already stroked and
+    is left alone. `clip`, in lon/lat, is where the bodies were cut off: a
+    body there is treated as carrying on past it, so the sliver of a wide lake
+    left at the edge of a box is not mistaken for a narrow one.
+    """
+    reach_m = cell_deg * 110540.0 * THIN_WATER_MAX_CELLS / 2.0
+    if not bodies or reach_m <= 0.0:
+        return []
+    course_tree = STRtree([c.line for c in courses]) if courses else None
+    out: List[Watercourse] = []
+    for body in bodies:
+        geom = body.geom
+        for part in getattr(geom, 'geoms', [geom]):
+            if not isinstance(part, Polygon) or part.is_empty:
+                continue
+            lon0, lat0 = part.representative_point().coords[0]
+            kx = 111320.0 * max(0.05, math.cos(math.radians(lat0)))
+            ky = 110540.0
+
+            def metres(g):
+                return affine_scale(g, xfact=kx, yfact=ky, origin=(lon0, lat0))
+
+            def degrees(g):
+                return affine_scale(g, xfact=1.0 / kx, yfact=1.0 / ky, origin=(lon0, lat0))
+
+            water = metres(part)
+            wide = water
+            if clip is not None:
+                frame = metres(clip)
+                outside = water.envelope.buffer(4.0 * reach_m).difference(frame)
+                if not outside.is_empty:
+                    wide = water.union(outside)
+            try:
+                opened = wide.buffer(-reach_m, resolution=4).buffer(reach_m, resolution=4)
+                thin = water.difference(opened.buffer(THIN_WATER_SEAM_M, resolution=2))
+            except Exception:
+                continue
+            if thin.is_empty:
+                continue
+            if course_tree is not None:
+                near = [courses[i] for i in course_tree.query(degrees(thin.envelope))]
+                if near:
+                    stroked = unary_union([metres(c.line).buffer(c.width_m / 2.0 + reach_m, resolution=2)
+                                           for c in near])
+                    thin = thin.difference(stroked)
+            attached = prep(opened.buffer(2.0 * THIN_WATER_SEAM_M, resolution=2))
+            for piece in getattr(thin, 'geoms', [thin]):
+                if not isinstance(piece, Polygon) or piece.area <= 0.0:
+                    continue
+                rough_width = 2.0 * piece.area / max(piece.length, 1e-9)
+                step = max(THIN_WATER_MIN_STEP_M, rough_width / 2.0)
+                lines = _medial_lines(piece, step)
+                # The erosion also takes the tip off every sharp corner of a
+                # wide lake. Such a tip is about as long as it is joined to
+                # the rest, while an arm or a backwater is far longer than its
+                # mouth - and the wide water already shows a tip, so only the
+                # latter needs a stroke.
+                medial = sum(ln.length for ln in lines)
+                mouth = piece.boundary.intersection(opened.buffer(2.0 * THIN_WATER_SEAM_M, resolution=2)).length \
+                    if attached.intersects(piece) else 0.0
+                if medial < max(2.0 * reach_m / THIN_WATER_MAX_CELLS, THIN_WATER_MOUTH_RATIO * mouth):
+                    continue
+                for line in lines:
+                    width = _strip_width(line, water)
+                    if width is None or line.length < THIN_WATER_MIN_LENGTH_RATIO * width:
+                        continue
+                    line = _extend_ends(line, width / 2.0).intersection(water)
+                    for seg in getattr(line, 'geoms', [line]):
+                        if isinstance(seg, LineString) and seg.length >= width:
+                            out.append(Watercourse(degrees(seg.simplify(THIN_WATER_SIMPLIFY_M)), width))
+    return out
+
+
+def _strip_width(line: LineString, water: Polygon) -> Optional[float]:
+    """Twice the median distance from points along `line` to the shore of `water`."""
+    n = min(COURSE_WIDTH_SAMPLES, max(3, int(line.length / 5.0)))
+    pts = shapely.line_interpolate_point(line, (np.arange(n) + 0.5) / n, normalized=True)
+    d = shapely.distance(pts, water.boundary)
+    if len(d) == 0:
+        return None
+    return max(THIN_WATER_MIN_WIDTH_M, 2.0 * float(np.median(d)))
+
+
+def _extend_ends(line: LineString, by: float) -> LineString:
+    """`line` grown `by` past each end, along its end segments.
+
+    Pruning the corner forks takes about half a width off each end of the
+    strip; growing it back, then clipping to the water, restores the tip.
+    """
+    coords = list(line.coords)
+    if len(coords) < 2 or by <= 0.0:
+        return line
+
+    def grown(a, b):
+        dx, dy = a[0] - b[0], a[1] - b[1]
+        norm = math.hypot(dx, dy)
+        if norm <= 0.0:
+            return a
+        return (a[0] + dx / norm * by, a[1] + dy / norm * by)
+
+    return LineString([grown(coords[0], coords[1])] + coords + [grown(coords[-1], coords[-2])])
 
 
 def _water_kind(tags: dict) -> Optional[str]:
@@ -2346,6 +2522,10 @@ def _ancestor_worker(task: AncestorTask) -> 'Tuple[int, int, ClipResult]':
     out_dir, tile_size, z, x, y, grid, tol, line_tol = task
     land, inland, courses, claims = child_inputs(out_dir, z, x, y)
     land, inland, courses = coarse_inputs(land, inland, courses, z, tile_size)
+    # Water wide enough for the level below can still be too narrow for this
+    # one; the children's strokes cover the rest.
+    cell = (180.0 / (1 << z)) / max(1, tile_size - 1)
+    courses = courses + thin_water_courses(inland, courses, cell, tile_bounds(z, x, y).as_box())
     return x, y, _clip_worker_inline(
         out_dir, tile_size, land, inland, courses, z, x, y, grid, tol, line_tol, child_claims=claims)
 
@@ -2663,6 +2843,11 @@ def bake(args: argparse.Namespace) -> int:
             inland, courses, dem, cell_deg, manifest.get('seaLevel', 0.0))
         print(f'rivers      {profiled} flowing bodies given a downhill profile '
               f'({sum(1 for b in inland if not b.flat) - profiled} left on the DEM)')
+        # After the profiles too: these strokes are not rivers, and must not
+        # be chained into one.
+        thin = thin_water_courses(inland, courses, cell_deg, bbox.as_box())
+        courses = list(courses) + thin
+        print(f'thin water  {len(thin)} strokes down water too narrow for the grid')
 
     index_path = os.path.join(out_dir, manifest.get('indexPath', 'index.bin'))
     pdm_tiles = scan_pdm_tiles(out_dir, min_zoom, max_zoom)
