@@ -3621,7 +3621,7 @@ export class Game {
                 centre.lon = g.lon;
             },
             centre: () => geodeticToWorld(basis(), centre.lat, centre.lon, 0),
-            worldOf: (lat, lon) => geodeticToWorld(basis(), lat, lon, 0),
+            worldOf: (lat, lon, heightM = 0) => geodeticToWorld(basis(), lat, lon, heightM),
             geodeticOf: (x, z) => geodeticOnSurfaceAtEnu(basis(), x, -z),
             writeRoute: (lat, lon) => writeCameraRouteToLocation({
                 lat, lon, altM: fixed.getPosition(this._fixedCameraPos).y, headingDeg: 0, pitchDeg: -89,

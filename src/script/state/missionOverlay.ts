@@ -99,7 +99,7 @@ export class MissionOverlay {
         this.drawn = key;
         // Placed over the map only, so routes off its left edge do not run over the panel.
         const box = this.svg.getBoundingClientRect();
-        const parts = [airfieldSymbolsSvg(this.airfields().map(a => a.airfield), (lat, lon) => this.map.pageOf(lat, lon),
+        const parts = [airfieldSymbolsSvg(this.airfields().map(a => a.airfield), (lat, lon, h) => this.map.pageOf(lat, lon, h),
             this.map.metresPerPixel, box.left, box.width, box.height)];
         this.editor.mission().flights.forEach((f, i) => parts.push(this.flightSvg(f, i)));
         this.svg.innerHTML = `<g transform="translate(${-box.left},0)">${parts.join('')}</g>`;

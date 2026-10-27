@@ -91,8 +91,8 @@ export interface MapViewHost {
     pan(dx: number, dz: number): void;
     /** The view centre, in scene metres. */
     centre(): THREE.Vector3;
-    /** Scene position of a geodetic point on the ellipsoid. */
-    worldOf(lat: number, lon: number): THREE.Vector3;
+    /** Scene position of a geodetic point, `heightM` above the ellipsoid (0 when not given). */
+    worldOf(lat: number, lon: number, heightM?: number): THREE.Vector3;
     /** Geodetic of a scene point on the ground straight below it. */
     geodeticOf(x: number, z: number): { lat: number; lon: number };
     /** Rewrite the page's camera route to this centre. */
@@ -247,10 +247,14 @@ export class MapView {
     /** A left click on the ground, not a drag or a double-click (the waypoint editor's). */
     onGroundClick: ((lat: number, lon: number) => void) | undefined;
 
-    /** Page position of a point on the ground, or undefined behind the camera. */
-    pageOf(lat: number, lon: number): { x: number; y: number } | undefined {
+    /**
+     * Page position of a point on the ground, or undefined behind the camera.
+     * `heightM` is the ground's height there: on a tilted map a point drawn at
+     * 0 slides off ground that stands higher.
+     */
+    pageOf(lat: number, lon: number, heightM = 0): { x: number; y: number } | undefined {
         const c = this.host.container;
-        const p = this.host.worldOf(lat, lon).project(this.host.camera);
+        const p = this.host.worldOf(lat, lon, heightM).project(this.host.camera);
         if (p.z > 1) {
             return undefined;
         }
