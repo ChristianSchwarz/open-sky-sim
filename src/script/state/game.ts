@@ -2906,11 +2906,7 @@ export class Game {
             // round the aircraft would carry them along with it.
             if (!this.cockpitPadlock
                 && this.view !== PlayerViewState.FLY_BY && this.view !== PlayerViewState.TOWER
-                && (this.view !== PlayerViewState.AI_CHASE
-                    && (this.exteriorEnemyLock && this.isF2ExteriorView()
-                        || this.viewYaw !== 0 || this.viewPitch !== 0 || this.viewZoom !== 1)
-                    || this.view === PlayerViewState.AI_CHASE
-                        && (this.viewYaw !== 0 || this.viewPitch !== 0 || this.viewZoom !== 1))) {
+                && (this.viewYaw !== 0 || this.viewPitch !== 0 || this.viewZoom !== 1)) {
                 this.orbitCameraAroundAircraft();
             }
             this.playerCamera.update();
@@ -3212,13 +3208,7 @@ export class Game {
             .copy(this._orbitPivot)
             .add(this._orbitOffset);
         this.playerCamera.main.up.copy(UP);
-        if (this.view === PlayerViewState.AI_CHASE && this.aiOpponent?.enabled) {
-            this.playerCamera.main.lookAt(this.player.getDisplayPosition());
-        } else if (this.exteriorEnemyLock && this.isF2ExteriorView() && this.aiOpponent?.enabled) {
-            this.playerCamera.main.lookAt(this.aiOpponent.getDisplayPosition());
-        } else {
-            this.playerCamera.main.lookAt(this._orbitPivot);
-        }
+        this.playerCamera.main.lookAt(this._orbitPivot);
     }
 
     private isF2ExteriorView(): boolean {
@@ -3227,7 +3217,7 @@ export class Game {
     }
 
     private toggleExteriorEnemyLock(): void {
-        if (!this.aiOpponent?.enabled) {
+        if (!this.exteriorEnemyLock && !this.exteriorLockPosition()) {
             return;
         }
         this.exteriorEnemyLock = !this.exteriorEnemyLock;
@@ -3235,10 +3225,19 @@ export class Game {
         this.syncExteriorEnemyLockTarget();
     }
 
+    private readonly _exteriorLockPos = new THREE.Vector3();
+
+    /** What the F2 lock follows: the T-selected target, else the AI opponent; undefined when neither is there. */
+    private exteriorLockPosition(): THREE.Vector3 | undefined {
+        const target = this.player.weaponsTarget;
+        if (target) {
+            return this._exteriorLockPos.addVectors(target.position, target.localCenter);
+        }
+        return this.aiOpponent?.enabled ? this.aiOpponent.getDisplayPosition() : undefined;
+    }
+
     private syncExteriorEnemyLockTarget(): void {
-        const target = this.exteriorEnemyLock && this.aiOpponent?.enabled
-            ? this.aiOpponent
-            : undefined;
+        const target = this.exteriorEnemyLock ? () => this.exteriorLockPosition() : undefined;
         (this.cameraUpdaters.get(PlayerViewState.EXTERIOR_BEHIND) as ExteriorFrontBehindCameraUpdater)
             .setLookAtTarget(target);
         (this.cameraUpdaters.get(PlayerViewState.EXTERIOR_FRONT) as ExteriorFrontBehindCameraUpdater)

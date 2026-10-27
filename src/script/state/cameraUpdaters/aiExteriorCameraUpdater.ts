@@ -19,8 +19,10 @@ const EXTERIOR_CHASE_DISTANCE_M = 40;
 const EXTERIOR_CHASE_HEIGHT_M = 5;
 
 /**
- * F6 exterior view — mirror of F2, but orbiting the AI opponent and looking at
- * the player. Press F6 again to toggle behind/front of the enemy.
+ * F6 exterior view: behind the AI opponent on the line from its target (the
+ * player) through it, aimed at the AI and so straight on at the target past
+ * it, whatever their geometry; the numpad orbit turns round the AI, which
+ * stays centred. Press F6 again for the reverse: from the target's side.
  */
 export class AiExteriorCameraUpdater extends CameraUpdater {
 
@@ -43,22 +45,21 @@ export class AiExteriorCameraUpdater extends CameraUpdater {
         const subjectPos = this.orbitSubject.getDisplayPosition();
         const playerPos = this.actor.getDisplayPosition();
 
-        this._v
-            .copy(FORWARD)
-            .applyQuaternion(this.orbitSubject.getDisplayQuaternion())
-            .setY(0);
-        if (this._v.lengthSq() < 1e-6) {
-            this._v.set(0, 0, 1);
-        } else {
-            this._v.normalize();
+        // From the target through the AI; the AI's own nose when they coincide.
+        this._v.subVectors(subjectPos, playerPos);
+        if (this._v.lengthSq() < 1) {
+            this._v.copy(FORWARD).applyQuaternion(this.orbitSubject.getDisplayQuaternion()).negate();
+        }
+        this._v.normalize();
+        if (this.heading === ExteriorViewHeading.FRONT) {
+            this._v.negate();
         }
 
-        this.camera.position.copy(subjectPos);
-        this.camera.lookAt(playerPos);
+        this.camera.up.copy(UP);
         this.camera.position
-            .addScaledVector(UP, EXTERIOR_CHASE_HEIGHT_M)
-            .addScaledVector(this._v, EXTERIOR_CHASE_DISTANCE_M
-                * (this.heading === ExteriorViewHeading.BACK ? 1 : -1));
-        this.camera.lookAt(playerPos);
+            .copy(subjectPos)
+            .addScaledVector(this._v, EXTERIOR_CHASE_DISTANCE_M)
+            .addScaledVector(UP, EXTERIOR_CHASE_HEIGHT_M);
+        this.camera.lookAt(subjectPos);
     }
 }

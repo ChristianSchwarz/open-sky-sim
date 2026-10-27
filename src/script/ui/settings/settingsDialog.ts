@@ -121,7 +121,7 @@ const VIEWS_HELP: HelpEntry[] = [
     { keys: ['F3'], action: 'Fly-by (press again for a new pass)' },
     { keys: ['F4'], action: 'Close chase, rolling with the aircraft' },
     { keys: ['F5'], action: 'Combat: from behind you towards the target' },
-    { keys: ['F6'], action: 'Exterior back/front of AI plane (looks at player)' },
+    { keys: ['F6'], action: 'Behind the AI plane, facing you past it (numpad turns round it); again: from your side' },
     { keys: ['F7'], action: 'Tower: from the nearest airfield or the carrier' },
     { keys: ['F8'], action: 'Target: from the target back at you' },
     { keys: ['F9'], action: 'Carrier, over the stern' },
@@ -131,7 +131,8 @@ const VIEWS_HELP: HelpEntry[] = [
     { keys: ['4'], action: 'To/from target' },
     { keys: ['Num 4', 'Num 6', 'Num 8', 'Num 2'], action: 'Move camera around aircraft' },
     { keys: ['Num 5'], action: 'Recenter camera' },
-    { keys: ['Num *', 'Num /'], action: 'Zoom in / out (F1: padlock target, F2: lock/unlock on enemy)' },
+    { keys: ['Num *', 'Num /'], action: 'Zoom in / out' },
+    { keys: ['Num Enter'], action: 'F1: padlock the target; F2: lock on the target (or the enemy) behind your aircraft' },
 ];
 
 /** A dataset the world is built from, as the About tab credits it. */
