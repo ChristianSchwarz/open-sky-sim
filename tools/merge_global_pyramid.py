@@ -55,7 +55,10 @@ BOX_EPS = 1e-9
 
 
 def area_boxes(manifest: dict) -> List[Box]:
-    return [(a['west'], a['south'], a['east'], a['north']) for a in manifest.get('areas', [])]
+    # A merged area (Settings -> World -> merge) is the union of its `parts`;
+    # its own box also spans the unbaked corners between them.
+    return [(p['west'], p['south'], p['east'], p['north'])
+            for a in manifest.get('areas', []) for p in (a.get('parts') or [a])]
 
 
 def inside_mask(z: int, x: int, y: int, n: int, boxes: List[Box]) -> np.ndarray:

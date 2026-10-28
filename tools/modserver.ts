@@ -20,8 +20,8 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { unzipSync } from 'fflate';
 import {
-    areasHandler, ensureTerrain, importStream, osmExtractsHandler, osmTile, startDelete, startImport,
-    terrainBootstrapHandler,
+    areasHandler, ensureTerrain, importStream, mergeAreas, osmExtractsHandler, osmTile, startDelete,
+    startImport, terrainBootstrapHandler,
 } from './areaImport';
 import { deleteMissionHandler, getMissionHandler, missionsHandler, saveMissionHandler } from './missions';
 
@@ -1021,6 +1021,7 @@ app.get('/api/areas', areasHandler);
 app.get('/api/osm-extracts', osmExtractsHandler);
 app.post('/api/import-area', express.json(), startImport);
 app.post('/api/delete-area', express.json(), startDelete);
+app.post('/api/merge-areas', express.json(), mergeAreas);
 app.get('/api/import-area/:id', importStream);
 app.get('/api/terrain-bootstrap', terrainBootstrapHandler);
 ensureTerrain();

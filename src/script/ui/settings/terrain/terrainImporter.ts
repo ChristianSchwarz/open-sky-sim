@@ -31,17 +31,25 @@ import { TerrainMap } from './terrainMap';
     <p class="m-0 font-mono text-xs opacity-70">{{ readout() }}</p>
 
     @if (service.areas().length > 0) {
-        <mat-chip-set aria-label="Baked areas">
-            @for (area of service.areas(); track area.name) {
-                <mat-chip [removable]="canDelete()" [disabled]="service.running()"
-                    (removed)="confirmDelete(area.name)">
-                    {{ area.name }}
-                    @if (canDelete()) {
-                        <button matChipRemove type="button" [attr.aria-label]="'Delete ' + area.name">×</button>
-                    }
-                </mat-chip>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <mat-chip-listbox multiple aria-label="Baked areas" [disabled]="service.running()"
+                [value]="service.picked()" (change)="service.picked.set($event.value)">
+                @for (area of service.areas(); track area.name) {
+                    <mat-chip-option [value]="area.name" [removable]="canDelete()"
+                        (removed)="confirmDelete(area.name)">
+                        {{ area.name }}
+                        @if (canDelete()) {
+                            <button matChipRemove type="button" [attr.aria-label]="'Delete ' + area.name">×</button>
+                        }
+                    </mat-chip-option>
+                }
+            </mat-chip-listbox>
+            @if (service.picked().length >= 2) {
+                <button mat-stroked-button type="button" [disabled]="service.running()"
+                    [title]="'Join into one area called ' + mergeName()"
+                    (click)="merge()">Merge into {{ mergeName() }}</button>
             }
-        </mat-chip-set>
+        </div>
     } @else {
         <p class="m-0 text-sm opacity-70">Nothing baked yet.</p>
     }
@@ -83,6 +91,9 @@ export class TerrainImporter {
     /** Deleting the last area would leave nothing to fly over. */
     readonly canDelete = computed(() => this.service.areas().length > 1);
 
+    /** The name field if filled in, else the first area ticked keeps its name. */
+    readonly mergeName = computed(() => this.service.name().trim() || this.service.picked()[0] || '');
+
     readonly readout = computed(() => {
         const selection = this.service.selection();
         if (!selection) {
@@ -111,6 +122,10 @@ export class TerrainImporter {
 
     startImport(): void {
         void this.service.startImport();
+    }
+
+    merge(): void {
+        void this.service.mergeAreas(this.service.picked(), this.mergeName());
     }
 
     confirmDelete(name: string): void {

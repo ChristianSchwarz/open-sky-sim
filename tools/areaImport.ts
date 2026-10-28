@@ -4,6 +4,7 @@
 //   GET  /api/areas          the areas the baked pyramid already holds
 //   POST /api/import-area    start a bake for a bbox; returns a job id
 //   POST /api/delete-area    remove a baked area; returns a job id
+//   POST /api/merge-areas    join overlapping areas into one (no bake; answers at once)
 //   GET  /api/import-area/:id  server-sent progress for that job (either kind)
 //
 // The bake is the same command line documented in tools/README.md, run stage by
@@ -15,12 +16,14 @@ import { Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { ChildProcess, spawn } from 'child_process';
+import { MISSIONS_DIR } from './missions';
 
 const PROJECT_ROOT = path.dirname(__dirname);
 const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 const IMPORTS_DIR = path.join(PROJECT_ROOT, 'data', 'imports');
 const OSM_CACHE = path.join(PROJECT_ROOT, 'tools', 'osm-cache');
 const TERRAIN_MANIFEST = path.join(PROJECT_ROOT, 'assets', 'terrain', 'manifest.json');
+const PLANET_MANIFEST = path.join(PROJECT_ROOT, 'assets', 'planet', 'manifest.json');
 
 // openstreetmap.org asks for a real identifying User-Agent and no bulk
 // downloading. An area picker browses a few hundred tiles at most and every one
@@ -87,6 +90,12 @@ export interface Area {
     south: number;
     east: number;
     north: number;
+    /**
+     * The boxes actually baked, on a merged area. Its own box is their
+     * bounding box and also spans the unbaked corners between them, so
+     * delete_area.py and merge_global_pyramid.py read these instead.
+     */
+    parts?: Array<Omit<Area, 'name' | 'parts'>>;
 }
 
 type JobState = 'running' | 'done' | 'failed';
@@ -197,6 +206,148 @@ export function readAreas(): { areas: Area[]; coverage?: Area } {
 
 export function areasHandler(_req: Request, res: Response): void {
     res.json(readAreas());
+}
+
+// --- merging areas -----------------------------------------------------------
+
+function boxesTouch(a: Area, b: Area): boolean {
+    return a.west <= b.east && b.west <= a.east && a.south <= b.north && b.south <= a.north;
+}
+
+/**
+ * The `areas` list with `names` replaced by one area called `name`, or an
+ * error. The areas must overlap (or share an edge) as one connected group:
+ * the merged box is their bounding box, and two areas an ocean apart would
+ * get one origin for both and a box spanning the sea between them.
+ *
+ * Nothing is baked. Tiles are one global pyramid that every area draws from,
+ * so an area is only a name and a box over it - which is all this rewrites.
+ */
+export function mergeAreaEntries(
+    areas: readonly Area[], names: readonly string[], name: string,
+): { areas: Area[] } | { error: string } {
+    const unique = [...new Set(names)];
+    if (unique.length < 2) {
+        return { error: 'pick at least two areas to merge' };
+    }
+    const picked: Area[] = [];
+    for (const n of unique) {
+        const a = areas.find(x => x.name === n);
+        if (!a) {
+            return { error: `no area called "${n}"` };
+        }
+        picked.push(a);
+    }
+    if (!name || slug(name).length === 0) {
+        return { error: 'give the merged area a name' };
+    }
+    if (areas.some(a => a.name === name) && !unique.includes(name)) {
+        return { error: `an area called "${name}" already exists` };
+    }
+
+    const reached = new Set([0]);
+    for (let grew = true; grew;) {
+        grew = false;
+        for (let i = 0; i < picked.length; i++) {
+            if (!reached.has(i) && [...reached].some(j => boxesTouch(picked[i], picked[j]))) {
+                reached.add(i);
+                grew = true;
+            }
+        }
+    }
+    if (reached.size < picked.length) {
+        const apart = picked.filter((_, i) => !reached.has(i)).map(a => a.name).join(', ');
+        return { error: `${apart} does not overlap the others` };
+    }
+
+    const parts = picked.flatMap(a => a.parts ?? [{
+        west: a.west, south: a.south, east: a.east, north: a.north,
+    }]);
+    const merged: Area = {
+        name,
+        west: Math.min(...parts.map(p => p.west)),
+        south: Math.min(...parts.map(p => p.south)),
+        east: Math.max(...parts.map(p => p.east)),
+        north: Math.max(...parts.map(p => p.north)),
+        parts,
+    };
+    const kept = areas.filter(a => !unique.includes(a.name));
+    kept.push(merged);
+    kept.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    return { areas: kept };
+}
+
+/** Rename the `area` tag on every record that carried one of `from`. */
+function retag(items: unknown, from: readonly string[], to: string): number {
+    if (!Array.isArray(items)) {
+        return 0;
+    }
+    let n = 0;
+    for (const item of items) {
+        const tagged = item as { area?: unknown } | null;
+        if (tagged && typeof tagged.area === 'string' && from.includes(tagged.area)) {
+            tagged.area = to;
+            n++;
+        }
+    }
+    return n;
+}
+
+export function mergeAreas(req: Request, res: Response): void {
+    const busy = runningJob();
+    if (busy) {
+        res.status(409).json({ ok: false, error: `a job is already running (${busy.name})` });
+        return;
+    }
+    const names: string[] = Array.isArray(req.body?.names)
+        ? req.body.names.filter((n: unknown): n is string => typeof n === 'string') : [];
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const result = mergeAreaEntries(readAreas().areas, names, name);
+    if ('error' in result) {
+        res.status(400).json({ ok: false, error: result.error });
+        return;
+    }
+
+    // Both trees record the areas, and the airfields carry the name they
+    // were baked under: the spawn search offers "fly here" by matching it.
+    let airfields = 0;
+    for (const file of [PLANET_MANIFEST, TERRAIN_MANIFEST]) {
+        if (!fs.existsSync(file)) {
+            continue;
+        }
+        const m = JSON.parse(fs.readFileSync(file, 'utf8'));
+        m.areas = result.areas;
+        airfields += retag(m.airfields?.items, names, name);
+        fs.writeFileSync(file, JSON.stringify(m, null, 2) + '\n');
+    }
+    const terrain = JSON.parse(fs.readFileSync(TERRAIN_MANIFEST, 'utf8'));
+    if (typeof terrain.airfields?.path === 'string') {
+        const file = path.join(path.dirname(TERRAIN_MANIFEST), terrain.airfields.path);
+        if (fs.existsSync(file)) {
+            const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+            retag(doc.items, names, name);
+            fs.writeFileSync(file, JSON.stringify(doc));
+        }
+    }
+
+    // Saved missions name the area they are flown in.
+    let missions = 0;
+    if (fs.existsSync(MISSIONS_DIR)) {
+        for (const f of fs.readdirSync(MISSIONS_DIR).filter(f => f.endsWith('.json'))) {
+            const file = path.join(MISSIONS_DIR, f);
+            try {
+                const m = JSON.parse(fs.readFileSync(file, 'utf8'));
+                if (names.includes(m?.area)) {
+                    m.area = name;
+                    fs.writeFileSync(file, JSON.stringify(m, null, 2) + '\n');
+                    missions++;
+                }
+            } catch {
+                // Not a mission this can read; leave it alone.
+            }
+        }
+    }
+    res.json({ ok: true, airfields, missions });
 }
 
 // --- OSM extract coverage ---------------------------------------------------

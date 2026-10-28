@@ -26,7 +26,7 @@ from bake_planet_dem import (
     unpack_index,
     write_tile,
 )
-from delete_area import exclusive_tiles, main, pack_full_index
+from delete_area import area_parts, exclusive_tiles, keeps_point, main, pack_full_index
 
 TILE_SIZE = 5
 SEA = 0.0
@@ -200,6 +200,19 @@ class DeleteAreaTest(unittest.TestCase):
         self.assertEqual(exclusive_tiles(2, box, [neighbour], present), {(0, 0)})
         overlapping = Bounds(-160.0, 45.0, -135.0, 90.0)
         self.assertEqual(exclusive_tiles(2, box, [overlapping], present), set())
+
+    def test_merged_area_claims_only_its_parts(self) -> None:
+        # Two overlapping boxes merged into an L: the bounding box also
+        # covers the empty corner at (15, 15), which no part baked.
+        merged = {'name': 'L', 'west': 0, 'south': 0, 'east': 20, 'north': 20,
+                  'parts': [{'west': 0, 'south': 0, 'east': 20, 'north': 10},
+                            {'west': 0, 'south': 0, 'east': 10, 'north': 20}]}
+        parts = area_parts(merged)
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(len(area_parts(AREA_A)), 1)
+        corner = {'lat': 15.0, 'lon': 15.0}
+        self.assertTrue(keeps_point(corner, parts, []))
+        self.assertFalse(keeps_point({'lat': 5.0, 'lon': 15.0}, parts, []))
 
     def test_pack_full_index_keeps_empty_levels_in_place(self) -> None:
         packed = pack_full_index({0: {(0, 0)}, 2: {(3, 1)}}, 0, 2)

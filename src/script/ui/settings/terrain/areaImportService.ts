@@ -65,6 +65,8 @@ export class AreaImportService {
     readonly running = signal(false);
     readonly selection = signal<Box | undefined>(undefined);
     readonly name = signal('');
+    /** Baked areas ticked in the chip list, for Merge. */
+    readonly picked = signal<string[]>([]);
     /** Geofabrik regions already downloaded locally, so the map can shade them. */
     readonly extracts = signal<Area[]>([]);
     readonly progress = signal<ImportProgress | undefined>(undefined);
@@ -154,6 +156,36 @@ export class AreaImportService {
             name: this.name().trim(),
             bbox: [b.west, b.south, b.east, b.north],
         }, 'Reload the page and pick it under Settings -> World -> Area.');
+    }
+
+    /**
+     * Join overlapping areas into one. Only the area lists and the names on
+     * airfields and missions change - the tiles are already one pyramid - so
+     * this answers at once instead of starting a job.
+     */
+    async mergeAreas(names: string[], name: string): Promise<void> {
+        if (this.running()) {
+            return;
+        }
+        this.lastLineWasProgress = false;
+        try {
+            const res = await fetch('/api/merge-areas', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ names, name }),
+            });
+            const reply = await res.json();
+            if (!res.ok || !reply.ok) {
+                throw new Error(reply.error ?? `server said ${res.status}`);
+            }
+            this.picked.set([]);
+            await this.loadAreas();
+            this.append(`merged ${names.join(' + ')} into "${name}" `
+                + `(${reply.airfields} airfields, ${reply.missions} missions renamed). `
+                + 'Reload the page to fly it.');
+        } catch (err) {
+            this.append(`could not merge: ${(err as Error).message}`);
+        }
     }
 
     async deleteArea(name: string): Promise<void> {

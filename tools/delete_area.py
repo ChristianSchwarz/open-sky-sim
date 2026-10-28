@@ -66,6 +66,12 @@ def area_box(a: dict) -> Bounds:
     return Bounds(float(a['west']), float(a['south']), float(a['east']), float(a['north']))
 
 
+def area_parts(a: dict) -> List[Bounds]:
+    """The boxes an area actually baked: a merged area lists them as `parts`,
+    and its own box also spans the unbaked corners between them."""
+    return [area_box(p) for p in (a.get('parts') or [a])]
+
+
 def box_contains(b: Bounds, lat: float, lon: float) -> bool:
     return b.west <= lon <= b.east and b.south <= lat <= b.north
 
@@ -135,12 +141,12 @@ def remove_tile_files(root: str, z: int, x: int, y: int, exts: Sequence[str]) ->
     return removed
 
 
-def keeps_point(item: dict, box: Bounds, remaining: Sequence[Bounds]) -> bool:
+def keeps_point(item: dict, boxes: Sequence[Bounds], remaining: Sequence[Bounds]) -> bool:
     """Whether a lat/lon record survives the delete (inclusive containment)."""
     lat, lon = item.get('lat'), item.get('lon')
     if lat is None or lon is None:
         return True
-    if not box_contains(box, float(lat), float(lon)):
+    if not any(box_contains(b, float(lat), float(lon)) for b in boxes):
         return True
     return any(box_contains(r, float(lat), float(lon)) for r in remaining)
 
@@ -182,7 +188,8 @@ def delete(args: argparse.Namespace) -> int:
         return 2
 
     remaining = [a for a in areas if a.get('name') != args.name]
-    remaining_boxes = [area_box(a) for a in remaining]
+    remaining_boxes = [b for a in remaining for b in area_parts(a)]
+    parts = area_parts(target)
     box = area_box(target)
     print(f'area        {args.name}: lon [{box.west:.5f}, {box.east:.5f}] '
           f'lat [{box.south:.5f}, {box.north:.5f}]')
@@ -198,11 +205,13 @@ def delete(args: argparse.Namespace) -> int:
         index = unpack_index(fh.read())
     total_before = sum(len(v) for v in index.values())
 
-    delete_now = exclusive_tiles(
-        max_zoom, box, remaining_boxes, index.get(max_zoom, set()))
+    delete_now: TileSet = set()
+    for part in parts:
+        delete_now |= exclusive_tiles(
+            max_zoom, part, remaining_boxes, index.get(max_zoom, set()))
     overlap = len([1 for xy in index.get(max_zoom, set())
                    if xy not in delete_now
-                   and tile_bounds(max_zoom, *xy).intersects(box)])
+                   and any(tile_bounds(max_zoom, *xy).intersects(p) for p in parts)])
     print(f'level {max_zoom:2d}    {len(delete_now)} tiles exclusive to it'
           + (f', {overlap} shared with a remaining area stay' if overlap else ''))
 
@@ -268,7 +277,7 @@ def delete(args: argparse.Namespace) -> int:
     dropped_fields = 0
     if airfields and isinstance(airfields.get('items'), list):
         kept = [i for i in airfields['items']
-                if keeps_point(i, box, remaining_boxes)]
+                if keeps_point(i, parts, remaining_boxes)]
         dropped_fields = len(airfields['items']) - len(kept)
         airfields['items'] = kept
         if 'count' in airfields:
@@ -319,14 +328,14 @@ def delete(args: argparse.Namespace) -> int:
         tman['coverage'] = manifest['coverage']
         if isinstance(tman.get('flattenPads'), list):
             tman['flattenPads'] = [p for p in tman['flattenPads']
-                                   if keeps_point(p, box, remaining_boxes)]
+                                   if keeps_point(p, parts, remaining_boxes)]
         af = tman.get('airfields')
         af_path = os.path.join(args.terrain, af['path']) if af and af.get('path') else None
         if af_path and os.path.exists(af_path):
             af_doc = load_json(af_path)
             if isinstance(af_doc.get('items'), list):
                 kept = [i for i in af_doc['items']
-                        if keeps_point(i, box, remaining_boxes)]
+                        if keeps_point(i, parts, remaining_boxes)]
                 af_doc['items'] = kept
                 af['count'] = len(kept)
                 save_json(af_path, af_doc, indent=None)

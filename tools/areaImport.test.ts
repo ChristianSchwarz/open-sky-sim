@@ -3,9 +3,47 @@ import { describe, it } from 'node:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-    Lanes, Step, dataSteps, deletePlan, extractPathFor, formatDuration, isProgressLine, parseProgress, plan, chunkBbox,
+    Lanes, Step, dataSteps, deletePlan, mergeAreaEntries, extractPathFor, formatDuration, isProgressLine, parseProgress, plan, chunkBbox,
     snapBboxToTiles, splitStream, stepOutcome, EXIT_NO_LAND, landChunks, meshSteps, chunkPoolStep,
 } from './areaImport';
+
+describe('merging areas', () => {
+    const a = { name: 'a', west: 0, south: 0, east: 2, north: 1 };
+    const b = { name: 'b', west: 1, south: 0, east: 3, north: 2 };
+    const c = { name: 'c', west: 3, south: 2, east: 4, north: 3 };
+    const far = { name: 'far', west: 50, south: 50, east: 51, north: 51 };
+
+    it('replaces overlapping areas with their bounding box and keeps the parts', () => {
+        const r = mergeAreaEntries([a, b, far], ['a', 'b'], 'ab');
+        assert.ok('areas' in r);
+        assert.deepEqual(r.areas.map(x => x.name), ['ab', 'far']);
+        const ab = r.areas[0];
+        assert.deepEqual([ab.west, ab.south, ab.east, ab.north], [0, 0, 3, 2]);
+        assert.equal(ab.parts?.length, 2);
+    });
+
+    it('chains through a shared corner and flattens earlier merges', () => {
+        const first = mergeAreaEntries([a, b, c], ['a', 'b'], 'ab');
+        assert.ok('areas' in first);
+        const r = mergeAreaEntries(first.areas, ['ab', 'c'], 'abc');
+        assert.ok('areas' in r);
+        assert.equal(r.areas.length, 1);
+        assert.equal(r.areas[0].parts?.length, 3);
+    });
+
+    it('may keep one of the merged names', () => {
+        const r = mergeAreaEntries([a, b], ['a', 'b'], 'a');
+        assert.ok('areas' in r);
+        assert.deepEqual(r.areas.map(x => x.name), ['a']);
+    });
+
+    it('refuses areas that do not overlap, too few, or a taken name', () => {
+        assert.match((mergeAreaEntries([a, far], ['a', 'far'], 'x') as { error: string }).error, /far does not overlap/);
+        assert.ok('error' in mergeAreaEntries([a, b], ['a'], 'x'));
+        assert.ok('error' in mergeAreaEntries([a, b, far], ['a', 'b'], 'far'));
+        assert.ok('error' in mergeAreaEntries([a, b], ['a', 'nope'], 'x'));
+    });
+});
 
 describe('an import with satellites', () => {
     const box = [7.6, 45.9, 7.8, 46.0];
