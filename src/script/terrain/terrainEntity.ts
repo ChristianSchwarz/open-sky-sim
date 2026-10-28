@@ -2404,7 +2404,10 @@ export class TerrainEntity implements Entity {
             patch = buildOceanPatch(
                 id, this.basis, this.manifest.seaLevel,
                 this.manifest.mesh.levelSkirtDepthM[id.z] ?? 0,
-                this.materials, updateUniforms, at, lift?.divisions,
+                // The tiles' hook, not the plain one: a lifted patch is drawn
+                // with the land material, and would otherwise keep the leaf
+                // dissolve and depth push of whichever tile drew before it.
+                this.materials, lift ? tileBeforeRender : updateUniforms, at, lift?.divisions,
             );
             patch.provisional = lift?.missing() ?? false;
             this.oceans.set(key, patch);
