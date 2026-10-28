@@ -29,7 +29,7 @@ import {
     TREE_DENSITY_MULTIPLIER_DEFAULT, TREE_SCATTER_CLASSES, buildTreeMeshes, orderTreesFor, treeInstancesToDraw, treeReorderWanted, treeSpacingM, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
 } from './treeBillboards';
 import { CLUTTER_ELIGIBLE_CLASSES, buildStoneMesh, scatterGroundClutter } from './stones';
-import { sphereInFrustum } from './culling';
+import { behindHorizon, sphereInFrustum } from './culling';
 import { DemTile, decodePdm } from './demTile';
 import {
     EnuBasis, FrameShift, WGS84_A, cloneEnuBasis, ecefToEnu, enuFrameRotation, geodeticToEcef, makeEnuBasis,
@@ -42,7 +42,7 @@ import {
     MESH_CACHE_BYTES, PREFETCH_LOOKAHEAD_S, PREFETCH_MIN_DISTANCE_M, RECONCILE_INTERVAL_MS,
     LANDUSE_REVEAL_MIN_PX, LEAF_REFINE_DISTANCE_SCALE, LOD_DEPTH_PUSH_SCALE, LOD_FADE_MS,
     TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
-    adjustDetailScale, landuseRevealScale,
+    FRUSTUM_CULL_MARGIN_TAN, adjustDetailScale, terrainViewRangeM, landuseRevealScale,
 } from './lod';
 import {
     TerrainManifest, baseUrlOf, heightIndexUrl, heightTileUrl, meshIndexUrl, meshTileUrl,
@@ -1814,6 +1814,8 @@ export class TerrainEntity implements Entity {
     private readonly buildingFrustum = new THREE.Frustum();
     private readonly buildingViewProjection = new THREE.Matrix4();
     private readonly cullProjScreenMatrix = new THREE.Matrix4();
+    /** The LOD camera's view for addEdgeFill, set each reconcile. */
+    private readonly edgeFillView = { frustum: new THREE.Frustum(), matrix: new THREE.Matrix4(), mPerPxPerM: 0 };
 
     /**
      * `this.group` holds the one shared draw list the LOD-nominated camera
@@ -1922,6 +1924,12 @@ export class TerrainEntity implements Entity {
         if (sizeScale) {
             sizeScale.value = landuseRevealScale(this.viewportHeightPx, camera.fov, this.revealPx);
         }
+        camera.updateMatrixWorld();
+        this.edgeFillView.frustum.setFromProjectionMatrix(
+            this.edgeFillView.matrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse),
+            THREE.WebGLCoordinateSystem, camera.reversedDepth,
+        );
+        this.edgeFillView.mPerPxPerM = 2 * Math.tan(camera.fov * Math.PI / 360) / this.viewportHeightPx;
         this.syncGroup(camera.position);
         publishTerrainStats({ ...this.stats, altitudeM: camera.position.y });
     }
@@ -2179,7 +2187,7 @@ export class TerrainEntity implements Entity {
                 // Under its children too: the ones outside an area are not
                 // all drawn while it dissolves, and its fill is gone.
                 if (this.straddlesAreaEdge(node.id)) {
-                    this.addEdgeFill(node.id, updateUniforms, extraOceans);
+                    this.addEdgeFill(node.id, updateUniforms, extraOceans, camPos);
                 } else if (this.edgeLiftFor(node.id)) {
                     // A fill-only tile wholly outside every area.
                     this.group.add(this.oceanPatchFor(node.id, updateUniforms, true).group);
@@ -2381,7 +2389,9 @@ export class TerrainEntity implements Entity {
                 // dissolve and depth push of whichever tile drew before it.
                 this.materials, lift ? tileBeforeRender : updateUniforms, at, lift?.divisions,
             );
-            patch.provisional = lift?.missing() ?? false;
+            // Once the coarse tier has loaded, a gap in it is permanent (no
+            // DEM there), and rebuilding would only redo the same patch.
+            patch.provisional = !this.heights.coarseComplete && (lift?.missing() ?? false);
             this.oceans.set(key, patch);
         }
         return patch;
@@ -2394,21 +2404,50 @@ export class TerrainEntity implements Entity {
      * (which stays under them, out of sight) - the quadtree does not reach
      * them, the tile being drawn whole.
      */
-    private addEdgeFill(id: TileKey, updateUniforms: THREE.Mesh['onBeforeRender'], drawn: Set<string>): void {
+    private addEdgeFill(
+        id: TileKey, updateUniforms: THREE.Mesh['onBeforeRender'], drawn: Set<string>,
+        camPos: THREE.Vector3,
+    ): void {
         if (id.z >= this.maxZoom) {
             return;
         }
         for (const child of childrenOf(id)) {
+            const seen = this.edgeFillSeen(child, camPos);
+            if (seen === 'hidden') {
+                continue;
+            }
             // Wholly outside: covered, baked or not (the bake pads with
             // fill-only tiles too). Across the edge: down a level. Inside:
             // the tile's own ground.
             if (this.edgeLiftFor(child)) {
                 this.group.add(this.oceanPatchFor(child, updateUniforms, true).group);
                 drawn.add(tileKeyString(child) + '+');
-            } else if (this.straddlesAreaEdge(child)) {
-                this.addEdgeFill(child, updateUniforms, drawn);
+            } else if (seen === 'split' && this.straddlesAreaEdge(child)) {
+                this.addEdgeFill(child, updateUniforms, drawn, camPos);
             }
         }
+    }
+
+    /**
+     * The quadtree culls what it draws, but never sees edge-fill patches: a
+     * coarse tile spread hundreds of z12 patches along its stretch of border,
+     * most behind the camera or the horizon (2026-10-28). So a patch is drawn
+     * only in view, and split only while its children are a few pixels wide.
+     */
+    private edgeFillSeen(id: TileKey, camPos: THREE.Vector3): 'hidden' | 'whole' | 'split' {
+        const view = this.edgeFillView;
+        const centre = tileOriginWorld(id, 0, this.basis);
+        const centreM = camPos.distanceTo(centre);
+        const edgeM = approxTileEdgeMetres(id);
+        const radius = edgeM * 0.75 + this.edgeLiftTopM;
+        // The quadtree's range too: behindHorizon never culls from inside the
+        // equatorial radius, which is anywhere low enough away from the equator.
+        if (centreM - radius > terrainViewRangeM(camPos.y)
+            || !sphereInFrustum(centre, radius + centreM * FRUSTUM_CULL_MARGIN_TAN, view.frustum)
+            || behindHorizon(centre, radius, camPos, this.earthCenter, WGS84_A)) {
+            return 'hidden';
+        }
+        return edgeM / 2 < EDGE_FILL_MIN_PX * view.mPerPxPerM * Math.max(1, centreM - radius) ? 'whole' : 'split';
     }
 
     /**
@@ -2555,6 +2594,8 @@ function tileInsideArea(b: LonLatBounds, a: LonLatBounds): boolean {
     return b.west >= a.west - e && b.east <= a.east + e && b.south >= a.south - e && b.north <= a.north + e;
 }
 
+/** Narrowest an edge-fill patch may be on screen before addEdgeFill stops descending. */
+const EDGE_FILL_MIN_PX = 6;
 /** Provisional sea patches rebuilt per reconcile; see oceanPatchFor. */
 const OCEAN_RETRIES_PER_RECONCILE = 4;
 /** How far patches drawn over a baked tile's sea-level fill sit above it; see oceanPatchFor. */

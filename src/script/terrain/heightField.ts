@@ -46,6 +46,8 @@ export class HeightField {
     private readonly pads: FlattenPad[];
     /** Always-resident coarse tier, keyed by tile. */
     private readonly coarse = new Map<string, DemTile>();
+    /** Set once loadCoarse has settled: a coarse tile absent after that never arrives. */
+    coarseComplete = false;
     private readonly sampler: HeightSampler;
     /**
      * Railway beds the drawn land has had laid (railBed.ts): the collision
@@ -122,6 +124,7 @@ export class HeightField {
                 }
             }));
         await Promise.all(jobs);
+        this.coarseComplete = true;
     }
 
     /** Every tile in the coverage rectangle at `z`, baked or not. */
