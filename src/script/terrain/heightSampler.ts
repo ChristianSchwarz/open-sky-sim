@@ -189,6 +189,21 @@ export class HeightSampler {
         return this.seaLevel;
     }
 
+    /**
+     * Raw coarse-tier sample, or undefined where no coarse tile is resident:
+     * the same answer whatever the fine tier has streamed in.
+     */
+    coarseHeightAtLonLat(lon: number, lat: number): number | undefined {
+        const coarse = this.tileAt(this.coarseZoom, lon, lat, this.coarse);
+        if (coarse) {
+            const h = sampleAt(coarse.tile, coarse.id, lon, lat);
+            if (Number.isFinite(h)) {
+                return h;
+            }
+        }
+        return undefined;
+    }
+
     /** Which tier would answer a query here. */
     tierAtEnu(e: number, n: number): HeightTier {
         const g = geodeticOnSurfaceAtEnu(this.basis, e, n);

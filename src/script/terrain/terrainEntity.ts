@@ -76,7 +76,8 @@ import {
 import { RailWalls, buildRailBedExclusion } from './railBed';
 import { TilePlacement, bedsToGeodetic } from './railBedField';
 import { BedStore } from './bedStore';
-import { tileBounds } from './tiling';
+import { LonLatBounds, childrenOf, tileBounds } from './tiling';
+import { terrainAreas } from './playArea';
 import { TileStore } from './tileStore';
 import { PRIORITY_IN_FRUSTUM, TileStreamer, TileWant, predictViewTarget } from './tileStreamer';
 import { TileCover, TileHeightIndex } from './tileHeightIndex';
@@ -85,7 +86,7 @@ import { geodeticOnSurfaceAtEnu } from './geodesy';
 import {
     CLASS_TO_TONE, LAND_TONE_BASE, LAND_TONE_COUNT, TONE_COUNT, TerrainTone,
 } from './tones';
-import { RoadsMode, TERRAIN_COLOUR_MODE_INDEX, TerrainColours, TerrainShading } from '../state/gameDefs';
+import { RoadsMode, TERRAIN_COLOUR_MODE_INDEX, TerrainColours, TerrainShading, terrainSmoothingStrength } from '../state/gameDefs';
 import {
     BuildingsSetting, FarTileTexturesSetting, LanduseBlendSetting, LanduseReachSetting, LanduseRevealSetting, RoadsSetting, TerrainColourSetting,
     TerrainDetailSetting, TerrainShadingSetting, TreeDensitySetting, TriangleBudgetSetting, VisibleZoomSetting,
@@ -321,6 +322,10 @@ export class TerrainEntity implements Entity {
     private readonly railWallMaterial: THREE.Material;
     private readonly quadtree: Quadtree;
     private readonly oceans = new Map<string, OceanPatch>();
+    /** Provisional patches oceanPatchFor may still rebuild this reconcile. */
+    private oceanRetries = 0;
+    /** Highest ground any lifted patch has reached; see edgeLiftFor. */
+    edgeLiftTopM = 0;
     private readonly pinned = new Set<string>();
     private readonly earthCenter: THREE.Vector3;
     private readonly landMaterial: THREE.ShaderMaterial;
@@ -412,19 +417,44 @@ export class TerrainEntity implements Entity {
      * saved SMOOTH setting got applied instead of avoided.
      */
     setTerrainShading(mode: TerrainShading): void {
+        const strength = terrainSmoothingStrength(mode);
+        // A weld is made at one strength: another level re-welds every tile.
+        const reweld = strength > 0 && strength !== this.weldStrength;
         this.landShading = mode;
+        this.farLand.smoothingStrength = strength;
         for (const meshes of this.streamer.values()) {
-            const geometry = mode === TerrainShading.SMOOTH
+            if (reweld) {
+                this.dropSmooth(meshes);
+            }
+            const geometry = strength > 0
                 ? meshes.landGeometrySmooth ?? meshes.landGeometryFaceted
                 : meshes.landGeometryFaceted;
             if (meshes.land && geometry) {
                 meshes.land.geometry = geometry;
             }
         }
-        if (mode === TerrainShading.SMOOTH) {
+        if (strength > 0) {
+            this.weldStrength = strength;
             this.smoothBacklog = true;
             this.pumpSmooth();
         }
+    }
+
+    /** Strength the resident SMOOTH geometries were welded at. */
+    private weldStrength = terrainSmoothingStrength(TerrainShading.SMOOTH);
+
+    /** Forget a tile's welded land, near and far, for pumpSmooth to weld again. */
+    private dropSmooth(meshes: TileMeshes): void {
+        const smooth = meshes.landGeometrySmooth;
+        if (smooth) {
+            if (meshes.land?.geometry === smooth && meshes.landGeometryFaceted) {
+                meshes.land.geometry = meshes.landGeometryFaceted;
+            }
+            meshes.bytes -= smooth.getIndex()?.array.byteLength ?? 0;
+            meshes.landGeometrySmooth = undefined;
+            smooth.dispose();
+        }
+        this.farLand.dropSmooth(meshes);
     }
 
     /**
@@ -437,7 +467,7 @@ export class TerrainEntity implements Entity {
      * land (up to ~1.6 MB a leaf).
      */
     private pumpSmooth(): void {
-        if (!this.smoothBacklog || this.bootstrapping || this.landShading !== TerrainShading.SMOOTH) {
+        if (!this.smoothBacklog || this.bootstrapping || terrainSmoothingStrength(this.landShading) === 0) {
             return;
         }
         for (const meshes of this.streamer.values()) {
@@ -458,13 +488,16 @@ export class TerrainEntity implements Entity {
         const coverColor = faceted.getAttribute('coverColor') as THREE.InterleavedBufferAttribute;
         const regionSize = faceted.getAttribute('regionSize') as THREE.BufferAttribute | undefined;
         this.smoothPending.add(meshes);
+        const strength = this.weldStrength;
         void this.welder.weld(
             position.array as Int16Array, normal.data.array as Int8Array,
             coverColor.data.array as Uint8Array, regionSize?.array as Uint16Array | undefined,
+            strength,
         ).then(weld => {
             this.smoothPending.delete(meshes);
             this.smoothBacklog = true;
-            if (!weld || meshes.disposed || meshes.landGeometrySmooth || meshes.landGeometryFaceted !== faceted) {
+            if (!weld || meshes.disposed || meshes.landGeometrySmooth || meshes.landGeometryFaceted !== faceted
+                || strength !== this.weldStrength) {
                 return;
             }
             // The seams may have moved the border since the copy was taken.
@@ -472,7 +505,7 @@ export class TerrainEntity implements Entity {
             const smooth = smoothGeometryFromWeld(weld);
             meshes.landGeometrySmooth = smooth;
             meshes.bytes += weld.indices.byteLength;
-            if (meshes.land && this.landShading === TerrainShading.SMOOTH) {
+            if (meshes.land && terrainSmoothingStrength(this.landShading) > 0) {
                 meshes.land.geometry = smooth;
             }
         });
@@ -1417,8 +1450,8 @@ export class TerrainEntity implements Entity {
             // rather than every pinned tile having eagerly paid for it during
             // the burst above - see `bootstrapping`.
             this.bootstrapping = false;
-            if (this.landShading === TerrainShading.SMOOTH) {
-                this.setTerrainShading(TerrainShading.SMOOTH);
+            if (terrainSmoothingStrength(this.landShading) > 0) {
+                this.setTerrainShading(this.landShading);
             }
         }
     }
@@ -1703,7 +1736,7 @@ export class TerrainEntity implements Entity {
                     this.treeReorders.push({ mesh: trees, group: meshes.group });
                 }
             }
-            const smooth = this.landShading === TerrainShading.SMOOTH;
+            const smooth = terrainSmoothingStrength(this.landShading) > 0;
             const near = smooth ? meshes.landGeometrySmooth ?? meshes.landGeometryFaceted : meshes.landGeometryFaceted;
             this.farLand.show(node.id, meshes, FAR_LAND_MAX_PIXELS * nearM * pixelAngle,
                 PRIORITY_IN_FRUSTUM - nearM, near, smooth && near === meshes.landGeometrySmooth);
@@ -2137,6 +2170,8 @@ export class TerrainEntity implements Entity {
         // What neighbours meet: not an ancestor drawn under its dissolving
         // children, and not a tile the budget left out. See seamStitch.ts.
         const stitched: Array<{ id: TileKey; tile: TileMeshes }> = [];
+        this.oceanRetries = OCEAN_RETRIES_PER_RECONCILE;
+        const extraOceans = new Set<string>();
         for (const node of ordered) {
             const meshes = this.streamer.get(node.id);
             if (meshes) {
@@ -2168,6 +2203,16 @@ export class TerrainEntity implements Entity {
                 lod.fadeM = node.fadeM;
                 lod.fadeFromMs = node.fadeFromMs;
                 this.group.add(meshes.group);
+                this.clipFillWater(node.id, meshes);
+                // Under its children too: the ones outside an area are not
+                // all drawn while it dissolves, and its fill is gone.
+                if (this.straddlesAreaEdge(node.id)) {
+                    this.addEdgeFill(node.id, updateUniforms, extraOceans);
+                } else if (this.edgeLiftFor(node.id)) {
+                    // A fill-only tile wholly outside every area.
+                    this.group.add(this.oceanPatchFor(node.id, updateUniforms, true).group);
+                    extraOceans.add(node.key + '+');
+                }
                 if (!node.under) {
                     stitched.push({ id: node.id, tile: meshes });
                 }
@@ -2216,20 +2261,10 @@ export class TerrainEntity implements Entity {
                 void this.railBedJob(node.id, meshes);
                 continue;
             }
-            const key = node.key;
-            let patch = this.oceans.get(key);
-            if (!patch) {
-                patch = buildOceanPatch(
-                    node.id, this.basis, this.manifest.seaLevel,
-                    this.manifest.mesh.levelSkirtDepthM[node.id.z] ?? 0,
-                    this.materials, updateUniforms,
-                );
-                this.oceans.set(key, patch);
-            }
-            this.group.add(patch.group);
+            this.group.add(this.oceanPatchFor(node.id, updateUniforms).group);
         }
         stitchSeams(stitched);
-        this.pruneOceans();
+        this.pruneOceans(extraOceans);
     }
 
     /** What a drawn tile costs the triangle budget: land, water, roads and bridges. */
@@ -2256,11 +2291,226 @@ export class TerrainEntity implements Entity {
         }
     }
 
-    private pruneOceans(): void {
+    /**
+     * For a sea patch wholly outside every baked area and near one: the
+     * height it is lifted to. The ground outside the areas is flat at sea
+     * level (the shell paints the globe map's colours on it), with a ramp of
+     * EDGE_LIFT_FADE_M from each area's edge down to it, so the baked terrain
+     * does not end in a cliff. Each point starts from the ground round the
+     * nearest point of the nearest area's box. Beyond the ramp it is flat but
+     * still drawn as land: the water material's dithered depth left the shell
+     * reading sky through it. Undefined for a patch overlapping an area, which
+     * stands in for a tile still in flight.
+     *
+     * The edge's relief is averaged over a window that widens with distance
+     * from the box, and a patch gets vertices about that far apart: patches
+     * of different levels meet along seams, and on raw canyon heights a
+     * coarse patch's chords missed a fine neighbour's samples by hundreds of
+     * metres, a staircase of walls along every level change.
+     */
+    private edgeLiftFor(id: TileKey): {
+        at: (lon: number, lat: number) => number; divisions: number; missing: () => boolean;
+    } | undefined {
+        const b = tileBounds(id);
+        const areas = terrainAreas(this.manifest);
+        if (areas.some(a => tileOverlapsArea(b, a))) {
+            return undefined;
+        }
+        const degM = (Math.PI / 180) * 6_371_000;
+        const nearest = (lon: number, lat: number) => {
+            let best = Infinity;
+            let area = areas[0];
+            for (const a of areas) {
+                const dx = (lon - Math.min(Math.max(lon, a.west), a.east)) * Math.cos(lat * Math.PI / 180);
+                const d = Math.hypot(dx, lat - Math.min(Math.max(lat, a.south), a.north)) * degM;
+                if (d < best) {
+                    best = d;
+                    area = a;
+                }
+            }
+            return { area, distM: best };
+        };
+        const windowM = (distM: number) => EDGE_LIFT_SMOOTH_M + EDGE_LIFT_SMOOTH_SLOPE * distM;
+
+        let missing = false;
+        const at = (lon: number, lat: number) => {
+            const { area: a, distM } = nearest(lon, lat);
+            const cLon = Math.min(Math.max(lon, a.west), a.east);
+            const cLat = Math.min(Math.max(lat, a.south), a.north);
+            const wLat = windowM(distM) / degM;
+            const wLon = wLat / Math.cos(cLat * Math.PI / 180);
+            // A tent along the edge: the ground off a side is the same all the
+            // way out, so only the direction along it needs averaging. Past a
+            // corner both sides are clamped, and both directions are walked.
+            const alongLon = lat !== cLat ? 1 : 0;
+            const alongLat = lon !== cLon ? 1 : 0;
+            let sum = 0;
+            let weight = 0;
+            for (let i = -EDGE_LIFT_TAPS; i <= EDGE_LIFT_TAPS; i++) {
+                const f = i / EDGE_LIFT_TAPS;
+                const w = 1 - Math.abs(f) * 0.9;
+                // The coarse tier only: the fine one streams in and out,
+                // and patches built at different moments would disagree.
+                const h = this.heights.coarseHeightAtLonLat(
+                    Math.min(Math.max(cLon + f * wLon * alongLon, a.west), a.east),
+                    Math.min(Math.max(cLat + f * wLat * alongLat, a.south), a.north));
+                if (h === undefined) {
+                    missing = true;
+                }
+                sum += w * ((h ?? this.manifest.seaLevel) - this.manifest.seaLevel);
+                weight += w;
+            }
+            const t = Math.min(1, distM / EDGE_LIFT_FADE_M);
+            const lift = Math.max(0, sum / weight) * (1 - t * t * (3 - 2 * t));
+            this.edgeLiftTopM = Math.max(this.edgeLiftTopM, lift);
+            return lift;
+        };
+        const edgeM = (b.north - b.south) * degM;
+        const closest = nearest((b.west + b.east) / 2, (b.south + b.north) / 2);
+        // Past the ramp the ground outside stays flat at sea level: an
+        // ordinary sea patch. The centre is up to half a diagonal from the box.
+        if (closest.distM - edgeM > EDGE_LIFT_FADE_M) {
+            return { at: () => 0, divisions: 2, missing: () => false };
+        }
+        const span = windowM(Math.max(0, closest.distM - edgeM));
+        const divisions = Math.min(EDGE_LIFT_MAX_DIVISIONS, Math.max(8, Math.ceil(edgeM / span)));
+        return { at, divisions, missing: () => missing };
+    }
+
+    /**
+     * The sea patch for an absent tile, built on first use. A provisional one
+     * - its lift was missing a coarse height tile - is built again, a few per
+     * reconcile, until it is complete.
+     */
+    private oceanPatchFor(
+        id: TileKey, updateUniforms: THREE.Mesh['onBeforeRender'], overFill = false,
+    ): OceanPatch {
+        // Over a baked tile's fill the patch is a separate one, raised clear
+        // of that sea-level fill: where the ramp has run out the two would
+        // lie in one plane and the fill's water show through in blocks.
+        const key = tileKeyString(id) + (overFill ? '+' : '');
+        let patch = this.oceans.get(key);
+        if (patch?.provisional && this.oceanRetries > 0) {
+            this.oceanRetries--;
+            disposeOceanPatch(patch);
+            this.oceans.delete(key);
+            patch = undefined;
+        }
+        if (!patch) {
+            const lift = this.edgeLiftFor(id);
+            const at = lift && overFill
+                ? (lon: number, lat: number) => lift.at(lon, lat) + EDGE_FILL_CLEARANCE_M
+                : lift?.at;
+            patch = buildOceanPatch(
+                id, this.basis, this.manifest.seaLevel,
+                this.manifest.mesh.levelSkirtDepthM[id.z] ?? 0,
+                this.materials, updateUniforms, at, lift?.divisions,
+            );
+            patch.provisional = lift?.missing() ?? false;
+            this.oceans.set(key, patch);
+        }
+        return patch;
+    }
+
+    /**
+     * A baked tile across an area's edge carries sea-level fill outside it,
+     * which would sit as a step below the lifted ground beside it. Its
+     * descendants outside the area get lifted patches drawn over that fill
+     * (which stays under them, out of sight) - the quadtree does not reach
+     * them, the tile being drawn whole.
+     */
+    private addEdgeFill(id: TileKey, updateUniforms: THREE.Mesh['onBeforeRender'], drawn: Set<string>): void {
+        if (id.z >= this.maxZoom) {
+            return;
+        }
+        for (const child of childrenOf(id)) {
+            // Wholly outside: covered, baked or not (the bake pads with
+            // fill-only tiles too). Across the edge: down a level. Inside:
+            // the tile's own ground.
+            if (this.edgeLiftFor(child)) {
+                this.group.add(this.oceanPatchFor(child, updateUniforms, true).group);
+                drawn.add(tileKeyString(child) + '+');
+            } else if (this.straddlesAreaEdge(child)) {
+                this.addEdgeFill(child, updateUniforms, drawn);
+            }
+        }
+    }
+
+    /**
+     * Drop a tile's water outside every baked area, once. That water is the
+     * bake's sea-level fill; the ground drawn outside the areas is land and
+     * covers it, but the fill's water still won over it in blocks where the
+     * ramp has run out. Water inside an area, a coast or a lake by the edge,
+     * stays.
+     */
+    private clipFillWater(id: TileKey, meshes: TileMeshes): void {
+        const water = meshes.water;
+        if (!water || meshes.group.userData.fillWaterClipped) {
+            return;
+        }
+        meshes.group.userData.fillWaterClipped = true;
+        const areas = terrainAreas(this.manifest);
+        const b = tileBounds(id);
+        if (areas.some(a => tileInsideArea(b, a))) {
+            return;
+        }
+        const geometry = water.geometry;
+        const index = geometry.getIndex();
+        const pos = geometry.getAttribute('position');
+        if (!index) {
+            return;
+        }
+        // Vertices are offsets from the tile's centre in the bake's axes;
+        // the group's rotation and scale turn them into scene metres, east
+        // along x and south along z. Near enough to degrees for telling
+        // inside from out (the scene position itself moves with the floating
+        // origin, so only the offset is used).
+        const scale = meshes.group.scale.x;
+        const turn = meshes.group.quaternion;
+        const v = new THREE.Vector3();
+        const centreLat = (b.south + b.north) / 2;
+        const centreLon = (b.west + b.east) / 2;
+        const degLat = 1 / 111_320;
+        const degLon = degLat / Math.cos(centreLat * Math.PI / 180);
+        const src = index.array;
+        const kept: number[] = [];
+        for (let t = 0; t < src.length; t += 3) {
+            v.set(0, 0, 0);
+            for (let k = 0; k < 3; k++) {
+                v.x += pos.getX(src[t + k]) / 3;
+                v.y += pos.getY(src[t + k]) / 3;
+                v.z += pos.getZ(src[t + k]) / 3;
+            }
+            v.multiplyScalar(scale).applyQuaternion(turn);
+            const lon = centreLon + v.x * degLon;
+            const lat = centreLat - v.z * degLat;
+            if (areas.some(a => lon >= a.west && lon <= a.east && lat >= a.south && lat <= a.north)) {
+                kept.push(src[t], src[t + 1], src[t + 2]);
+            }
+        }
+        if (kept.length === src.length) {
+            return;
+        }
+        const ArrayType = src.constructor as new (values: number[]) => THREE.TypedArray;
+        geometry.setIndex(new THREE.BufferAttribute(new ArrayType(kept), 1));
+        geometry.clearGroups();
+        geometry.addGroup(0, kept.length, TerrainTone.Water);
+        water.visible = kept.length > 0;
+    }
+
+    /** Whether a tile overlaps a baked area without lying wholly inside one. */
+    private straddlesAreaEdge(id: TileKey): boolean {
+        const b = tileBounds(id);
+        const areas = terrainAreas(this.manifest);
+        return areas.some(a => tileOverlapsArea(b, a))
+            && !areas.some(a => tileInsideArea(b, a));
+    }
+
+    private pruneOceans(extra: ReadonlySet<string>): void {
         if (this.oceans.size < 512) {
             return;
         }
-        const live = new Set(this.drawList.map(n => n.key));
+        const live = new Set([...this.drawList.map(n => n.key), ...extra]);
         for (const [key, patch] of this.oceans) {
             if (!live.has(key)) {
                 disposeOceanPatch(patch);
@@ -2305,6 +2555,42 @@ const FAR_LAND_MAX_PIXELS = 0.5;
 
 /** Main-thread time a frame may spend simplifying far road levels; see RoadStrokes.buildPendingLevels. */
 const ROAD_LEVEL_BUILD_MS = 2;
+
+/**
+ * Width of the ramp from an area's edge down to the flat sea-level ground
+ * outside it; see edgeLiftFor.
+ */
+export const EDGE_LIFT_FADE_M = 20_000;
+/**
+ * Slack (degrees) for comparing tile bounds with an area's box. The boxes are
+ * baked on the tile grid, but the two sides compute the same edge in
+ * different ways: a tile just outside could come out a hair across it, count
+ * as overlapping, and be drawn as a sea-level stand-in - a pit beside the
+ * area.
+ */
+const AREA_EDGE_EPS_DEG = 1e-7;
+
+function tileOverlapsArea(b: LonLatBounds, a: LonLatBounds): boolean {
+    const e = AREA_EDGE_EPS_DEG;
+    return b.west < a.east - e && b.east > a.west + e && b.south < a.north - e && b.north > a.south + e;
+}
+
+function tileInsideArea(b: LonLatBounds, a: LonLatBounds): boolean {
+    const e = AREA_EDGE_EPS_DEG;
+    return b.west >= a.west - e && b.east <= a.east + e && b.south >= a.south - e && b.north <= a.north + e;
+}
+
+/** Provisional sea patches rebuilt per reconcile; see oceanPatchFor. */
+const OCEAN_RETRIES_PER_RECONCILE = 4;
+/** How far patches drawn over a baked tile's sea-level fill sit above it; see oceanPatchFor. */
+const EDGE_FILL_CLEARANCE_M = 25;
+/** Width the edge's relief is averaged over at the box, and how it widens per metre out; see edgeLiftFor. */
+const EDGE_LIFT_SMOOTH_M = 1_500;
+const EDGE_LIFT_SMOOTH_SLOPE = 0.5;
+/** Taps either side of the point in edgeLiftFor's tent. */
+const EDGE_LIFT_TAPS = 6;
+/** Most vertices a lifted patch has along a side. */
+const EDGE_LIFT_MAX_DIVISIONS = 48;
 
 /** What a sea stand-in costs the budget; see buildOceanPatch. */
 const OCEAN_PATCH_TRIANGLES = 10;

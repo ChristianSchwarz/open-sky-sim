@@ -17,6 +17,9 @@ import { EnuBasis, WGS84_A, ecefToEnu, geodeticToEcef, sceneZFromNorth } from '.
 import { TileKey, tileBounds } from './tiling';
 import { TerrainTone } from './tones';
 
+/** Cover colour (sRGB) and class of lifted ground; see buildOceanPatch. */
+const LIFTED_COVER = [176, 150, 112, 0];
+
 /** Surface subdivision per side. 2 keeps the patch flat but not degenerate. */
 const DIVISIONS = 2;
 
@@ -47,11 +50,16 @@ function coarseNeighbourSagM(z: number): number {
 export interface OceanPatch {
     group: THREE.Group;
     bytes: number;
+    /** Built without all the heights its lift wanted; rebuilt later. */
+    provisional?: boolean;
 }
 
 /**
  * Build a sea-level patch for `id`. `skirtDepthM` seals the seam against a
  * neighbouring DEM tile, which hangs its own skirt down the same edge.
+ * `liftAt` (degrees in, metres above sea level out) raises the surface: the
+ * ground outside every baked area carries on at the height of the area's
+ * edge rather than dropping to the sea, on a `liftDivisions` grid.
  */
 export function buildOceanPatch(
     id: TileKey,
@@ -60,6 +68,8 @@ export function buildOceanPatch(
     skirtDepthM: number,
     materials: readonly THREE.Material[],
     onBeforeRender?: THREE.Mesh['onBeforeRender'],
+    liftAt?: (lon: number, lat: number) => number,
+    liftDivisions = DIVISIONS,
 ): OceanPatch {
     const b = tileBounds(id);
     const skirt = skirtDepthM > 0
@@ -69,7 +79,8 @@ export function buildOceanPatch(
     const centreLat = (b.south + b.north) / 2;
     const origin = ecefToEnu(basis, geodeticToEcef(centreLat, centreLon, seaLevel));
 
-    const n = DIVISIONS + 1;
+    const divisions = liftAt ? liftDivisions : DIVISIONS;
+    const n = divisions + 1;
     const positions: number[] = [];
     const indices: number[] = [];
 
@@ -81,14 +92,14 @@ export function buildOceanPatch(
     };
 
     for (let row = 0; row < n; row++) {
-        const lat = b.north + (b.south - b.north) * (row / DIVISIONS);
+        const lat = b.north + (b.south - b.north) * (row / divisions);
         for (let col = 0; col < n; col++) {
-            const lon = b.west + (b.east - b.west) * (col / DIVISIONS);
-            positions.push(...localAt(lon, lat, seaLevel));
+            const lon = b.west + (b.east - b.west) * (col / divisions);
+            positions.push(...localAt(lon, lat, seaLevel + (liftAt ? liftAt(lon, lat) : 0)));
         }
     }
-    for (let row = 0; row < DIVISIONS; row++) {
-        for (let col = 0; col < DIVISIONS; col++) {
+    for (let row = 0; row < divisions; row++) {
+        for (let col = 0; col < divisions; col++) {
             const a = row * n + col;
             const c = a + 1;
             const d = a + n;
@@ -127,7 +138,23 @@ export function buildOceanPatch(
     const idx = new Uint16Array(indices);
     geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geometry.setIndex(new THREE.BufferAttribute(idx, 1));
-    geometry.addGroup(0, idx.length, TerrainTone.Water);
+    if (liftAt) {
+        // Drawn with the land material, which wants what a baked land mesh
+        // carries: a normal and a cover colour per vertex. The colour is a
+        // plain dry ground; the shell paints the globe map over it anyway.
+        geometry.computeVertexNormals();
+        const count = pos.length / 3;
+        const attrs = new Uint8Array(count * 4);
+        for (let i = 0; i < count; i++) {
+            attrs.set(LIFTED_COVER, i * 4);
+        }
+        const buffer = new THREE.InterleavedBuffer(attrs, 4);
+        geometry.setAttribute('coverColor', new THREE.InterleavedBufferAttribute(buffer, 3, 0, true));
+        geometry.setAttribute('coverClass', new THREE.InterleavedBufferAttribute(buffer, 1, 3, false));
+        geometry.setAttribute('regionSize', new THREE.BufferAttribute(new Float32Array(count).fill(1e6), 1, false));
+    }
+    // Lifted ground is land: the water material draws its sheet at sea level.
+    geometry.addGroup(0, idx.length, liftAt ? TerrainTone.Bare : TerrainTone.Water);
 
     const mesh = new THREE.Mesh(geometry, materials as THREE.Material[]);
     mesh.frustumCulled = false;

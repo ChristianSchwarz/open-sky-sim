@@ -108,6 +108,18 @@ const FRAGMENT_PROGRAM = `
   // The bake's sea colour: the map's water is drawn in it, so a baked area's
   // sea does not stand out as a darker box in the map's.
   uniform vec3 uMapWater;
+  // Paint the map's land over the sea-level fill outside every baked area at
+  // any height, below the shell too (uWeight 0), so the world goes on past an
+  // area's edge instead of ending in sea. Fogged like the terrain as the air
+  // fades out (the scene's fog is scaled by 1 - uWeight the same way).
+  uniform float uLowFill;
+  // The fill's ground is flat at sea level past a ramp of uRampM from each
+  // area's edge, never higher than uRampTopM on it: anything above that is
+  // not ground (a cloud, an aircraft) and keeps its own colour.
+  uniform float uRampM;
+  uniform float uRampTopM;
+  uniform vec3 uFogColor;
+  uniform float uFogDensity;
 ${SCENE_DEPTH_PARS_FRAGMENT}
 
   const float A = ${WGS84_A.toFixed(1)};
@@ -210,8 +222,29 @@ ${EARTH_MAP_PARS_FRAGMENT}
     return depth;
   }
 
+  // Distance (m) from a point outside every area to the nearest one.
+  float areaDistanceM(vec2 ll) {
+    float best = 1e9;
+    for (int i = 0; i < ${SHELL_MAX_AREAS}; i++) {
+      if (i >= uAreaCount) {
+        break;
+      }
+      vec4 r = uAreas[i];
+      float ew = max(max(r.x - ll.y, ll.y - r.z), 0.0) * cos(ll.x);
+      float ns = max(max(r.y - ll.x, ll.x - r.w), 0.0);
+      best = min(best, length(vec2(ew, ns)) * A);
+    }
+    return best;
+  }
+
+  // 1 where a fill pixel is low enough to be the fill's own ground.
+  float fillGround(vec3 hit, vec2 ll) {
+    float top = 60.0 + uRampTopM * (1.0 - smoothstep(0.0, uRampM, areaDistanceM(ll)));
+    return step(length(hit) - A, top);
+  }
+
   void main() {
-    if (uWeight <= 0.0) {
+    if (uWeight <= 0.0 && uLowFill < 0.5) {
       discard;
     }
     vec2 ndc = gl_FragCoord.xy / uSceneDepthSize * 2.0 - 1.0;
@@ -234,6 +267,12 @@ ${EARTH_MAP_PARS_FRAGMENT}
     float sceneW = sceneDistance(gl_FragCoord.xy);
     bool terrain = sceneW < uSceneFar * float(${SCENE_DEPTH_SKY_CUT});
     float terrainT = sceneW / max(1e-4, -viewDir.z);
+
+    // Below the shell only the map's land over the fill is drawn: nothing
+    // else to do for the sky or for baked terrain.
+    if (uWeight <= 0.0 && (!terrain || bakedAreaDepth(latLon(o + d * terrainT)) >= 1.0)) {
+      discard;
+    }
 
     // Only once the dome has all but gone: stars do not show through a daylit sky.
     vec3 star = vec3(stars(dir)) * smoothstep(0.9, 1.0, uWeight);
@@ -293,7 +332,8 @@ ${EARTH_MAP_PARS_FRAGMENT}
     vec3 radiance = vec3(0.0);
     for (int half_ = 0; half_ < 2; half_++) {
       float span = half_ == 0 ? tc - tNear : tEnd - tc;
-      if (span <= 0.0) {
+      // No air below the shell: the terrain's own fog stands in for it.
+      if (span <= 0.0 || uWeight <= 0.0) {
         continue;
       }
       for (int i = 0; i < ${VIEW_STEPS}; i++) {
@@ -335,6 +375,9 @@ ${EARTH_MAP_PARS_FRAGMENT}
     // Outside every baked area the tiles are sea-level fill padding the
     // ancestors out to whole quadrants: real only where the map says sea.
     float fill = terrain ? 1.0 - bakedAreaDepth(hitLatLon) : 0.0;
+    if (uLowFill > 0.5 && fill > 0.0) {
+      fill *= fillGround(o + d * tEnd, hitLatLon);
+    }
     // How much of the globe map is drawn: over baked terrain as the camera
     // climbs, on the bare ellipsoid as the shell itself fades in, never on
     // open sky. The map is opaque: once it is in, nothing under it shows.
@@ -388,16 +431,26 @@ ${EARTH_MAP_PARS_FRAGMENT}
         smoothstep(0.006, 0.002, max(albedo.r, albedo.g)));
       vec3 surface = mix(albedo, uSurface, water);
       mapWater = water;
-      vec3 lit = (transmittance * (surface * (sunT * direct * 3.0 + 0.02) + sunT * glint * water * step(0.0, mu)));
+      // Low down there is no march to bring the sky's light in, so the
+      // ambient term stands in for it, and the terrain's fog for the air.
+      float ambient = mix(0.25, 0.02, uWeight);
+      vec3 lit = (transmittance * (surface * (sunT * direct * 3.0 + ambient) + sunT * glint * water * step(0.0, mu)));
       globeColour = vec4(1.0 - exp(-(emission + lit) * uExposure), 1.0);
+      // Low down the fill outside the areas is drawn as land, so the map's
+      // water is painted on it too, in the bake's sea colour like the map mode.
+      globeColour.rgb = mix(globeColour.rgb, uMapWater, water * (1.0 - uWeight));
+      float fog = 1.0 - clamp(exp2(-uFogDensity * tEnd), 0.0, 1.0);
+      globeColour.rgb = mix(globeColour.rgb, uFogColor, fog * 0.92 * (1.0 - uWeight));
       // Over terrain the map's sea comes in on the later schedule, inside an
       // area or out: the fill is the same water as an area's sea, so an
       // area's edge does not show as a step in it. The map's land comes in
       // with the shell over baked land - softly, as the bake is the sharper
       // picture - but at once over fill, which has nothing to show there.
       if (terrain) {
-        float land = mix(uWeight, min(1.0, uWeight * 10.0), fill);
-        globe = max(uGlobe, land * (1.0 - water));
+        float land = mix(uWeight, max(uLowFill, min(1.0, uWeight * 10.0)), fill);
+        // Over fill the water is painted as well while the low fill is on:
+        // the ground there is drawn as land, with no sea of its own.
+        globe = max(uGlobe, land * (1.0 - water * (1.0 - uLowFill * fill)));
       }
     }
     if (uMapMode > 0.5) {
@@ -440,6 +493,11 @@ export const ATMOSPHERE_SHELL_UNIFORMS = {
     uGlobe: { value: 0 },
     uMapMode: { value: 0 },
     uMapWater: { value: new THREE.Color() },
+    uLowFill: { value: 0 },
+    uRampM: { value: 1 },
+    uRampTopM: { value: 0 },
+    uFogColor: { value: new THREE.Color() },
+    uFogDensity: { value: 0 },
     uAreas: { value: Array.from({ length: SHELL_MAX_AREAS }, () => new THREE.Vector4()) },
     uAreaCount: { value: 0 },
 };

@@ -32,6 +32,7 @@ import { earthMap } from '../scene/earthMap';
 import { SPACE_FOG } from '../scene/materials/shaders/spaceFog';
 import { Model } from '../scene/models/models';
 import { terrainMaxZoomForAltitudeM } from '../terrain/lod';
+import { EDGE_LIFT_FADE_M } from '../terrain/terrainEntity';
 import { Renderer, RenderLayer, RenderTargetType } from "../render/renderer";
 import { SceneCamera } from '../scene/cameras/camera';
 import { DebrisField } from '../scene/entities/debrisField';
@@ -3052,7 +3053,9 @@ export class Game {
         // the baked areas (uMapMode), and without the air.
         const weight = this.mapView ? 1
             : THREE.MathUtils.smoothstep(altitude, ATMOSPHERE_SHELL_FADE_IN_M, SPACE_SKY_ALTITUDE_M);
-        const show = weight > 0 && this.view !== PlayerViewState.SHOWCASE;
+        // Below the shell it still paints the map's land past the areas' edges.
+        const lowFill = !this.mapView && this.areaList.length > 0;
+        const show = (weight > 0 || lowFill) && this.view !== PlayerViewState.SHOWCASE;
         SPACE_FOG.scale = show ? 1 - weight : 1;
         this.atmosphereShell.enabled = show;
         if (!show) {
@@ -3096,6 +3099,12 @@ export class Game {
         }
         u.uAreaCount.value = count;
         u.uGlobe.value = THREE.MathUtils.smoothstep(height, GLOBE_MAP_FADE_START_M, GLOBE_MAP_FADE_END_M);
+        u.uLowFill.value = lowFill ? 1 : 0;
+        u.uRampM.value = EDGE_LIFT_FADE_M;
+        u.uRampTopM.value = this.planetTerrain.edgeLiftTopM;
+        (u.uFogColor.value as THREE.Color).set(PaletteColor(this.palette, PaletteCategory.FOG_TERRAIN));
+        (u.uMapWater.value as THREE.Color).set(PaletteColor(this.palette, PaletteCategory.TERRAIN_WATER));
+        u.uFogDensity.value = this.palette.values[PaletteCategory.FOG_TERRAIN] ?? 0;
         u.uSun.value.copy(SUN_DIRECTION);
         u.uCamHeight.value = height;
         u.uWeight.value = weight;

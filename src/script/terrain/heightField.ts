@@ -192,6 +192,11 @@ export class HeightField {
         return this.sampler.heightAtLonLat(lon, lat);
     }
 
+    /** Coarse tier only; see HeightSampler.coarseHeightAtLonLat. */
+    coarseHeightAtLonLat(lon: number, lat: number): number | undefined {
+        return this.sampler.coarseHeightAtLonLat(lon, lat);
+    }
+
     /** Every coarse-tier tile, for mirroring the fallback tier elsewhere. */
     coarseTiles(): { id: TileKey; tile: DemTile }[] {
         const out: { id: TileKey; tile: DemTile }[] = [];
