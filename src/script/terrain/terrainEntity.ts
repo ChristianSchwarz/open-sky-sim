@@ -86,7 +86,7 @@ import { geodeticOnSurfaceAtEnu } from './geodesy';
 import {
     CLASS_TO_TONE, LAND_TONE_BASE, LAND_TONE_COUNT, TONE_COUNT, TerrainTone,
 } from './tones';
-import { RoadsMode, TERRAIN_COLOUR_MODE_INDEX, TerrainColours, TerrainShading, terrainSmoothingStrength } from '../state/gameDefs';
+import { RoadsMode, TERRAIN_COLOUR_MODE_INDEX, TerrainColours, TerrainShading } from '../state/gameDefs';
 import {
     BuildingsSetting, FarTileTexturesSetting, LanduseBlendSetting, LanduseReachSetting, LanduseRevealSetting, RoadsSetting, TerrainColourSetting,
     TerrainDetailSetting, TerrainShadingSetting, TreeDensitySetting, TriangleBudgetSetting, VisibleZoomSetting,
@@ -417,44 +417,19 @@ export class TerrainEntity implements Entity {
      * saved SMOOTH setting got applied instead of avoided.
      */
     setTerrainShading(mode: TerrainShading): void {
-        const strength = terrainSmoothingStrength(mode);
-        // A weld is made at one strength: another level re-welds every tile.
-        const reweld = strength > 0 && strength !== this.weldStrength;
         this.landShading = mode;
-        this.farLand.smoothingStrength = strength;
         for (const meshes of this.streamer.values()) {
-            if (reweld) {
-                this.dropSmooth(meshes);
-            }
-            const geometry = strength > 0
+            const geometry = mode === TerrainShading.SMOOTH
                 ? meshes.landGeometrySmooth ?? meshes.landGeometryFaceted
                 : meshes.landGeometryFaceted;
             if (meshes.land && geometry) {
                 meshes.land.geometry = geometry;
             }
         }
-        if (strength > 0) {
-            this.weldStrength = strength;
+        if (mode === TerrainShading.SMOOTH) {
             this.smoothBacklog = true;
             this.pumpSmooth();
         }
-    }
-
-    /** Strength the resident SMOOTH geometries were welded at. */
-    private weldStrength = terrainSmoothingStrength(TerrainShading.SMOOTH);
-
-    /** Forget a tile's welded land, near and far, for pumpSmooth to weld again. */
-    private dropSmooth(meshes: TileMeshes): void {
-        const smooth = meshes.landGeometrySmooth;
-        if (smooth) {
-            if (meshes.land?.geometry === smooth && meshes.landGeometryFaceted) {
-                meshes.land.geometry = meshes.landGeometryFaceted;
-            }
-            meshes.bytes -= smooth.getIndex()?.array.byteLength ?? 0;
-            meshes.landGeometrySmooth = undefined;
-            smooth.dispose();
-        }
-        this.farLand.dropSmooth(meshes);
     }
 
     /**
@@ -467,7 +442,7 @@ export class TerrainEntity implements Entity {
      * land (up to ~1.6 MB a leaf).
      */
     private pumpSmooth(): void {
-        if (!this.smoothBacklog || this.bootstrapping || terrainSmoothingStrength(this.landShading) === 0) {
+        if (!this.smoothBacklog || this.bootstrapping || this.landShading !== TerrainShading.SMOOTH) {
             return;
         }
         for (const meshes of this.streamer.values()) {
@@ -488,16 +463,13 @@ export class TerrainEntity implements Entity {
         const coverColor = faceted.getAttribute('coverColor') as THREE.InterleavedBufferAttribute;
         const regionSize = faceted.getAttribute('regionSize') as THREE.BufferAttribute | undefined;
         this.smoothPending.add(meshes);
-        const strength = this.weldStrength;
         void this.welder.weld(
             position.array as Int16Array, normal.data.array as Int8Array,
             coverColor.data.array as Uint8Array, regionSize?.array as Uint16Array | undefined,
-            strength,
         ).then(weld => {
             this.smoothPending.delete(meshes);
             this.smoothBacklog = true;
-            if (!weld || meshes.disposed || meshes.landGeometrySmooth || meshes.landGeometryFaceted !== faceted
-                || strength !== this.weldStrength) {
+            if (!weld || meshes.disposed || meshes.landGeometrySmooth || meshes.landGeometryFaceted !== faceted) {
                 return;
             }
             // The seams may have moved the border since the copy was taken.
@@ -505,7 +477,7 @@ export class TerrainEntity implements Entity {
             const smooth = smoothGeometryFromWeld(weld);
             meshes.landGeometrySmooth = smooth;
             meshes.bytes += weld.indices.byteLength;
-            if (meshes.land && terrainSmoothingStrength(this.landShading) > 0) {
+            if (meshes.land && this.landShading === TerrainShading.SMOOTH) {
                 meshes.land.geometry = smooth;
             }
         });
@@ -1450,8 +1422,8 @@ export class TerrainEntity implements Entity {
             // rather than every pinned tile having eagerly paid for it during
             // the burst above - see `bootstrapping`.
             this.bootstrapping = false;
-            if (terrainSmoothingStrength(this.landShading) > 0) {
-                this.setTerrainShading(this.landShading);
+            if (this.landShading === TerrainShading.SMOOTH) {
+                this.setTerrainShading(TerrainShading.SMOOTH);
             }
         }
     }
@@ -1736,7 +1708,7 @@ export class TerrainEntity implements Entity {
                     this.treeReorders.push({ mesh: trees, group: meshes.group });
                 }
             }
-            const smooth = terrainSmoothingStrength(this.landShading) > 0;
+            const smooth = this.landShading === TerrainShading.SMOOTH;
             const near = smooth ? meshes.landGeometrySmooth ?? meshes.landGeometryFaceted : meshes.landGeometryFaceted;
             this.farLand.show(node.id, meshes, FAR_LAND_MAX_PIXELS * nearM * pixelAngle,
                 PRIORITY_IN_FRUSTUM - nearM, near, smooth && near === meshes.landGeometrySmooth);

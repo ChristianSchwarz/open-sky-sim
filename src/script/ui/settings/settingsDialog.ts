@@ -331,9 +331,7 @@ const ROADS_OPTIONS: Option<RoadsMode>[] = [
 
 const TERRAIN_SHADING_OPTIONS: Option<TerrainShading>[] = [
     { value: TerrainShading.FACETED, label: 'Faceted (flat)' },
-    { value: TerrainShading.SMOOTH_LOW, label: 'Smooth: low' },
-    { value: TerrainShading.SMOOTH_MEDIUM, label: 'Smooth: medium' },
-    { value: TerrainShading.SMOOTH, label: 'Smooth: high' },
+    { value: TerrainShading.SMOOTH, label: 'Smooth (blended)' },
 ];
 
 const COLOUR_GROUP_OPTIONS: { key: ColourAdjustGroup; label: string }[] = [
@@ -770,7 +768,7 @@ function sliderValue(event: Event): number {
                         <section>
                             <h3 class="m-0 mb-1 text-base font-medium">Terrain shading</h3>
                             <p class="m-0 mb-2 text-sm opacity-70">
-                                Flat colour per facet, or smoothly blended across neighbouring facets. Rock and steep slopes stay more faceted.
+                                Flat colour per facet, or smoothly blended across neighbouring facets.
                             </p>
                             <mat-radio-group class="grid grid-cols-1 sm:grid-cols-2"
                                 [value]="terrainShading()" (change)="setTerrainShading($event.value)">

@@ -55,8 +55,6 @@ export class FarLandTiles {
     private triangles = 0;
     /** performance.now() past which no more levels are welded this frame. */
     private smoothDeadline = 0;
-    /** Smoothing strength levels are welded at (weldSmoothLand). */
-    smoothingStrength = 1;
 
     constructor(opts: FarLandOptions) {
         const spec = opts.manifest.farLand;
@@ -184,7 +182,7 @@ export class FarLandTiles {
      * left it; followSeam keeps it there from then on.
      */
     private weld(meshes: TileMeshes, far: FarLandMeshes, level: FarLandLevel): void {
-        const smooth = buildSmoothLandGeometryFromFaceted(level.geometry, this.smoothingStrength);
+        const smooth = buildSmoothLandGeometryFromFaceted(level.geometry);
         level.smooth = smooth ?? 'none';
         if (smooth) {
             const bytes = (smooth.getAttribute('position').array as Int16Array).byteLength * 3
@@ -195,27 +193,6 @@ export class FarLandTiles {
     }
 
     /** Copy the near border, as the stitcher left it, onto each level's border corners. */
-    /** Forget a tile's welded levels, after a change of smoothing strength; show() welds them again. */
-    dropSmooth(meshes: TileMeshes): void {
-        const far = meshes.far;
-        if (far === undefined || far === 'pending' || far === 'none') {
-            return;
-        }
-        for (const level of far.levels) {
-            if (level.smooth !== undefined && level.smooth !== 'none') {
-                const bytes = (level.smooth.getAttribute('position').array as Int16Array).byteLength * 3
-                    + (level.smooth.getIndex()?.array.byteLength ?? 0);
-                far.bytes -= bytes;
-                meshes.bytes -= bytes;
-                if (meshes.land?.geometry === level.smooth && meshes.landGeometryFaceted) {
-                    meshes.land.geometry = meshes.landGeometryFaceted;
-                }
-                level.smooth.dispose();
-            }
-            level.smooth = undefined;
-        }
-    }
-
     /** A level's welded geometry was rebuilt bigger (seamFillTail.ts writeFill): point the level at the new one. */
     replaceGeometry(meshes: TileMeshes, from: THREE.BufferGeometry, to: THREE.BufferGeometry): void {
         const far = meshes.far;

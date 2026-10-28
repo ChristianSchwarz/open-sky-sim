@@ -88,23 +88,7 @@ export const TERRAIN_COLOUR_MODE_INDEX: Readonly<Record<TerrainColours, TerrainC
  */
 export enum TerrainShading {
     FACETED = 'FACETED',
-    SMOOTH_LOW = 'SMOOTH_LOW',
-    SMOOTH_MEDIUM = 'SMOOTH_MEDIUM',
-    /** Full smoothing; the name predates the lower levels and is what settings saved. */
     SMOOTH = 'SMOOTH',
-}
-
-/**
- * How far a shading smooths, 0 for FACETED: scales every triangle's
- * smoothing (smoothWeld.ts triangleSmoothing), whatever its class and slope.
- */
-export function terrainSmoothingStrength(mode: TerrainShading): number {
-    switch (mode) {
-        case TerrainShading.SMOOTH_LOW: return 0.35;
-        case TerrainShading.SMOOTH_MEDIUM: return 0.7;
-        case TerrainShading.SMOOTH: return 1;
-        default: return 0;
-    }
 }
 
 export enum HUDFocusMode {

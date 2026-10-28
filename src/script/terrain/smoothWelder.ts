@@ -38,9 +38,9 @@ export class SmoothWelder {
         return this.pending.size;
     }
 
-    weld(positions: Int16Array, normals: Int8Array, attrs: Uint8Array, sizes?: Uint16Array, strength = 1): Promise<SmoothWeld | undefined> {
+    weld(positions: Int16Array, normals: Int8Array, attrs: Uint8Array, sizes?: Uint16Array): Promise<SmoothWeld | undefined> {
         if (this.workers.length === 0) {
-            return Promise.resolve(weldSmoothLand(positions, normals, attrs, sizes, strength));
+            return Promise.resolve(weldSmoothLand(positions, normals, attrs, sizes));
         }
         // The least loaded worker; jobs queue in its message port.
         let worker = 0;
@@ -51,7 +51,7 @@ export class SmoothWelder {
         }
         const id = this.nextId++;
         const request: SmoothWeldRequest = {
-            id, positions: positions.slice(), normals: normals.slice(), attrs: attrs.slice(), sizes: sizes?.slice(), strength,
+            id, positions: positions.slice(), normals: normals.slice(), attrs: attrs.slice(), sizes: sizes?.slice(),
         };
         const transfer = [request.positions, request.normals, request.attrs, request.sizes]
             .filter((a): a is NonNullable<typeof a> => a !== undefined)
