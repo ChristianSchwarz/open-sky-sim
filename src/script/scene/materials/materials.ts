@@ -349,7 +349,8 @@ export class SceneMaterialManager implements KernelTask {
     private readonly colorCache: ColorCache = new ColorCache();
     private palette: Palette;
     private fog: FogQuality;
-    private fogDensityScale = 1;
+    /** Distance fog is off: the user preferred the clear horizon (2026-10-28). */
+    private fogDensityScale = 0;
     private shading: DisplayShading;
     /** Every live material; a disposed one leaves (see build). */
     private materials = new Set<THREE.ShaderMaterial>();
@@ -607,7 +608,7 @@ export class SceneMaterialManager implements KernelTask {
                 color: { value: new THREE.Color(properties.rawColor ?? PaletteColor(this.palette, properties.category)) },
                 colorSecondary: { value: new THREE.Color(properties.rawColor ?? PaletteColorShade(this.palette, properties.category)) },
                 fogType: { value: this.fog },
-                fogDensity: { value: this.palette.values[FogValueCategory(properties.category)] },
+                fogDensity: { value: this.palette.values[FogValueCategory(properties.category)] * this.fogDensityScale },
                 fogColor: { value: new THREE.Color(PaletteColor(this.palette, FogColorCategory(properties.category))) },
                 alphaDither: {
                     value: properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded

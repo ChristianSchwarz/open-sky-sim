@@ -3104,7 +3104,8 @@ export class Game {
         u.uRampTopM.value = this.planetTerrain.edgeLiftTopM;
         (u.uFogColor.value as THREE.Color).set(PaletteColor(this.palette, PaletteCategory.FOG_TERRAIN));
         (u.uMapWater.value as THREE.Color).set(PaletteColor(this.palette, PaletteCategory.TERRAIN_WATER));
-        u.uFogDensity.value = this.palette.values[PaletteCategory.FOG_TERRAIN] ?? 0;
+        // No fog, matching the terrain (MaterialManager.fogDensityScale).
+        u.uFogDensity.value = 0;
         u.uSun.value.copy(SUN_DIRECTION);
         u.uCamHeight.value = height;
         u.uWeight.value = weight;
