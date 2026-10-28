@@ -1243,7 +1243,7 @@ npm run bake:farland -- --bbox ... --satellites --jobs 0   # satellites only
 ```
 
 `bake:tex`, `bake:lidar` and `bake:roof-colours` take the same flags. A whole
-import does it all with `SATELLITES=1` in its environment: the chunk stages
+import does it all by itself (`SATELLITES=0` in its environment turns it off): the chunk stages
 then run stage by stage across every land chunk (coast, roads, buildings,
 the airfields here per chunk, then cover), each chunk's leaves on a satellite
 or here and the coarser tiles and manifest blocks merged here chunk by chunk

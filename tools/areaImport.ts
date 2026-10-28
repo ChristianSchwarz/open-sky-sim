@@ -974,8 +974,12 @@ function gradeSteps(bbox: string, rebaking = false): Step[] {
  */
 const SATELLITE_STEPS = /tools[\\/](bake_planet_(mesh|tex|grade|farland)\.ts|py_leaf_pool\.ts)$/;
 
-/** Whether an import hands its tiles and chunks to bake satellites too: SATELLITES=1. */
-export const importWithSatellites = (): boolean => process.env.SATELLITES === '1';
+/**
+ * Whether an import hands its tiles and chunks to bake satellites too: yes
+ * unless SATELLITES=0. With none on the LAN every tile is baked here, the same
+ * bytes as without them; the bake only listens on ports 47811/47810.
+ */
+export const importWithSatellites = (): boolean => process.env.SATELLITES !== '0';
 
 /**
  * The mesh, far-texture and road-stroke bakes, then bridges, grading and far
