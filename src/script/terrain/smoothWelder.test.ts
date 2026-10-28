@@ -21,7 +21,48 @@ describe('weldSmoothLand', () => {
         assert.equal(weld.positions.length / 3, 4);
         assert.deepEqual([...weld.indices], [0, 1, 2, 1, 3, 2]);
     });
+
+    it('keeps a rock triangle its own faceted normal', () => {
+        const { positions, normals, attrs } = ridge();
+        attrs[3] = attrs[7] = attrs[11] = 6;   // first triangle bare rock
+        const weld = weldSmoothLand(positions, normals, attrs)!;
+        for (let c = 0; c < 3; c++) {
+            const v = weld.indices[c];
+            assert.deepEqual([...weld.normals.subarray(v * 4, v * 4 + 3)], [...normals.subarray(c * 4, c * 4 + 3)]);
+        }
+        // Three of its own, and the other triangle's three: nothing left over.
+        assert.equal(weld.positions.length / 3, 6);
+    });
+
+    it('blends part way at a lower strength, and does not weld steep faces', () => {
+        const { positions, normals, attrs } = ridge();
+        const full = weldSmoothLand(positions, normals, attrs, undefined, 1)!;
+        const half = weldSmoothLand(positions, normals, attrs, undefined, 0.5)!;
+        // Corner 1 is on the ridge: welded, its x leans from its facet's to level; half way, part of that.
+        const v = half.indices[1], w = full.indices[1];
+        const own = normals[4], welded = full.normals[w * 4], blended = half.normals[v * 4];
+        assert.ok(Math.abs(blended - own) > 0 && Math.abs(blended - own) < Math.abs(welded - own));
+
+        const steep = ridge(70);
+        const cliff = weldSmoothLand(steep.positions, steep.normals, steep.attrs)!;
+        assert.equal(cliff.positions.length / 3, 6);
+    });
 });
+
+/** Two facets meeting at a ridge, each leaning `deg` from up to either side, class grass. */
+function ridge(deg = 20) {
+    const { positions, attrs } = quad();
+    for (let v = 0; v < 6; v++) {
+        attrs[v * 4 + 3] = 3;
+    }
+    const s = Math.round(Math.sin(deg * Math.PI / 180) * 127), c = Math.round(Math.cos(deg * Math.PI / 180) * 127);
+    const normals = new Int8Array(6 * 4);
+    for (let v = 0; v < 6; v++) {
+        normals[v * 4] = v < 3 ? -s : s;
+        normals[v * 4 + 1] = c;
+    }
+    return { positions, normals, attrs };
+}
 
 describe('refreshWeldPositions', () => {
     it('takes the faceted positions as they are now, through the index', () => {

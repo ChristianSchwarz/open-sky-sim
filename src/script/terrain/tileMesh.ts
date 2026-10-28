@@ -24,7 +24,7 @@
  */
 
 import * as THREE from 'three';
-import { TerrainShading } from '../state/gameDefs';
+import { TerrainShading, terrainSmoothingStrength } from '../state/gameDefs';
 import { EnuBasis, ecefToEnu, geodeticToEcef, sceneFromEnu } from './geodesy';
 import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, PtmBorder, PtmTile } from './ptm';
 import type { SeamState } from './seamStitch';
@@ -377,8 +377,10 @@ export function buildSmoothLandGeometry(
     positions: Int16Array, normals: Int8Array, attrs: Uint8Array,
     /** Per-vertex region width (see regionSizes); the weld keeps the largest. */
     sizes?: Uint16Array,
+    /** See weldSmoothLand. */
+    strength = 1,
 ): THREE.BufferGeometry | undefined {
-    const weld = weldSmoothLand(positions, normals, attrs, sizes);
+    const weld = weldSmoothLand(positions, normals, attrs, sizes, strength);
     return weld && smoothGeometryFromWeld(weld);
 }
 
@@ -405,7 +407,7 @@ export function smoothGeometryFromWeld(weld: SmoothWeld): THREE.BufferGeometry {
  * (see the file header), so those arrays are still alive here even though the
  * `PtmTile` itself is long gone — this just reads them back out.
  */
-export function buildSmoothLandGeometryFromFaceted(faceted: THREE.BufferGeometry): THREE.BufferGeometry | undefined {
+export function buildSmoothLandGeometryFromFaceted(faceted: THREE.BufferGeometry, strength = 1): THREE.BufferGeometry | undefined {
     const position = faceted.getAttribute('position') as THREE.BufferAttribute;
     const normal = faceted.getAttribute('normal') as THREE.InterleavedBufferAttribute;
     const coverColor = faceted.getAttribute('coverColor') as THREE.InterleavedBufferAttribute;
@@ -415,6 +417,7 @@ export function buildSmoothLandGeometryFromFaceted(faceted: THREE.BufferGeometry
         normal.data.array as Int8Array,
         coverColor.data.array as Uint8Array,
         regionSize?.array as Uint16Array | undefined,
+        strength,
     );
 }
 
@@ -560,14 +563,16 @@ export function buildTileMeshes(
         // whatever is resident at the time — see
         // TerrainEntity.setTerrainShading — rather than every tile upload
         // paying it up front regardless of the active setting.
-        const smoothLg = shading === TerrainShading.SMOOTH
+        const strength = terrainSmoothingStrength(shading);
+        const smoothLg = strength > 0
             ? buildSmoothLandGeometry(
                 tile.landPositions, tile.landNormals, tile.landAttrs,
                 (lg.getAttribute('regionSize') as THREE.BufferAttribute).array as Uint16Array,
+                strength,
             )
             : undefined;
         const mesh = new THREE.Mesh(
-            shading === TerrainShading.SMOOTH && smoothLg ? smoothLg : lg,
+            smoothLg ?? lg,
             materials as THREE.Material[],
         );
         mesh.frustumCulled = false;   // the quadtree already culled this tile

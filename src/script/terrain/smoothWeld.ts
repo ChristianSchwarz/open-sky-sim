@@ -43,6 +43,39 @@ export function hasLanduseGround(landAttrs: Uint8Array): boolean {
  */
 const MIN_NORMAL_WEIGHT = 1e-3;
 
+/**
+ * How smooth each class (TerrainClass, tones.ts) shades, 0 faceted .. 1
+ * welded; anything not listed is 1. Rock stays crisp, sand and moss half way.
+ */
+const CLASS_SMOOTHING: Readonly<Record<number, number>> = {
+    6: 0, // Bare (rock, scree)
+    11: 0.5, // Moss (fell, tundra)
+    12: 0.5, // Sand
+};
+
+/** A facet whose normal's y (cos of its slope) is above this shades fully smooth... */
+const SMOOTH_SLOPE_COS = Math.cos(25 * Math.PI / 180);
+/** ...and at or below this fully faceted, cliffs and gorge walls. */
+const FACETED_SLOPE_COS = Math.cos(50 * Math.PI / 180);
+
+/**
+ * How far one land triangle's corners shade toward the welded normal: its
+ * class's smoothing times a slope fade, times the overall strength. From the
+ * baked faceted normal (y up) and the class of its first corner.
+ */
+export function triangleSmoothing(normals: Int8Array, attrs: Uint8Array, first: number, strength: number): number {
+    const byClass = CLASS_SMOOTHING[attrs[first * 4 + 3]] ?? 1;
+    let nx = 0, ny = 0, nz = 0;
+    for (let c = 0; c < 3; c++) {
+        nx += normals[(first + c) * 4];
+        ny += normals[(first + c) * 4 + 1];
+        nz += normals[(first + c) * 4 + 2];
+    }
+    const cos = ny / (Math.hypot(nx, ny, nz) || 1);
+    const t = Math.min(1, Math.max(0, (cos - FACETED_SLOPE_COS) / (SMOOTH_SLOPE_COS - FACETED_SLOPE_COS)));
+    return byClass * t * t * (3 - 2 * t) * strength;
+}
+
 /** A land triangle's area (twice it, which weights the same), in quantised units squared. */
 function triangleArea(positions: Int16Array, first: number): number {
     const o = first * 3;
@@ -88,6 +121,8 @@ export function weldSmoothLand(
     positions: Int16Array, normals: Int8Array, attrs: Uint8Array,
     /** Per-vertex region width (see regionSizes); the weld keeps the largest. */
     sizes?: Uint16Array,
+    /** Overall smoothing, 0..1, see triangleSmoothing; 1 keeps flat gentle ground fully welded. */
+    strength = 1,
 ): SmoothWeld | undefined {
     const vertexCount = positions.length / 3;
     if (vertexCount === 0) {
@@ -176,30 +211,85 @@ export function weldSmoothLand(
         colorSum[idx * 4 + 3] += 1;
     }
 
-    const outPositions = uniquePositions.slice(0, uniqueCount * 3);
-    const outNormals = new Int8Array(uniqueCount * 4);
-    const outAttrs = new Uint8Array(uniqueCount * 4);
-    const outSizes = sizeMax.slice(0, uniqueCount);
-    for (let v = 0; v < uniqueCount; v++) {
-        const n = normalOf[v];
+    // Per triangle, how far toward the welded normal it shades. A triangle
+    // short of fully smooth gets a vertex per corner of its own, with the
+    // region's colour but its own blended normal; a welded vertex only such
+    // triangles touch is left out.
+    const triangleS = new Float32Array(vertexCount / 3);
+    const sharedOut = new Int32Array(uniqueCount).fill(-1);
+    let total = 0;
+    for (let t = 0; t < triangleS.length; t++) {
+        const s = triangleSmoothing(normals, attrs, t * 3, strength);
+        triangleS[t] = s;
+        for (let c = t * 3; c < t * 3 + 3; c++) {
+            if (s < 1) {
+                total++;
+            } else if (sharedOut[remap[c]] === -1) {
+                sharedOut[remap[c]] = total++;
+            }
+        }
+    }
+
+    const smoothNormals = new Float64Array(slots * 3);
+    for (let n = 0; n < slots; n++) {
         const nx = normalSum[n * 3];
         const ny = normalSum[n * 3 + 1];
         const nz = normalSum[n * 3 + 2];
         const len = Math.hypot(nx, ny, nz) || 1;
-        outNormals[v * 4] = Math.round((nx / len) * 127);
-        outNormals[v * 4 + 1] = Math.round((ny / len) * 127);
-        outNormals[v * 4 + 2] = Math.round((nz / len) * 127);
-        outNormals[v * 4 + 3] = 0;
-
-        const count = colorSum[v * 4 + 3] || 1;
-        outAttrs[v * 4] = Math.round(colorSum[v * 4] / count);
-        outAttrs[v * 4 + 1] = Math.round(colorSum[v * 4 + 1] / count);
-        outAttrs[v * 4 + 2] = Math.round(colorSum[v * 4 + 2] / count);
-
-        outAttrs[v * 4 + 3] = vertexClass[v];
+        smoothNormals[n * 3] = nx / len;
+        smoothNormals[n * 3 + 1] = ny / len;
+        smoothNormals[n * 3 + 2] = nz / len;
     }
 
-    const IndexArray = uniqueCount > 65535 ? Uint32Array : Uint16Array;
+    const outPositions = new Int16Array(total * 3);
+    const outNormals = new Int8Array(total * 4);
+    const outAttrs = new Uint8Array(total * 4);
+    const outSizes = new Uint16Array(total);
+    let next = 0;
+    for (let i = 0; i < vertexCount; i++) {
+        const v = remap[i];
+        const s = triangleS[(i / 3) | 0];
+        let o: number;
+        if (s >= 1) {
+            o = sharedOut[v];
+            remap[i] = o;
+            if (o < next) {
+                continue;   // already written
+            }
+            next = o + 1;
+        } else {
+            o = next++;
+            remap[i] = o;
+        }
+        const n = normalOf[v];
+        let bx = smoothNormals[n * 3], by = smoothNormals[n * 3 + 1], bz = smoothNormals[n * 3 + 2];
+        if (s < 1) {
+            const ni = i * 4;
+            const fx = normals[ni] / 127, fy = normals[ni + 1] / 127, fz = normals[ni + 2] / 127;
+            bx = fx + (bx - fx) * s;
+            by = fy + (by - fy) * s;
+            bz = fz + (bz - fz) * s;
+            const len = Math.hypot(bx, by, bz) || 1;
+            bx /= len;
+            by /= len;
+            bz /= len;
+        }
+        outNormals[o * 4] = Math.round(bx * 127);
+        outNormals[o * 4 + 1] = Math.round(by * 127);
+        outNormals[o * 4 + 2] = Math.round(bz * 127);
+
+        const count = colorSum[v * 4 + 3] || 1;
+        outAttrs[o * 4] = Math.round(colorSum[v * 4] / count);
+        outAttrs[o * 4 + 1] = Math.round(colorSum[v * 4 + 1] / count);
+        outAttrs[o * 4 + 2] = Math.round(colorSum[v * 4 + 2] / count);
+        outAttrs[o * 4 + 3] = vertexClass[v];
+        outPositions[o * 3] = uniquePositions[v * 3];
+        outPositions[o * 3 + 1] = uniquePositions[v * 3 + 1];
+        outPositions[o * 3 + 2] = uniquePositions[v * 3 + 2];
+        outSizes[o] = sizeMax[v];
+    }
+
+    const IndexArray = total > 65535 ? Uint32Array : Uint16Array;
     const indices = new IndexArray(vertexCount);
     indices.set(remap);
     return { positions: outPositions, normals: outNormals, attrs: outAttrs, sizes: outSizes, indices };
@@ -227,6 +317,7 @@ export interface SmoothWeldRequest {
     normals: Int8Array;
     attrs: Uint8Array;
     sizes?: Uint16Array;
+    strength: number;
 }
 
 export interface SmoothWeldReply {
