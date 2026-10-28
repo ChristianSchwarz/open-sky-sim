@@ -4051,7 +4051,9 @@ export class Game {
             }
         }
         const at = aircraft ?? this.playArea.origin;
-        window.open(mapViewUrl({ lat: at.lat, lon: at.lon, aircraft }), '_blank');
+        window.open(mapViewUrl({ lat: at.lat, lon: at.lon, aircraft }), 'retroflightsim-editor',
+            // A window of its own, not a tab, sized to most of the screen.
+            `popup,width=${Math.round(screen.availWidth * 0.9)},height=${Math.round(screen.availHeight * 0.9)}`);
     }
 
     private toggleShowcaseView() {

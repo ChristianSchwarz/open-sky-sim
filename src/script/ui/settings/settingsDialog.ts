@@ -426,7 +426,9 @@ function sliderValue(event: Event): number {
     ],
     // The page body is bold with a text shadow for legibility over the 3D
     // view; the dialog sits on its own opaque surface and wants neither.
-    host: { class: 'block font-normal [text-shadow:none]' },
+    // A column filling the settings window, so the tab content takes the
+    // height the title, section picker and buttons leave.
+    host: { class: 'flex h-full flex-col font-normal [text-shadow:none]' },
     template: `
 <h2 mat-dialog-title>Settings</h2>
 
@@ -449,18 +451,16 @@ function sliderValue(event: Event): number {
     }
 </div>
 
-<mat-dialog-content>
-    <mat-tab-nav-panel #panel>
-        <!-- One fixed-height scroller, vertical only. Sized to stay inside the
-             dialog content's own maximum height so that never scrolls too, and
-             to leave room for the title, section picker and buttons (16rem) so
-             the whole dialog fits on short windows. -->
-        <div class="box-border h-[min(55vh,480px,calc(100dvh-16rem))] overflow-x-hidden overflow-y-auto pt-4 pr-2 wrap-anywhere">
+<mat-dialog-content class="!flex min-h-0 grow !max-h-none flex-col !overflow-hidden">
+    <mat-tab-nav-panel #panel class="!flex min-h-0 grow flex-col">
+        <!-- One scroller, vertical only, taking all the height the title,
+             section picker and buttons leave in the window. -->
+        <div class="box-border flex min-h-0 grow flex-col overflow-x-hidden overflow-y-auto pt-4 pr-2 wrap-anywhere">
             @switch (tab()) {
                 @case ('Flight') {
                     <!-- Fills the tab exactly: the aircraft list takes what the
                          other fields and the buttons leave, and scrolls itself. -->
-                    <div class="flex h-full flex-col gap-4 overflow-hidden">
+                    <div class="flex min-h-0 grow flex-col gap-4 overflow-hidden">
                         <section class="flex min-h-0 flex-1 flex-col">
                             <h3 class="m-0 mb-1 text-base font-medium">Aircraft</h3>
                             <mat-selection-list #aircraftList [multiple]="false" class="min-h-0 flex-1 overflow-y-auto"
