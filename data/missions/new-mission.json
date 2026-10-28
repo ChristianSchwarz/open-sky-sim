@@ -4,32 +4,19 @@
   "flights": [
     {
       "name": "Flight 1",
-      "aircraftId": "f22",
-      "control": "player",
+      "aircraftId": "3443641237_global_skies_collection_a_10c_a_10c_mat_r-564970989868862199",
+      "control": "ai",
       "start": {
-        "kind": "air",
-        "lat": 52.46678307103195,
-        "lon": 13.00513992038658,
-        "altM": 3048,
-        "speedMps": 180.0554,
-        "headingDeg": 0
+        "kind": "runway",
+        "airfield": "ETNL",
+        "designator": "27",
+        "lat": 53.918079784091155,
+        "lon": 12.279279939654412
       },
       "waypoints": [
         {
-          "lat": 52.45420019990383,
-          "lon": 13.157272592786141,
-          "altM": 3048,
-          "speedMps": 180.0554
-        },
-        {
-          "lat": 52.45822906657554,
-          "lon": 13.140038983572428,
-          "altM": 3048,
-          "speedMps": 180.0554
-        },
-        {
-          "lat": 52.465689763399816,
-          "lon": 13.152248859652198,
+          "lat": 53.95318649421387,
+          "lon": 12.130356216762484,
           "altM": 3048,
           "speedMps": 180.0554
         }
@@ -37,21 +24,21 @@
     },
     {
       "name": "Flight 2",
-      "aircraftId": "cold_war_planes_a_10a_511th_a_10a_mat_r-1308628691937419272",
-      "control": "ai",
+      "aircraftId": "3443641237_global_skies_collection_mig_29s_mig_29s_mat_r-8180588934027524324",
+      "control": "player",
       "start": {
         "kind": "air",
-        "lat": 52.47264722944659,
-        "lon": 13.014578951481386,
-        "altM": 3048,
+        "lat": 53.89363096392232,
+        "lon": 12.267620304987389,
+        "altM": 152.4,
         "speedMps": 180.0554,
         "headingDeg": 0
       },
       "waypoints": [
         {
-          "lat": 52.46545532940128,
-          "lon": 13.032799726235323,
-          "altM": 3048,
+          "lat": 53.926873890322966,
+          "lon": 12.276841699485175,
+          "altM": 152.4,
           "speedMps": 180.0554
         }
       ]
