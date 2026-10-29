@@ -1,0 +1,4 @@
+retroflightsim dev server running at http://localhost:8020
+Serving C:\Users\chris\Projects\retroflightsim\dist
+Mod import endpoint: POST /api/preview-mod, POST /api/import-mod (F10 in-app upload)
+Live reload enabled — browser refreshes when bundle.js rebuilds

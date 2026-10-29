@@ -1,48 +1,6 @@
 {
   "version": 1,
   "name": "New mission",
-  "flights": [
-    {
-      "name": "Flight 1",
-      "aircraftId": "3443641237_global_skies_collection_a_10c_a_10c_mat_r-564970989868862199",
-      "control": "ai",
-      "start": {
-        "kind": "runway",
-        "airfield": "ETNL",
-        "designator": "27",
-        "lat": 53.918079784091155,
-        "lon": 12.279279939654412
-      },
-      "waypoints": [
-        {
-          "lat": 53.95318649421387,
-          "lon": 12.130356216762484,
-          "altM": 3048,
-          "speedMps": 180.0554
-        }
-      ]
-    },
-    {
-      "name": "Flight 2",
-      "aircraftId": "3443641237_global_skies_collection_mig_29s_mig_29s_mat_r-8180588934027524324",
-      "control": "player",
-      "start": {
-        "kind": "air",
-        "lat": 53.89363096392232,
-        "lon": 12.267620304987389,
-        "altM": 152.4,
-        "speedMps": 180.0554,
-        "headingDeg": 0
-      },
-      "waypoints": [
-        {
-          "lat": 53.926873890322966,
-          "lon": 12.276841699485175,
-          "altM": 152.4,
-          "speedMps": 180.0554
-        }
-      ]
-    }
-  ],
-  "area": "DACH"
+  "flights": [],
+  "area": "Nord Kap"
 }
