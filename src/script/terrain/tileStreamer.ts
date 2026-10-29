@@ -75,6 +75,8 @@ export class TileStreamer<T, G> {
      */
     private pinnedKeys = new Set<string>();
     private uploaded = 0;
+    /** Bumped whenever the set of uploaded tiles changes. */
+    private residentVersion = 0;
     private uploadMs = 0;
     private prefetched = 0;
 
@@ -92,6 +94,11 @@ export class TileStreamer<T, G> {
     /** Tiles that must never be cancelled or skipped, whatever the want set. */
     setPinnedKeys(keys: Iterable<string>): void {
         this.pinnedKeys = new Set(keys);
+    }
+
+    /** Changes whenever a tile is uploaded or dropped; equal means the same resident set. */
+    get version(): number {
+        return this.residentVersion;
     }
 
     /** Drawable object for a tile, if it has been uploaded. */
@@ -194,6 +201,7 @@ export class TileStreamer<T, G> {
                 continue;
             }
             this.gpu.set(key, this.opts.upload(entry.id, entry.value));
+            this.residentVersion++;
             done++;
         }
         this.uploaded += done;
@@ -208,6 +216,7 @@ export class TileStreamer<T, G> {
             return;
         }
         this.gpu.delete(key);
+        this.residentVersion++;
         const [z, x, y] = key.split('/').map(Number);
         this.opts.release?.({ z, x, y }, g);
     }

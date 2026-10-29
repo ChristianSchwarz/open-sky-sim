@@ -289,6 +289,9 @@ export interface TerrainStats {
     buildingShownTriangles: number;
 }
 
+/** How far the camera moves before the budget fold runs again; see coarsenToBudget. */
+const FOLD_CAMERA_QUANTUM_M = 250;
+
 export class TerrainEntity implements Entity {
     readonly tags = [ENTITY_TAGS.GROUND];
     enabled = true;
@@ -2058,7 +2061,46 @@ export class TerrainEntity implements Entity {
      * cannot take over and is asked for, so the next reconcile can fold
      * into it; until then the cap below still applies.
      */
+    /**
+     * The fold again only when what it reads has changed: the cut, the
+     * budget, the resident tiles, or the camera by a few hundred metres (it
+     * folds farthest first). Re-folded every reconcile it was the biggest
+     * part of the slow frames over the Alps, ~800 folds every 100 ms
+     * (2026-10-29).
+     */
     private coarsenToBudget(
+        draw: QuadNode[], camPos: THREE.Vector3,
+    ): { draw: QuadNode[]; merged: number; wants: TileWant[] } {
+        const q = FOLD_CAMERA_QUANTUM_M;
+        let signature = `${this.triangleBudget}|${this.streamer.version}|${Math.round(camPos.x / q)},`
+            + `${Math.round(camPos.y / q)},${Math.round(camPos.z / q)}|`;
+        for (const node of draw) {
+            signature += node.under ? node.key + '~' : node.key + ';';
+        }
+        const last = this.lastFold;
+        // A parent the tree forgot and built again is another object.
+        if (last && last.signature === signature && last.promoted.every(n => this.quadtree.node(n.key) === n)) {
+            for (const node of last.promoted) {
+                node.under = false;
+            }
+            return { draw: last.draw, merged: last.merged, wants: last.wants };
+        }
+        const fit = this.foldToBudget(draw, camPos);
+        const input = new Set(draw);
+        this.lastFold = {
+            signature, draw: fit.draw, merged: fit.merged, wants: fit.wants,
+            promoted: fit.draw.filter(n => !input.has(n) || !n.under),
+        };
+        return fit;
+    }
+
+    private lastFold: {
+        signature: string; draw: QuadNode[]; merged: number; wants: TileWant[];
+        /** Nodes the fold drew whole; their `under` is cleared again on a hit. */
+        promoted: QuadNode[];
+    } | undefined;
+
+    private foldToBudget(
         draw: QuadNode[], camPos: THREE.Vector3,
     ): { draw: QuadNode[]; merged: number; wants: TileWant[] } {
         // The same count syncGroup caps on, roads and bridges included: a
