@@ -17,7 +17,7 @@ import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missio
     selector: 'rfs-mission-panel',
     changeDetection: ChangeDetectionStrategy.OnPush,
     imports: [MatButtonModule, MatButtonToggleModule, MatFormFieldModule, MatInputModule, MatSelectModule],
-    // Fills the map's left pane (style.css --map-split), scrolling on its own.
+    // Fills the map's left pane (mapView.ts --map-split), scrolling on its own.
     host: { class: 'fixed inset-y-0 left-0 block w-[var(--map-split)] overflow-y-auto text-white/90' },
     template: `
 @let e = editor();

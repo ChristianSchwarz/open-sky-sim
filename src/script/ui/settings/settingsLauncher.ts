@@ -74,7 +74,7 @@ function prepareWindow(win: Window): void {
     }
     doc.documentElement.className = document.documentElement.className;
     doc.body.className = document.body.className;
-    // The game's style.css styles the body for a full-screen canvas; the
+    // The game's body classes style it for a full-screen canvas; the
     // settings page wants a plain background behind the dialog surface.
     doc.body.style.margin = '0';
     doc.body.style.overflow = 'hidden';

@@ -1,16 +1,28 @@
 /*
- * Styles for the Angular Material settings dialog: the Material theme and
- * Tailwind's utilities, and nothing hand-written. Components style themselves
- * with Tailwind classes in their templates; Material is adjusted only through
- * its documented --mat-* tokens.
+ * The page's only stylesheet: the Material theme and Tailwind's utilities,
+ * and nothing hand-written. The game's overlays (index.html, the map view)
+ * and the Angular components style themselves with Tailwind classes; Material
+ * is adjusted only through its documented --mat-* tokens.
  *
- * Tailwind's preflight is left out on purpose: it resets every element on the
- * page, and the game's own overlays (spawn menu, boot screen) are hand-styled
- * in style.css against browser defaults.
+ * Tailwind's preflight is left out on purpose: it resets every element, and
+ * the overlays and Material components are styled against browser defaults.
  */
 @layer theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "@angular/material/prebuilt-themes/cyan-orange.css";
 
+@source "./index.html";
 @source "./script/ui";
+@source "./script/state/mapView.ts";
+@source "./script/state/missionOverlay.ts";
+
+@theme {
+    /* The countdown's number, restarted each second (osd/bootProgress.ts). */
+    --animate-countdown-tick: countdown-tick 1s ease-out;
+
+    @keyframes countdown-tick {
+        from { scale: 1.4; opacity: 1; }
+        to { scale: 1; opacity: 0.6; }
+    }
+}

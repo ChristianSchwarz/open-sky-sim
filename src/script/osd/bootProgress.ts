@@ -33,7 +33,7 @@ export function setBootStreaming(percent: number, label: string): void {
     root?.classList.remove('fading');
 }
 
-/** Clear the blur and dim to nothing over a second (see style.css), then hide the overlay. */
+/** Clear the blur and dim to nothing over a second (see index.html), then hide the overlay. */
 export function fadeOutBootProgress(): void {
     const root = document.getElementById('boot-progress');
     if (!root) {

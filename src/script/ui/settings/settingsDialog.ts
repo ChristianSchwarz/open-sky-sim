@@ -1007,13 +1007,13 @@ function sliderValue(event: Event): number {
                                             </div>
                                             <div class="text-xs opacity-80">
                                                 @if (source.creditUrl) {
-                                                    <a [href]="source.creditUrl" target="_blank" rel="noopener">{{ source.credit }}</a>
+                                                    <a [href]="source.creditUrl" target="_blank" rel="noopener" class="text-[#94ddff] no-underline hover:text-white hover:underline">{{ source.credit }}</a>
                                                 } @else {
                                                     {{ source.credit }}
                                                 }
                                                 ·
                                                 @if (licenceUrls[source.licence]; as url) {
-                                                    <a [href]="url" target="_blank" rel="noopener">{{ source.licence }}</a>
+                                                    <a [href]="url" target="_blank" rel="noopener" class="text-[#94ddff] no-underline hover:text-white hover:underline">{{ source.licence }}</a>
                                                 } @else {
                                                     {{ source.licence }}
                                                 }

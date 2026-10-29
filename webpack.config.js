@@ -28,7 +28,7 @@ function isModAsset(resourcePath) {
  * serving dist/ with a plain static server would otherwise 404 the manifest.
  */
 module.exports = (_env, argv) => ({
-    // ui.css is the settings dialog's Material theme and Tailwind utilities,
+    // ui.css is the page's Material theme and Tailwind utilities,
     // extracted next to the bundle as bundle.css.
     entry: ['./src/script/index.ts', './src/ui.css'],
     devtool: argv && argv.mode === 'production' ? false : 'inline-source-map',
@@ -99,10 +99,6 @@ module.exports = (_env, argv) => ({
                             .replace('src="./bundle.js"', `src="./bundle.js?v=${v}"`)
                             .replace('href="./bundle.css"', `href="./bundle.css?v=${v}"`);
                     },
-                },
-                {
-                    from: 'src/style.css',
-                    to: 'style.css',
                 },
                 {
                     from: 'assets/*',

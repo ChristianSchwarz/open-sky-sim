@@ -21,6 +21,11 @@ const OTHER = '#d8e4ee';
 /** A press on a waypoint moving less than this (px) selects it without moving it. */
 const DRAG_SLOP_PX = 3;
 
+/** A draggable waypoint, start or landing. */
+const WP = 'mission-wp pointer-events-auto cursor-move';
+/** A label outlined in the map's background so it reads over routes. */
+const LABEL = 'mission-wp-label stroke-[#0d1a26] stroke-3 [paint-order:stroke]';
+
 export class MissionOverlay {
     private readonly svg: SVGSVGElement;
     private drawn: unknown[] = [];
@@ -33,7 +38,8 @@ export class MissionOverlay {
         private readonly airfields: () => ReadonlyArray<{ airfield: Airfield }> = () => [],
     ) {
         this.svg = document.createElementNS(SVG, 'svg');
-        this.svg.classList.add('mission-overlay');
+        this.svg.setAttribute('class', 'mission-overlay pointer-events-none fixed top-0 left-(--map-split) z-4 h-full'
+            + ' w-[calc(100%-var(--map-split))] font-mono text-[11px] font-bold');
         document.body.appendChild(this.svg);
         map.onGroundClick = (lat, lon) => editor.clickMap(lat, lon);
         this.svg.addEventListener('pointerdown', e => {
@@ -134,11 +140,11 @@ export class MissionOverlay {
             }
             // The selected one filled in, and a ring round it.
             const picked = selected && j === this.editor.selectedPoint();
-            out += `<g data-wp="${i},${j}" class="mission-wp" transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">`
+            out += `<g data-wp="${i},${j}" class="${WP}" transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">`
                 + (picked ? `<circle r="14" fill="none" stroke="#ffffff" stroke-width="2"/>` : '')
                 + `<circle r="9" fill="${picked ? colour : '#0d1a26'}" stroke="${colour}" stroke-width="2"/>`
                 + `<text text-anchor="middle" dy="4" fill="${picked ? '#0d1a26' : colour}">${j + 1}</text>`
-                + (selected ? `<text x="13" dy="4" class="mission-wp-label" fill="${colour}">`
+                + (selected ? `<text x="13" dy="4" class="${LABEL}" fill="${colour}">`
                     + `${Math.round(w.altM / FT / 100) * 100} ft · ${Math.round(w.speedMps / 0.514444)} kt</text>` : '')
                 + '</g>';
         });
@@ -164,14 +170,14 @@ export class MissionOverlay {
         const fill = onRunway ? 'transparent' : picked ? colour : '#0d1a26';
         const label = kind === 'start' ? name ?? '' : onRunway ? e.designator : '';
         const text = kind === 'start' && onRunway ? `${label} · ${e.airfield} ${e.designator}` : label;
-        const drag = flight === undefined ? '' : ` data-wp="${flight},${kind}" class="mission-wp"`;
+        const drag = flight === undefined ? '' : ` data-wp="${flight},${kind}" class="${WP}"`;
         return `<g${drag} transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">`
             + (picked ? `<circle r="${r + 5}" fill="none" stroke="#ffffff" stroke-width="2"/>` : '')
             + `${shape} fill="${fill}" stroke="${colour}" stroke-width="${onRunway ? 3 : 2}"/>`
             // Numbered 0 like the panel's list; on a runway the chart symbol is inside instead.
             + (kind === 'start' && !onRunway
                 ? `<text text-anchor="middle" dy="4" fill="${picked ? '#0d1a26' : colour}">0</text>` : '')
-            + `<text x="${r + 4}" dy="4" class="mission-wp-label" fill="${colour}">${escapeXml(text)}</text></g>`;
+            + `<text x="${r + 4}" dy="4" class="${LABEL}" fill="${colour}">${escapeXml(text)}</text></g>`;
     }
 }
 

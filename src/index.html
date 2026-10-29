@@ -7,25 +7,31 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Retro Flight Sim</title>
     <link rel="stylesheet" href="./bundle.css">
-    <link rel="stylesheet" href="./style.css">
     <script src="./bundle.js"></script>
 </head>
 
-<body>
-    <div id="container"></div>
-    <div id="boot-progress">
-        <div id="boot-progress-dialog">
-            <h2>Retro Flight Sim</h2>
-            <div id="boot-progress-label">Loading...</div>
-            <div id="boot-progress-track">
-                <div id="boot-progress-fill"></div>
+<!-- map-view: the map mode (F12, state/mapView.ts), the page as a map with the map on the right. -->
+<body class="m-0 flex h-screen select-none bg-[#fafafa] font-[sans-serif] font-bold text-shadow-[black_0_0_2px] [&.map-view]:bg-[#0d1a26]">
+    <div id="container" class="fixed inset-0 in-[.map-view]:left-(--map-split) in-[.map-view]:cursor-grab in-[.map-view]:touch-none [&.map-dragging]:cursor-grabbing"></div>
+    <!-- streaming: after boot the live view shows through, blurred, until terrain streaming settles.
+         fading: blur and dim go to zero in 1s, under the countdown; the dialog leaves at once. -->
+    <div id="boot-progress" class="fixed inset-0 z-4 flex items-center justify-center bg-black/85 [&.hidden]:hidden
+            [&.streaming]:transition-[backdrop-filter,background-color] [&.streaming]:duration-1000 [&.streaming]:ease-linear
+            [&.streaming:not(.fading)]:bg-black/35 [&.streaming:not(.fading)]:backdrop-blur-[12px]
+            [&.fading]:pointer-events-none [&.fading]:bg-black/0 [&.fading]:backdrop-blur-[0px]">
+        <div id="boot-progress-dialog" class="min-w-64 max-w-[90vw] border border-[#8a8a8a] bg-black/90 p-5 text-center text-[#b8b8b8] in-[.fading]:invisible">
+            <h2 class="mt-0 mb-4 text-[1.25rem] text-white">Retro Flight Sim</h2>
+            <div id="boot-progress-label" class="mb-3 text-[0.9rem] text-white">Loading...</div>
+            <div id="boot-progress-track" class="h-2 w-full overflow-hidden border border-[#8a8a8a] bg-[#3a3a3a]">
+                <div id="boot-progress-fill" class="h-full w-0 bg-white transition-[width] duration-200 ease-linear"></div>
             </div>
         </div>
     </div>
-    <div id="countdown" class="hidden"></div>
-    <div id="mod-status" class="hidden"></div>
-    <div id="showcase-pick" class="hidden"></div>
-    <div id="settings-button" title="Settings and help">⋮</div>
+    <div id="countdown" class="hidden pointer-events-none fixed top-1/2 left-1/2 z-4 -translate-1/2 text-[8rem] font-bold text-white text-shadow-[0_0_0.5rem_black,0_0_1.5rem_black] [&.tick]:animate-countdown-tick in-[.map-view]:hidden"></div>
+    <div id="mod-status" class="hidden absolute top-4 left-1/2 z-2 max-w-[80vw] -translate-x-1/2 rounded-sm border border-[#8a8a8a] bg-black/80 px-4 py-2 text-center text-[0.9rem] text-white"></div>
+    <div id="showcase-pick" class="hidden absolute top-4 left-4 z-2 max-w-[40vw] rounded-sm border border-[#8a8a8a] bg-black/80 px-[0.8rem] py-[0.4rem] text-[0.85rem] text-white"></div>
+    <div id="settings-button" title="Settings and help" class="absolute top-4 left-4 z-1 size-12 cursor-pointer rounded-full bg-white text-center text-2xl/12 text-black select-none hover:bg-black hover:text-white
+            [&.active]:bg-black [&.active]:text-white [&.active:hover]:bg-white [&.active:hover]:text-black in-[.map-view]:hidden">⋮</div>
 </body>
 
 </html>

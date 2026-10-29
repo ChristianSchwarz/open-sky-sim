@@ -120,21 +120,28 @@ export class MapView {
 
     /** Built once, closed; {@link open} shows it. */
     constructor(private readonly host: MapViewHost) {
-        this.marker = el('div', 'map-aircraft');
+        this.marker = el('div', 'map-aircraft pointer-events-none fixed -top-3 -left-2.5 z-5 h-6 w-5 origin-[10px_12px]'
+            // No heading: a dot in place of the arrow.
+            + ' [&.no-heading_svg]:hidden after:hidden [&.no-heading]:after:block after:absolute after:top-1.5 after:left-1'
+            + ' after:size-3 after:box-border after:rounded-full after:border-2 after:border-black after:bg-[#ffcc33]');
         this.marker.innerHTML = '<svg width="20" height="24" viewBox="0 0 20 24">'
             + '<path d="M10 1 L18 22 L10 17 L2 22 Z" fill="#ffcc33" stroke="#000" stroke-width="1.5" '
             + 'stroke-linejoin="round" /></svg>';
-        const info = el('div', 'map-info');
-        const scale = el('div', 'map-scale', info);
-        this.scaleBar = el('div', 'map-scale-bar', scale);
+        const info = el('div', `map-info ${PANEL} left-[calc(var(--map-split)+12px)] flex flex-col gap-1`
+            + ' text-[13px]/[1.3] text-[#d8e4ee]');
+        const scale = el('div', 'map-scale flex items-center gap-2', info);
+        this.scaleBar = el('div', 'map-scale-bar h-1.5 border-2 border-t-0 border-[#d8e4ee]', scale);
         this.scaleLabel = el('span', '', scale);
         this.cursor = el('div', 'map-cursor', info);
         this.cursor.innerHTML = '&nbsp;';
-        const help = el('div', 'map-help');
+        const help = el('div', `map-help ${PANEL} right-3 text-[12px]/[1.3] text-[#8aa0b2]`
+            // Wraps rather than covering the scale bar when the split leaves the map narrow.
+            + ' max-w-[calc(100%-var(--map-split)-280px)]');
         help.textContent =
             'drag to move · wheel or double-click to zoom · left+right drag to tilt · arrows / WASD · +/- · C centres the aircraft';
         this.bindPointer();
-        const divider = el('div', 'map-divider');
+        const divider = el('div', 'map-divider fixed inset-y-0 left-(--map-split) z-6 -ml-[3px] w-1.5 cursor-col-resize touch-none'
+            + ' bg-[#3c5468] hover:bg-[#8aa0b2]');
         divider.addEventListener('pointerdown', e => divider.setPointerCapture(e.pointerId));
         divider.addEventListener('pointermove', e => {
             if (e.buttons & 1) {
@@ -441,6 +448,10 @@ function withParam(search: string, key: string, value: string): string {
 function formatDeg(v: number, pos: string, neg: string): string {
     return `${Math.abs(v).toFixed(5)}°${v >= 0 ? pos : neg}`;
 }
+
+/** The map's info and help boxes in the bottom corners. */
+const PANEL = 'pointer-events-none fixed bottom-3 z-5 rounded border border-[#3c5468] bg-[rgba(12,18,26,0.82)] px-2 py-1.5'
+    + ' font-mono font-normal';
 
 function el(tag: string, cls: string, parent: HTMLElement = document.body): HTMLElement {
     const e = document.createElement(tag);
