@@ -26,7 +26,7 @@
 import * as THREE from 'three';
 import { EnuBasis, ecefToEnu, geodeticToEcef } from './geodesy';
 import { TerrainManifest, TextureStreamManifest, textureTileUrl } from './manifest';
-import { PTX_NO_DATA, PtxTile, decodePtx } from './ptx';
+import { PTX_FLAG_WATER, PTX_NO_DATA, PtxTile, decodePtx } from './ptx';
 import { TileIndex } from './tileIndex';
 import { TileMeshes } from './tileMesh';
 import { LAND_TONE_BASE, TerrainTone } from './tones';
@@ -51,7 +51,14 @@ export interface CoverBinding {
     k: number;
     /** The texture is read only past this distance (m); 0 = everywhere. A leaf's is its far-field stand-in for houses. */
     fromM: number;
+    /** The bake painted the leaves' water in (PTX_FLAG_WATER). */
+    water: boolean;
+    /** Ground metres per texel, north-south. */
+    texelM: number;
 }
+
+/** Metres per degree of latitude, near enough for a texel's size. */
+const M_PER_DEG_LAT = 111_320;
 
 /** How far from the camera a leaf's own cover texture replaces its facet colour. */
 export const LEAF_COVER_FROM_M = 3000;
@@ -339,8 +346,11 @@ export class CoverTextures {
         const frame = coverFrame(id, this.bakeBasis, meshes.group.scale.x);
         const texture = buildCoverTexture(tile);
         const leaf = id.z === this.leafZoom;
+        const bounds = tileBounds(id);
         const binding: CoverBinding = {
             texture, east: frame.east, north: frame.north, k: frame.k,
+            water: (tile.flags & PTX_FLAG_WATER) !== 0,
+            texelM: (bounds.north - bounds.south) * M_PER_DEG_LAT / tile.size,
             // Read per draw, so setLeafCoverFromM reaches leaves bound before
             // it, and the land discards over no-data only while its sheets show.
             get fromM() {

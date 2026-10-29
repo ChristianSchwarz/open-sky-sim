@@ -14,7 +14,9 @@
  *    0  u32  magic 'PTX1'      8  u16  x
  *    4  u8   version = 1      10  u16  y
  *    5  u8   z                12  u16  size
- *    6  u16  reserved         14  u16  reserved
+ *    6  u16  flags            14  u16  reserved
+ *
+ * Flags: {@link PTX_FLAG_WATER}. A raster from before the flags existed reads 0.
  *
  * Decode is a typed-array view over the received buffer, the same rule PTM1
  * lives by: no per-texel pass at load time. Written by
@@ -28,15 +30,31 @@ export const PTX_VERSION = 1;
 export const PTX_HEADER_BYTES = 16;
 /** The alpha (class) byte that marks a texel as carrying nothing. */
 export const PTX_NO_DATA = 255;
+/**
+ * The alpha byte of a water texel: a leaf's water sheet or a watercourse
+ * ribbon at its true width (tools/bake/coverTex.ts paintWater). Not a
+ * TerrainClass - the shader paints it in the palette's water colour in every
+ * colour mode, unshaded, like the water mesh. Its rgb is the noon water
+ * colour, for whatever reads the bytes directly.
+ */
+export const PTX_WATER = 254;
+/**
+ * The bake painted the leaves' water into this raster: a watercourse at least
+ * a couple of texels wide is in it, and the runtime may stop drawing its
+ * stroke over the tile (riverStrokeRange).
+ */
+export const PTX_FLAG_WATER = 1;
 
 export interface PtxTile {
     id: TileKey;
     size: number;
     /** RGBA8, `size * size * 4`, row 0 north, column 0 west. */
     texels: Uint8Array;
+    /** PTX_FLAG_* bits. */
+    flags: number;
 }
 
-export function encodePtx(id: TileKey, size: number, texels: Uint8Array): Uint8Array {
+export function encodePtx(id: TileKey, size: number, texels: Uint8Array, flags = 0): Uint8Array {
     if (texels.byteLength !== size * size * 4) {
         throw new Error(`PTX1: ${texels.byteLength} bytes is not ${size}x${size} RGBA`);
     }
@@ -48,6 +66,7 @@ export function encodePtx(id: TileKey, size: number, texels: Uint8Array): Uint8A
     view.setUint32(0, PTX_MAGIC, true);
     view.setUint8(4, PTX_VERSION);
     view.setUint8(5, id.z);
+    view.setUint16(6, flags, true);
     view.setUint16(8, id.x, true);
     view.setUint16(10, id.y, true);
     view.setUint16(12, size, true);
@@ -81,5 +100,6 @@ export function decodePtx(bytes: ArrayBuffer | Uint8Array): PtxTile {
         id: { z, x, y },
         size,
         texels: raw.subarray(PTX_HEADER_BYTES, PTX_HEADER_BYTES + byteCount),
+        flags: view.getUint16(6, true),
     };
 }

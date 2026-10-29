@@ -28,7 +28,7 @@ import { getStoneAtlas } from '../scene/textures/stoneAtlas';
 import {
     TREE_DENSITY_MULTIPLIER_DEFAULT, TREE_SCATTER_CLASSES, buildTreeMeshes, orderTreesFor, treeInstancesToDraw, treeReorderWanted, treeSpacingM, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
 } from './treeBillboards';
-import { CLUTTER_ELIGIBLE_CLASSES, buildStoneMesh, scatterGroundClutter } from './stones';
+import { CLUTTER_ELIGIBLE_CLASSES, buildStoneMeshes, scatterGroundClutter } from './stones';
 import { behindHorizon, sphereInFrustum } from './culling';
 import { DemTile, decodePdm } from './demTile';
 import {
@@ -58,7 +58,8 @@ import { buildBuildingExclusion } from './buildingExclusion';
 import { BUILDING_TONES } from './buildingTones';
 import { roadLevelFor } from './roadLod';
 import { FarLandTiles } from './farLandTiles';
-import { RoadStrokes, trackDetailReachM } from './roadStrokes';
+import { ROAD_RENDER_ORDER, RoadStrokes, trackDetailReachM } from './roadStrokes';
+import { TileBatcher } from './tileBatch';
 import { buildRoadExclusion } from './roadExclusion';
 import { buildAirfieldExclusion, AirfieldExclusion } from './airfieldExclusion';
 import { coverInPtmTile } from './finestCover';
@@ -71,7 +72,7 @@ import { canCarryFill, fillVersionOf, showFill, writeFill } from './seamFillTail
 import { TileIndex } from './tileIndex';
 import {
     TileMeshes, TileRailBed, buildTileMeshes, disposeTileMeshes, smoothGeometryFromWeld,
-    landGeometryFromArrays, tileOriginWorld,
+    landGeometryFromArrays, riverStrokeRange, tileOriginWorld,
 } from './tileMesh';
 import { RailWalls, buildRailBedExclusion } from './railBed';
 import { TilePlacement, bedsToGeodetic } from './railBedField';
@@ -558,7 +559,7 @@ export class TerrainEntity implements Entity {
             : undefined;
         const stoneMeshes = clutter.rocks.length > 0
             ? await getStoneAtlas()
-                .then(atlas => [buildStoneMesh(clutter.rocks, materials, atlas)])
+                .then(atlas => buildStoneMeshes(clutter.rocks, materials, atlas))
                 .catch(() => undefined)
             : undefined;
         meshes.treesBusy = false;
@@ -851,6 +852,16 @@ export class TerrainEntity implements Entity {
             mat.polygonOffsetUnits = 2;
             trackTerrainMaterial(mat);
             this.materials.push(mat);
+        }
+
+        // One draw each across every drawn tile (tileBatch.ts), in the order
+        // a tile's own children drew them: water, watercourses, then the
+        // road strokes as RoadStrokes lays them out. The rail sleeper and
+        // rail passes stay per tile: they are transparent, a dozen draws.
+        this.batcher.register(this.materials[TerrainTone.Water] as THREE.ShaderMaterial, 0);
+        this.batcher.register(this.riverMaterial, 2);
+        for (const m of [majorRoadMaterial, minorRoadMaterial, bothRoadMaterial, railMaterial]) {
+            this.batcher.register(m, ROAD_RENDER_ORDER);
         }
 
         if (opts.terrainColour) {
@@ -1677,11 +1688,14 @@ export class TerrainEntity implements Entity {
             // entity too, and their culling (and the track-detail flips in it)
             // was paid every frame for nothing.
             this.cullSharedGroupFor(camera, isLodPass);
+            this.collectBatches();
             // Must go through attachToRenderList, not list.add: the renderer
             // stamps a generation on each build pass and pruneRenderList drops
             // every child that is not stamped for the current one. A plain add
             // is silently pruned again before anything is drawn.
             attachToRenderList(list, this.group);
+            // After the tiles: every tile's land is down before the strokes.
+            attachToRenderList(list, this.batcher.root);
         }
     }
 
@@ -1724,6 +1738,7 @@ export class TerrainEntity implements Entity {
                 this.roads.showTrackDetail(meshes, true);
                 this.buildings.showAll(meshes);
                 this.syncSeamFill(meshes, true);
+                this.showRivers(meshes, Infinity, 0);
                 for (const trees of meshes.trees ?? []) {
                     trees.count = treeInstancesToDraw(trees, meshes.group, undefined, 0);
                     trees.visible = true;
@@ -1737,6 +1752,7 @@ export class TerrainEntity implements Entity {
             this.roads.showTrackDetail(meshes, nearM <= reach);
             this.roads.showLevel(meshes, roadLevelFor(nearM * pixelAngle));
             this.bridges.showLevel(meshes, camera.position, pixelAngle);
+            this.showRivers(meshes, nearM, pixelAngle);
             const fillVisible = seamFillVisibleAt(meshes, nearM * pixelAngle);
             for (const trees of meshes.trees ?? []) {
                 trees.count = treeInstancesToDraw(trees, meshes.group, camera.position, pixelAngle);
@@ -1765,6 +1781,64 @@ export class TerrainEntity implements Entity {
     }
 
     private readonly treeSphere = new THREE.Sphere();
+
+    /** Draws water, watercourses and road strokes across tiles; see collectBatches. */
+    private readonly batcher = new TileBatcher();
+
+    /**
+     * Offer this pass's drawn tiles' water, watercourses and road strokes to
+     * their batches, after culling has settled what each shows: a tile the
+     * budget left out of the group, or a pass's culling hid, offers nothing.
+     */
+    private collectBatches(): void {
+        const debug = (globalThis as Record<string, unknown>).__debugTileBatch;
+        this.batcher.enabled = debug !== false;
+        this.batcher.begin();
+        for (const node of this.drawList) {
+            const meshes = this.streamer.get(node.id);
+            if (!meshes || meshes.group.parent !== this.group || !meshes.group.visible) {
+                continue;
+            }
+            this.batcher.offer(meshes.water);
+            this.batcher.offer(meshes.rivers);
+            const roads = meshes.roads;
+            if (roads !== undefined && roads !== 'pending' && roads !== 'none' && roads.group.visible) {
+                this.batcher.offer(roads.major);
+                this.batcher.offer(roads.minor);
+                this.batcher.offer(roads.both);
+                this.batcher.offer(roads.rail);
+            }
+        }
+    }
+
+    /**
+     * Draw only the watercourse strokes that can show: none under
+     * RIVER_MIN_PIXELS wide at the tile's near edge (the stroke has no pixel
+     * floor, so those are sub-pixel slivers), and, where the tile's far
+     * texture is read all over it and carries the water, none it paints
+     * itself - RIVER_TEXTURE_MIN_TEXELS wide and up. One draw range over the
+     * width-sorted index (riverStrokeRange). `pixelAngle` 0 draws them all.
+     */
+    private showRivers(meshes: TileMeshes, nearM: number, pixelAngle: number): void {
+        const rivers = meshes.rivers;
+        const halfM = rivers?.geometry.userData.strokeHalfM as Float32Array | undefined;
+        if (!rivers || !halfM) {
+            return;
+        }
+        let minHalfM = 0;
+        let maxHalfM = Infinity;
+        if (pixelAngle > 0) {
+            minHalfM = 0.5 * RIVER_MIN_PIXELS * nearM * pixelAngle;
+            const cover = meshes.land?.userData.cover as CoverBinding | undefined;
+            if (cover?.water && this.landMaterial.uniforms.uCoverEnabled.value > 0.5 && nearM > cover.fromM) {
+                maxHalfM = 0.5 * RIVER_TEXTURE_MIN_TEXELS * cover.texelM;
+            }
+        }
+        const range = riverStrokeRange(halfM, minHalfM, maxHalfM);
+        rivers.geometry.setDrawRange(range.start, range.count);
+        rivers.visible = range.count > 0;
+    }
+
     /**
      * Show a tile's T-junction fill, or not: at the end of its land draw
      * when the land drawn this frame is SMOOTH (seamFillTail.ts), else as
@@ -2688,6 +2762,16 @@ export class TerrainEntity implements Entity {
 
 /** A leaf draws a far level of its land once that level's tolerance is under this many pixels. */
 const FAR_LAND_MAX_PIXELS = 0.5;
+
+/** A watercourse stroke narrower than this many pixels at its tile's near edge is not drawn. */
+const RIVER_MIN_PIXELS = 0.5;
+
+/**
+ * A watercourse at least this many texels wide is in a water-baked far
+ * texture (paintWater: a texel is water where its centre is, and the 2x2
+ * fold votes), so a tile reading that texture all over draws no stroke for it.
+ */
+const RIVER_TEXTURE_MIN_TEXELS = 2;
 
 /** Main-thread time a frame may spend simplifying far road levels; see RoadStrokes.buildPendingLevels. */
 const ROAD_LEVEL_BUILD_MS = 2;

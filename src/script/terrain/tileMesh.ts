@@ -465,7 +465,7 @@ function waterGeometry(tile: PtmTile): THREE.BufferGeometry | undefined {
  * `riverDir`, so nothing here says how wide the ribbon is on screen — that is
  * settled per frame, in pixels, by RiverVertProgram.
  */
-function strokeGeometry(tile: PtmTile, kind: number): THREE.BufferGeometry | undefined {
+export function strokeGeometry(tile: PtmTile, kind: number): THREE.BufferGeometry | undefined {
     if (tile.riverIndices.length === 0) {
         return undefined;
     }
@@ -476,27 +476,30 @@ function strokeGeometry(tile: PtmTile, kind: number): THREE.BufferGeometry | und
     // the same kind, so a triangle's first vertex speaks for all three.
     const all = tile.riverIndices;
     const dirs = tile.riverDirections;
-    let count = 0;
+    const half = tile.riverHalfWidths;
+    const triangles: number[] = [];
     for (let i = 0; i < all.length; i += 3) {
         if (dirs[all[i] * 4 + 3] === kind) {
-            count += 3;
+            triangles.push(i);
         }
     }
-    if (count === 0) {
+    if (triangles.length === 0) {
         return undefined;
     }
-    let indices = all;
-    if (count !== all.length) {
-        indices = new Uint16Array(count);
-        let o = 0;
-        for (let i = 0; i < all.length; i += 3) {
-            if (dirs[all[i] * 4 + 3] === kind) {
-                indices[o++] = all[i];
-                indices[o++] = all[i + 1];
-                indices[o++] = all[i + 2];
-            }
-        }
-    }
+    // Narrowest first, so the triangles a frame draws are one range of the
+    // index list (riverStrokeRange): the sub-pixel narrow end and the wide
+    // end the far texture already carries both drop off by draw range.
+    // Same colour, no depth write: the order between strokes never shows.
+    const widthOf = (i: number) => Math.max(half[all[i]], half[all[i + 1]], half[all[i + 2]]);
+    triangles.sort((a, b) => widthOf(a) - widthOf(b));
+    const indices = new Uint16Array(triangles.length * 3);
+    const halfM = new Float32Array(triangles.length);
+    triangles.forEach((i, t) => {
+        indices[t * 3] = all[i];
+        indices[t * 3 + 1] = all[i + 1];
+        indices[t * 3 + 2] = all[i + 2];
+        halfM[t] = widthOf(i) * 0.1;
+    });
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(tile.riverPositions, 3));
     // Directions are stored xyz + one pad byte, like land normals, so each
@@ -508,7 +511,34 @@ function strokeGeometry(tile: PtmTile, kind: number): THREE.BufferGeometry | und
     // The filtered list, not the whole stream: with every index the water
     // material drew the landuse outlines too, as blue lines round each field.
     g.setIndex(new THREE.BufferAttribute(indices, 1));
+    g.userData.strokeHalfM = halfM;
     return g;
+}
+
+/**
+ * The triangles of a watercourse stroke geometry worth drawing, as an index
+ * draw range: those at least `minHalfM` and under `maxHalfM` half-wide.
+ * `halfM` is the geometry's `userData.strokeHalfM`, the triangles'
+ * half-widths in metres, ascending (strokeGeometry sorts them so).
+ */
+export function riverStrokeRange(
+    halfM: Float32Array, minHalfM: number, maxHalfM: number,
+): { start: number; count: number } {
+    const lowerBound = (v: number) => {
+        let lo = 0, hi = halfM.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (halfM[mid] < v) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    };
+    const first = lowerBound(minHalfM);
+    const end = Math.max(first, lowerBound(maxHalfM));
+    return { start: first * 3, count: (end - first) * 3 };
 }
 
 /** Scene position of a tile's local frame origin. */

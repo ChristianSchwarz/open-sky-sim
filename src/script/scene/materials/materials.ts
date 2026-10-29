@@ -789,6 +789,8 @@ export class SceneMaterialManager implements KernelTask {
             uCoverNorth: { value: new THREE.Vector3() },
             uCoverK: { value: 0 },
             uCoverFromM: { value: 0 },
+            // A water texel's colour: the water mesh's, set with the tones.
+            uCoverWater: { value: new THREE.Color() },
         };
     }
 
@@ -907,6 +909,9 @@ export class SceneMaterialManager implements KernelTask {
             }
             const light = palette.light ?? [1, 1, 1];
             (u.uRawLight.value as THREE.Vector3).set(light[0], light[1], light[2]);
+            const water = (u.uCoverWater.value as THREE.Color)
+                .copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.TERRAIN_WATER)));
+            adjustColourInPlace(water, this.waterTweak);
         }
         if (d.shaded && d.vertexTones) {
             this.fillVertexTones(d.vertexTones, palette, u.uVertexTone.value, u.uVertexToneShade.value);

@@ -18,7 +18,7 @@
 import * as THREE from 'three';
 import { PaletteCategory } from '../config/palettes/palette';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../scene/materials/materials';
-import { TREE_MIN_SPACING_PX } from '../scene/materials/shaders/treeBillboardVP';
+import { TREE_MAX_GROW, TREE_MIN_SPACING_PX } from '../scene/materials/shaders/treeBillboardVP';
 import { nearDistanceInTile, sphereInTile } from './tileFrameBounds';
 import { TREE_SPECIES_COUNT, Species } from '../scene/vegetation/treeSprites';
 import { PtmTile } from './ptm';
@@ -298,6 +298,89 @@ export function treeSpacingM(densityScale: number): number {
 const TREE_CELLS = 4;
 
 /**
+ * A mesh that sets `userData.treeSizeM`, the tallest any of its instances
+ * can be drawn (grown included), draws none of them once that is under this
+ * many pixels at its near edge (treeInstancesToDraw). The rocks set it: at
+ * well under a metre they are sub-pixel a kilometre or two out, where the
+ * spacing thinning alone still submitted every one.
+ */
+export const TREE_MIN_SIZE_PX = 0.5;
+
+/** Scattered points with a colour and a ground normal each: a tree species' or a rock shape's. */
+export interface ScatterGroup {
+    points: Vec3[];
+    tints: number[];
+    normals: number[];
+}
+
+/**
+ * Split scattered groups into TREE_CELLS x TREE_CELLS patches of their
+ * bounding box, each a list of groups (`blank` makes an empty one like its
+ * source). Empty patches are left out.
+ */
+export function splitIntoCells<G extends ScatterGroup>(groups: G[], blank: (g: G) => G): G[][] {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const g of groups) {
+        for (const p of g.points) {
+            minX = Math.min(minX, p.x);
+            maxX = Math.max(maxX, p.x);
+            minZ = Math.min(minZ, p.z);
+            maxZ = Math.max(maxZ, p.z);
+        }
+    }
+    const n = TREE_CELLS;
+    const cells: G[][] = Array.from({ length: n * n }, () => []);
+    const sx = n / Math.max(maxX - minX, 1e-6), sz = n / Math.max(maxZ - minZ, 1e-6);
+    for (const g of groups) {
+        const split: G[] = [];
+        for (let k = 0; k < g.points.length; k++) {
+            const p = g.points[k];
+            const c = Math.min(n - 1, Math.floor((p.x - minX) * sx)) + n * Math.min(n - 1, Math.floor((p.z - minZ) * sz));
+            let s = split[c];
+            if (!s) {
+                s = split[c] = blank(g);
+                cells[c].push(s);
+            }
+            s.points.push(p);
+            s.tints.push(g.tints[k * 3], g.tints[k * 3 + 1], g.tints[k * 3 + 2]);
+            s.normals.push(g.normals[k * 3], g.normals[k * 3 + 1], g.normals[k * 3 + 2]);
+        }
+    }
+    return cells.filter(c => c.length > 0);
+}
+
+/**
+ * A seeded shuffle of `count` slots. A scattered instance's slot is its
+ * thinning hash (instanceHash), so the ones any thinning keeps are spread
+ * evenly over the patch and the same every build, and in slot order a
+ * prefix - until orderTreesFor stores them by distance, the hash going with
+ * them.
+ */
+export function shuffledSlots(count: number): Uint32Array {
+    const slot = new Uint32Array(count);
+    for (let j = 0; j < count; j++) {
+        slot[j] = j;
+    }
+    let seed = (count * 2654435761) >>> 0 || 1;
+    for (let j = count - 1; j > 0; j--) {
+        seed ^= seed << 13;
+        seed ^= seed >>> 17;
+        seed ^= seed << 5;
+        seed >>>= 0;
+        const r = seed % (j + 1);
+        const t = slot[j];
+        slot[j] = slot[r];
+        slot[r] = t;
+    }
+    return slot;
+}
+
+/** The tallest a scattered quad `heightM` high, at instance scale up to `maxScale`, is drawn: the thinning may grow it. */
+export function grownSizeM(heightM: number, maxScale: number): number {
+    return heightM * maxScale * TREE_MAX_GROW;
+}
+
+/**
  * A tree mesh's instances stored in the order they survive the thinning for
  * one eye (orderTreesFor), so the ones it keeps are a prefix from anywhere
  * near that eye rather than only at the patch's near edge.
@@ -495,6 +578,10 @@ export function treeInstancesToDraw(
     if (spacingM <= 0 || eye === undefined) {
         return total;
     }
+    const sizeM: number | undefined = mesh.userData.treeSizeM;
+    if (sizeM !== undefined && nearDistanceInTile(mesh, tileGroup, eye) * pixelAngle * TREE_MIN_SIZE_PX > sizeM) {
+        return 0;
+    }
     const order = mesh.userData.treeOrder as TreeOrder | undefined;
     if (order !== undefined) {
         const slack = treeOrderSlack(mesh, tileGroup, eye, pixelAngle);
@@ -529,34 +616,8 @@ export function buildTreeMeshes(
     atlas: THREE.Texture,
     spacingM = 0,
 ): THREE.InstancedMesh[] {
-    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (const g of groups) {
-        for (const p of g.points) {
-            minX = Math.min(minX, p.x);
-            maxX = Math.max(maxX, p.x);
-            minZ = Math.min(minZ, p.z);
-            maxZ = Math.max(maxZ, p.z);
-        }
-    }
-    const n = TREE_CELLS;
-    const cells: SpeciesGroup[][] = Array.from({ length: n * n }, () => []);
-    const sx = n / Math.max(maxX - minX, 1e-6), sz = n / Math.max(maxZ - minZ, 1e-6);
-    for (const g of groups) {
-        const split: SpeciesGroup[] = [];
-        for (let k = 0; k < g.points.length; k++) {
-            const p = g.points[k];
-            const c = Math.min(n - 1, Math.floor((p.x - minX) * sx)) + n * Math.min(n - 1, Math.floor((p.z - minZ) * sz));
-            let s = split[c];
-            if (!s) {
-                s = split[c] = { species: g.species, points: [], tints: [], normals: [] };
-                cells[c].push(s);
-            }
-            s.points.push(p);
-            s.tints.push(g.tints[k * 3], g.tints[k * 3 + 1], g.tints[k * 3 + 2]);
-            s.normals.push(g.normals[k * 3], g.normals[k * 3 + 1], g.normals[k * 3 + 2]);
-        }
-    }
-    return cells.filter(c => c.length > 0).map(c => buildTreeMesh(c, materials, atlas, spacingM));
+    return splitIntoCells(groups, g => ({ species: g.species, points: [], tints: [], normals: [] }))
+        .map(c => buildTreeMesh(c, materials, atlas, spacingM));
 }
 
 /**
@@ -589,25 +650,7 @@ export function buildTreeMesh(
     }) as THREE.ShaderMaterial;
     material.uniforms.uTreeSpacingM = { value: spacingM };
 
-    // A seeded shuffle of the slots: a tree's slot is its thinning hash
-    // (instanceHash), so the trees any thinning keeps are spread evenly over
-    // the patch and the same every build, and in slot order a prefix -
-    // until orderTreesFor stores them by distance, the hash going with them.
-    const slot = new Uint32Array(count);
-    for (let j = 0; j < count; j++) {
-        slot[j] = j;
-    }
-    let seed = (count * 2654435761) >>> 0 || 1;
-    for (let j = count - 1; j > 0; j--) {
-        seed ^= seed << 13;
-        seed ^= seed >>> 17;
-        seed ^= seed << 5;
-        seed >>>= 0;
-        const r = seed % (j + 1);
-        const t = slot[j];
-        slot[j] = slot[r];
-        slot[r] = t;
-    }
+    const slot = shuffledSlots(count);
 
     const mesh = new THREE.InstancedMesh(geometry, material, count);
     const shade = new Float32Array(count * 4);

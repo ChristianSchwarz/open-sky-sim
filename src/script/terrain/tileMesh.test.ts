@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { makeEnuBasis } from './geodesy';
 import { tileAtLonLat } from './tiling';
-import { tileOriginWorld, buildSmoothLandGeometry, regionSizes } from './tileMesh';
+import { tileOriginWorld, buildSmoothLandGeometry, regionSizes, riverStrokeRange, strokeGeometry } from './tileMesh';
+import { PTM_STROKE_KIND_OUTLINE, PTM_STROKE_KIND_WATER, decodePtm, encodePtm } from './ptm';
 
 const HOME = { lat: 28.0015, lon: -15.3937 };
 const BASIS = makeEnuBasis(HOME.lat, HOME.lon, 0);
@@ -321,5 +322,54 @@ describe('buildSmoothLandGeometry', () => {
         assert.deepEqual([...(g.getAttribute('coverColor') as { data: { array: Uint8Array } }).data.array], ref.colour);
         assert.deepEqual([...g.getAttribute('regionSize').array], ref.size);
         assert.deepEqual([...g.getIndex()!.array], ref.index);
+    });
+});
+
+describe('watercourse strokes', () => {
+    /** One tile with a segment per half-width (metres), the last an outline. */
+    function strokeTile(halves: number[]) {
+        const positions: number[] = [], directions: number[] = [], halfWidthsM: number[] = [], indices: number[] = [], kinds: number[] = [];
+        halves.forEach((h, s) => {
+            const base = positions.length / 3;
+            for (const z of [0, 100]) {
+                for (const side of [1, -1]) {
+                    positions.push(s * 50, 0, z);
+                    directions.push(side, 0, 0);
+                    halfWidthsM.push(h);
+                    kinds.push(s === halves.length - 1 ? PTM_STROKE_KIND_OUTLINE : PTM_STROKE_KIND_WATER);
+                }
+            }
+            indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+        });
+        return decodePtm(encodePtm({
+            id: { z: 12, x: 3000, y: 900 }, centerHeightM: 0, tileHalfWidthM: 2500, skirtDepthM: 50, geometricErrorM: 1,
+            land: { positions: new Float32Array(0), faceNormals: new Float32Array(0), classes: new Uint8Array(0), colors: new Uint8Array(0) },
+            water: { positions: new Float32Array(0), indices: new Uint32Array(0), tones: new Uint8Array(0) },
+            rivers: {
+                positions: new Float32Array(positions), directions: new Float32Array(directions),
+                halfWidthsM: new Float32Array(halfWidthsM), indices: new Uint32Array(indices), kinds: new Uint8Array(kinds),
+            },
+        }));
+    }
+
+    it('orders the water triangles narrowest first and records their half-widths', () => {
+        const tile = strokeTile([20, 2, 8, 40]);
+        const g = strokeGeometry(tile, PTM_STROKE_KIND_WATER)!;
+        const halfM = g.userData.strokeHalfM as Float32Array;
+        assert.deepEqual([...halfM].map(v => Math.round(v * 10) / 10), [2, 2, 8, 8, 20, 20]);
+        const index = g.getIndex()!.array;
+        const half = tile.riverHalfWidths;
+        for (let t = 0; t < halfM.length; t++) {
+            assert.equal(half[index[t * 3]] * 0.1, Math.round(halfM[t] * 10) / 10, `triangle ${t} vertex width`);
+        }
+    });
+
+    it('draws the range between the sub-pixel floor and the textured ceiling', () => {
+        const halfM = new Float32Array([2, 2, 8, 8, 20, 20]);
+        assert.deepEqual(riverStrokeRange(halfM, 0, Infinity), { start: 0, count: 18 });
+        assert.deepEqual(riverStrokeRange(halfM, 5, Infinity), { start: 6, count: 12 });
+        assert.deepEqual(riverStrokeRange(halfM, 5, 20), { start: 6, count: 6 });
+        assert.deepEqual(riverStrokeRange(halfM, 30, Infinity), { start: 18, count: 0 });
+        assert.deepEqual(riverStrokeRange(halfM, 10, 5), { start: 12, count: 0 });
     });
 });

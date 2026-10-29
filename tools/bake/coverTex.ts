@@ -22,8 +22,8 @@
  */
 
 import { EnuBasis, ecefToEnu, ecefToGeodetic, enuToEcef, geodeticToEcef } from '../../src/script/terrain/geodesy';
-import { PtmTile } from '../../src/script/terrain/ptm';
-import { PTX_NO_DATA } from '../../src/script/terrain/ptx';
+import { PTM_STROKE_KIND_WATER, PtmTile } from '../../src/script/terrain/ptm';
+import { PTX_NO_DATA, PTX_WATER } from '../../src/script/terrain/ptx';
 import { RoadClass } from '../../src/script/terrain/ptr';
 import { PBH_FLAG_ROOF_RGB, PbhTile, pbhRings } from '../../src/script/terrain/pbh';
 import { noonRgb } from '../../src/script/terrain/buildingTones';
@@ -33,7 +33,7 @@ import { LonLatBounds } from './shoreline';
 import { tileBounds } from './meshTile';
 
 export {
-    PTX_HEADER_BYTES, PTX_MAGIC, PTX_NO_DATA, PTX_VERSION, PtxTile, decodePtx, encodePtx,
+    PTX_FLAG_WATER, PTX_HEADER_BYTES, PTX_MAGIC, PTX_NO_DATA, PTX_VERSION, PTX_WATER, PtxTile, decodePtx, encodePtx,
 } from '../../src/script/terrain/ptx';
 
 /** A raster of nothing: every texel no-data. */
@@ -443,4 +443,96 @@ export function paintRoads(
         }
     }
     return painted;
+}
+
+/** A water texel's rgb: the noon palette's TERRAIN_WATER, for readers of the raw bytes. */
+export const WATER_TEXEL_RGB: readonly [number, number, number] = [0x16, 0x35, 0x5e];
+
+/**
+ * Paint a leaf's water into its raster as {@link PTX_WATER} texels: the
+ * water sheet (lakes, riverbanks, sea), and every watercourse stroke as the
+ * ribbon it is at its true width - the shape the stroke mesh draws with no
+ * pixel floor. A texel is water where its centre is, so a ribbon narrower
+ * than about a texel paints a broken line or nothing; the runtime keeps
+ * drawing those strokes (riverStrokeRange).
+ *
+ * After the leaf's own facets and over them, since water is drawn on top of
+ * the ground in the leaf too. Painted into the leaf before the fold, unlike
+ * roads: water is an area, and the 2x2 vote keeps an area right at every
+ * level. Returns the texels painted.
+ */
+export function paintWater(out: Uint8Array, size: number, tile: PtmTile, basis: EnuBasis): number {
+    const bounds = tileBounds(tile.id.z, tile.id.x, tile.id.y);
+    const lonSpan = bounds.east - bounds.west;
+    const latSpan = bounds.north - bounds.south;
+    const centre = ecefToEnu(basis, geodeticToEcef(
+        (bounds.south + bounds.north) / 2, (bounds.west + bounds.east) / 2, tile.centerHeightM,
+    ));
+    const enu = { e: 0, n: 0, u: 0 };
+    const ecef = { x: 0, y: 0, z: 0 };
+    // Tile-local metres (x = e, y = u, z = -n) to texel x, y.
+    const toTexel = (x: number, y: number, z: number, into: Float64Array, at: number): void => {
+        enu.e = centre.e + x;
+        enu.u = centre.u + y;
+        enu.n = centre.n - z;
+        enuToEcef(basis, enu, ecef);
+        const g = ecefToGeodetic(ecef.x, ecef.y, ecef.z);
+        into[at] = ((g.lon - bounds.west) / lonSpan) * size;
+        into[at + 1] = ((bounds.north - g.lat) / latSpan) * size;
+    };
+    // Every texel a triangle covers is painted: the height test is moot.
+    const height = new Float32Array(size * size).fill(-Infinity);
+    const before = countWater(out);
+    const [r, g, b] = WATER_TEXEL_RGB;
+    const fill = (t: Float64Array, indices: ArrayLike<number>, keep?: (i: number) => boolean): void => {
+        for (let i = 0; i + 2 < indices.length; i += 3) {
+            if (keep && !keep(indices[i])) {
+                continue;
+            }
+            const a = indices[i] * 2, c = indices[i + 1] * 2, d = indices[i + 2] * 2;
+            fillTriangle(out, height, size, t[a], t[a + 1], 0, t[c], t[c + 1], 0, t[d], t[d + 1], 0, r, g, b, PTX_WATER);
+        }
+    };
+    const q = tile.quantScale;
+
+    // The sheet. Its skirts are vertical, so top-down they are lines and
+    // fillTriangle's area floor drops them.
+    const wp = tile.waterPositions;
+    const sheet = new Float64Array((wp.length / 3) * 2);
+    for (let v = 0; v < wp.length / 3; v++) {
+        toTexel(wp[v * 3] * q, wp[v * 3 + 1] * q, wp[v * 3 + 2] * q, sheet, v * 2);
+    }
+    fill(sheet, tile.waterIndices);
+
+    // The strokes: each vertex pushed out along its unit offset by the half
+    // width, as RiverVertProgram does with no pixel floor. Landuse outlines
+    // share the stream under another kind byte and are not water.
+    const rp = tile.riverPositions;
+    const dirs = tile.riverDirections;
+    const half = tile.riverHalfWidths;
+    const ribbon = new Float64Array((rp.length / 3) * 2);
+    for (let v = 0; v < rp.length / 3; v++) {
+        if (dirs[v * 4 + 3] !== PTM_STROKE_KIND_WATER) {
+            continue;
+        }
+        const s = (half[v] * 0.1) / 127;
+        toTexel(
+            rp[v * 3] * q + dirs[v * 4] * s,
+            rp[v * 3 + 1] * q + dirs[v * 4 + 1] * s,
+            rp[v * 3 + 2] * q + dirs[v * 4 + 2] * s,
+            ribbon, v * 2,
+        );
+    }
+    fill(ribbon, tile.riverIndices, v => dirs[v * 4 + 3] === PTM_STROKE_KIND_WATER);
+    return countWater(out) - before;
+}
+
+function countWater(texels: Uint8Array): number {
+    let n = 0;
+    for (let i = 3; i < texels.length; i += 4) {
+        if (texels[i] === PTX_WATER) {
+            n++;
+        }
+    }
+    return n;
 }

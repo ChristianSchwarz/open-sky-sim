@@ -1,4 +1,5 @@
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
+import { TILE_BATCH_PARS_VERTEX, TILE_BATCH_VERTEX } from './tileBatch';
 
 const shader = (highp: boolean): string => `
   precision highp float;
@@ -26,7 +27,9 @@ const shader = (highp: boolean): string => `
   varying float vSecondTone;
 #endif
 ${LOG_DEPTH_PARS_VERTEX}
+${TILE_BATCH_PARS_VERTEX}
   void main() {
+${TILE_BATCH_VERTEX}
   #ifdef USE_INSTANCING
     vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
     vec4 viewPos = modelViewMatrix * instanceMatrix * vec4(position, 1.0);

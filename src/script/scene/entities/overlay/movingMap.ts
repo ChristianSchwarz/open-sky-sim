@@ -13,7 +13,7 @@
  * blank where the bake has data.
  */
 
-import { PTX_NO_DATA, PtxTile } from '../../../terrain/ptx';
+import { PTX_NO_DATA, PTX_WATER, PtxTile } from '../../../terrain/ptx';
 import { TileKey, parentOf, tileBounds, tileKeyString, tileRangeForBounds } from '../../../terrain/tiling';
 import { CanvasPainter } from '../../../render/screen/canvasPainter';
 
@@ -110,12 +110,12 @@ export function parseHexColor(color: string): [number, number, number] {
     return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
 }
 
-/** The sidecar as opaque RGBA, no-data texels painted `water`. */
+/** The sidecar as opaque RGBA, no-data and water texels painted `water`. */
 export function mapTilePixels(tile: PtxTile, water: [number, number, number]): Uint8ClampedArray<ArrayBuffer> {
     const src = tile.texels;
     const out = new Uint8ClampedArray(new ArrayBuffer(src.length));
     for (let o = 0; o < src.length; o += 4) {
-        if (src[o + 3] === PTX_NO_DATA) {
+        if (src[o + 3] === PTX_NO_DATA || src[o + 3] === PTX_WATER) {
             out[o] = water[0];
             out[o + 1] = water[1];
             out[o + 2] = water[2];

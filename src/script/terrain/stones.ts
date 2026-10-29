@@ -34,7 +34,7 @@ import { PaletteCategory } from '../config/palettes/palette';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../scene/materials/materials';
 import { Species, TREE_SPECIES_COUNT } from '../scene/vegetation/treeSprites';
 import { ROCK_SHAPE_COUNT, RockShape } from '../scene/vegetation/stoneSprites';
-import { SpeciesGroup } from './treeBillboards';
+import { SpeciesGroup, grownSizeM, shuffledSlots, splitIntoCells } from './treeBillboards';
 import { PtmTile } from './ptm';
 
 // TerrainClass values spelled out: it is a `const enum`, and the tsx test
@@ -86,6 +86,9 @@ const GREEN_DENSITY_BOOST = 3;
 const TOTAL_CLUTTER_SAFETY_CAP = 6000;
 const STONE_HALF_WIDTH_M = 0.45;
 const STONE_HEIGHT_M = 0.7;
+/** A rock's instance scale is 0.6 plus up to this. */
+const STONE_SCALE_MIN = 0.6;
+const STONE_SCALE_JITTER = 0.7;
 
 /**
  * How strongly a facet's baked colour has to lean green before it grows
@@ -324,10 +327,47 @@ function buildQuadGeometry(): THREE.BufferGeometry {
 }
 
 /**
- * Builds every shape's already-scattered points into one InstancedMesh (one
- * draw call per tile), reusing the tree-billboard shader/atlas convention
- * (see stoneAtlas.ts) - only the atlas texture, geometry size and palette
- * category differ from a tree's.
+ * A tile's rocks as patches (splitIntoCells), one InstancedMesh each, the
+ * way buildTreeMeshes splits its trees: each is culled by its own bounds,
+ * thinned on screen by its own spacing, and not drawn at all once a rock is
+ * under TREE_MIN_SIZE_PX at its near edge. As one mesh per tile every rock
+ * was submitted whenever any of the tile was in view - a hundred thousand
+ * sub-pixel quads from a valley floor.
+ */
+export function buildStoneMeshes(
+    groups: ShapeGroup[],
+    materials: SceneMaterialManager,
+    atlas: THREE.Texture,
+): THREE.InstancedMesh[] {
+    return splitIntoCells(groups, g => ({ shape: g.shape, points: [], tints: [], normals: [] }))
+        .map(c => buildStoneMesh(c, materials, atlas));
+}
+
+/**
+ * Mean metres between the scattered points: the square root of their
+ * footprint's area per point. Rocks are a share of the clutter the green
+ * split picks per facet, so their density is measured, not derived.
+ */
+function measuredSpacingM(groups: ShapeGroup[], count: number): number {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const g of groups) {
+        for (const p of g.points) {
+            minX = Math.min(minX, p.x);
+            maxX = Math.max(maxX, p.x);
+            minZ = Math.min(minZ, p.z);
+            maxZ = Math.max(maxZ, p.z);
+        }
+    }
+    const area = Math.max(maxX - minX, 1) * Math.max(maxZ - minZ, 1);
+    return Math.sqrt(area / Math.max(count, 1));
+}
+
+/**
+ * Builds the shapes' already-scattered points into one InstancedMesh,
+ * reusing the tree-billboard shader/atlas convention (see stoneAtlas.ts) -
+ * only the atlas texture, geometry size and palette category differ from a
+ * tree's - and the trees' thinning: a shuffled hash per rock, and the
+ * spacing and size treeInstancesToDraw reads.
  */
 export function buildStoneMesh(
     groups: ShapeGroup[],
@@ -338,6 +378,7 @@ export function buildStoneMesh(
     for (const group of groups) {
         count += group.points.length;
     }
+    const spacingM = measuredSpacingM(groups, count);
     const geometry = buildQuadGeometry();
     const material = materials.build({
         type: SceneMaterialPrimitiveType.TREE_BILLBOARD,
@@ -348,12 +389,15 @@ export function buildStoneMesh(
         category: PaletteCategory.TERRAIN_BARE,
         depthWrite: true,
         map: atlas,
-    });
+    }) as THREE.ShaderMaterial;
+    material.uniforms.uTreeSpacingM = { value: spacingM };
 
+    const slot = shuffledSlots(count);
     const mesh = new THREE.InstancedMesh(geometry, material, count);
     const shade = new Float32Array(count * 4);
     const shapeAttr = new Float32Array(count);
     const normalAttr = new Float32Array(count * 3);
+    const hashAttr = new Float32Array(count);
     const m = new THREE.Matrix4();
     let i = 0;
     for (const group of groups) {
@@ -364,29 +408,35 @@ export function buildStoneMesh(
             // shader always faces the camera regardless of instanceMatrix's
             // rotation, so there is nothing to gain from rotating it here -
             // see treeBillboardVP.ts).
-            const scale = 0.6 + hash01(i * 5.113 + group.shape * 13.1 + 1) * 0.7;
+            const scale = STONE_SCALE_MIN + hash01(i * 5.113 + group.shape * 13.1 + 1) * STONE_SCALE_JITTER;
             m.makeScale(scale, scale, scale);
             m.setPosition(p.x, p.y, p.z);
-            mesh.setMatrixAt(i, m);
-            shapeAttr[i] = group.shape;
-            normalAttr[i * 3] = group.normals[k * 3];
-            normalAttr[i * 3 + 1] = group.normals[k * 3 + 1];
-            normalAttr[i * 3 + 2] = group.normals[k * 3 + 2];
+            const s = slot[i];
+            mesh.setMatrixAt(s, m);
+            hashAttr[s] = (s + 0.5) / count;
+            shapeAttr[s] = group.shape;
+            normalAttr[s * 3] = group.normals[k * 3];
+            normalAttr[s * 3 + 1] = group.normals[k * 3 + 1];
+            normalAttr[s * 3 + 2] = group.normals[k * 3 + 2];
             // rgb = the sampled ground colour, a = lighter/darker variation;
             // the shared shader mixes the ground colour 50:50 with the
             // palette's bare-ground colour.
-            shade[i * 4] = group.tints[k * 3];
-            shade[i * 4 + 1] = group.tints[k * 3 + 1];
-            shade[i * 4 + 2] = group.tints[k * 3 + 2];
-            shade[i * 4 + 3] = (0.35 + hash01(i * 6.451 + group.shape * 17.3 + 2) * 0.35) * 0.9;
+            shade[s * 4] = group.tints[k * 3];
+            shade[s * 4 + 1] = group.tints[k * 3 + 1];
+            shade[s * 4 + 2] = group.tints[k * 3 + 2];
+            shade[s * 4 + 3] = (0.35 + hash01(i * 6.451 + group.shape * 17.3 + 2) * 0.35) * 0.9;
         }
     }
     mesh.instanceMatrix.needsUpdate = true;
     geometry.setAttribute('instanceShade', new THREE.InstancedBufferAttribute(shade, 4));
     geometry.setAttribute('instanceNormal', new THREE.InstancedBufferAttribute(normalAttr, 3));
     geometry.setAttribute('instanceSpecies', new THREE.InstancedBufferAttribute(shapeAttr, 1));
+    geometry.setAttribute('instanceHash', new THREE.InstancedBufferAttribute(hashAttr, 1));
     mesh.computeBoundingSphere();
     mesh.frustumCulled = true;
     mesh.matrixAutoUpdate = false;
+    mesh.userData.treeTotal = count;
+    mesh.userData.treeSpacingM = spacingM;
+    mesh.userData.treeSizeM = grownSizeM(STONE_HEIGHT_M, STONE_SCALE_MIN + STONE_SCALE_JITTER);
     return mesh;
 }

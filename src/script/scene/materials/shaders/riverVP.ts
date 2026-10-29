@@ -1,5 +1,6 @@
 import { ALONG_STEP_M } from '../../../terrain/ptr';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
+import { TILE_BATCH_PARS_VERTEX, TILE_BATCH_VERTEX } from './tileBatch';
 
 const RAIL_ALONG_STEP_GLSL = ALONG_STEP_M.toFixed(4);
 
@@ -99,7 +100,9 @@ const riverVert = (rail: boolean): string => `
   varying vec3 vNormalView;
   varying vec3 vViewDir;
 ${LOG_DEPTH_PARS_VERTEX}
+${TILE_BATCH_PARS_VERTEX}
   void main() {
+${TILE_BATCH_VERTEX}
 #ifdef SECOND_TONE
     vSecondTone = secondTone;
 #endif

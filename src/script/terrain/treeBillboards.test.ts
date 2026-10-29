@@ -5,7 +5,8 @@ import { TREE_MIN_SPACING_PX } from '../scene/materials/shaders/treeBillboardVP'
 import { Species } from '../scene/vegetation/treeSprites';
 import { PtmTile } from './ptm';
 import {
-    TREE_REORDER_SLACK, orderTreesFor, scatterTreeSpecies, treeInstancesToDraw, treeOrderSlack, treeReorderWanted,
+    TREE_MIN_SIZE_PX, TREE_REORDER_SLACK, orderTreesFor, scatterTreeSpecies, shuffledSlots, splitIntoCells,
+    treeInstancesToDraw, treeOrderSlack, treeReorderWanted,
 } from './treeBillboards';
 
 const SPACING_M = 3;
@@ -166,5 +167,54 @@ describe('scatterTreeSpecies biomes', () => {
     it('grows nothing on sand or tundra', () => {
         assert.equal(scatterTreeSpecies(oneTriangleTile(12)).length, 0);
         assert.equal(scatterTreeSpecies(oneTriangleTile(11)).length, 0);
+    });
+});
+
+describe('scatter patches', () => {
+    it('splits groups into cells and keeps every point with its tint and normal', () => {
+        const points = [];
+        const tints: number[] = [];
+        const normals: number[] = [];
+        for (let i = 0; i < 64; i++) {
+            points.push({ x: (i % 8) * 100, y: 0, z: Math.floor(i / 8) * 100 });
+            tints.push(i, i, i);
+            normals.push(0, 1, i);
+        }
+        const cells = splitIntoCells([{ shape: 2, points, tints, normals }], g => ({ shape: g.shape, points: [], tints: [], normals: [] }));
+        assert.equal(cells.length, 16);
+        const all = cells.flat();
+        assert.equal(all.reduce((n, g) => n + g.points.length, 0), 64);
+        for (const g of all) {
+            assert.equal(g.shape, 2);
+            g.points.forEach((p, k) => {
+                const i = p.x / 100 + 8 * (p.z / 100);
+                assert.deepEqual(g.tints.slice(k * 3, k * 3 + 3), [i, i, i]);
+                assert.equal(g.normals[k * 3 + 2], i);
+            });
+        }
+    });
+
+    it('shuffles slots into a permutation, the same every time', () => {
+        const a = shuffledSlots(500);
+        assert.deepEqual([...a].sort((x, y) => x - y), Array.from({ length: 500 }, (_, i) => i));
+        assert.deepEqual([...shuffledSlots(500)], [...a]);
+    });
+});
+
+describe('size cutoff', () => {
+    it('draws nothing once the tallest instance is under TREE_MIN_SIZE_PX at the near edge', () => {
+        const { mesh, group } = patch(400);
+        const sizeM = 1.5;
+        mesh.userData.treeSizeM = sizeM;
+        // The patch's near edge is about 1000 m out along x.
+        const cutoffM = sizeM / (TREE_MIN_SIZE_PX * PIXEL_ANGLE);
+        assert.ok(cutoffM > 1000, 'the patch starts inside the cutoff');
+        const inside = new THREE.Vector3(0, 0, 0);
+        assert.ok(treeInstancesToDraw(mesh, group, inside, PIXEL_ANGLE) > 0);
+        // The near edge is the bounding sphere's, a little short of x = 1000.
+        const beyond = new THREE.Vector3(-cutoffM, 0, 0);
+        assert.equal(treeInstancesToDraw(mesh, group, beyond, PIXEL_ANGLE), 0);
+        delete mesh.userData.treeSizeM;
+        assert.ok(treeInstancesToDraw(mesh, group, beyond, PIXEL_ANGLE) > 0, 'a tree patch has no cutoff');
     });
 });

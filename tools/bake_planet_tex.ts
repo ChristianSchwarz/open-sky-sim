@@ -44,8 +44,8 @@ import { decodePtm } from '../src/script/terrain/ptm';
 import { decodePbh } from '../src/script/terrain/pbh';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import {
-    PTX_HEADER_BYTES, boundsOf, decodePtx, emptyRaster, encodePtx, isEmptyRaster,
-    mergeQuadrant, paintRoads, quadrantOf, rasterizeLeaf, shrinkTo,
+    PTX_FLAG_WATER, PTX_HEADER_BYTES, boundsOf, decodePtx, emptyRaster, encodePtx, isEmptyRaster,
+    mergeQuadrant, paintRoads, paintWater, quadrantOf, rasterizeLeaf, shrinkTo,
 } from './bake/coverTex';
 import { decodeRvr } from './bake/rvr';
 import { LonLatBounds } from './bake/shoreline';
@@ -219,9 +219,10 @@ function readPtx(p: string): Raster | undefined {
     return { texels, size };
 }
 
+/** A shipped raster: every one carries the leaves' water (leafRaster paints it in). */
 function writePtx(p: string, id: TileKey, size: number, texels: Uint8Array): number {
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    const gz = zlib.gzipSync(encodePtx(id, size, texels), { level: 9 });
+    const gz = zlib.gzipSync(encodePtx(id, size, texels, PTX_FLAG_WATER), { level: 9 });
     fs.writeFileSync(p, gz);
     return gz.byteLength;
 }
@@ -356,8 +357,17 @@ async function main(): Promise<void> {
         const bytes = fs.readFileSync(p);
         // A cache written before it was compressed is still readable.
         const { texels, size } = decodePtx(bytes[0] === 0x1f && bytes[1] === 0x8b ? zlib.gunzipSync(bytes) : bytes);
+        // The cache holds ground only; the water goes on here, so a change to
+        // it needs no leaf re-rasterised (see paintWater).
+        const ptmPath = tilePath(args.dir, k, '.ptm');
+        if (fs.existsSync(ptmPath)) {
+            if (paintWater(texels, size, decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath))), basis) > 0) {
+                waterLeaves++;
+            }
+        }
         return { texels, size };
     };
+    let waterLeaves = 0;
     /**
      * A copy of `texels` with the major roads of tile `k` painted in, or
      * `texels` itself where the road bake wrote nothing for it.
@@ -459,7 +469,7 @@ async function main(): Promise<void> {
             leafDropped.push(k);
         }
     }
-    console.log(`  leaf textures: ${leafShipped.length} shipped (${(leafGz / 1048576).toFixed(1)} MB gz), ${leafDropped.length} dropped`);
+    console.log(`  leaf textures: ${leafShipped.length} shipped (${(leafGz / 1048576).toFixed(1)} MB gz), ${leafDropped.length} dropped; water painted in ${waterLeaves} leaf reads`);
 
     // --- index and manifest -------------------------------------------------
     const indexPath = path.join(args.dir, 'index_tex.bin');

@@ -268,3 +268,92 @@ describe('paintRoads', () => {
         assert.equal(raster[o + 3], 5);
     });
 });
+
+describe('paintWater', () => {
+    /** A leaf of grass with a lake over its west half and two north-south watercourses. */
+    async function waterLeaf() {
+        const { PTM_STROKE_KIND_OUTLINE } = await import('../../src/script/terrain/ptm');
+        const ground = leaf(groundQuad(3, [10, 20, 30]));
+        const lake = [at(-0.01, -0.01, 100), at(0.5, -0.01, 100), at(0.5, 1.01, 100), at(-0.01, 1.01, 100)];
+        const lakePos = new Float32Array(12);
+        lake.forEach((c, i) => lakePos.set(local(c[0], c[1], c[2]), i * 3));
+        // East-west texel width in metres, near enough at this latitude.
+        const texelM = (BOUNDS.east - BOUNDS.west) * 111_320 * Math.cos(28 * Math.PI / 180) / SIZE;
+        const strokes: Array<{ fx: number; halfM: number; kind: number }> = [
+            { fx: 0.75 + 0.5 / SIZE, halfM: 1.5 * texelM, kind: 0 },      // three texels wide
+            { fx: 0.9 + 0.25 / SIZE, halfM: 0.05 * texelM, kind: 0 },     // a tenth of one
+            { fx: 0.6 + 0.5 / SIZE, halfM: 1.5 * texelM, kind: PTM_STROKE_KIND_OUTLINE },
+        ];
+        const positions: number[] = [], directions: number[] = [], halfWidthsM: number[] = [];
+        const indices: number[] = [], kinds: number[] = [];
+        for (const s of strokes) {
+            const base = positions.length / 3;
+            for (const fy of [-0.01, 1.01]) {
+                for (const side of [1, -1]) {
+                    const c = at(s.fx, fy, 100);
+                    positions.push(...local(c[0], c[1], c[2]));
+                    directions.push(side, 0, 0);
+                    halfWidthsM.push(s.halfM);
+                    kinds.push(s.kind);
+                }
+            }
+            indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+        }
+        const tile = decodePtm(encodePtm({
+            id: ID, centerHeightM: CENTER_H, tileHalfWidthM: 2500, skirtDepthM: 50, geometricErrorM: 1,
+            land: { positions: new Float32Array(0), faceNormals: new Float32Array(0), classes: new Uint8Array(0), colors: new Uint8Array(0) },
+            water: { positions: lakePos, indices: new Uint32Array([0, 1, 2, 0, 2, 3]), tones: new Uint8Array([0, 0]) },
+            rivers: {
+                positions: new Float32Array(positions), directions: new Float32Array(directions),
+                halfWidthsM: new Float32Array(halfWidthsM), indices: new Uint32Array(indices), kinds: new Uint8Array(kinds),
+            },
+        }));
+        return { raster: rasterizeLeaf(ground, BASIS, SIZE), tile };
+    }
+
+    it('paints the water sheet and a wide watercourse over the ground, in the water marker', async () => {
+        const { paintWater, PTX_WATER, WATER_TEXEL_RGB } = await import('./coverTex');
+        const { raster, tile } = await waterLeaf();
+        const painted = paintWater(raster, SIZE, tile, BASIS);
+        assert.ok(painted > 0);
+        const row = 8;
+        // The lake: every texel west of the middle.
+        for (let x = 0; x < SIZE / 2; x++) {
+            assert.deepEqual(texel(raster, SIZE, x, row), [...WATER_TEXEL_RGB, PTX_WATER], `lake texel ${x}`);
+        }
+        // The wide course, three texels centred on column 12.
+        for (const x of [11, 12, 13]) {
+            assert.equal(texel(raster, SIZE, x, row)[3], PTX_WATER, `course texel ${x}`);
+        }
+        assert.deepEqual(texel(raster, SIZE, 10, row), [10, 20, 30, 3], 'ground beside the course');
+        assert.deepEqual(texel(raster, SIZE, 15, row), [10, 20, 30, 3], 'ground east of it');
+    });
+
+    it('leaves a course well under a texel wide, and the landuse outlines, unpainted', async () => {
+        const { paintWater, PTX_WATER } = await import('./coverTex');
+        const { raster, tile } = await waterLeaf();
+        paintWater(raster, SIZE, tile, BASIS);
+        for (let y = 0; y < SIZE; y++) {
+            assert.notEqual(texel(raster, SIZE, 14, y)[3], PTX_WATER, `thin course, row ${y}`);
+            assert.notEqual(texel(raster, SIZE, 9, y)[3], PTX_WATER, `outline, row ${y}`);
+        }
+    });
+
+    it('survives the fold as an area', async () => {
+        const { paintWater, PTX_WATER } = await import('./coverTex');
+        const { raster, tile } = await waterLeaf();
+        paintWater(raster, SIZE, tile, BASIS);
+        const half = downsample2x2(raster, SIZE);
+        assert.equal(texel(half, SIZE / 2, 0, 4)[3], PTX_WATER);
+        assert.equal(texel(half, SIZE / 2, 7, 4)[3], 3);
+    });
+});
+
+describe('PTX1 flags', () => {
+    it('round-trips through the reserved header word, and reads 0 when unset', async () => {
+        const { PTX_FLAG_WATER } = await import('../../src/script/terrain/ptx');
+        const texels = emptyRaster(2);
+        assert.equal(decodePtx(encodePtx({ z: 1, x: 1, y: 1 }, 2, texels, PTX_FLAG_WATER)).flags, PTX_FLAG_WATER);
+        assert.equal(decodePtx(encodePtx({ z: 1, x: 1, y: 1 }, 2, texels)).flags, 0);
+    });
+});

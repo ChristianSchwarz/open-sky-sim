@@ -24,7 +24,9 @@ import { TERRAIN_COVER_PARS } from './terrainCover';
  * (uHasCoverTex) takes its base colour from the texel under the fragment,
  * resolved through the same facetColor the vertex program applied to the
  * facet, so the four colour modes and the leaf dissolving in over it agree.
- * A no-data texel keeps the facet colour. See coverTextures.ts.
+ * A no-data texel keeps the facet colour. A water texel (PTX_WATER) is the
+ * water mesh's colour, unlit like it: the strokes and small waters a far
+ * tile no longer draws as meshes. See coverTextures.ts.
  */
 export const TerrainFragProgram: string = `
   precision highp float;
@@ -42,6 +44,8 @@ export const TerrainFragProgram: string = `
   uniform float uCoverEnabled;
   /** The texture is read past this distance only; a leaf keeps its facets close up. */
   uniform float uCoverFromM;
+  /** The water mesh's colour (TERRAIN_WATER, tweaked), for water texels. */
+  uniform vec3 uCoverWater;
 
   varying vec3 vLight;
   varying vec3 vBase;
@@ -79,11 +83,15 @@ ${TERRAIN_COVER_PARS}
     }
 
     vec3 base = vBase;
+    vec3 light = vLight;
     if (uHasCoverTex > 0.5 && uCoverEnabled > 0.5 && vDist > uCoverFromM) {
       vec4 texel = texture2D(uCoverTex, vCoverUv);
-      // Alpha is the class byte; 255 is no data (PTX_NO_DATA).
+      // Alpha is the class byte; 255 is no data (PTX_NO_DATA), 254 water (PTX_WATER).
       float coverClass = floor(texel.a * 255.0 + 0.5);
-      if (coverClass < 254.5) {
+      if (coverClass > 253.5 && coverClass < 254.5) {
+        base = uCoverWater;
+        light = vec3(1.0);
+      } else if (coverClass < 253.5) {
         base = facetColor(texel.rgb, coverClass, 1.0);
       } else if (uCoverFromM < 0.0) {
         // The map mode (a negative reach, see setCoverUnderlay): no data is
@@ -91,7 +99,7 @@ ${TERRAIN_COVER_PARS}
         discard;
       }
     }
-    vec3 diffuse = base * vLight;
+    vec3 diffuse = base * light;
     gl_FragColor = mix(vec4(diffuse, 1.0), vec4(fogColor, 1.0), fogFactor * 0.92);
 ${LOG_DEPTH_FRAGMENT}
   }
