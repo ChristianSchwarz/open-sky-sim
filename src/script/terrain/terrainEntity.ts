@@ -63,7 +63,7 @@ import { buildRoadExclusion } from './roadExclusion';
 import { buildAirfieldExclusion, AirfieldExclusion } from './airfieldExclusion';
 import { coverInPtmTile } from './finestCover';
 import { Airfield } from './airfields';
-import { OceanPatch, buildOceanPatch, disposeOceanPatch } from './oceanPatch';
+import { OceanPatch, buildOceanPatch, disposeOceanPatch, mergeOceanPatches } from './oceanPatch';
 import { PtmTile, decodePtm } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
 import { seamFillVisibleAt, stitchSeams } from './seamStitch';
@@ -712,6 +712,11 @@ export class TerrainEntity implements Entity {
     private triangleBudgetHit = false;
     /** Sibling groups folded into their parent to fit the budget this reconcile; see coarsenToBudget. */
     private coarsenedTiles = 0;
+    /** tileTriangles per tile, for the current reconcile only. */
+    private readonly tileTriangleMemo = new Map<TileMeshes, number>();
+    /** Edge-fill patches merged per drawn tile; see mergedEdgeFill. */
+    private readonly edgeFillMerged = new Map<string, { patches: OceanPatch[]; group: THREE.Group }>();
+    private readonly edgeFillUsed = new Set<string>();
     /**
      * Plan-view triangle indices for the drawn tiles something has asked the
      * surface height of. Built on demand and dropped as soon as the tile stops
@@ -1216,6 +1221,9 @@ export class TerrainEntity implements Entity {
         for (const patch of this.oceans.values()) {
             shift.object(patch.group);
         }
+        for (const merged of this.edgeFillMerged.values()) {
+            shift.object(merged.group);
+        }
         this.quadtree.rebase(shift);
         shift.point(this.earthCenter);
         // Each index copied its tile's placement when it was built.
@@ -1517,6 +1525,36 @@ export class TerrainEntity implements Entity {
      */
     drawnCoverAtWorld(x: number, z: number): TileCover | undefined {
         return this.drawnIndexAt(x, z)?.coverAtWorld(x, z);
+    }
+
+    /**
+     * For the Shift+F8 debug tooltip: the drawn tile under a scene point and
+     * its cover texture, if it has one bound. texelM is the texture's level-0
+     * texel edge on the ground; fromM is the binding's own (see CoverBinding).
+     */
+    drawnTileInfoAtWorld(x: number, z: number): {
+        id: TileKey;
+        texture?: { size: number; levels: number; texelM: number; fromM: number };
+    } | undefined {
+        const node = this.drawnNodeAt(x, z);
+        if (node === undefined) {
+            return undefined;
+        }
+        const meshes = this.streamer.get(node.id);
+        const cover = meshes?.land?.userData.cover as CoverBinding | undefined;
+        if (!meshes || !cover) {
+            return { id: node.id };
+        }
+        const size = cover.texture.image.width;
+        // east is scaled to quantScale / tile width; see coverFrame.
+        const widthM = meshes.group.scale.x / cover.east.length();
+        return {
+            id: node.id,
+            texture: {
+                size, levels: cover.texture.mipmaps.length,
+                texelM: widthM / size, fromM: cover.fromM,
+            },
+        };
     }
 
     /**
@@ -1867,6 +1905,9 @@ export class TerrainEntity implements Entity {
     }
 
     private reconcile(camera: THREE.PerspectiveCamera): void {
+        // Prices hold for one reconcile: the budget fold asks for the same
+        // tiles round after round (3.7 % of the main thread, 2026-10-28).
+        this.tileTriangleMemo.clear();
         // Everything below reads the camera's orientation out of its world
         // matrix -- the culling frustum here, and the prefetch direction via
         // getWorldDirection in speculativeWants. But that matrix is only
@@ -2187,7 +2228,11 @@ export class TerrainEntity implements Entity {
                 // Under its children too: the ones outside an area are not
                 // all drawn while it dissolves, and its fill is gone.
                 if (this.straddlesAreaEdge(node.id)) {
-                    this.addEdgeFill(node.id, updateUniforms, extraOceans, camPos);
+                    const patches: OceanPatch[] = [];
+                    this.addEdgeFill(node.id, updateUniforms, extraOceans, camPos, patches);
+                    if (patches.length > 0) {
+                        this.group.add(this.mergedEdgeFill(node.key, patches));
+                    }
                 } else if (this.edgeLiftFor(node.id)) {
                     // A fill-only tile wholly outside every area.
                     this.group.add(this.oceanPatchFor(node.id, updateUniforms, true).group);
@@ -2245,11 +2290,17 @@ export class TerrainEntity implements Entity {
         }
         stitchSeams(stitched);
         this.pruneOceans(extraOceans);
+        this.pruneEdgeFill();
     }
 
     /** What a drawn tile costs the triangle budget: land, water, roads and bridges. */
     private tileTriangles(meshes: TileMeshes): number {
-        return countTriangles(meshes, true) + this.roads.trianglesOf(meshes, true) + this.bridges.trianglesOf(meshes);
+        let n = this.tileTriangleMemo.get(meshes);
+        if (n === undefined) {
+            n = countTriangles(meshes, true) + this.roads.trianglesOf(meshes, true) + this.bridges.trianglesOf(meshes);
+            this.tileTriangleMemo.set(meshes, n);
+        }
+        return n;
     }
 
     /** What a tile actually draws this frame, far land included; for the stats only. */
@@ -2406,7 +2457,7 @@ export class TerrainEntity implements Entity {
      */
     private addEdgeFill(
         id: TileKey, updateUniforms: THREE.Mesh['onBeforeRender'], drawn: Set<string>,
-        camPos: THREE.Vector3,
+        camPos: THREE.Vector3, out: OceanPatch[],
     ): void {
         if (id.z >= this.maxZoom) {
             return;
@@ -2420,10 +2471,10 @@ export class TerrainEntity implements Entity {
             // fill-only tiles too). Across the edge: down a level. Inside:
             // the tile's own ground.
             if (this.edgeLiftFor(child)) {
-                this.group.add(this.oceanPatchFor(child, updateUniforms, true).group);
+                out.push(this.oceanPatchFor(child, updateUniforms, true));
                 drawn.add(tileKeyString(child) + '+');
             } else if (seen === 'split' && this.straddlesAreaEdge(child)) {
-                this.addEdgeFill(child, updateUniforms, drawn, camPos);
+                this.addEdgeFill(child, updateUniforms, drawn, camPos, out);
             }
         }
     }
@@ -2518,6 +2569,35 @@ export class TerrainEntity implements Entity {
         const areas = terrainAreas(this.manifest);
         return areas.some(a => tileOverlapsArea(b, a))
             && !areas.some(a => tileInsideArea(b, a));
+    }
+
+    /**
+     * One mesh for a tile's edge-fill patches, rebuilt only when the set of
+     * patches changes (a split, a provisional patch rebuilt).
+     */
+    private mergedEdgeFill(key: string, patches: OceanPatch[]): THREE.Group {
+        const had = this.edgeFillMerged.get(key);
+        this.edgeFillUsed.add(key);
+        if (had && had.patches.length === patches.length && had.patches.every((p, i) => p === patches[i])) {
+            return had.group;
+        }
+        if (had) {
+            disposeOceanPatch({ group: had.group, bytes: 0 });
+        }
+        const group = mergeOceanPatches(patches);
+        this.edgeFillMerged.set(key, { patches, group });
+        return group;
+    }
+
+    /** Drop merged edge fills no tile drew this reconcile. */
+    private pruneEdgeFill(): void {
+        for (const [key, merged] of this.edgeFillMerged) {
+            if (!this.edgeFillUsed.has(key)) {
+                disposeOceanPatch({ group: merged.group, bytes: 0 });
+                this.edgeFillMerged.delete(key);
+            }
+        }
+        this.edgeFillUsed.clear();
     }
 
     private pruneOceans(extra: ReadonlySet<string>): void {

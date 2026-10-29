@@ -1391,7 +1391,7 @@ export class Game {
     /** After 2 s without mouse movement, names the land cover under the cursor. */
     private updateCoverTooltip(): void {
         if (this.coverTooltipShown || this.coverTooltipMoveAt === 0
-            || performance.now() - this.coverTooltipMoveAt < 2000) {
+            || performance.now() - this.coverTooltipMoveAt < (isTerrainWireframe() ? 300 : 2000)) {
             return;
         }
         // One attempt per rest; a new mouse move re-arms it.
@@ -1467,6 +1467,32 @@ export class Game {
             this.coverTooltipEl = el;
         }
         el.textContent = COVER_CLASS_NAMES[cover.cls] ?? 'Unknown';
+        if (isTerrainWireframe()) {
+            // Shift+F8: the drawn level and the cover texture's mip under the cursor.
+            const t = isWater ? tDem : tLand;
+            const info = terrain.drawnTileInfoAtWorld(origin.x + direction.x * t, origin.z + direction.z * t);
+            if (info) {
+                const lines = [`z${info.id.z} ${info.id.x}/${info.id.y}`];
+                const tex = info.texture;
+                if (!tex) {
+                    lines.push('texture: none');
+                } else if (tex.fromM > 0 && t < tex.fromM) {
+                    lines.push(`texture: ${tex.size}px, not read under ${Math.round(tex.fromM)} m`);
+                } else {
+                    // The ground a render pixel covers, stretched by the grazing
+                    // angle, against the level-0 texel; nearest-mip rounds.
+                    const renderH = (this.hdResolutionWidth || H_RES) * rect.height / rect.width;
+                    const pixelM = t * 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) / renderH
+                        / Math.max(0.05, Math.abs(direction.y));
+                    const level = Math.min(tex.levels - 1,
+                        Math.max(0, Math.round(Math.log2(pixelM / tex.texelM))));
+                    lines.push(`texture: ${tex.size}px, mip ${level} (${tex.size >> level}px, `
+                        + `${(tex.texelM * 2 ** level).toFixed(1)} m/texel)`);
+                }
+                el.textContent += `\n${lines.join('\n')}`;
+            }
+        }
+        el.style.whiteSpace = 'pre';
         el.style.left = `${this.coverTooltipClient.x + 14}px`;
         el.style.top = `${this.coverTooltipClient.y + 18}px`;
         el.classList.remove('hidden');
@@ -5434,7 +5460,7 @@ export class Game {
                 { probability: 0.12, model: 'lib:cloudLarge', jitter: 1, randomRotation: true, lodBias: -2 },
                 { probability: 0.18, model: 'lib:cloudMedium', jitter: 1, randomRotation: true, lodBias: -2 },
                 { probability: 0.15, model: 'lib:cloudSmall', jitter: 1, randomRotation: true, lodBias: -2 },
-                { probability: 0.55, model: 'lib:cloudNone', jitter: 0, randomRotation: false },
+                { probability: 0.55, model: 'lib:cloudNone', jitter: 0, randomRotation: false, empty: true },
             ],
             statsKey: 'cloud',
         };
@@ -5460,7 +5486,7 @@ export class Game {
             cellVariations: [
                 { probability: 0.08, model: 'lib:cirrusWide', jitter: 1, randomRotation: false },
                 { probability: 0.12, model: 'lib:cirrusThin', jitter: 1, randomRotation: false },
-                { probability: 0.8, model: 'lib:cirrusNone', jitter: 0, randomRotation: false },
+                { probability: 0.8, model: 'lib:cirrusNone', jitter: 0, randomRotation: false, empty: true },
             ],
             statsKey: 'cirrus',
         };

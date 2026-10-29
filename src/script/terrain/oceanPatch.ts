@@ -183,3 +183,71 @@ export function disposeOceanPatch(p: OceanPatch): void {
     }
     p.group.clear();
 }
+
+/**
+ * Several patches drawn as one mesh, for the edge fill beside one tile: each
+ * was a draw of its own, ~20 % of a frame's draws along a border (2026-10-28).
+ * All carry the same attributes and the one land group; positions move into
+ * the first patch's frame. The patches themselves are left as they are.
+ */
+export function mergeOceanPatches(patches: OceanPatch[]): THREE.Group {
+    const meshes = patches.map(p => p.group.children[0] as THREE.Mesh);
+    const first = meshes[0];
+    const base = patches[0].group.position;
+    let vertices = 0;
+    let indexCount = 0;
+    for (const m of meshes) {
+        vertices += m.geometry.getAttribute('position').count;
+        indexCount += m.geometry.getIndex()!.count;
+    }
+    const geometry = new THREE.BufferGeometry();
+    for (const name of Object.keys(first.geometry.attributes)) {
+        const a0 = first.geometry.getAttribute(name);
+        const size = a0.itemSize;
+        const ctor = (a0 instanceof THREE.InterleavedBufferAttribute ? a0.data.array : a0.array).constructor as
+            new (n: number) => Float32Array | Uint8Array;
+        const out = new ctor(vertices * size);
+        let o = 0;
+        for (let k = 0; k < meshes.length; k++) {
+            const a = meshes[k].geometry.getAttribute(name);
+            const shift = name === 'position' ? patches[k].group.position.clone().sub(base) : undefined;
+            for (let i = 0; i < a.count; i++) {
+                for (let c = 0; c < size; c++) {
+                    // Raw components: normalized attributes keep their bytes.
+                    let v = a instanceof THREE.InterleavedBufferAttribute
+                        ? a.data.array[i * a.data.stride + a.offset + c]
+                        : a.array[i * size + c];
+                    if (shift) {
+                        v += c === 0 ? shift.x : c === 1 ? shift.y : shift.z;
+                    }
+                    out[o++] = v;
+                }
+            }
+        }
+        geometry.setAttribute(name, new THREE.BufferAttribute(out, size, a0.normalized));
+    }
+    const index = vertices > 0xffff ? new Uint32Array(indexCount) : new Uint16Array(indexCount);
+    let io = 0;
+    let offset = 0;
+    for (const m of meshes) {
+        const idx = m.geometry.getIndex()!;
+        for (let i = 0; i < idx.count; i++) {
+            index[io++] = idx.array[i] + offset;
+        }
+        offset += m.geometry.getAttribute('position').count;
+    }
+    geometry.setIndex(new THREE.BufferAttribute(index, 1));
+    geometry.addGroup(0, indexCount, first.geometry.groups[0].materialIndex ?? 0);
+
+    const mesh = new THREE.Mesh(geometry, first.material);
+    mesh.frustumCulled = false;
+    mesh.matrixAutoUpdate = false;
+    mesh.onBeforeRender = first.onBeforeRender;
+    const group = new THREE.Group();
+    group.name = `oceans:${patches[0].group.name}`;
+    group.position.copy(base);
+    group.add(mesh);
+    group.updateMatrix();
+    group.matrixAutoUpdate = false;
+    return group;
+}

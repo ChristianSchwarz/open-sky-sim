@@ -31,6 +31,11 @@ export interface SceneryFieldCellVariation {
     jitter: number; // [0,1] - 0 disabled, 1 cell edge. Applies a random offset to the item within its cell
     randomRotation: boolean;
     /**
+     * Nothing is drawn: the cell stays empty. Its share of the probability
+     * still counts, but no entity is built, positioned or culled for it.
+     */
+    empty?: boolean;
+    /**
      * Overrides SimpleEntity's DEFAULT_LOD_BIAS for this variation. Field
      * scenery (cloud puffs, treetops, ...) is large, distant and rarely
      * inspected up close, unlike aircraft/vehicles the default bias is tuned
@@ -171,18 +176,23 @@ export class SceneryField implements Entity {
     }
 
     private buildTile(models: ModelManager): FieldTile {
-        const tile: FieldTile = new Array(this.options.cellsInTile * this.options.cellsInTile);
+        const tile: FieldTile = [];
         for (let row = 0; row < this.options.cellsInTile; row++) {
             for (let col = 0; col < this.options.cellsInTile; col++) {
-                const idx = row * this.options.cellsInTile + col;
-                tile[idx] = this.buildCell(row, col, models);
+                const cell = this.buildCell(row, col, models);
+                if (cell) {
+                    tile.push(cell);
+                }
             }
         }
         return tile;
     }
 
-    private buildCell(row: number, col: number, models: ModelManager): FieldTileElement {
+    private buildCell(row: number, col: number, models: ModelManager): FieldTileElement | undefined {
         const variation = this.pickRandomCellVariation();
+        if (variation.empty) {
+            return undefined;
+        }
         const offset = this.genElementOffset(row, col, variation.jitter);
         const model = models.getModel(variation.model);
         const entity = new SimpleEntity(model, SceneLayers.EntityFlats, SceneLayers.EntityVolumes, variation.lodBias);
