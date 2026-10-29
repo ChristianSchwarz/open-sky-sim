@@ -423,10 +423,11 @@ async function main(): Promise<void> {
                 emptied.push(k);
                 continue;
             }
-            // The unpainted raster is what the next level folds; the shipped
-            // one gets this level's roads drawn crisp, one texel wide.
+            // The unpainted raster is what the next level folds. The near (512)
+            // levels ship with their roads drawn crisp, one texel wide; the far
+            // (256) levels are purely the unpainted 512 downsampled, no roads.
             current.set(keyOf(k), { texels: parent, size });
-            const shipped = paintLevelRoads(k, parent, size);
+            const shipped = size === args.nearSize ? paintLevelRoads(k, parent, size) : parent;
             if (shipped !== parent) {
                 roadTiles++;
             }
