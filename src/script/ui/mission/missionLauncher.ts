@@ -9,6 +9,7 @@ import { MissionPanel } from './missionPanel';
  * own boot is untouched, and Angular starts only in the map.
  */
 export async function mountMissionPanel(host: HTMLElement, editor: MissionEditor): Promise<void> {
+    // Kept for the session: closing the map hides the host, so a reopened map has the mission as it was.
     const app = await createApplication();
     const ref = createComponent(MissionPanel, { environmentInjector: app.injector, hostElement: host });
     ref.setInput('editor', editor);

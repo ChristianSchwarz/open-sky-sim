@@ -67,8 +67,9 @@ let underlay = false;
  * its texel size, with no data wherever there is water. So a textured coarse
  * tile gets two sheets under its land, a textured land sheet and a water
  * sheet below it; its land facets give way over no-data texels (a negative
- * fromM tells terrainFP to discard there) and its water mesh is hidden. Bound
- * from then on: set it before the map's tiles arrive.
+ * fromM tells terrainFP to discard there) and its water mesh is hidden.
+ * Switched per tile as the tile is next drawn (CoverTextures.attach): the
+ * sheets are built the first time and kept, hidden, when the map closes.
  */
 export function setCoverUnderlay(on: boolean): void {
     underlay = on;
@@ -299,6 +300,10 @@ export class CoverTextures {
      * past the first call per tile it is a field read.
      */
     attach(id: TileKey, meshes: TileMeshes, priority: number): void {
+        if (meshes.cover instanceof THREE.DataTexture) {
+            this.syncUnderlay(id, meshes);
+            return;
+        }
         if (meshes.cover !== undefined || !this.store || !this.wanted || !meshes.land) {
             return;
         }
@@ -334,21 +339,41 @@ export class CoverTextures {
         const frame = coverFrame(id, this.bakeBasis, meshes.group.scale.x);
         const texture = buildCoverTexture(tile);
         const leaf = id.z === this.leafZoom;
-        const sheets = underlay && !leaf;
         const binding: CoverBinding = {
             texture, east: frame.east, north: frame.north, k: frame.k,
-            // Read per draw, so setLeafCoverFromM reaches leaves bound before it.
+            // Read per draw, so setLeafCoverFromM reaches leaves bound before
+            // it, and the land discards over no-data only while its sheets show.
             get fromM() {
-                return leaf ? leafCoverFromM : sheets ? -1 : 0;
+                return leaf ? leafCoverFromM : meshes.coverUnderlay?.[0].visible ? -1 : 0;
             },
         };
         land.userData.cover = binding;
-        if (sheets) {
-            this.addUnderlay(id, meshes, binding);
-        }
         meshes.cover = texture;
+        this.syncUnderlay(id, meshes);
         meshes.bytes += coverTextureBytes(tile.size);
         this.attached++;
+    }
+
+    /** Show or hide a bound coarse tile's sheets as setCoverUnderlay says, building them the first time. */
+    private syncUnderlay(id: TileKey, meshes: TileMeshes): void {
+        const want = underlay && id.z !== this.leafZoom;
+        const sheets = meshes.coverUnderlay;
+        if (!sheets) {
+            const binding = meshes.land?.userData.cover as CoverBinding | undefined;
+            if (want && binding) {
+                this.addUnderlay(id, meshes, binding);
+            }
+            return;
+        }
+        if (sheets[0].visible === want) {
+            return;
+        }
+        for (const s of sheets) {
+            s.visible = want;
+        }
+        if (meshes.water) {
+            meshes.water.visible = !want;
+        }
     }
 
     /** The map mode's two sheets under a coarse tile's land; see setCoverUnderlay. */

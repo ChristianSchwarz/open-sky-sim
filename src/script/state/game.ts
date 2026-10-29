@@ -56,7 +56,7 @@ import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { FogQuality } from '../config/profiles/profile';
 import { MAP_FOV_DEG, MAP_TRIANGLE_BUDGET, MapView, isMapViewPage, mapViewUrl } from './mapView';
 import { setMapDetailScale, setMapLod } from '../terrain/quadtree';
-import { setCoverUnderlay, setLeafCoverFromM } from '../terrain/coverTextures';
+import { LEAF_COVER_FROM_M, setCoverUnderlay, setLeafCoverFromM } from '../terrain/coverTextures';
 import { setBuildingsAtOnce } from '../terrain/buildingMeshes';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { BarricadeEntity, BarricadeRigPhase } from '../scene/entities/barricadeEntity';
@@ -112,7 +112,9 @@ import { TowerCameraUpdater } from './cameraUpdaters/towerCameraUpdater';
 import {
     FixedCameraRates, FixedCameraTuning, fixedCameraInput, stepFixedCameraRates, zeroFixedCameraRates,
 } from './cameraUpdaters/fixedCameraControl';
-import { CameraRoute, cameraRouteFromLocation, clearCameraRouteFromLocation, writeCameraRouteToLocation } from './cameraRoute';
+import { CameraRoute, cameraRouteFromLocation, clearCameraRouteFromLocation, parseCameraRoute, writeCameraRouteToLocation } from './cameraRoute';
+import { missionUrl, parseAppRoute, splitAppUrl } from './appRoute';
+import { AppNavigator, startAppRouter } from '../ui/appRouter';
 import { SpawnDestination, airfieldEntryOf, savePendingDestination, takePendingDestination } from './spawnSearch';
 import type { TerrainArea } from '../terrain/manifest';
 import { restoreMainCameraParameters } from './stateUtils';
@@ -792,9 +794,24 @@ export class Game {
     private flyByCameraUpdater: FlyByCameraUpdater;
     /** The fixed camera asked for in the page URL, if any. */
     private cameraRoute: CameraRoute | undefined = cameraRouteFromLocation();
-    /** Opened by F12 as the map: the fixed camera, looking straight down (mapView.ts). */
-    private readonly mapMode = isMapViewPage();
+    /** Booting as the map (?map): the boot skips what only a flight needs. Cleared once it is up. */
+    private mapMode = isMapViewPage();
+    /** The map while it is open (F12): the fixed camera, looking straight down (mapView.ts). */
     private mapView: MapView | undefined;
+    /** Built on the first open and kept, with the editor, for the next one. */
+    private mapViewKept: MapView | undefined;
+    private missionEditor: MissionEditor | undefined;
+    private missionPanelHost: HTMLElement | undefined;
+    /** What the map was opened over, put back when it closes; undefined for a page loaded as the map. */
+    private mapReturn: { state: GameState; view: PlayerViewState; route?: CameraRoute } | undefined;
+    /** Settings the map overrides without saving, as they were before it opened. */
+    private mapSaved: { shading: TerrainShading; budget: number; perfHud: boolean } | undefined;
+    /** The Angular Router (ui/appRouter.ts), from the end of the boot on. */
+    private nav: AppNavigator | undefined;
+    /** Router navigations one at a time: each may await a flight's start. */
+    private routeChange: Promise<void> = Promise.resolve();
+    /** Fly this mission on its next navigation even if it is the one in the air: the editor's Fly after an edit. */
+    private missionToFly: string | undefined;
     /** The map's detail scale and when it was last checked; see fitMapDetail. */
     private mapDetailScale = 1;
     private mapDetailCheckMs = 0;
@@ -805,8 +822,11 @@ export class Game {
     private mapCentre = { lat: 0, lon: 0 };
     /** The waypoint editor's routes over the map; see enterMapView. */
     private missionOverlay: MissionOverlay | undefined;
-    /** The mission ?mission= named, flown once the boot's flight has begun (startMission). */
+    /** The mission being flown (startMission), and its saved id. */
     private mission: Mission | undefined;
+    private missionId: string | undefined;
+    /** Missions loaded or flown this session, by id: going back to one does not fetch it again. */
+    private readonly missionCache = new Map<string, Mission>();
     /** Its AI flights, sim ids mf0.., built on first use and kept for the session (the sim never frees a row). */
     private readonly missionAircraft: AiAircraftEntity[] = [];
     /** The player's flight, and the waypoint its HUD cue points at. */
@@ -1065,19 +1085,13 @@ export class Game {
         this.setupControls();
         setBootProgress(15, 'Loading aircraft packs...');
         await this.loadPersistedPacks();
-        const missionId = this.mapMode ? null : new URLSearchParams(location.search).get('mission');
-        if (missionId) {
-            try {
-                this.mission = await loadMission(missionId);
-            } catch (err) {
-                console.error(`Mission ${missionId} could not be loaded`, err);
-            }
-            // Made in another area: that area's terrain, then the mission.
-            if (this.mission?.area && this.mission.area !== loadSettings().terrainArea) {
-                updateSettings({ terrainArea: this.mission.area });
-                window.location.reload();
-                return;
-            }
+        const missionId = this.mapMode ? undefined : parseAppRoute().mission;
+        const bootMission = missionId ? await this.missionById(missionId) : undefined;
+        // Made in another area: that area's terrain, then the mission.
+        if (bootMission?.area && bootMission.area !== loadSettings().terrainArea) {
+            updateSettings({ terrainArea: bootMission.area });
+            window.location.reload();
+            return;
         }
         const settings = loadSettings();
         setBootProgress(25, 'Building scene...');
@@ -1094,7 +1108,7 @@ export class Game {
         // for the rest of the session.
         this.urlCameraPending = urlCameraRoute !== undefined;
         // A mission's player starts where its flight does: stream the terrain there.
-        const missionPlayer = this.mission?.flights.find(f => f.control === 'player');
+        const missionPlayer = bootMission?.flights.find(f => f.control === 'player');
         if (missionPlayer) {
             this.selectAircraftById(missionPlayer.aircraftId, settings.aircraftId);
         }
@@ -1112,10 +1126,20 @@ export class Game {
         if (!this.mapView) {
             await this.waitForRequiredTerrain(90, 99);
         }
-        if (this.mission) {
-            await this.startMission(this.mission);
+        if (bootMission && missionId) {
+            await this.startMission(bootMission, missionId);
         }
         setBootProgress(100, 'Ready');
+        this.mapMode = false;
+        try {
+            this.nav = await startAppRouter(url => {
+                this.routeChange = this.routeChange.then(() => this.applyRoute(url))
+                    .catch(err => console.error(`Route ${url} failed`, err));
+            });
+        } catch (err) {
+            // Without the router, F12 and Fly load the page instead (navigateApp).
+            console.error('The router did not start', err);
+        }
         window.addEventListener('resize', () => this.onViewportResize());
     }
 
@@ -2398,7 +2422,10 @@ export class Game {
             this.advanceCarrier(delta);
             this.syncCarrierSystems();
             this.scene.update(delta);
-            this.pumpCombatSim(delta);
+            // A flight paused under the map waits whole: its AI too.
+            if (!(this.mapView && this.mapReturn?.state === GameState.PLAYER)) {
+                this.pumpCombatSim(delta);
+            }
         }
     }
 
@@ -3403,10 +3430,15 @@ export class Game {
             if (this.mapView) {
                 // The map is the whole page: its keys, nothing of the free
                 // camera's, and no menu on Escape.
-                if (this.mapView.handleKey(event) || event.code === 'Escape'
-                    || event.code === 'F12' || event.code === 'F10') {
+                const close = (event.code === 'F12' || event.code === 'F10')
+                    && !event.shiftKey;
+                if (this.mapView.handleKey(event) || close || event.code === 'Escape') {
                     event.preventDefault();
                     event.stopPropagation();
+                }
+                // Opened over the game: closing is Back, so the history stays the way it reads.
+                if (close && !event.repeat && this.mapReturn) {
+                    this.nav?.back();
                 }
                 return;
             }
@@ -3694,25 +3726,21 @@ export class Game {
     }
 
     /**
-     * F12: the terrain seen straight down, in a tab of its own, centred on
-     * the aircraft in flight and on the camera anywhere else.
+     * The map mode (F12): the fixed camera turns straight down through a long
+     * lens, the sky's altitude effects go, and the map's own input
+     * (mapView.ts) drives the camera. Everything it changes is put back by
+     * {@link exitMapView}; the MapView and the waypoint editor are built the
+     * first time and kept, so a reopened map has the mission as it was.
      */
-    /**
-     * The map mode: this page was opened by F12 as the map. The fixed camera
-     * turns straight down through a long lens, the fog and the sky's altitude
-     * effects go, and the map's own input (mapView.ts) drives the camera.
-     */
-    private enterMapView(): void {
+    private enterMapView(search: string = location.search): void {
         const fixed = this.fixedCameraUpdater;
+        setCoverUnderlay(true);
         this.materials.setFog(FogQuality.NONE);
         for (const e of [this.cloudField, this.cirrusField]) {
             if (e) {
                 e.enabled = false;
             }
         }
-        // The fog is by distance whatever the fog setting, and the map camera
-        // is kilometres up: with it, the whole map washes to sky colour.
-        this.materials.setFogDensityScale(0);
         setMapLod(true);
         setLeafCoverFromM(1e9);
         // The map is always at noon, whatever the flight's time of day. Set
@@ -3721,6 +3749,11 @@ export class Game {
         this.refreshDaytimePalette();
         this.updateSunEntity();
         setBuildingsAtOnce(true);
+        this.mapSaved = {
+            shading: this.configService.terrainShading.getActive(),
+            budget: this.configService.triangleBudget.getActive(),
+            perfHud: this.perfHud?.enabled ?? false,
+        };
         // Smooth shading reads better as a map: the slopes as relief, not
         // facets. Not saved, like the budget below.
         this.configService.terrainShading.setActive(TerrainShading.SMOOTH);
@@ -3734,22 +3767,23 @@ export class Game {
         if (this.perfHud) {
             this.perfHud.enabled = false;
         }
-        // The boot parked an aircraft at the base; the map marks the real one instead.
+        // The flight's aircraft (or the boot's, parked at the base) waits
+        // hidden; the map marks where it is instead.
         this.player.enabled = false;
         const route = this.cameraRoute;
         this.mapCentre = route ? { lat: route.lat, lon: route.lon } : { ...this.playArea.origin };
         const basis = () => this.planetTerrain.basis;
-        const centre = this.mapCentre;
-        this.mapView = new MapView({
+        const map = this.mapViewKept ??= new MapView({
             container: document.getElementById('container')!,
             camera: this.playerCamera.main,
             pan: (dx, dz) => {
-                const w = geodeticToWorld(basis(), centre.lat, centre.lon, 0);
+                const c = this.mapCentre;
+                const w = geodeticToWorld(basis(), c.lat, c.lon, 0);
                 const g = geodeticOnSurfaceAtEnu(basis(), w.x + dx, -(w.z + dz));
-                centre.lat = g.lat;
-                centre.lon = g.lon;
+                c.lat = g.lat;
+                c.lon = g.lon;
             },
-            centre: () => geodeticToWorld(basis(), centre.lat, centre.lon, 0),
+            centre: () => geodeticToWorld(basis(), this.mapCentre.lat, this.mapCentre.lon, 0),
             worldOf: (lat, lon, heightM = 0) => geodeticToWorld(basis(), lat, lon, heightM),
             geodeticOf: (x, z) => geodeticOnSurfaceAtEnu(basis(), x, -z),
             writeRoute: (lat, lon) => writeCameraRouteToLocation({
@@ -3757,19 +3791,245 @@ export class Game {
             }),
             groundAt: (px, py) => this.mapGroundAt(px, py),
         });
+        map.open(search);
+        this.mapView = map;
+        this.mapDetailScale = 1;
+        this.mapDetailFloor = 1;
+        this.mapDetailView = -1;
         this.placeMapCamera();
-        // The waypoint editor: its panel in the left pane, its routes over the map.
-        const editor = new MissionEditor({
-            aircraft: this.aircraftRegistry.list().map(d => ({ id: d.id, name: d.name })),
-            defaultAircraftId: this.currentDef.id,
-            area: this.playArea.area.name,
-            centre: () => ({ ...centre }),
-            runwayEndAt: (lat, lon) => this.runwayEndAt(lat, lon),
-            runwayEnds: () => this.runwayEnds(),
-        });
-        this.missionOverlay = new MissionOverlay(
-            this.mapView, editor, this.playerCamera.main, () => this.chartAirfields);
-        void mountMissionPanel(document.body.appendChild(document.createElement('rfs-mission-panel')), editor);
+        if (!this.missionEditor) {
+            // The waypoint editor: its panel in the left pane, its routes over the map.
+            const editor = this.missionEditor = new MissionEditor({
+                aircraft: this.aircraftRegistry.list().map(d => ({ id: d.id, name: d.name })),
+                defaultAircraftId: this.currentDef.id,
+                area: this.playArea.area.name,
+                centre: () => ({ ...this.mapCentre }),
+                runwayEndAt: (lat, lon) => this.runwayEndAt(lat, lon),
+                runwayEnds: () => this.runwayEnds(),
+                fly: (id, mission) => {
+                    this.missionCache.set(id, mission);
+                    this.missionToFly = id;
+                    this.navigateApp(missionUrl(id));
+                },
+            });
+            this.missionOverlay = new MissionOverlay(
+                map, editor, this.playerCamera.main, () => this.chartAirfields);
+            this.missionPanelHost = document.body.appendChild(document.createElement('rfs-mission-panel'));
+            void mountMissionPanel(this.missionPanelHost, editor);
+        }
+        this.missionOverlay?.setShown(true);
+        if (this.missionPanelHost) {
+            this.missionPanelHost.style.display = '';
+        }
+    }
+
+    /** Undo {@link enterMapView}; the caller decides what the game does next. */
+    private exitMapView(): void {
+        const map = this.mapView;
+        if (!map) {
+            return;
+        }
+        this.mapView = undefined;
+        map.close();
+        this.missionOverlay?.setShown(false);
+        if (this.missionPanelHost) {
+            this.missionPanelHost.style.display = 'none';
+        }
+        setCoverUnderlay(false);
+        setMapLod(false);
+        setMapDetailScale(1);
+        this.mapDetailScale = 1;
+        setLeafCoverFromM(LEAF_COVER_FROM_M);
+        setSunTime(this.configService.daytime.getActive());
+        this.refreshDaytimePalette();
+        this.updateSunEntity();
+        setBuildingsAtOnce(false);
+        this.materials.setFog(this.configService.techProfiles.getActive().fogQuality);
+        const saved = this.mapSaved;
+        if (saved) {
+            this.configService.terrainShading.setActive(saved.shading);
+            this.configService.triangleBudget.setActive(saved.budget);
+            if (this.perfHud) {
+                this.perfHud.enabled = saved.perfHud;
+            }
+            this.mapSaved = undefined;
+        }
+        // The clouds and SPACE_FOG are set again each frame from the altitude.
+        ATMOSPHERE_SHELL_UNIFORMS.uMapMode.value = 0;
+        this.fixedCameraUpdater.setStraightDown(undefined);
+        restoreMainCameraParameters(this.playerCamera.main);
+        this.player.enabled = true;
+    }
+
+    /**
+     * Open the map over whatever the game is doing: a flight is paused, AI
+     * and all, and comes back where it was when the map closes. `search` and
+     * `hash` are the map's URL, the router navigation's (applyRoute).
+     */
+    private openMap(search: string, hash: string): void {
+        if (this.mapView) {
+            return;
+        }
+        this.leaveShowcaseIfActive();
+        this.mapReturn = { state: this.state, view: this.view, route: this.cameraRoute };
+        // A spawn's hold still running would keep update(), and so the map, still.
+        this.streamHoldToken++;
+        this.streamHeld = false;
+        hideCountdown();
+        fadeOutBootProgress();
+        this.heldFixedCameraKeys.clear();
+        this.fixedCameraRates = zeroFixedCameraRates();
+        const route = parseCameraRoute(search, hash);
+        if (route) {
+            this.enterFixedCamera(route);
+        } else {
+            this.player.setSimulationPaused(true);
+        }
+        this.enterMapView(search);
+    }
+
+    /** Close the map, and with `restore` go back to what it was opened over. */
+    private async closeMap(restore: boolean): Promise<void> {
+        if (!this.mapView) {
+            return;
+        }
+        this.exitMapView();
+        const back = this.mapReturn;
+        this.mapReturn = undefined;
+        if (!restore) {
+            return;
+        }
+        if (back?.state === GameState.PLAYER) {
+            await this.resumeFlight(back.view);
+        } else if (back?.state === GameState.FIXED_CAMERA && back.route) {
+            this.enterFixedCamera(back.route);
+        } else {
+            // Loaded as the map, or opened over the menu: the boot's parked aircraft and the menu.
+            this.enterSpawnMenu();
+        }
+    }
+
+    /**
+     * Fly on from where the map paused the flight. The map may have looked
+     * far away and had the terrain around the aircraft evicted: stream it
+     * back under the blur, as a respawn does, then count down.
+     */
+    private async resumeFlight(view: PlayerViewState): Promise<void> {
+        this.state = GameState.PLAYER;
+        this.restoreView(view);
+        const p = this.player.position;
+        const resident = this.isSeedAreaResident(p.x, p.z, 'approach');
+        if (!resident) {
+            this.streamHeld = true;
+            hideCountdown();
+            setBootStreaming(0, 'Loading terrain...');
+            await this.preloadTerrainAroundPlane(p.x, p.z, 'approach');
+        }
+        // Unpaused first: the hold pauses for itself and resumes on "Go".
+        this.player.setSimulationPaused(false);
+        void this.holdUntilStreamed(!resident);
+    }
+
+    /** Fly `mission` from the map's editor (or Back / Forward onto its URL), in this page. */
+    private async flyMission(id: string, mission: Mission): Promise<void> {
+        this.missionCache.set(id, mission);
+        if (mission.area && mission.area !== this.playArea.area.name) {
+            // Another area's terrain is a new origin and new scenery: still a reload.
+            updateSettings({ terrainArea: mission.area });
+            window.location.reload();
+            return;
+        }
+        await this.closeMap(false);
+        this.setCockpitFrontView();
+        const settings = loadSettings();
+        const player = mission.flights.find(f => f.control === 'player');
+        if (player) {
+            this.selectAircraftById(player.aircraftId, settings.aircraftId);
+        }
+        await this.beginFlight(settings.spawnMode, player ? { lat: player.start.lat, lon: player.start.lon } : undefined);
+        await this.startMission(mission, id);
+    }
+
+    /** A mission by id, from this session's cache or the dev server; undefined when it cannot be had. */
+    private async missionById(id: string): Promise<Mission | undefined> {
+        const cached = this.missionCache.get(id);
+        if (cached) {
+            return cached;
+        }
+        try {
+            const m = await loadMission(id);
+            this.missionCache.set(id, m);
+            return m;
+        } catch (err) {
+            console.error(`Mission ${id} could not be loaded`, err);
+            return undefined;
+        }
+    }
+
+    /** Go to another of the page's routes through the router; a page load if it never started. */
+    private navigateApp(url: string): void {
+        if (this.nav) {
+            this.nav.navigate(url);
+        } else {
+            window.location.assign(url);
+        }
+    }
+
+    /**
+     * Move the game to a router navigation's URL: F12, Fly, Back or Forward.
+     * The map opens over the flight or closes back onto it; a mission URL
+     * whose mission is not the one in the air (or was just flown from the
+     * editor) flies it; within one page a changed camera route (an edited
+     * `#@lat,lon`) moves the camera there.
+     */
+    private async applyRoute(url: string): Promise<void> {
+        const { search, hash } = splitAppUrl(url);
+        const next = parseAppRoute(search);
+        const route = parseCameraRoute(search, hash);
+        if (next.map) {
+            if (!this.mapView) {
+                this.openMap(search, hash);
+            } else if (route) {
+                this.mapCentre = { lat: route.lat, lon: route.lon };
+            }
+            return;
+        }
+        const fly = this.missionToFly;
+        this.missionToFly = undefined;
+        if (next.mission && (next.mission !== this.missionId || next.mission === fly)) {
+            const m = await this.missionById(next.mission);
+            if (m) {
+                await this.flyMission(next.mission, m);
+                return;
+            }
+        }
+        if (this.mapView) {
+            await this.closeMap(true);
+            return;
+        }
+        const here = this.cameraRoute;
+        if (route && !(here && Math.abs(route.lat - here.lat) < 1e-6 && Math.abs(route.lon - here.lon) < 1e-6
+            && Math.abs(route.altM - here.altM) < 1)) {
+            this.enterFixedCamera(route);
+        }
+    }
+
+    /** Stop the mission in the air, if any: its AI flights leave and the player's cue goes. */
+    private endMission(): void {
+        if (!this.mission) {
+            return;
+        }
+        for (const ai of this.missionAircraft) {
+            ai.enabled = false;
+            this.combatSim.setRoute(ai.simId, null);
+            this.combatSim.setEnabled(ai.simId, false);
+        }
+        this.combatSim.setRoute(PLAYER_SIM_ID, null);
+        this.missionTakeoffs = [];
+        this.missionPlayer = undefined;
+        this.player.waypointCue = undefined;
+        this.mission = undefined;
+        this.missionId = undefined;
     }
 
     /**
@@ -3816,7 +4076,9 @@ export class Game {
      * AI flights sharing a runway end line up one behind another and roll
      * MISSION_TAKEOFF_GAP_S apart, the one furthest down the runway first.
      */
-    private async startMission(m: Mission): Promise<void> {
+    private async startMission(m: Mission, id: string): Promise<void> {
+        this.mission = m;
+        this.missionId = id;
         // Only the mission's flights: the free flight's wingman and opponent
         // fly the player's airframe and passed for flights ignoring theirs.
         this.clearOtherAircraft();
@@ -4078,8 +4340,8 @@ export class Game {
             }
         }
         const at = aircraft ?? this.playArea.origin;
-        // Same page: the browser's Back returns to the game.
-        window.location.assign(mapViewUrl({ lat: at.lat, lon: at.lon, aircraft }));
+        // A router navigation, not a load; applyRoute opens the map, and Back closes it onto the flight.
+        this.navigateApp(mapViewUrl({ lat: at.lat, lon: at.lon, aircraft }));
     }
 
     private toggleShowcaseView() {
@@ -4581,6 +4843,8 @@ export class Game {
         // home should restore the runway start rather than the one an
         // imported area forced.
         this.persistSpawnSelection(requested);
+        // A new flight is not the mission's; flyMission starts it again after.
+        this.endMission();
         const spawn = this.spawnForArea(requested);
         const def = this.selectedAircraftDef();
         if (def) {

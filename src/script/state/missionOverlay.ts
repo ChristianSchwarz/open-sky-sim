@@ -66,7 +66,7 @@ export class MissionOverlay {
         // Delete or Backspace removes the selected waypoint or landing, unless a field of the panel has the keys.
         window.addEventListener('keydown', e => {
             const j = editor.selectedPoint();
-            if ((e.key !== 'Delete' && e.key !== 'Backspace') || j === undefined || j === 'start'
+            if (!this.map.isOpen || (e.key !== 'Delete' && e.key !== 'Backspace') || j === undefined || j === 'start'
                 || (e.target as Element | null)?.closest?.('input, textarea, mat-select')) {
                 return;
             }
@@ -84,6 +84,13 @@ export class MissionOverlay {
                 editor.removeWaypoint(at.flight, at.point);
             }
         });
+    }
+
+    /** Shown with the map, hidden while the game flies; the editor keeps its mission meanwhile. */
+    setShown(on: boolean): void {
+        this.svg.style.display = on ? '' : 'none';
+        this.drag = undefined;
+        this.drawn = [];
     }
 
     /** Per frame, after the map camera is placed. */

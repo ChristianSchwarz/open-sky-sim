@@ -1,6 +1,7 @@
 import { computed, signal } from '@angular/core';
 import { Flight, FlightEndpoint, MAX_ALT_M, MAX_FLIGHTS, MAX_SPEED_MPS, MISSION_VERSION, Mission, Waypoint, validateMission } from './flightPlan';
 import * as store from './missionStore';
+import { missionUrl } from '../state/appRoute';
 
 /** What a click on the map does: add a waypoint to the selected flight, or set its start or landing. */
 export type PickMode = 'waypoint' | 'start' | 'land';
@@ -36,6 +37,8 @@ export interface MissionEditorHost {
     runwayEndAt(lat: number, lon: number): RunwayEnd | undefined;
     /** Every runway end that can be picked from a list, both directions of each runway. */
     runwayEnds(): RunwayEnd[];
+    /** Fly the saved mission `id` in this page; without it the page is reloaded onto it. */
+    fly?(id: string, mission: Mission): void;
 }
 
 /**
@@ -311,8 +314,13 @@ export class MissionEditor {
     /** Save, then open the game on this mission (game.ts startMission). */
     async fly(): Promise<void> {
         const id = await this.save();
-        if (id) {
-            location.href = `index.html?mission=${encodeURIComponent(id)}`;
+        if (!id) {
+            return;
+        }
+        if (this.host.fly) {
+            this.host.fly(id, this.mission());
+        } else {
+            location.href = missionUrl(id);
         }
     }
 }

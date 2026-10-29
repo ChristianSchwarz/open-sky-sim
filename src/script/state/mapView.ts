@@ -72,7 +72,7 @@ export function mapViewUrl(p: MapViewParams): string {
     return `index.html?${q.toString()}&@${p.lat.toFixed(6)},${p.lon.toFixed(6)},10000a,0h,0t`;
 }
 
-/** Whether this page was opened as the map; read once, at boot. */
+/** Whether this URL is the map's. */
 export function isMapViewPage(search: string = location.search): boolean {
     return new URLSearchParams(search).has('map');
 }
@@ -102,9 +102,13 @@ export interface MapViewHost {
 }
 
 export class MapView {
-    private mpp: number;
-    private tiltDeg: number;
-    readonly aircraft?: MapAircraft;
+    private mpp = DEFAULT_MPP;
+    private tiltDeg = 0;
+    aircraft?: MapAircraft;
+    /** Shown and taking input; see open and close. */
+    private shown = false;
+    /** The map's own elements, hidden while it is closed. */
+    private readonly parts: HTMLElement[] = [];
     private readonly marker: HTMLElement;
     private readonly scaleBar: HTMLElement;
     private readonly scaleLabel: HTMLElement;
@@ -114,31 +118,21 @@ export class MapView {
     private urlTimer = 0;
     private readonly _p = new THREE.Vector3();
 
-    constructor(private readonly host: MapViewHost, search: string = location.search) {
-        const q = new URLSearchParams(search);
-        this.mpp = clampMpp(num(q, 'mpp') ?? DEFAULT_MPP);
-        this.tiltDeg = clampTilt(num(q, 'tilt') ?? 0);
-        const alat = num(q, 'alat');
-        const alon = num(q, 'alon');
-        if (alat !== undefined && alon !== undefined) {
-            this.aircraft = { lat: alat, lon: alon, headingDeg: num(q, 'ahdg') };
-        }
-        document.body.classList.add('map-view');
+    /** Built once, closed; {@link open} shows it. */
+    constructor(private readonly host: MapViewHost) {
         this.marker = el('div', 'map-aircraft');
         this.marker.innerHTML = '<svg width="20" height="24" viewBox="0 0 20 24">'
             + '<path d="M10 1 L18 22 L10 17 L2 22 Z" fill="#ffcc33" stroke="#000" stroke-width="1.5" '
             + 'stroke-linejoin="round" /></svg>';
-        this.marker.classList.toggle('hidden', !this.aircraft);
-        this.marker.classList.toggle('no-heading', this.aircraft?.headingDeg === undefined);
         const info = el('div', 'map-info');
         const scale = el('div', 'map-scale', info);
         this.scaleBar = el('div', 'map-scale-bar', scale);
         this.scaleLabel = el('span', '', scale);
         this.cursor = el('div', 'map-cursor', info);
         this.cursor.innerHTML = '&nbsp;';
-        el('div', 'map-help').textContent =
+        const help = el('div', 'map-help');
+        help.textContent =
             'drag to move · wheel or double-click to zoom · left+right drag to tilt · arrows / WASD · +/- · C centres the aircraft';
-        this.setSplit(num(q, 'split') ?? this.split);
         this.bindPointer();
         const divider = el('div', 'map-divider');
         divider.addEventListener('pointerdown', e => divider.setPointerCapture(e.pointerId));
@@ -148,8 +142,51 @@ export class MapView {
             }
         });
         divider.addEventListener('pointerup', () => this.scheduleUrl());
+        this.parts.push(info, help, divider);
+        // Inline: .map-info's own display would win over .hidden.
+        for (const p of this.parts) {
+            p.style.display = 'none';
+        }
+        this.marker.classList.add('hidden');
         // Dev aid, alongside __terrain: the map's camera and state.
         (globalThis as Record<string, unknown>).__mapView = this;
+    }
+
+    get isOpen(): boolean {
+        return this.shown;
+    }
+
+    /** Show the map with the zoom, tilt, split and aircraft marker `search` gives (mapViewUrl). */
+    open(search: string = location.search): void {
+        const q = new URLSearchParams(search);
+        this.mpp = clampMpp(num(q, 'mpp') ?? DEFAULT_MPP);
+        this.tiltDeg = clampTilt(num(q, 'tilt') ?? 0);
+        const alat = num(q, 'alat');
+        const alon = num(q, 'alon');
+        this.aircraft = alat !== undefined && alon !== undefined
+            ? { lat: alat, lon: alon, headingDeg: num(q, 'ahdg') } : undefined;
+        this.shown = true;
+        document.body.classList.add('map-view');
+        for (const p of this.parts) {
+            p.style.display = '';
+        }
+        this.marker.classList.toggle('hidden', !this.aircraft);
+        this.marker.classList.toggle('no-heading', this.aircraft?.headingDeg === undefined);
+        this.viewVersion++;
+        this.setSplit(num(q, 'split') ?? this.split);
+    }
+
+    /** Hide it and give the page back to the game; its state is read again on the next open. */
+    close(): void {
+        this.shown = false;
+        window.clearTimeout(this.urlTimer);
+        document.body.classList.remove('map-view');
+        for (const p of this.parts) {
+            p.style.display = 'none';
+        }
+        this.marker.classList.add('hidden');
+        this.host.container.classList.remove('map-dragging');
+        window.dispatchEvent(new Event('resize'));
     }
 
     /** Camera height above the ground under the centre, for this zoom. */
@@ -294,8 +331,15 @@ export class MapView {
             return [e.clientX - r.left, e.clientY - r.top];
         };
         // The right button is half of the tilt chord, not a menu.
-        c.addEventListener('contextmenu', e => e.preventDefault());
+        c.addEventListener('contextmenu', e => {
+            if (this.shown) {
+                e.preventDefault();
+            }
+        });
         c.addEventListener('pointerdown', e => {
+            if (!this.shown) {
+                return;
+            }
             c.setPointerCapture(e.pointerId);
             pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
             press = pointers.size === 1 && e.button === 0 ? { x: e.clientX, y: e.clientY } : undefined;
@@ -306,6 +350,9 @@ export class MapView {
             }
         });
         c.addEventListener('pointermove', e => {
+            if (!this.shown) {
+                return;
+            }
             this.showCursor(...local(e));
             const prev = pointers.get(e.pointerId);
             if (!prev) {
@@ -336,6 +383,9 @@ export class MapView {
             }
             press = undefined;
             pointers.delete(e.pointerId);
+            if (!this.shown) {
+                pointers.clear();
+            }
             pinch = 0;
             if (pointers.size === 0) {
                 c.classList.remove('map-dragging');
@@ -344,12 +394,18 @@ export class MapView {
         c.addEventListener('pointerup', release);
         c.addEventListener('pointercancel', release);
         c.addEventListener('wheel', e => {
+            if (!this.shown) {
+                return;
+            }
             e.preventDefault();
             // Lines and pages scroll in bigger steps than pixels.
             const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 500 : 1);
             this.zoomAt(Math.pow(WHEEL_ZOOM_PER_100PX, -dy / 100), ...local(e));
         }, { passive: false });
         c.addEventListener('dblclick', e => {
+            if (!this.shown) {
+                return;
+            }
             window.clearTimeout(clickTimer);
             this.zoomAt(e.shiftKey ? 0.5 : 2, ...local(e));
         });
