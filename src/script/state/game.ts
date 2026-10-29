@@ -76,7 +76,7 @@ import { PlayerEntity, PlayerSpawnState } from '../scene/entities/player';
 import {
     bakeCollisionMeshFromModel,
     createCarrierMeshCollider,
-    sampleCarrierMeshSurfaceYMax,
+    MeshColliderIndex, sampleCarrierMeshSurfaceYMax,
     CarrierMeshCollider,
 } from '../scene/entities/carrierDeck';
 import {
@@ -659,6 +659,14 @@ export class Game {
     private activeRunway: SceneRunway | undefined;
     /** Static scenery collision soups (hangars, tower, depots...); solid like the carrier deck. */
     private readonly sceneryMeshes: CarrierMeshCollider[] = [];
+    /**
+     * {@link sceneryMeshes} bucketed for ground queries, rebuilt when the
+     * list changes or the frame re-bases. Scanning the whole list - every
+     * airfield's pavement - per query showed in profiles far from any field
+     * (2026-10-29).
+     */
+    private sceneryIndex: MeshColliderIndex | undefined;
+    private sceneryIndexCount = -1;
     /**
      * Baked scenery colliders held here until all scenery is placed, then moved
      * into {@link sceneryMeshes}. Keeps ground sampling during placement from
@@ -1999,6 +2007,15 @@ export class Game {
         };
     }
 
+    /** {@link sampleCarrierMeshSurfaceYMax} over the scenery colliders, through {@link sceneryIndex}. */
+    private sceneryYMax(x: number, z: number): number {
+        if (!this.sceneryIndex || this.sceneryIndexCount !== this.sceneryMeshes.length) {
+            this.sceneryIndex = new MeshColliderIndex(this.sceneryMeshes);
+            this.sceneryIndexCount = this.sceneryMeshes.length;
+        }
+        return this.sceneryIndex.sampleYMax(x, z);
+    }
+
     /** Highest solid ground Y at (x, z): DEM/flat datum, hills, ski jumps, surface pads, scenery + carrier meshes. */
     private groundHeightAt(x: number, z: number): number {
         const demY = this.planetTerrain.heightAtWorld(x, z);
@@ -2006,7 +2023,7 @@ export class Game {
             demY,
             sampleSkiJumpSurfaceYMax(x, z, this.skiJumps),
             this.surfacePads.sampleYMax(x, z),
-            sampleCarrierMeshSurfaceYMax(x, z, this.sceneryMeshes),
+            this.sceneryYMax(x, z),
             sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes),
         );
     }
@@ -2035,7 +2052,7 @@ export class Game {
             ground,
             sampleSkiJumpSurfaceYMax(x, z, this.skiJumps),
             this.surfacePads.sampleYMax(x, z),
-            sampleCarrierMeshSurfaceYMax(x, z, this.sceneryMeshes),
+            this.sceneryYMax(x, z),
             sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes),
         );
     }
@@ -2107,7 +2124,7 @@ export class Game {
         const drawn = this.planetTerrain.drawnHeightAtWorld(x, z);
         const pad = this.surfacePads.sampleYMax(x, z);
         const ski = sampleSkiJumpSurfaceYMax(x, z, this.skiJumps);
-        const scenery = sampleCarrierMeshSurfaceYMax(x, z, this.sceneryMeshes);
+        const scenery = this.sceneryYMax(x, z);
         const carrier = sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes);
         const worldGround = this.groundHeightAt(x, z);
         const fin = (v: number) => (Number.isFinite(v) ? +v.toFixed(1) : null);
@@ -5807,6 +5824,7 @@ export class Game {
         setBootProgress(60, 'Loading airfields...');
         this.surfacePads.clear();
         this.sceneryMeshes.length = 0;
+        this.sceneryIndex = undefined;
         this.stagedSceneryMeshes.length = 0;
         await this.addOsmAirfields(this.scene);
 
@@ -6131,6 +6149,7 @@ export class Game {
         for (const m of this.sceneryMeshes) {
             rebaseMeshCollider(m, shift);
         }
+        this.sceneryIndex = undefined;
         for (const m of this.stagedSceneryMeshes) {
             rebaseMeshCollider(m, shift);
         }
