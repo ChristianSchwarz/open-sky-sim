@@ -539,10 +539,25 @@ export class TilePool<R> {
             return;
         }
         this.leases.delete(jobId);
-        const headLen = body.readUInt32LE(0);
-        const head = JSON.parse(body.subarray(4, 4 + headLen).toString()) as {
+        // The lease is gone from here on: a tile whose answer cannot be taken
+        // in (a cut-off body, a write that fails with the disk or memory full)
+        // goes back in the queue, or the pass waited for it for ever (Nord
+        // Kap, 2026-10-28).
+        const lost = (err: unknown) => {
+            console.warn(`\nwarning: ${keyOf(lease.job.key)} from ${sat.name} could not be taken in (${(err as Error).message}); it goes back in the queue`);
+            this.requeue(lease.idx);
+        };
+        let headLen: number;
+        let head: {
             result?: R; resultText?: string; error?: string; retry?: boolean; outputs: Array<{ rel: string; state: 'bytes' | 'deleted' | 'unchanged'; size: number }>;
         };
+        try {
+            headLen = body.readUInt32LE(0);
+            head = JSON.parse(body.subarray(4, 4 + headLen).toString()) as typeof head;
+        } catch (err) {
+            lost(err);
+            return;
+        }
         if (head.retry) {
             this.requeue(lease.idx);
             return;
@@ -551,21 +566,28 @@ export class TilePool<R> {
             this.complete(lease.idx, { error: `${head.error} (on ${sat.name})` });
             return;
         }
-        let o = 4 + headLen;
-        for (const out of head.outputs) {
-            if (!lease.job.outputs.includes(out.rel)) {
-                throw new Error(`${sat.name} sent ${out.rel}, not an output of job ${jobId}`);
+        let result: R;
+        try {
+            let o = 4 + headLen;
+            for (const out of head.outputs) {
+                if (!lease.job.outputs.includes(out.rel)) {
+                    throw new Error(`${sat.name} sent ${out.rel}, not an output of job ${jobId}`);
+                }
+                const abs = this.absOf(out.rel);
+                if (out.state === 'bytes') {
+                    writeAtomic(abs, body.subarray(o, o + out.size));
+                    o += out.size;
+                } else if (out.state === 'deleted' && fs.existsSync(abs)) {
+                    fs.unlinkSync(abs);
+                }
             }
-            const abs = this.absOf(out.rel);
-            if (out.state === 'bytes') {
-                writeAtomic(abs, body.subarray(o, o + out.size));
-                o += out.size;
-            } else if (out.state === 'deleted' && fs.existsSync(abs)) {
-                fs.unlinkSync(abs);
-            }
+            result = (head.resultText !== undefined ? decodeWire<R>(head.resultText) : head.result) as R;
+        } catch (err) {
+            lost(err);
+            return;
         }
         sat.done++;
-        this.complete(lease.idx, (head.resultText !== undefined ? decodeWire<R>(head.resultText) : head.result) as R);
+        this.complete(lease.idx, result);
         // The satellite has room again (see atCapacity).
         this.wakeWaiters();
     }
