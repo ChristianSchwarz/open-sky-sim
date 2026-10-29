@@ -205,8 +205,36 @@ export function regionSizes(
         }
     };
     const triArea = new Float64Array(triCount);
-    // First triangle seen at each (position, class) corner.
-    const cornerToTri = new Map<string, number>();
+    // First triangle seen at each (position, class) corner: open addressing
+    // over typed arrays. A string-keyed Map here was 15 % of the main thread
+    // while tiles streamed in over the Alps (2026-10-29).
+    let cap = 1024;
+    while (cap < vertexCount * 2) {
+        cap <<= 1;
+    }
+    const mask = cap - 1;
+    const slotTri = new Int32Array(cap).fill(-1);
+    const slotXY = new Int32Array(cap);
+    const slotZC = new Int32Array(cap);
+    const cornerTri = (x: number, y: number, z: number, cls: number, t: number): number => {
+        const xy = (x & 0xffff) | (y << 16);
+        const zc = (z & 0xffff) | (cls << 16);
+        let h = Math.imul(xy, 0x9e3779b1) ^ Math.imul(zc, 0x85ebca77);
+        h = (h ^ (h >>> 15)) & mask;
+        for (;;) {
+            const at = slotTri[h];
+            if (at < 0) {
+                slotTri[h] = t;
+                slotXY[h] = xy;
+                slotZC[h] = zc;
+                return -1;
+            }
+            if (slotXY[h] === xy && slotZC[h] === zc) {
+                return at;
+            }
+            h = (h + 1) & mask;
+        }
+    };
     for (let t = 0; t < triCount; t++) {
         const v = t * 3;
         const cls = attrs[v * 4 + 3];
@@ -222,11 +250,8 @@ export function regionSizes(
         triArea[t] = 0.5 * Math.hypot(nx, ny, nz) * quantScale * quantScale;
         for (let k = 0; k < 3; k++) {
             const i = v + k;
-            const key = `${positions[i * 3]},${positions[i * 3 + 1]},${positions[i * 3 + 2]},${cls}`;
-            const other = cornerToTri.get(key);
-            if (other === undefined) {
-                cornerToTri.set(key, t);
-            } else {
+            const other = cornerTri(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], cls, t);
+            if (other >= 0) {
                 union(t, other);
             }
         }
