@@ -6,11 +6,17 @@ reaches the ground once the leaves under them are re-meshed and re-graded
 (tools/rebake_box.ts), and a graded leaf cannot be re-graded in place. This
 lists the leaves each airfield's pads reach, joins touching ones into blocks,
 and prints one box per block, west,south,east,north, inset so only those
-leaves are re-baked - one per line, for a driver to feed rebake_box --bbox.
+leaves are re-baked - one per line, the `--bboxes` file of the bake stages
+(tools/bake/bboxes.ts, tools/rebake_airfields.ts).
+
+The leaves the runway pads reached before 2026-10-30 count too: those were the
+ICAO strip plus an 80 m feather, far wider than the pavement-and-margin pads
+now, and a leaf they flattened that the new pads miss would keep its shelf.
+`--old-only` lists just those, for an area re-baked before they were counted.
 
 Usage::
 
-    python tools/airfield_rebake_boxes.py [--area DACH] [--manifest assets/planet/manifest.json]
+    python tools/airfield_rebake_boxes.py [--area DACH] [--old-only] [--manifest assets/planet/manifest.json]
 """
 
 from __future__ import annotations
@@ -38,6 +44,16 @@ def pad_leaves(pad: dict) -> Set[Tuple[int, int]]:
     x0, y1 = leaf_of(pad['lon'] - dlon, pad['lat'] - dlat)
     x1, y0 = leaf_of(pad['lon'] + dlon, pad['lat'] + dlat)
     return {(x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)}
+
+
+def old_runway_leaves(runway: dict) -> Set[Tuple[int, int]]:
+    """The leaves a runway's pad reached before 2026-10-30: the ICAO strip
+    (75 m either side at least, 150 m past each threshold) plus an 80 m feather."""
+    return pad_leaves({
+        'lat': runway['lat'], 'lon': runway['lon'], 'featherM': 80.0,
+        'halfD': runway['lengthM'] / 2 + 150.0 + 80.0,
+        'halfW': max(75.0, runway['widthM'] / 2 + 30.0) + 80.0,
+    })
 
 
 def blocks(leaves: Set[Tuple[int, int]]) -> List[Set[Tuple[int, int]]]:
@@ -74,15 +90,21 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--manifest', default='assets/planet/manifest.json')
     ap.add_argument('--area', help='only the airfields of this area')
+    ap.add_argument('--old-only', action='store_true',
+                    help='only the leaves the old runway pads reached and the new pads do not')
     args = ap.parse_args()
     with open(args.manifest, encoding='utf-8') as fh:
         items = (json.load(fh).get('airfields') or {}).get('items') or []
-    leaves: Set[Tuple[int, int]] = set()
+    new: Set[Tuple[int, int]] = set()
+    old: Set[Tuple[int, int]] = set()
     for airfield in items:
         if args.area and airfield.get('area') != args.area:
             continue
         for pad in airfield.get('pads') or []:
-            leaves |= pad_leaves(pad)
+            new |= pad_leaves(pad)
+        for runway in airfield.get('runways') or []:
+            old |= old_runway_leaves(runway)
+    leaves = old - new if args.old_only else new | old
     found = blocks(leaves)
     # Biggest blocks first, so a driver resumed part way has done the most.
     found.sort(key=lambda b: -len(b))

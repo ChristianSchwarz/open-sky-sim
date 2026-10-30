@@ -19,6 +19,7 @@
  *     [--lod2-store data/imports/buildings/lod2 | --no-lod2]
  */
 
+import { Box, inBoxes, readBboxes, unionOf } from './bake/bboxes';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
@@ -41,6 +42,8 @@ interface Args {
     dir: string;
     src: string;
     bbox?: LonLatBounds;
+    /** `--bboxes`: the boxes themselves; `bbox` is their union (tools/bake/bboxes.ts). */
+    boxes?: Box[];
     /** Roof colours measured in orthophotos (tools/measure_buildings.py); undefined = none. */
     colours?: string;
     /** Roof shapes fitted to surface models (tools/measure_roof_shapes.py); undefined = none. */
@@ -70,6 +73,10 @@ function parseArgs(argv: string[]): Args {
         const next = () => argv[++i];
         if (k === '--dir') a.dir = next();
         else if (k === '--src') a.src = next();
+        else if (k === '--bboxes') {
+            a.boxes = readBboxes(next());
+            a.bbox = unionOf(a.boxes);
+        }
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else if (k === '--colour-store') a.colours = next();
         else if (k === '--no-colours') a.colours = undefined;
@@ -109,7 +116,7 @@ function main(): void {
     const leafZoom = manifest.mesh.maxZoom;
     const basis = makeEnuBasis(manifest.enuOrigin.lat, manifest.enuOrigin.lon, manifest.enuOrigin.height);
     const meshTiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath ?? 'index_mesh.bin')));
-    const tiles = meshTiles.filter(k => k.z === leafZoom && (args.bbox === undefined || overlaps(boundsOf(k), args.bbox)));
+    const tiles = meshTiles.filter(k => k.z === leafZoom && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes))));
     console.log(`bake_planet_buildings: ${tiles.length} leaf tiles${args.bbox ? ' (scoped)' : ''}`);
 
     const written: TileKey[] = [];

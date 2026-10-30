@@ -19,6 +19,7 @@
  *   node --import tsx tools/bake_planet_grade.ts [options]
  *
  *     --dir DIR        the mesh tree (default assets/terrain)
+ *     --bboxes FILE    many boxes, one w,s,e,n a line, as one run (tools/bake/bboxes.ts)
  *     --bbox w,s,e,n   only tiles in this box; the bed index is merged
  *     --jobs N         worker threads (default: CPUs - 1, at most one per 5 GB of memory;
  *                      JOBS in the environment sets it too)
@@ -48,6 +49,7 @@
  * RailBedInput.freeBorder). The .pbd1 files are removed at the end.
  */
 
+import { Box, inBoxes, readBboxes, unionOf } from './bake/bboxes';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -70,6 +72,8 @@ const MIN_FREE_BYTES = 2e9;
 interface Args {
     dir: string;
     bbox?: LonLatBounds;
+    /** `--bboxes`: the boxes themselves; `bbox` is their union (tools/bake/bboxes.ts). */
+    boxes?: Box[];
     jobs?: number;
     noBundle: boolean;
     freeBorder: boolean;
@@ -87,6 +91,10 @@ function parseArgs(argv: string[]): Args {
         const k = argv[i];
         const next = () => argv[++i];
         if (k === '--dir') a.dir = next();
+        else if (k === '--bboxes') {
+            a.boxes = readBboxes(next());
+            a.bbox = unionOf(a.boxes);
+        }
         else if (k === '--bbox') {
             const [west, south, east, north] = next().split(',').map(Number);
             if (![west, south, east, north].every(Number.isFinite) || west >= east || south >= north) {
@@ -185,7 +193,7 @@ async function main(): Promise<void> {
         return;
     }
     const tiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.roads.indexPath)))
-        .filter(k => args.bbox === undefined || overlaps(boundsOf(k), args.bbox));
+        .filter(k => args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes)));
     // Leaves read their neighbours' bridges, placed by the neighbours' centre heights.
     const centreHeights: Record<string, number> = {};
     for (const k of tiles) {

@@ -17,6 +17,7 @@
  *
  *     --dir DIR        the mesh tree, read and written   (default assets/terrain)
  *     --src DIR        the planet pyramid with the .rbr  (default assets/planet)
+ *     --bboxes FILE    many boxes, one w,s,e,n a line, as one run (tools/bake/bboxes.ts)
  *     --bbox w,s,e,n   only tiles in this box; the index is merged with what
  *                      is there
  *     --lidar-store DIR the lidar store (default data/imports/lidar/store,
@@ -25,6 +26,7 @@
  *     --no-lidar       ignore the store
  */
 
+import { Box, inBoxes, readBboxes, unionOf } from './bake/bboxes';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
@@ -147,6 +149,8 @@ interface Args {
     dir: string;
     src: string;
     bbox?: LonLatBounds;
+    /** `--bboxes`: the boxes themselves; `bbox` is their union (tools/bake/bboxes.ts). */
+    boxes?: Box[];
     /** The lidar store (tools/measure_lidar.py): decks end at the measured approaches. */
     lidarStore: string;
     lidar: boolean;
@@ -175,6 +179,10 @@ function parseArgs(argv: string[]): Args {
         const next = () => argv[++i];
         if (k === '--dir') a.dir = next();
         else if (k === '--src') a.src = next();
+        else if (k === '--bboxes') {
+            a.boxes = readBboxes(next());
+            a.bbox = unionOf(a.boxes);
+        }
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else if (k === '--lidar-store') a.lidarStore = next();
         else if (k === '--no-lidar') a.lidar = false;
@@ -1189,7 +1197,7 @@ function main(): void {
     console.log(lidar ? `lidar: deck ends at the approaches measured in ${args.lidarStore}` : 'lidar: none');
     const meshTiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath ?? 'index_mesh.bin')));
     const tiles = meshTiles.filter(k => k.z === leafZoom
-        && (args.bbox === undefined || overlaps(boundsOf(k), args.bbox)));
+        && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes))));
     console.log(`bake_planet_bridges: ${tiles.length} leaf tiles z${leafZoom}${args.bbox ? ' (scoped)' : ''}`);
 
     const written: TileKey[] = [];

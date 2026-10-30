@@ -25,6 +25,7 @@
  *     --only z/x/y     bake a single tile (repeatable), for debugging
  *     --limit N        stop after N tiles, for a quick smoke bake
  *     --swatches N     colours in the baked swatch table (default 24)
+ *     --bboxes FILE    many boxes, one w,s,e,n a line, as one run (tools/bake/bboxes.ts)
  *     --bbox w,s,e,n   bake only tiles overlapping this box, and merge the
  *                      index and swatch table with what is already there
  *                      (see tools/README.md, "Adding an area")
@@ -37,6 +38,7 @@
  *                      the address; leaves the port to another bake)
  */
 
+import { Box, inBoxes, readBboxes, unionOf } from './bake/bboxes';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -88,6 +90,8 @@ interface Args {
     limit?: number;
     swatches: number;
     bbox?: LonLatBounds;
+    /** `--bboxes`: the boxes themselves; `bbox` is their union (tools/bake/bboxes.ts). */
+    boxes?: Box[];
     /** Worker threads; default one fewer than the machine's CPUs. */
     jobs?: number;
     /** Run the worker from its .ts source under tsx instead of the esbuild bundle. */
@@ -140,6 +144,10 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--only') a.only.push(next());
         else if (k === '--limit') a.limit = Number(next());
         else if (k === '--swatches') a.swatches = Number(next());
+        else if (k === '--bboxes') {
+            a.boxes = readBboxes(next());
+            a.bbox = unionOf(a.boxes);
+        }
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else if (k === '--jobs') a.jobs = Number(next());
         else if (k === '--no-bundle') a.noBundle = true;
@@ -577,7 +585,8 @@ async function main(): Promise<void> {
     if (args.bbox !== undefined) {
         const before = tiles.length;
         const box = args.bbox;
-        tiles = tiles.filter(t => overlaps(tileBounds(t.z, t.x, t.y), box));
+        tiles = tiles.filter(t => overlaps(tileBounds(t.z, t.x, t.y), box)
+            && inBoxes(tileBounds(t.z, t.x, t.y), args.boxes));
         console.log(`bbox: ${tiles.length} of ${before} tiles overlap it; `
             + `${before - tiles.length} left alone`);
     }

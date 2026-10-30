@@ -23,6 +23,7 @@
  *     --near-zoom N    first level counted as near       (default 10)
  *     --min-zoom N     coarsest level that gets one      (default 4)
  *     --no-buildings   leave the .pbh building footprints out of the leaf rasters
+ *     --bboxes FILE    many boxes, one w,s,e,n a line, as one run (tools/bake/bboxes.ts)
  *     --bbox w,s,e,n   re-rasterise only the leaves in this box, refold their
  *                      ancestors, and merge the index with what is there
  *     --jobs N         worker threads rasterising leaves (default: CPUs - 1, at most one
@@ -35,6 +36,7 @@
  *                      the address; leaves the port to another bake)
  */
 
+import { Box, inBoxes, readBboxes, unionOf } from './bake/bboxes';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -99,6 +101,8 @@ interface Args {
     satellitePort?: number;
     noDiscovery?: boolean;
     bbox?: LonLatBounds;
+    /** `--bboxes`: the boxes themselves; `bbox` is their union (tools/bake/bboxes.ts). */
+    boxes?: Box[];
 }
 
 function parseBbox(text: string): LonLatBounds {
@@ -145,6 +149,10 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--satellites') a.satellitePort ??= DEFAULT_SATELLITE_PORT;
         else if (k === '--satellite-port') a.satellitePort = Number(next());
         else if (k === '--no-discovery') a.noDiscovery = true;
+        else if (k === '--bboxes') {
+            a.boxes = readBboxes(next());
+            a.bbox = unionOf(a.boxes);
+        }
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else throw new Error(`unknown argument ${k}`);
     }
@@ -266,7 +274,7 @@ async function main(): Promise<void> {
         }
         list.push(k);
     }
-    const inScope = (k: TileKey) => args.bbox === undefined || overlaps(boundsOf(k), args.bbox);
+    const inScope = (k: TileKey) => args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes));
     const sizeAt = (z: number) => (z >= args.nearZoom ? args.nearSize : args.size);
     // Leaves are rasterised at the finest size any parent wants.
     const leafSize = Math.max(args.size, args.nearSize);

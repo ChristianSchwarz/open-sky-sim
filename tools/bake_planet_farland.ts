@@ -11,6 +11,7 @@
  *   node --import tsx tools/bake_planet_farland.ts [options]
  *
  *     --dir DIR        the mesh tree (default assets/terrain)
+ *     --bboxes FILE    many boxes, one w,s,e,n a line, as one run (tools/bake/bboxes.ts)
  *     --bbox w,s,e,n   only leaves in this box; the index is merged
  *     --jobs N         worker threads (default: CPUs - 1, at most one per 2 GB of memory;
  *                      JOBS in the environment sets it too)
@@ -28,6 +29,7 @@
  *     --no-bundle      run the worker under tsx instead of an esbuild bundle
  */
 
+import { Box, inBoxes, readBboxes, unionOf } from './bake/bboxes';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -48,6 +50,8 @@ const INDEX_FILE = 'index_farland.bin';
 interface Args {
     dir: string;
     bbox?: LonLatBounds;
+    /** `--bboxes`: the boxes themselves; `bbox` is their union (tools/bake/bboxes.ts). */
+    boxes?: Box[];
     jobs?: number;
     levelsM: number[];
     noBundle: boolean;
@@ -63,6 +67,10 @@ function parseArgs(argv: string[]): Args {
         const k = argv[i];
         const next = () => argv[++i];
         if (k === '--dir') a.dir = next();
+        else if (k === '--bboxes') {
+            a.boxes = readBboxes(next());
+            a.bbox = unionOf(a.boxes);
+        }
         else if (k === '--bbox') {
             const [west, south, east, north] = next().split(',').map(Number);
             if (![west, south, east, north].every(Number.isFinite) || west >= east || south >= north) {
@@ -123,7 +131,7 @@ async function main(): Promise<void> {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     const leafZoom: number = manifest.mesh.maxZoom;
     const tiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath)))
-        .filter(k => k.z === leafZoom && (args.bbox === undefined || overlaps(boundsOf(k), args.bbox)));
+        .filter(k => k.z === leafZoom && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes))));
     // Resuming: a sidecar written after its leaf's mesh was is that mesh's.
     const mtime = (f: string) => (fs.existsSync(f) ? fs.statSync(f).mtimeMs : -1);
     const todo = tiles.filter(k => {
@@ -157,7 +165,7 @@ async function main(): Promise<void> {
     if (args.bbox !== undefined && fs.existsSync(indexPath)) {
         const leaves = new Set(tiles.map(keyOf));
         for (const k of decodeTileIndex(fs.readFileSync(indexPath))) {
-            if (overlaps(boundsOf(k), args.bbox) && !leaves.has(keyOf(k))) {
+            if ((overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes)) && !leaves.has(keyOf(k))) {
                 const stale = tileFile(args.dir, k, FAR_LAND_EXT);
                 if (fs.existsSync(stale)) {
                     fs.unlinkSync(stale);

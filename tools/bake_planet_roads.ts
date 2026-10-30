@@ -19,10 +19,12 @@
  *     --dir DIR        the mesh tree, read and written   (default assets/terrain)
  *     --src DIR        the planet pyramid with the .rvr  (default assets/planet)
  *     --max-verts N    stroke vertices per leaf tile     (default 16384)
+ *     --bboxes FILE    many boxes, one w,s,e,n a line, as one run (tools/bake/bboxes.ts)
  *     --bbox w,s,e,n   only tiles in this box; the index is merged with what
  *                      is there
  */
 
+import { Box, inBoxes, readBboxes, unionOf } from './bake/bboxes';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
@@ -48,6 +50,8 @@ interface Args {
     src: string;
     maxVerts: number;
     bbox?: LonLatBounds;
+    /** `--bboxes`: the boxes themselves; `bbox` is their union (tools/bake/bboxes.ts). */
+    boxes?: Box[];
 }
 
 function parseBbox(text: string): LonLatBounds {
@@ -74,6 +78,10 @@ function parseArgs(argv: string[]): Args {
         if (k === '--dir') a.dir = next();
         else if (k === '--src') a.src = next();
         else if (k === '--max-verts') a.maxVerts = Number(next());
+        else if (k === '--bboxes') {
+            a.boxes = readBboxes(next());
+            a.bbox = unionOf(a.boxes);
+        }
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else throw new Error(`unknown argument ${k}`);
     }
@@ -121,7 +129,7 @@ function main(): void {
     const basis = makeEnuBasis(manifest.enuOrigin.lat, manifest.enuOrigin.lon, manifest.enuOrigin.height);
     const meshTiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath ?? 'index_mesh.bin')));
     const inScope = (k: TileKey) => k.z >= minZoom && k.z <= leafZoom
-        && (args.bbox === undefined || overlaps(boundsOf(k), args.bbox));
+        && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes)));
     const tiles = meshTiles.filter(inScope);
     // A coarse tile is drawn from far enough away that its strokes get the
     // mesh budget's worth of vertices and no more, as the rivers do.
