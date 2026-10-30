@@ -4,14 +4,15 @@
 Reads an existing ``assets/planet`` tree (manifest + heights from the DEM bake,
 land mask from the coast bake), pulls ``aeroway=*`` from OpenStreetMap, and
 writes an ``airfields`` block into ``manifest.json`` describing where every
-airfield is, which way its runways actually point, and what plane the terrain
-has to be cut to for them to sit flat.
+airfield is, which way its runways actually point, and the surface each
+runway, apron and taxiway is laid on: the DEM's own ground, graded only where
+it is steeper or bumpier than ICAO lets pavement be (tools/airfield_grade.py).
 
-The mesh bake reads the `pads` in that block and cuts the terrain to them, and
+The mesh bake reads the `pads` in that block and lays the terrain on them, and
 copies the descriptions to `assets/terrain/airfields.json`, which the runtime
 draws and then flies from: real pavement, thresholds, designators and
-centrelines on the plane the ground under them was cut to, with the spawns, the
-ILS and the AI all working the real runways. An area with an airfield in it no
+centrelines on the same graded surface, with the spawns, the ILS and the AI
+all working the real runways. An area with an airfield in it no
 longer gets an invented pad flattened at its centre.
 
 openairportmap.org is a front end over exactly this data: it queries Overpass
@@ -77,6 +78,7 @@ from osm_common import (
     ways_map,
 )
 from osm_pbf import pbf_elements_groups
+import airfield_grade as AG
 
 
 # --- what counts as an airfield --------------------------------------------
@@ -170,34 +172,27 @@ EMBANKMENT_HEIGHT_RANGE_M = (0.5, 20.0)
 # fields are a single tagged point with the runways drawn separately.
 ORPHAN_ASSIGN_RADIUS_M = 5000.0
 
-# ICAO Annex 14 longitudinal slope limits: 1% for code 3/4 (runways >= 1200 m),
-# 2% for code 1/2. Used as a clamp on the gradient fitted from the DEM, because
-# what the DEM says across a 3 km strip is partly real slope and partly noise,
-# and a runway steeper than this is not one.
-GRADIENT_LIMIT_LONG = 0.01
-GRADIENT_LIMIT_SHORT = 0.02
-GRADIENT_LIMIT_LENGTH_M = 1200.0
-
 # Platform footprint margins, metres.
 #
-# The strip is ICAO's: a code 3/4 runway sits inside a graded area 150 m wide,
-# 75 m either side of the centreline, and 60 m of it beyond each threshold.
-# RESA adds another 90 m. Flattening the strip rather than just the pavement is
-# what stops the ground falling away at the runway edge, which reads as a table
-# standing on the terrain rather than as an airfield cut into it.
-STRIP_HALF_WIDTH_M = 75.0
-STRIP_OVERRUN_M = 150.0
+# A runway pad is the pavement plus a 10 m flat margin all round, ringed by a
+# feather of one DEM post. It used to be the ICAO strip (75 m either side of
+# the centreline, 150 m beyond each threshold) with an 80 m feather, which
+# reached far out to sea at shore fields (Honningsvaag, Mehamn, Kilpyavr) and
+# failed MAX_WATER_FRACTION for water the runway never touches.
+# Taxiway and apron pads keep the wider feather.
+RUNWAY_PAD_MARGIN_M = 10.0
+RUNWAY_PAD_FEATHER_M = 30.0
 PAD_FEATHER_M = 80.0
 
 # A pad's half-extents are its *outer* edge, feather included, and the fully
-# flattened core is what is left inside. So the feather is added to the strip
+# flattened core is what is left inside. So the feather is added to the margin
 # rather than taken out of it.
 #
-# Taken out of it, an 80 m feather inside a 75 m strip half-width leaves a core
-# of zero: the whole runway becomes a ramp with the graded height reached only
-# along the centreline, and the pavement edge sits half way between the plane
-# and the raw DEM. Measured at Tenerife Norte before the fix, not one vertex
-# under either runway strip was fully flattened.
+# Taken out of it, a feather wider than the margin leaves a core of zero: the
+# whole runway becomes a ramp with the graded height reached only along the
+# centreline, and the pavement edge sits half way between the plane and the
+# raw DEM. Measured at Tenerife Norte with the old strip, not one vertex under
+# either runway strip was fully flattened.
 
 # DEM sample spacing across a platform. 30 m is roughly the SRTM 1 arcsec cell,
 # so a finer grid would resample the same posts rather than learn anything.
@@ -206,12 +201,13 @@ SAMPLE_STEP_M = 30.0
 # Rejection thresholds, all reported rather than silent.
 MAX_WATER_FRACTION = 0.10
 MIN_VALID_SAMPLE_FRACTION = 0.60
-# Cut/fill the plane implies against the DEM. Past this the footprint is on a
-# cliff, which means the OSM geometry and the DEM disagree about where the
-# ground is - a void, a bad `ele`, or a runway drawn in the wrong place.
+# Cut/fill the grade needs under a runway against the DEM. Past this the
+# footprint is on a cliff, which means the OSM geometry and the DEM disagree
+# about where the ground is - a void, a bad `ele`, or a runway drawn in the
+# wrong place.
 MAX_RESIDUAL_M = 60.0
 # Below the hard limit but worth saying out loud: a real airfield on real
-# terrain sits within a few metres of its own plane.
+# terrain sits within a few metres of its own ground.
 WARN_RESIDUAL_M = 15.0
 
 # How far a runway's true bearing may sit from what its `ref` implies before
@@ -235,8 +231,8 @@ MAX_REF_DELTA_DEG = 25.0
 # wants a lighter bake.
 DEFAULT_PER_AREA = None
 
-# Fitting one airfield - sampling every pad's DEM points and least-squaring a
-# plane through them - is pure Python per point and independent of every other
+# Grading one airfield - reading the DEM along every runway and taxiway and
+# solving their profiles - is pure Python per point and independent of every other
 # airfield, the same shape of work the DEM and coast bakes already split
 # across worker processes. It only pays off once the per-area cap above was
 # removed: a handful of airfields is over before a process pool would even
@@ -1510,122 +1506,332 @@ class LandMask:
         return grid[row * self.n + col] == LAND
 
 
-def gradient_limit(length_m: float) -> float:
-    """ICAO longitudinal slope limit for a runway of this length."""
-    return GRADIENT_LIMIT_LONG if length_m >= GRADIENT_LIMIT_LENGTH_M else GRADIENT_LIMIT_SHORT
+# --- grading ----------------------------------------------------------------
+#
+# Every runway, apron and taxiway follows the DEM's own ground, held to the
+# slopes ICAO Annex 14 allows (tools/airfield_grade.py). They used to be cut
+# into one plane fitted for the whole airfield, which on any ground that is
+# not a table left a shelf with a cliff at one end and taxiways floating or
+# buried where they left it.
+
+# Taxiway pads: the pavement plus this margin, ringed by this feather. Only a
+# taxiway whose graded profile leaves the DEM's ground by more than
+# TAXIWAY_PAD_TOLERANCE_M gets pads at all; the rest are draped on the ground
+# as it is, which is already within the limits.
+TAXIWAY_PAD_MARGIN_M = 3.0
+TAXIWAY_PAD_FEATHER_M = 20.0
+TAXIWAY_PAD_TOLERANCE_M = 0.5
+# A taxiway's centreline is thinned to this before it is cut into pads: OSM
+# puts a node every few metres down a straight one, and a pad per node is
+# thousands of pads for nothing.
+TAXIWAY_SIMPLIFY_M = 2.0
+# Spacing of the DEM reads across an apron's footprint.
+APRON_SAMPLE_STEP_M = 20.0
+UNPAVED_SURFACES = ('grass', 'ground', 'dirt', 'earth', 'gravel', 'sand', 'unpaved')
 
 
-# Share of samples the high tail may be trimmed down to per pass, and how many
-# passes. See :func:`fit_plane` for what is being trimmed and why.
-TRIM_KEEP_QUANTILE = 0.90
-TRIM_PASSES = 2
-TRIM_FLOOR_FRACTION = 0.5
+def is_paved(surface: str) -> bool:
+    return surface in ('asphalt', 'concrete', 'metal')
 
 
-def fit_plane(samples: Sequence[Tuple[float, float]], limit: float) -> dict:
-    """Least-squares ``h = a + b * along`` over the platform, gradient clamped.
+class Surface:
+    """A graded runway or extra pad, for pinning what joins it."""
 
-    Only along the runway axis. A real runway also has a transverse camber, but
-    it is ~1.5% over 45 m - a third of a metre, well under one DEM post - so
-    fitting it would be fitting noise and calling it drainage.
+    def __init__(self, e: float, n: float, ax: float, ay: float,
+                 half_len: float, half_w: float, s: np.ndarray, g: np.ndarray):
+        self.e, self.n, self.ax, self.ay = e, n, ax, ay
+        self.half_len, self.half_w = half_len, half_w
+        self.s, self.g = s, g
 
-    Clamping rather than rejecting a steep fit, because the fit is measuring two
-    things at once: the ground's real slope and the DEM's error over it. ICAO
-    says the first cannot exceed the limit, so anything past it is the second.
+    def height_at(self, e: float, n: float) -> Optional[float]:
+        """The graded surface at a local point on the pavement, else None."""
+        de, dn = e - self.e, n - self.n
+        along = de * self.ax + dn * self.ay
+        across = -de * self.ay + dn * self.ax
+        if abs(along) > self.half_len or abs(across) > self.half_w:
+            return None
+        return float(np.interp(along, self.s, self.g))
 
-    The high tail is trimmed between passes because SRTM is a *surface* model,
-    not a terrain one: it has the terminal roofs, the hangars and the trees in
-    it, and an airport is exactly the place where those are large, numerous and
-    all on one side of the ground. Measured at Gran Canaria, whose platform
-    carries 59 mapped buildings, the untrimmed fit sat 8 m under the OSM
-    elevation with 28 m of apparent cut; trimming leaves the plane on the
-    ground and reports the buildings separately as `outlierMaxM`.
 
-    One-sided, and only the high tail, because that is the direction the error
-    has. A hangar stands above the apron; nothing on an airfield is a 20 m pit.
-    """
-    if len(samples) < 8:
-        return {}
-    along_all = np.array([s[0] for s in samples], dtype=np.float64)
-    height_all = np.array([s[1] for s in samples], dtype=np.float64)
+class Plane:
+    """A graded apron, for pinning what joins it."""
 
-    def solve(along, height):
-        design = np.column_stack([np.ones_like(along), along])
-        (a, b), *_ = np.linalg.lstsq(design, height, rcond=None)
-        return float(a), float(b)
+    def __init__(self, e: float, n: float, ax: float, ay: float,
+                 half_d: float, half_w: float, h: float, ge: float, gn: float):
+        self.e, self.n, self.ax, self.ay = e, n, ax, ay
+        self.half_d, self.half_w = half_d, half_w
+        self.h, self.ge, self.gn = h, ge, gn
 
-    along, height = along_all, height_all
-    a, raw = solve(along, height)
-    floor = max(8, int(len(samples) * TRIM_FLOOR_FRACTION))
-    for _ in range(TRIM_PASSES):
-        residual = height - (a + raw * along)
-        cut = float(np.quantile(residual, TRIM_KEEP_QUANTILE))
-        keep = residual <= cut
-        if int(keep.sum()) < floor:
-            break
-        along, height = along[keep], height[keep]
-        a, raw = solve(along, height)
+    def height_at(self, e: float, n: float) -> Optional[float]:
+        de, dn = e - self.e, n - self.n
+        along = de * self.ax + dn * self.ay
+        across = -de * self.ay + dn * self.ax
+        if abs(along) > self.half_d or abs(across) > self.half_w:
+            return None
+        return self.h + self.ge * de + self.gn * dn
 
-    clamped = max(-limit, min(limit, raw))
-    if clamped != raw:
-        # Re-solve the intercept against the gradient actually being used, or
-        # the plane keeps the tilted fit's intercept and sits offset from the
-        # ground by half the correction at both ends.
-        a = float(np.mean(height - clamped * along))
-    residual = height - (a + clamped * along)
-    over_all = height_all - (a + clamped * along_all)
-    return {
-        'heightMsl': float(a),
-        'gradient': float(clamped),
-        'gradientRaw': raw,
-        'clamped': clamped != raw,
-        'samples': int(len(along)),
-        'samplesTrimmed': int(len(samples) - len(along)),
-        'residualRmsM': float(np.sqrt(np.mean(residual ** 2))),
-        'residualMaxM': float(np.max(np.abs(residual))),
-        # The tallest thing standing on the platform, buildings included. Not a
-        # fit error - the plane is not supposed to reach a terminal roof.
-        'outlierMaxM': float(np.max(over_all)),
+
+def simplify_line(pts: List[Tuple[float, float]], tol: float) -> List[Tuple[float, float]]:
+    """Douglas-Peucker in local metres, ends kept."""
+    if len(pts) < 3:
+        return pts
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        (x0, y0), (x1, y1) = pts[i], pts[j]
+        dx, dy = x1 - x0, y1 - y0
+        ln = math.hypot(dx, dy)
+        best, at = -1.0, -1
+        for k in range(i + 1, j):
+            px, py = pts[k]
+            d = (abs(dy * (px - x0) - dx * (py - y0)) / ln) if ln > 1e-9 else math.hypot(px - x0, py - y0)
+            if d > best:
+                best, at = d, k
+        if at >= 0 and best > tol:
+            keep[at] = True
+            stack.append((i, at))
+            stack.append((at, j))
+    return [p for p, k in zip(pts, keep) if k]
+
+
+def strip_heights(dem: DemSampler, frame: 'LocalFrame', points: Sequence[Tuple[float, float, float, float]],
+                  half_w: float) -> np.ndarray:
+    """The DEM across a strip at each station: the mean of its centreline and
+    both edges, bilinear. Stations are (e, n, axis e, axis n)."""
+    out = np.full(len(points), np.nan)
+    offsets = (-half_w, 0.0, half_w) if half_w > 5.0 else (0.0,)
+    for i, (e, n, ax, ay) in enumerate(points):
+        vals = []
+        for v in offsets:
+            lon, lat = frame.to_lonlat(e - ay * v, n + ax * v)
+            h = dem.sample_bilinear(lon, lat)
+            if math.isfinite(h):
+                vals.append(h)
+        if vals:
+            out[i] = sum(vals) / len(vals)
+    return out
+
+
+def pins_for(stations: Sequence[Tuple[float, float, float, float]], pinned_by: Sequence) -> Dict[int, float]:
+    """Stations lying on an already graded surface, held to its height there."""
+    pins: Dict[int, float] = {}
+    for i, (e, n, _, _) in enumerate(stations):
+        for other in pinned_by:
+            v = other.height_at(e, n)
+            if v is not None:
+                pins[i] = v
+                break
+    return pins
+
+
+def grade_rect(
+    pad: dict, frame: 'LocalFrame', dem: DemSampler, limits, paved: bool, pave_half_w: float,
+    pinned_by: Sequence,
+) -> Tuple[dict, dict, Surface]:
+    """Grade an oriented pad rectangle along its axis: the pad record with its
+    profile, the grading report, and the surface for pinning."""
+    e0, n0 = frame.to_m(pad['lon'], pad['lat'])
+    ax = math.sin(math.radians(pad['headingDeg']))
+    ay = math.cos(math.radians(pad['headingDeg']))
+    half = pad['halfD']
+    rel = AG.stations_along(2 * half) - half
+    step = float(rel[1] - rel[0])
+    pts = [(e0 + ax * u, n0 + ay * u, ax, ay) for u in rel]
+    h = strip_heights(dem, frame, pts, pave_half_w)
+    pins = pins_for(pts, pinned_by)
+    g, report = AG.grade_profile(h, step, limits, paved=paved, pins=pins or None)
+    record = dict(pad)
+    record['heightMsl'] = round(float(np.interp(0.0, rel, g)), 3)
+    record['profile'] = [round(float(v), 2) for v in g]
+    core_half = max(0.0, half - pad['featherM'])
+    return record, report, Surface(e0, n0, ax, ay, core_half, pave_half_w, rel, g)
+
+
+def grade_apron(pad: dict, frame: 'LocalFrame', dem: DemSampler) -> Tuple[dict, dict, Plane]:
+    """Fit an apron pad's plane to the DEM inside its core, sloping no more
+    than Annex 14 lets an apron."""
+    e0, n0 = frame.to_m(pad['lon'], pad['lat'])
+    ax = math.sin(math.radians(pad['headingDeg']))
+    ay = math.cos(math.radians(pad['headingDeg']))
+    cd = max(1.0, pad['halfD'] - pad['featherM'])
+    cw = max(1.0, pad['halfW'] - pad['featherM'])
+    xs, ys, hs = [], [], []
+    for u in np.arange(-cd, cd + 1e-6, APRON_SAMPLE_STEP_M):
+        for v in np.arange(-cw, cw + 1e-6, APRON_SAMPLE_STEP_M):
+            de, dn = ax * u - ay * v, ay * u + ax * v
+            lon, lat = frame.to_lonlat(e0 + de, n0 + dn)
+            xs.append(de)
+            ys.append(dn)
+            hs.append(dem.sample_bilinear(lon, lat))
+    fit = AG.fit_apron_plane(np.array(xs), np.array(ys), np.array(hs))
+    if fit is None:
+        fit = {'heightMsl': float('nan'), 'gradient': 0.0, 'gradientRaw': 0.0,
+               'gradientHeadingDeg': 0.0, 'earthworkM': 0.0}
+    record = dict(pad)
+    record['heightMsl'] = round(fit['heightMsl'], 3)
+    record['gradient'] = round(fit['gradient'], 5)
+    record['gradientHeadingDeg'] = round(fit['gradientHeadingDeg'], 2)
+    gh = math.radians(fit['gradientHeadingDeg'])
+    plane = Plane(e0, n0, ax, ay, cd, cw, fit['heightMsl'],
+                  fit['gradient'] * math.sin(gh), fit['gradient'] * math.cos(gh))
+    report = {
+        'status': 'graded' if fit['gradientRaw'] > AG.APRON_GRADIENT_LIMIT * AG.OK_TOLERANCE else 'ok',
+        'naturalGradient': round(fit['gradientRaw'], 5),
+        'gradient': round(fit['gradient'], 5),
+        'earthworkM': round(fit['earthworkM'], 2),
     }
+    return record, report, plane
 
 
-def stamp_pad_planes(airfield: Airfield) -> None:
-    """Write the airfield's one plane onto each of its pads.
+def grade_taxiway(
+    taxiway: dict, frame: 'LocalFrame', dem: DemSampler, limits, pinned_by: Sequence,
+) -> Tuple[List[dict], Optional[dict]]:
+    """Grade one taxiway along its centreline, pinned where it runs onto a
+    runway or an apron. Pads only where the graded profile leaves the ground."""
+    pts = simplify_line([frame.to_m(p[1], p[0]) for p in taxiway['points']], TAXIWAY_SIMPLIFY_M)
+    segs = []
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        ln = math.hypot(x1 - x0, y1 - y0)
+        if ln >= 1.0:
+            segs.append((x0, y0, x1, y1, ln))
+    if not segs:
+        return [], None
+    cum = np.concatenate([[0.0], np.cumsum([sg[4] for sg in segs])])
+    s = AG.stations_along(float(cum[-1]))
+    step = float(s[1] - s[0])
+    stations = []
+    for d in s:
+        k = min(len(segs) - 1, int(np.searchsorted(cum, d, side='right') - 1))
+        x0, y0, x1, y1, ln = segs[k]
+        t = (d - cum[k]) / ln
+        stations.append((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, (x1 - x0) / ln, (y1 - y0) / ln))
+    width = float(taxiway.get('widthM') or 15.0)
+    h = strip_heights(dem, frame, stations, width / 2)
+    pins = pins_for(stations, pinned_by)
+    if np.isfinite(h).sum() < 2 and not pins:
+        return [], None
+    paved = (taxiway.get('surface') or 'asphalt') not in UNPAVED_SURFACES
+    g, report = AG.grade_profile(h, step, limits, paved=paved, pins=pins or None)
+    free = [i for i in range(len(s)) if i not in pins and math.isfinite(h[i])]
+    leave = max((abs(g[i] - h[i]) for i in free), default=0.0)
+    report['leavesGroundM'] = round(float(leave), 2)
+    pads: List[dict] = []
+    if leave > TAXIWAY_PAD_TOLERANCE_M:
+        ext = width / 2 + TAXIWAY_PAD_MARGIN_M + TAXIWAY_PAD_FEATHER_M
+        for k, (x0, y0, x1, y1, ln) in enumerate(segs):
+            half = ln / 2 + ext
+            rel = AG.stations_along(2 * half) - half
+            mid = cum[k] + ln / 2
+            lon, lat = frame.to_lonlat((x0 + x1) / 2, (y0 + y1) / 2)
+            pads.append({
+                'lat': lat,
+                'lon': lon,
+                'headingDeg': bearing_deg(x1 - x0, y1 - y0),
+                'halfD': half,
+                'halfW': width / 2 + TAXIWAY_PAD_MARGIN_M + TAXIWAY_PAD_FEATHER_M,
+                'featherM': TAXIWAY_PAD_FEATHER_M,
+                'heightMsl': round(float(np.interp(mid, s, g)), 3),
+                'profile': [round(float(v), 2) for v in np.interp(mid + rel, s, g)],
+            })
+    return pads, report
 
-    A pad record has to stand on its own: the mesh bake reads the flatten pads
-    as a flat list and never learns which airfield a given one came from. So
-    the plane fitted once for the whole platform is written onto every pad as
-    the height at *that pad's* centre, plus the slope and the bearing it rises
-    along - which stays the platform's bearing even on a pad turned to a
-    crossing runway, because they are all cut to the same plane.
 
-    The field names are the terrain manifest's rather than this file's, since
-    that is what these become: `halfD` runs along the pad, `halfW` across it.
+def grade_airfield(airfield: Airfield, dem: DemSampler) -> Optional[str]:
+    """Grade every runway, extra pad, apron and taxiway of an airfield onto
+    its own ground.
+
+    `airfield.pads` comes in as the footprint `platform_pads` laid out and goes
+    out graded, in the order the terrain applies them; `plane` becomes a
+    summary (the primary runway's centre height and end-to-end slope) and
+    `fit` the per-element reports. Returns why the airfield is rejected, or
+    None.
     """
-    plane = airfield.plane
-    if plane is None:
-        return
     primary = max(airfield.runways, key=lambda r: r.length_m)
     frame = LocalFrame(primary.lat, primary.lon)
-    ax = math.sin(math.radians(plane['headingDeg']))
-    ay = math.cos(math.radians(plane['headingDeg']))
-    for pad in airfield.pads:
-        e, n = frame.to_m(pad['lon'], pad['lat'])
-        pad['heightMsl'] = plane['heightMsl'] + plane['gradient'] * (e * ax + n * ay)
-        pad['gradient'] = plane['gradient']
-        pad['gradientHeadingDeg'] = plane['headingDeg']
+    footprint = airfield.pads
+    nr, nx = len(airfield.runways), len(airfield.extra_pads)
+    by_runway = {id(r): p for r, p in zip(airfield.runways, footprint[:nr])}
+    surfaces: List = []
+    runway_pads: List[dict] = []
+    runway_reports: List[dict] = []
+    # Longest first: a crossing runway is pinned to the one it crosses.
+    for runway in sorted(airfield.runways, key=lambda r: -r.length_m):
+        record, report, surface = grade_rect(
+            by_runway[id(runway)], frame, dem, AG.runway_limits(runway.length_m, runway.surface),
+            is_paved(runway.surface), runway.width_m / 2 + RUNWAY_PAD_MARGIN_M, surfaces)
+        report['ref'] = runway.ref
+        surfaces.append(surface)
+        runway_pads.append(record)
+        runway_reports.append(report)
+    extra_pads: List[dict] = []
+    for pad in footprint[nr:nr + nx]:
+        record, _report, surface = grade_rect(
+            pad, frame, dem, AG.runway_limits(primary.length_m, primary.surface), True,
+            max(1.0, pad['halfW'] - pad['featherM']), surfaces)
+        extra_pads.append(record)
+        surfaces.append(surface)
+    apron_pads: List[dict] = []
+    apron_reports: List[dict] = []
+    planes: List = []
+    for pad in footprint[nr + nx:]:
+        record, report, plane = grade_apron(pad, frame, dem)
+        if not math.isfinite(record['heightMsl']):
+            continue
+        apron_pads.append(record)
+        apron_reports.append(report)
+        planes.append(plane)
+    taxi_limits = AG.taxiway_limits(primary.length_m)
+    taxiway_pads: List[dict] = []
+    taxi_reports: List[dict] = []
+    for taxiway in airfield.taxiways:
+        pads, report = grade_taxiway(taxiway, frame, dem, taxi_limits, surfaces + planes)
+        if report is not None:
+            taxi_reports.append(report)
+        taxiway_pads.extend(pads)
+
+    earthwork = max([r['earthworkM'] for r in runway_reports] + [0.0])
+    if earthwork > MAX_RESIDUAL_M:
+        return (f'{earthwork:.0f} m of cut/fill under a runway - the DEM and OSM '
+                f'disagree about where the ground is')
+    # Applied in list order, each over the last: taxiways first, then the
+    # aprons, the extras and the runways, so where they overlap the runway's
+    # own surface is the one that stands.
+    airfield.pads = taxiway_pads + apron_pads + extra_pads + runway_pads
+    primary_pad = runway_pads[0]
+    prof = primary_pad['profile']
+    airfield.plane = {
+        'heightMsl': primary_pad['heightMsl'],
+        'gradient': (prof[-1] - prof[0]) / (2 * primary_pad['halfD']),
+        'headingDeg': primary.heading_deg,
+    }
+    statuses: Dict[str, int] = {}
+    for r in taxi_reports:
+        statuses[r['status']] = statuses.get(r['status'], 0) + 1
+    airfield.fit = {
+        'runways': runway_reports,
+        'aprons': apron_reports,
+        'taxiways': {
+            'count': len(taxi_reports),
+            'status': statuses,
+            'padded': sum(1 for r in taxi_reports if r['leavesGroundM'] > TAXIWAY_PAD_TOLERANCE_M),
+            'pads': len(taxiway_pads),
+            'earthworkMaxM': max([r['earthworkM'] for r in taxi_reports] + [0.0]),
+            'localMax': max([r['local'] for r in taxi_reports] + [0.0]),
+        },
+        'earthworkMaxM': earthwork,
+    }
+    return None
 
 
 def platform_pads(airfield: Airfield) -> List[dict]:
-    """Oriented rectangles the terrain has to be cut flat under.
-
-    One per runway, grown to the ICAO strip rather than to the pavement, plus a
-    box around each apron and one for every displaced threshold, blast pad or
-    stopway `pavement_pad` recorded. Every one of them is flattened to the
-    same plane - fitted once for the airfield, not once per rectangle -
-    because two rectangles fitted separately meet at a step, and a step
-    across the taxiway between the apron and the runway is exactly where it
-    would be seen.
+    """The footprint `grade_airfield` grades, in this order: one oriented
+    rectangle per runway (the pavement plus RUNWAY_PAD_MARGIN_M), one for
+    every displaced threshold, blast pad or stopway `pavement_pad` recorded,
+    then a box around each apron. No heights yet: grading gives each runway
+    its own profile and each apron its own plane, the later ones pinned to the
+    earlier where they meet, so no step lands on the joint between them.
     """
     pads: List[dict] = []
     for runway in airfield.runways:
@@ -1633,9 +1839,9 @@ def platform_pads(airfield: Airfield) -> List[dict]:
             'lat': runway.lat,
             'lon': runway.lon,
             'headingDeg': runway.heading_deg,
-            'halfD': runway.length_m / 2.0 + STRIP_OVERRUN_M + PAD_FEATHER_M,
-            'halfW': max(STRIP_HALF_WIDTH_M, runway.width_m / 2.0 + 30.0) + PAD_FEATHER_M,
-            'featherM': PAD_FEATHER_M,
+            'halfD': runway.length_m / 2.0 + RUNWAY_PAD_MARGIN_M + RUNWAY_PAD_FEATHER_M,
+            'halfW': runway.width_m / 2.0 + RUNWAY_PAD_MARGIN_M + RUNWAY_PAD_FEATHER_M,
+            'featherM': RUNWAY_PAD_FEATHER_M,
         })
     pads.extend(airfield.extra_pads)
     primary = max(airfield.runways, key=lambda r: r.length_m)
@@ -1861,19 +2067,28 @@ def report_airfield(airfield: Airfield, rejected: str = '') -> None:
                 print(f'        note: OSM length tag says {r.length_tag_m:.0f} m, '
                       f'the way measures {gap:+.0f} m against it')
     fit = airfield.fit or {}
-    if fit:
-        clamp = ' (clamped from %+.2f%%)' % (fit['gradientRaw'] * 100) if fit['clamped'] else ''
-        print(f'      plane {fit["heightMsl"]:.1f} m MSL  '
-              f'gradient {fit["gradient"] * 100:+.2f}%{clamp}  '
-              f'residual rms {fit["residualRmsM"]:.1f} m max {fit["residualMaxM"]:.1f} m  '
-              f'({fit["samples"]} samples, {fit["samplesTrimmed"]} trimmed, '
-              f'tallest {fit["outlierMaxM"]:.0f} m above the plane)')
-        if fit['residualMaxM'] > WARN_RESIDUAL_M:
-            print(f'      note: {fit["residualMaxM"]:.0f} m of cut/fill - '
-                  f'steep ground or a coarse DEM under this one')
+    for r in fit.get('runways', []):
+        # natural -> graded: what the ground does under the runway, and what
+        # the runway now does.
+        print(f'      slope {r["ref"]:9s} {r["status"]:7s} '
+              f'ground {r["naturalOverall"] * 100:4.2f}% overall, {r["naturalLocal"] * 100:4.2f}% local -> '
+              f'{r["overall"] * 100:4.2f}% / {r["local"] * 100:4.2f}%  '
+              f'cut/fill {r["earthworkM"]:.1f} m  ({r["limits"]})')
+    taxi = fit.get('taxiways')
+    if taxi and taxi['count']:
+        status = ', '.join(f'{v} {k}' for k, v in sorted(taxi['status'].items()))
+        print(f'      taxiways: {status}; worst {taxi["localMax"] * 100:.2f}%, '
+              f'cut/fill {taxi["earthworkMaxM"]:.1f} m; {taxi["padded"]} off the ground in {taxi["pads"]} pads')
+    for a in fit.get('aprons', []):
+        if a['status'] != 'ok' or a['earthworkM'] > WARN_RESIDUAL_M:
+            print(f'      apron {a["status"]}: ground {a["naturalGradient"] * 100:.2f}% -> '
+                  f'{a["gradient"] * 100:.2f}%, cut/fill {a["earthworkM"]:.1f} m')
+    if fit.get('earthworkMaxM', 0.0) > WARN_RESIDUAL_M:
+        print(f'      note: {fit["earthworkMaxM"]:.0f} m of cut/fill under a runway - '
+              f'steep ground or the DEM and OSM disagree')
     if airfield.ele_tag_m is not None and airfield.plane:
         drift = airfield.plane['heightMsl'] - airfield.ele_tag_m
-        print(f'      OSM ele {airfield.ele_tag_m:.0f} m, DEM plane differs by {drift:+.1f} m')
+        print(f'      OSM ele {airfield.ele_tag_m:.0f} m, DEM runway differs by {drift:+.1f} m')
     print(f'      {len(airfield.pads)} pads, {len(airfield.taxiways)} taxiways, '
           f'{len(airfield.aprons)} aprons, {len(airfield.buildings)} buildings'
           + (f', {len(airfield.arresting_wires)} arresting wires' if airfield.arresting_wires else '')
@@ -1900,24 +2115,10 @@ def evaluate_airfield(
     if asked and water / asked > MAX_WATER_FRACTION:
         report_airfield(airfield, f'{100.0 * water / asked:.0f}% of the platform is water')
         return None
-    longest = max(r.length_m for r in airfield.runways)
-    fit = fit_plane(samples, gradient_limit(longest))
-    if not fit:
-        report_airfield(airfield, 'too few DEM samples to fit a plane')
+    rejected = grade_airfield(airfield, dem)
+    if rejected is not None:
+        report_airfield(airfield, rejected)
         return None
-    if fit['residualMaxM'] > MAX_RESIDUAL_M:
-        report_airfield(
-            airfield,
-            f'{fit["residualMaxM"]:.0f} m of cut/fill - the DEM and OSM '
-            f'disagree about where the ground is')
-        return None
-    airfield.fit = fit
-    airfield.plane = {
-        'heightMsl': fit['heightMsl'],
-        'gradient': fit['gradient'],
-        'headingDeg': max(airfield.runways, key=lambda r: r.length_m).heading_deg,
-    }
-    stamp_pad_planes(airfield)
     report_airfield(airfield)
     return airfield_to_json(airfield)
 

@@ -4,7 +4,7 @@
  * footprint and the roof height OSM gives, standing on the airfield's plane
  * at the end of its run-up.
  */
-import { airfieldPlaneSceneAt } from '../../state/activeAirfield';
+import { airfieldSurfaceSceneAt } from '../../state/activeAirfield';
 import { Airfield, AirfieldSkiJump } from '../../terrain/airfields';
 import { EnuBasis } from '../../terrain/geodesy';
 import { AIRFIELD_SURFACE_EPS_M } from '../airfield/airfieldModel';
@@ -25,13 +25,13 @@ export function osmSkiJumpsOf(airfields: readonly Airfield[], basis: EnuBasis): 
             }
             // On the run-up's pavement, which like all of it is drawn and
             // solid AIRFIELD_SURFACE_EPS_M off the plane.
-            const base = airfieldPlaneSceneAt(airfield, basis, jump.lat, jump.lon, AIRFIELD_SURFACE_EPS_M);
+            const base = airfieldSurfaceSceneAt(airfield, basis, jump.lat, jump.lon, AIRFIELD_SURFACE_EPS_M);
             // The heading from two placed points rather than from the bearing,
             // so it carries the frame's own turn away from the play origin.
             const r = jump.headingDeg * Math.PI / 180;
             const perLat = 111_132.954;
             const perLon = 111_412.84 * Math.cos(jump.lat * Math.PI / 180);
-            const tip = airfieldPlaneSceneAt(airfield, basis,
+            const tip = airfieldSurfaceSceneAt(airfield, basis,
                 jump.lat + jump.lengthM * Math.cos(r) / perLat,
                 jump.lon + jump.lengthM * Math.sin(r) / perLon, AIRFIELD_SURFACE_EPS_M);
             const heading = Math.atan2(tip.x - base.x, tip.z - base.z);

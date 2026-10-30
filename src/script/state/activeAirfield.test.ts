@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { Airfield } from '../terrain/airfields';
+import { padsOnPlane } from '../terrain/airfieldTestPads';
 import { makeEnuBasis } from '../terrain/geodesy';
 import {
     airfieldChoices, headingForward, nearestSceneRunway, pickStartRunway, sceneRunwayOf,
@@ -13,7 +14,7 @@ const BASIS = makeEnuBasis(28.0015, -15.3937, 0);
 const EPS = 1.5;
 
 function airfield(over: Partial<Airfield> = {}): Airfield {
-    return {
+    const field: Airfield = {
         name: 'Gran Canaria',
         icao: 'GCLP',
         iata: 'LPA',
@@ -31,6 +32,7 @@ function airfield(over: Partial<Airfield> = {}): Airfield {
         taxiways: [], aprons: [], buildings: [], pads: [],
         ...over,
     };
+    return over.pads ? field : { ...field, pads: padsOnPlane(field) };
 }
 
 const DEG = 180 / Math.PI;

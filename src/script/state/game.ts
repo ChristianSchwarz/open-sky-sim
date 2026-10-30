@@ -5945,8 +5945,8 @@ export class Game {
         if (here.length === 0) {
             return;
         }
-        // Every runway is solid, near or far: a pad is the airfield's own
-        // fitted plane and needs no terrain, and the sim worker only gets its
+        // Every runway is solid, near or far: a pad is the runway's own graded
+        // profile and needs no terrain, and the sim worker only gets its
         // colliders once, below in setupCombat.
         for (const runway of this.sceneRunways) {
             this.addRunwayPad(runway);
@@ -5961,8 +5961,8 @@ export class Game {
             + `${this.sceneRunways.length} runways, ${this.builtAirfields.size} built within `
             + `${AIRFIELD_STREAM_RADIUS_M / 1000} km`
             + (active ? `; based at ${active.icao || active.name} ${active.ref}` : ''));
-        // Dev aid, alongside __terrain: the pavement is laid on the same plane
-        // the terrain under it was cut to, and the only way to see whether
+        // Dev aid, alongside __terrain: the pavement is laid on the same surface
+        // the terrain under it was laid on, and the only way to see whether
         // those two agree is to read the numbers back.
         (globalThis as Record<string, unknown>).__airfields = here;
         (globalThis as Record<string, unknown>).__runways = this.sceneRunways;
@@ -6002,8 +6002,8 @@ export class Game {
             r => r.primary && r.icao === airfield.icao && r.name === airfield.name);
         const at = primary?.center ?? geodeticToWorld(this.planetTerrain.basis, airfield.lat, airfield.lon, 0);
         await this.planetTerrain.heights.ensureLoadedAroundWorld(at.x, -at.z, AIRFIELD_GROUND_RADIUS_M);
-        // Elevation of the real ground, which inside a runway's pad is the
-        // airfield's own plane and outside it is whatever is there.
+        // Elevation of the real ground, which on a runway, apron or graded
+        // taxiway is its pad's surface and elsewhere is whatever is there.
         const groundElevationAt = (e: number, n: number) =>
             this.planetTerrain.heights.geodeticHeightAtWorld(e, -n);
         // What the ground is made of, for a strip that is drawn as ground.
@@ -6416,6 +6416,7 @@ export class Game {
             baseY: runway.center.y - AIRFIELD_SURFACE_EPS_M,
             feather: SURFACE_PAD_FEATHER_M,
             slope: runway.slope,
+            profile: runway.profile,
         });
     }
 

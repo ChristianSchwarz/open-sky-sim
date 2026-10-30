@@ -16,7 +16,7 @@
 import * as THREE from 'three';
 import { PaletteCategory } from '../../config/palettes/palette';
 import {
-    Airfield, AirfieldBuilding, AirfieldRunway, RunwaySurface, primaryRunway,
+    Airfield, AirfieldBuilding, AirfieldRunway, RunwaySurface, airfieldSurface, primaryRunway,
 } from '../../terrain/airfields';
 import { bearingAxisAt } from '../../terrain/flattenPad';
 import { SHADOW_RENDER_ORDER } from '../entities/aircraftShadow';
@@ -513,6 +513,25 @@ class MeshParts {
     }
 
     /**
+     * {@link addTexturedQuad} for a strip of quads laid end to end, one mesh:
+     * each piece's corners wound as there, its UVs running u0 to u1 along it.
+     */
+    addTexturedQuads(
+        paint: Paint, material: THREE.Material,
+        pieces: ReadonlyArray<{ corners: [THREE.Vector3, THREE.Vector3, THREE.Vector3, THREE.Vector3]; u0: number; u1: number }>,
+    ): void {
+        const positions: number[] = [];
+        const uvs: number[] = [];
+        for (const { corners: [a, b, c, d], u0, u1 } of pieces) {
+            for (const p of [a, b, c, a, c, d]) {
+                positions.push(p.x, p.y, p.z);
+            }
+            uvs.push(u0, 0, u0, 1, u1, 1, u0, 0, u1, 1, u1, 0);
+        }
+        this.parts.set('textured#' + this.parts.size, { paint, material, positions, uvs });
+    }
+
+    /**
      * A quad in a material of its own with UVs given per corner, merged with
      * every other quad in that same material into one mesh.
      */
@@ -655,11 +674,10 @@ export interface AirfieldModel {
 /**
  * Elevation of the real ground at an ENU point, above the ellipsoid.
  *
- * Taxiways and aprons are draped on this rather than laid on the airfield's
- * plane. Only the runway strips are cut flat by the bake — the taxiway network
- * reaches a kilometre past them over ground nobody levelled, and on the plane
- * it floats or buries itself by up to twenty metres. Inside a runway's pad the
- * ground *is* the plane, so the two meet exactly where they have to.
+ * Taxiways and aprons are draped on this. The terrain under each runway,
+ * apron and steep taxiway was laid on its pad's graded surface, so inside a
+ * pad the ground *is* that surface, and where a taxiway runs onto a runway
+ * the two meet exactly where they have to.
  */
 export type GroundElevation = (e: number, n: number) => number;
 
@@ -683,13 +701,10 @@ export function buildAirfieldModel(
         return { e: enu.e, n: enu.n };
     };
 
-    // The plane every part of this airfield is cut to, as the pads carry it.
+    // The surface the terrain under this airfield was laid on, as its pads
+    // carry it: every runway on its own graded profile.
     const planeCentre = toEnu(primary.lat, primary.lon);
-    const riseAxis = bearingAxisAt(
-        primary.lat, primary.lon, airfield.plane.headingDeg, toEnu);
-    const elevationAt = (e: number, n: number): number =>
-        airfield.plane.heightMsl + airfield.plane.gradient
-        * ((e - planeCentre.e) * riseAxis.e + (n - planeCentre.n) * riseAxis.n);
+    const elevationAt = airfieldSurface(airfield, toEnu);
 
     // Geometry is built around the primary runway's centre so the numbers
     // stay small: a float32 vertex 200 km from the play origin has decimetre
@@ -699,8 +714,8 @@ export function buildAirfieldModel(
 
     const place = (e: number, n: number, lift: number): THREE.Vector3 =>
         sceneAt(basis, e, n, elevationAt(e, n) + lift).sub(originScene);
-    // Draped, for everything the bake did not flatten. Without a ground
-    // function this falls back to the plane, which is what the geometry tests
+    // Draped, for everything that is not a runway. Without a ground function
+    // this falls back to the pads' surface, which is what the geometry tests
     // and any caller with no terrain loaded get.
     const drape = (e: number, n: number, lift: number): THREE.Vector3 =>
         sceneAt(basis, e, n, (groundElevationAt?.(e, n) ?? elevationAt(e, n)) + lift)
@@ -833,7 +848,7 @@ export function buildAirfieldModel(
                     continue;
                 }
                 addRunway(parts, runway, paints.get(runway)!, marked.get(runway),
-                    kinds, pass, toEnu, place,
+                    kinds, pass, toEnu, place, elevationAt,
                     runway.plates ? paint => platedPaintOf(runway, paint) : undefined);
             }
         }
@@ -910,6 +925,53 @@ type Place = (e: number, n: number, lift: number) => THREE.Vector3;
 type ToEnu = (lat: number, lon: number) => { e: number; n: number };
 
 /**
+ * A runway follows its graded profile, which bends, so its pavement and the
+ * stripes down it are cut across wherever the profile leaves a straight chord
+ * by more than RUNWAY_BEND_TOLERANCE_M, read every RUNWAY_PROFILE_STEP_M. A
+ * runway on a straight slope stays one quad.
+ */
+const RUNWAY_PROFILE_STEP_M = 20;
+const RUNWAY_BEND_TOLERANCE_M = 0.05;
+
+/** Where along a runway (u, metres from its centre) its profile bends. */
+function runwayBends(lengthM: number, heightAt: (u: number) => number): number[] {
+    const n = Math.max(2, Math.ceil(lengthM / RUNWAY_PROFILE_STEP_M) + 1);
+    const us = Array.from({ length: n }, (_, i) => -lengthM / 2 + (lengthM * i) / (n - 1));
+    const hs = us.map(heightAt);
+    const keep = new Array<boolean>(n).fill(false);
+    const split = (i: number, j: number): void => {
+        let worst = 0;
+        let at = -1;
+        for (let k = i + 1; k < j; k++) {
+            const chord = hs[i] + (hs[j] - hs[i]) * (us[k] - us[i]) / (us[j] - us[i]);
+            const d = Math.abs(hs[k] - chord);
+            if (d > worst) {
+                worst = d;
+                at = k;
+            }
+        }
+        if (at >= 0 && worst > RUNWAY_BEND_TOLERANCE_M) {
+            keep[at] = true;
+            split(i, at);
+            split(at, j);
+        }
+    };
+    split(0, n - 1);
+    return us.filter((_, i) => keep[i]);
+}
+
+/** A marking rectangle cut across at every bend inside it. */
+function lengthwisePieces(rect: MarkingRect, bends: readonly number[]): MarkingRect[] {
+    const u0 = rect.u - rect.lengthM / 2;
+    const u1 = rect.u + rect.lengthM / 2;
+    const cuts = [u0, ...bends.filter(b => b > u0 + 1e-6 && b < u1 - 1e-6), u1];
+    if (cuts.length === 2) {
+        return [rect];
+    }
+    return cuts.slice(1).map((b, i) => ({ ...rect, u: (cuts[i] + b) / 2, lengthM: b - cuts[i] }));
+}
+
+/**
  * One runway's pavement, or its paint.
  *
  * `marked` is the pavement material carrying the paint as a texture, on a
@@ -919,6 +981,7 @@ function addRunway(
     parts: MeshParts, runway: AirfieldRunway, pavement: Paint,
     marked: THREE.Material | undefined, kinds: Set<MarkingKind>,
     pass: 'pavement' | 'paint', toEnu: ToEnu, place: Place,
+    heightAt: (e: number, n: number) => number,
     platedPaint?: (paint: Paint) => THREE.Material,
 ): void {
     const centre = toEnu(runway.lat, runway.lon);
@@ -930,6 +993,8 @@ function addRunway(
         centre.n + axis.n * u + right.n * v,
         lift,
     );
+    const bends = runwayBends(runway.lengthM,
+        u => heightAt(centre.e + axis.e * u, centre.n + axis.n * u));
 
     for (const rect of runwayMarkings(
         runway.lengthM, runway.widthM, runway.ref, runway.surface, runway.skiJump)) {
@@ -937,11 +1002,18 @@ function addRunway(
             continue;
         }
         if (rect.kind === 'pavement') {
-            const corners = quadCorners(rect, at, AIRFIELD_SURFACE_EPS_M);
+            const start = rect.u - rect.lengthM / 2;
+            const pieces = lengthwisePieces(rect, bends).map(piece => ({
+                corners: quadCorners(piece, at, AIRFIELD_SURFACE_EPS_M),
+                u0: (piece.u - piece.lengthM / 2 - start) / rect.lengthM,
+                u1: (piece.u + piece.lengthM / 2 - start) / rect.lengthM,
+            }));
             if (marked !== undefined) {
-                parts.addTexturedQuad(pavement, marked, ...corners);
+                parts.addTexturedQuads(pavement, marked, pieces);
             } else {
-                parts.addQuad(pavement, ...corners);
+                for (const piece of pieces) {
+                    parts.addQuad(pavement, ...piece.corners);
+                }
             }
             continue;
         }
@@ -951,18 +1023,20 @@ function addRunway(
             maxFootprintM: marked !== undefined ? PAINT_MAX_FOOTPRINT_M : undefined,
             opacity: MARKING_OPACITY,
         };
-        const corners = quadCorners(rect, at, AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M);
-        if (platedPaint !== undefined) {
-            // The runway's own UVs at the paint's corners, in quadCorners'
-            // order, so the joints line up with the plates under it.
-            const u0 = (rect.u - rect.lengthM / 2) / runway.lengthM + 0.5;
-            const u1 = (rect.u + rect.lengthM / 2) / runway.lengthM + 0.5;
-            const v0 = (rect.v - rect.widthM / 2) / runway.widthM + 0.5;
-            const v1 = (rect.v + rect.widthM / 2) / runway.widthM + 0.5;
-            parts.addMaterialQuad(paint, platedPaint(paint), corners, [[u0, v0], [u0, v1], [u1, v1], [u1, v0]]);
-            continue;
+        for (const piece of lengthwisePieces(rect, bends)) {
+            const corners = quadCorners(piece, at, AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M);
+            if (platedPaint !== undefined) {
+                // The runway's own UVs at the paint's corners, in quadCorners'
+                // order, so the joints line up with the plates under it.
+                const u0 = (piece.u - piece.lengthM / 2) / runway.lengthM + 0.5;
+                const u1 = (piece.u + piece.lengthM / 2) / runway.lengthM + 0.5;
+                const v0 = (piece.v - piece.widthM / 2) / runway.widthM + 0.5;
+                const v1 = (piece.v + piece.widthM / 2) / runway.widthM + 0.5;
+                parts.addMaterialQuad(paint, platedPaint(paint), corners, [[u0, v0], [u0, v1], [u1, v1], [u1, v0]]);
+                continue;
+            }
+            parts.addQuad(paint, ...corners);
         }
-        parts.addQuad(paint, ...corners);
     }
 }
 
@@ -1740,7 +1814,7 @@ interface PlatedPavement {
 }
 
 /**
- * Steel decks (Saki's NITKA) in their rust, on the airfield's plane. Drawn
+ * Steel decks (Saki's NITKA) in their rust, on the airfield's surface. Drawn
  * after the runways, so the deck is what shows where the two overlap.
  */
 function addDecks(parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place): void {

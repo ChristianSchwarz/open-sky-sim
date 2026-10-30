@@ -221,3 +221,20 @@ describe('surface pad index', () => {
         assert.equal(index.sampleYMax(p.centerX, p.centerZ), -Infinity);
     });
 });
+
+describe('surface pad profile', () => {
+    const pad: SurfacePadCollider = {
+        centerX: 0, centerZ: 0, heading: 0, halfLength: 1000, halfWidth: 25,
+        surfaceY: 50, baseY: 49, feather: 10, slope: 0.01, profile: [0, 1.5, 0],
+    };
+
+    it('bends the sloped line by the profile', () => {
+        assert.equal(sampleSurfacePadY(0, 0, pad), 51.5);
+        assert.ok(Math.abs(sampleSurfacePadY(0, 500, pad) - (50 + 5 + 0.75)) < 1e-9);
+        assert.ok(Math.abs(sampleSurfacePadY(0, -1000, pad) - 40) < 1e-9);
+    });
+
+    it('is the line alone without one', () => {
+        assert.ok(Math.abs(sampleSurfacePadY(0, 500, { ...pad, profile: undefined }) - 55) < 1e-9);
+    });
+});

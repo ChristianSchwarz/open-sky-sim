@@ -57,6 +57,17 @@ export interface FlattenPad {
      */
     gradE?: number;
     gradN?: number;
+    /**
+     * The surface height (m) at evenly spaced stations along the long axis,
+     * from -halfD to +halfD, ends included; level across. Takes the place of
+     * {@link heightMsl} and the gradient where present.
+     *
+     * A runway or taxiway is laid on its own ground, graded only where that
+     * ground is steeper or bumpier than ICAO lets pavement be
+     * (tools/airfield_grade.py), so it is a profile, not a plane. An apron
+     * keeps the plane.
+     */
+    profile?: ArrayLike<number>;
 }
 
 /** Pad axis for a compass bearing, in a frame whose north is the pad's north. */
@@ -132,8 +143,16 @@ export function padBlendWeight(e: number, n: number, pad: FlattenPad): number {
     return t * t * (3 - 2 * t);
 }
 
-/** Height the pad wants at an ENU point: its plane, not a single level. */
+/** Height the pad wants at an ENU point: its profile, or its plane. */
 export function padSurfaceHeight(e: number, n: number, pad: FlattenPad): number {
+    const profile = pad.profile;
+    if (profile !== undefined && profile.length >= 2) {
+        const along = padLocal(e, n, pad).along;
+        const last = profile.length - 1;
+        const f = Math.max(0, Math.min(last, (along + pad.halfD) / (2 * pad.halfD) * last));
+        const i = Math.min(last - 1, Math.floor(f));
+        return profile[i] + (profile[i + 1] - profile[i]) * (f - i);
+    }
     const gradE = pad.gradE ?? 0;
     const gradN = pad.gradN ?? 0;
     if (gradE === 0 && gradN === 0) {
@@ -193,6 +212,8 @@ export interface FlattenPadRecord {
     headingDeg?: number;
     gradient?: number;
     gradientHeadingDeg?: number;
+    /** See {@link FlattenPad.profile}. */
+    profile?: number[];
     /**
      * ICAO identifier of the airfield this pad belongs to, where it has one.
      * Carried for the manifest's readability, not used by the pad maths.
@@ -247,6 +268,7 @@ export function padFromRecord(
         halfD: p.halfD,
         featherM: p.featherM,
         heightMsl: p.heightMsl,
+        ...(p.profile !== undefined && p.profile.length >= 2 ? { profile: p.profile } : {}),
     };
     if (p.headingDeg === undefined && p.gradient === undefined) {
         // A record from before pads could turn. Left with no axis and no

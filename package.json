@@ -36,6 +36,7 @@
         "build:satellite": "node --import tsx tools/build_satellite.ts",
         "verify:satellite": "node --import tsx tools/verify_satellite.ts",
         "rebake:box": "node --import tsx tools/rebake_box.ts",
+        "rebake:airfields": "node --import tsx tools/rebake_airfields.ts",
         "bake:tree-sprites": "node --import tsx tools/bake_tree_sprites.ts",
         "verify:planet": "node --import tsx tools/verify_planet.ts",
         "deploy:pages": "node tools/deploy-pages.mjs",

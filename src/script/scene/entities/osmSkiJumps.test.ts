@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { airfieldPlaneSceneAt, sceneRunwaysOf } from '../../state/activeAirfield';
+import { airfieldSurfaceSceneAt, sceneRunwaysOf } from '../../state/activeAirfield';
+import { padsOnPlane } from '../../terrain/airfieldTestPads';
 import { Airfield } from '../../terrain/airfields';
 import { makeEnuBasis } from '../../terrain/geodesy';
 import { osmSkiJumpsOf } from './osmSkiJumps';
@@ -9,7 +10,7 @@ import { sampleSkiJumpSurfaceY } from './skiJump';
 const BASIS = makeEnuBasis(45.098, 33.605, 0);
 
 function saki(): Airfield {
-    return {
+    const field: Airfield = {
         name: 'Saki', icao: 'URFI', iata: '', kind: 'military', area: 'Krim',
         lat: 45.09, lon: 33.59, elevationM: 14.9,
         plane: { heightMsl: 14.9, gradient: 0, headingDeg: 45 },
@@ -32,6 +33,7 @@ function saki(): Airfield {
             runUpFound: true,
         }],
     };
+    return { ...field, pads: padsOnPlane(field) };
 }
 
 describe('OSM ski-jumps', () => {
@@ -69,8 +71,9 @@ describe('OSM ski-jumps', () => {
         field.plane = { heightMsl: 14.9, gradient: 0.0047, headingDeg: 45 };
         field.runways[1] = { ...field.runways[1], lat: 45.0837, lon: 33.5849,
             thresholds: [[45.0830, 33.5839], [45.0844, 33.5859]], skiJump: false, surface: 'metal' };
+        field.pads = padsOnPlane(field);
         const deck = sceneRunwaysOf([field], BASIS, 0).find(r => r.startOnly)!;
-        const want = airfieldPlaneSceneAt(field, BASIS, 45.0837, 33.5849);
+        const want = airfieldSurfaceSceneAt(field, BASIS, 45.0837, 33.5849);
         assert.ok(Math.abs(deck.center.y - want.y) < 0.05, `${deck.center.y} vs ${want.y}`);
         assert.ok(deck.center.y < 14.9 - 7, `still at ${deck.center.y}`);
     });

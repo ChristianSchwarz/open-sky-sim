@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import * as THREE from 'three';
 import { Airfield } from '../../terrain/airfields';
+import { padsOnPlane } from '../../terrain/airfieldTestPads';
 import {
     ecefToEnu, ecefToGeodetic, enuFromScene, enuToEcef, geodeticToEcef, makeEnuBasis,
 } from '../../terrain/geodesy';
@@ -65,7 +66,7 @@ const BASIS = makeEnuBasis(28.0015, -15.3937, 0);
 
 /** Gran Canaria as the bake records it, trimmed to what the builder reads. */
 function gclp(overrides: Partial<Airfield> = {}): Airfield {
-    return {
+    const field: Airfield = {
         name: 'Gran Canaria',
         icao: 'GCLP',
         iata: 'LPA',
@@ -92,6 +93,7 @@ function gclp(overrides: Partial<Airfield> = {}): Airfield {
         pads: [],
         ...overrides,
     };
+    return overrides.pads ? field : { ...field, pads: padsOnPlane(field) };
 }
 
 /** ENU east/north of a geodetic point in the airfield's frame. */
@@ -315,6 +317,26 @@ describe('airfield model', () => {
         const spread = Math.max(...heights) - Math.min(...heights);
         assert.ok(Math.abs(spread - 0.00385 * 3103) < 0.2,
             `pavement falls ${spread.toFixed(2)} m, wanted 11.95`);
+    });
+
+    it('bends the runway over its graded profile, and keeps a straight one whole', () => {
+        // A 3 m hump halfway down the runway, as a graded pad carries it.
+        const field = gclp();
+        const pad = field.pads[0];
+        const n = 41;
+        const hump = Array.from({ length: n }, (_, i) => {
+            const u = -pad.halfD + (2 * pad.halfD * i) / (n - 1);
+            return 50 + 3 * Math.exp(-((u / 600) ** 2));
+        });
+        const bent = buildAirfieldModel(
+            { ...field, pads: [{ ...pad, profile: hump, heightMsl: 53 }] }, BASIS, MATERIALS)!;
+        const heights = vertices(bent.model.lod[2].flats).map(v => elevationOf(v, bent.origin));
+        assert.ok(triangles(bent.model.lod[2].flats) > 2, 'the pavement was not cut at the bend');
+        const top = Math.max(...heights);
+        assert.ok(Math.abs(top - (53 + AIRFIELD_SURFACE_EPS_M)) < 0.1, `crest at ${top.toFixed(2)}`);
+        const low = Math.min(...heights);
+        assert.ok(Math.abs(low - (50 + AIRFIELD_SURFACE_EPS_M)) < 0.1, `thresholds at ${low.toFixed(2)}`);
+        assert.equal(triangles(buildAirfieldModel(field, BASIS, MATERIALS)!.model.lod[2].flats), 2);
     });
 
     it('lifts the pavement clear of the terrain cut under it', () => {

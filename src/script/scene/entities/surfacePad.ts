@@ -34,6 +34,16 @@ export interface SurfacePadCollider {
      * the pavement is lifted by.
      */
     slope?: number;
+    /**
+     * Rise above the sloped line (`surfaceY` + `slope` x along), in metres,
+     * at evenly spaced stations from -halfLength to +halfLength; absent means
+     * the line itself. A runway follows its own graded ground, so its surface
+     * bends where the ground does - gently, within ICAO's vertical curves.
+     *
+     * Offsets from the line rather than heights, so the floating origin's
+     * re-base, which tilts and shifts the line, leaves them as they are.
+     */
+    profile?: number[];
 }
 
 /**
@@ -187,7 +197,19 @@ function padY(worldX: number, worldZ: number, pad: SurfacePadCollider, feather: 
     // The surface at *this* point, not at the pad centre: on a sloping runway
     // the two differ by metres, and blending toward the centre's height would
     // step the pavement down at both thresholds.
-    const surfaceY = pad.surfaceY + (pad.slope ?? 0) * localZ;
+    const surfaceY = pad.surfaceY + (pad.slope ?? 0) * localZ + profileRise(pad, localZ);
     if (out <= 0) return surfaceY;
     return pad.baseY + (surfaceY - pad.baseY) * (1 - out / feather);
+}
+
+/** {@link SurfacePadCollider.profile} at `along` metres from the centre, held level past the ends. */
+export function profileRise(pad: Pick<SurfacePadCollider, 'profile' | 'halfLength'>, along: number): number {
+    const p = pad.profile;
+    if (p === undefined || p.length < 2) {
+        return 0;
+    }
+    const last = p.length - 1;
+    const f = Math.max(0, Math.min(last, (along + pad.halfLength) / (2 * pad.halfLength) * last));
+    const i = Math.min(last - 1, Math.floor(f));
+    return p[i] + (p[i + 1] - p[i]) * (f - i);
 }

@@ -13,7 +13,7 @@
  */
 
 import * as THREE from 'three';
-import { Airfield, AirfieldRunway, RunwaySurface, primaryRunway } from '../terrain/airfields';
+import { Airfield, AirfieldRunway, RunwaySurface, airfieldSurface, primaryRunway } from '../terrain/airfields';
 import { ecefToEnu, EnuBasis, geodeticToEcef, sceneFromEnu } from '../terrain/geodesy';
 
 export interface SceneRunway {
@@ -23,8 +23,14 @@ export interface SceneRunway {
     heading: number;
     halfLength: number;
     halfWidth: number;
-    /** Rise in scene Y per metre along `heading`. */
+    /** Rise in scene Y per metre along `heading`, threshold to threshold. */
     slope: number;
+    /**
+     * Rise above the line through the centre at `slope`, metres, at evenly
+     * spaced stations from -halfLength to +halfLength along `heading`: the
+     * runway follows its own graded ground (see SurfacePadCollider.profile).
+     */
+    profile?: number[];
     /** Painted designators, low end first. */
     ref: string;
     surface: RunwaySurface;
@@ -87,24 +93,35 @@ function metresPerDegree(latDeg: number): { lat: number; lon: number } {
     };
 }
 
+/** Spacing of a scene runway's profile stations, metres. */
+const RUNWAY_PROFILE_STEP_M = 20;
+
+/** Each airfield's surface in its own local frame (see airfieldSurfaceSceneAt). */
+const surfaces = new WeakMap<Airfield, { lat0: number; lon0: number; perDeg: { lat: number; lon: number }; at: (e: number, n: number) => number }>();
+
 /**
- * Scene position of a point on an airfield's platform plane, `liftM` above it.
+ * Scene position of a point on an airfield's pavement surface, `liftM` above
+ * it.
  *
- * The plane is what the bake cut every pad to, so anything standing on the
- * pavement - an arresting wire, the foot of a ski-jump - belongs on it.
+ * The surface is the one the terrain was laid on (airfieldSurface: every
+ * runway and taxiway on its own graded profile, every apron on its plane), so
+ * anything standing on the pavement - an arresting wire, the foot of a
+ * ski-jump, the runway's own collider - belongs on it.
  */
-export function airfieldPlaneSceneAt(
+export function airfieldSurfaceSceneAt(
     airfield: Airfield, basis: EnuBasis, lat: number, lon: number, liftM = 0,
 ): THREE.Vector3 {
-    const primary = primaryRunway(airfield);
-    const originLat = primary?.lat ?? airfield.lat;
-    const originLon = primary?.lon ?? airfield.lon;
-    const perDeg = metresPerDegree(originLat);
-    const e = (lon - originLon) * perDeg.lon;
-    const n = (lat - originLat) * perDeg.lat;
-    const h = airfield.plane.headingDeg * Math.PI / 180;
-    const height = airfield.plane.heightMsl
-        + airfield.plane.gradient * (e * Math.sin(h) + n * Math.cos(h)) + liftM;
+    let s = surfaces.get(airfield);
+    if (s === undefined) {
+        const primary = primaryRunway(airfield);
+        const lat0 = primary?.lat ?? airfield.lat;
+        const lon0 = primary?.lon ?? airfield.lon;
+        const perDeg = metresPerDegree(lat0);
+        const at = airfieldSurface(airfield, (la, lo) => ({ e: (lo - lon0) * perDeg.lon, n: (la - lat0) * perDeg.lat }));
+        s = { lat0, lon0, perDeg, at };
+        surfaces.set(airfield, s);
+    }
+    const height = s.at((lon - s.lon0) * s.perDeg.lon, (lat - s.lat0) * s.perDeg.lat) + liftM;
     return sceneFromEnu(ecefToEnu(basis, geodeticToEcef(lat, lon, height)));
 }
 
@@ -122,12 +139,11 @@ export function sceneRunwayOf(
 ): SceneRunway {
     const perDeg = metresPerDegree(runway.lat);
     const r = runway.headingDeg * Math.PI / 180;
-    // On the plane where this runway really is. planeElevationAt measures
-    // from the primary runway's centre, so handing it `along` from this one's
-    // put a secondary runway off its pavement by the plane's rise between the
-    // two: Saki's NITKA deck, 1.8 km down a 0.47 % plane, was solid 8.5 m
-    // above the deck drawn for it, and a landing there flew into it.
-    const at = (along: number): THREE.Vector3 => airfieldPlaneSceneAt(
+    // On the surface where this runway really is, measured at this runway's
+    // own points: Saki's NITKA deck, 1.8 km from the primary, was once solid
+    // 8.5 m above the deck drawn for it because its height was read as if it
+    // were the primary's.
+    const at = (along: number): THREE.Vector3 => airfieldSurfaceSceneAt(
         airfield, basis,
         runway.lat + (along * Math.cos(r)) / perDeg.lat,
         runway.lon + (along * Math.sin(r)) / perDeg.lon,
@@ -137,12 +153,21 @@ export function sceneRunwayOf(
     const centre = at(0);
     const ahead = at(half);
     const behind = at(-half);
+    const slope = (ahead.y - behind.y) / runway.lengthM;
+    // The bends in it, as rises over the straight line threshold to threshold.
+    const stations = Math.max(2, Math.ceil(runway.lengthM / RUNWAY_PROFILE_STEP_M) + 1);
+    const profile: number[] = [];
+    for (let i = 0; i < stations; i++) {
+        const along = -half + (2 * half * i) / (stations - 1);
+        profile.push(at(along).y - (centre.y + slope * along));
+    }
     return {
         center: centre,
         heading: Math.atan2(ahead.x - behind.x, ahead.z - behind.z),
         halfLength: half,
         halfWidth: runway.widthM / 2,
-        slope: (ahead.y - behind.y) / runway.lengthM,
+        slope,
+        profile: profile.some(v => Math.abs(v) > 0.005) ? profile : undefined,
         ref: runway.ref,
         surface: runway.surface,
         icao: airfield.icao,
@@ -175,6 +200,7 @@ export function sceneRunwaysOf(
                         if ((at.x - scene.center.x) * fwd.x + (at.z - scene.center.z) * fwd.z < 0) {
                             scene.heading = Math.atan2(-fwd.x, -fwd.z);
                             scene.slope = -scene.slope;
+                            scene.profile?.reverse();
                         }
                     }
                 } else {

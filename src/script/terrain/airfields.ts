@@ -11,6 +11,7 @@
  * tools/bake_osm_airports.py wrote into the DEM manifest.
  */
 
+import { PadGrid, applyFlattenPad, padFromRecord } from './flattenPad';
 import { FlattenPadManifest } from './manifest';
 import { LonLatBounds } from './tiling';
 
@@ -75,10 +76,14 @@ export interface AirfieldBuilding {
     heightM?: number;
 }
 
-/** The single plane every part of one airfield is cut to. */
+/**
+ * A summary of the primary runway: its centre height and its end-to-end
+ * slope. Every runway, taxiway and apron is laid on a surface of its own (see
+ * {@link airfieldSurface}); this is for what wants one number for the field.
+ */
 interface AirfieldPlane {
     heightMsl: number;
-    /** Rise per metre along `headingDeg`. */
+    /** Rise per metre along `headingDeg`, threshold to threshold. */
     gradient: number;
     headingDeg: number;
 }
@@ -188,20 +193,27 @@ export function airfieldsInArea(file: AirfieldsFile, areaName: string): Airfield
 }
 
 /**
- * Elevation of the airfield's platform plane, `distanceM` along `bearingDeg`
- * from the primary runway's centre.
+ * The airfield's pavement surface: height above MSL at an (e, n) point of the
+ * frame `toEnu` maps into, built from the airfield's own pads.
  *
- * The plane belongs to the whole airfield and rises along its own bearing, so
- * a runway crossing it climbs only by the component along that — which is what
- * keeps both runways of a crossing pair on one surface instead of two that
- * meet at a ridge.
+ * The same pads the terrain was laid on (each runway and taxiway on its own
+ * graded profile, each apron on its own plane), folded in the order the
+ * terrain applies them, so a runway drawn or made solid on this is on the
+ * ground under it by construction. Outside every pad it is the primary
+ * runway's centre height.
  */
-export function planeElevationAt(
-    airfield: Airfield, bearingDeg: number, distanceM: number,
-): number {
-    const angle = (bearingDeg - airfield.plane.headingDeg) * Math.PI / 180;
-    return airfield.plane.heightMsl
-        + airfield.plane.gradient * distanceM * Math.cos(angle);
+export function airfieldSurface(
+    airfield: Airfield, toEnu: (lat: number, lon: number) => { e: number; n: number },
+): (e: number, n: number) => number {
+    const pads = airfield.pads.map(p => padFromRecord(p, toEnu));
+    const grid = new PadGrid(pads);
+    return (e, n) => {
+        let h = NaN;
+        for (const pad of grid.at(e, n) ?? []) {
+            h = applyFlattenPad(h, e, n, pad);
+        }
+        return Number.isFinite(h) ? h : airfield.plane.heightMsl;
+    };
 }
 
 /** Longest runway of an airfield, which is the one worth flying to. */

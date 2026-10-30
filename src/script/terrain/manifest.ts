@@ -173,6 +173,12 @@ export interface FlattenPadManifest {
      */
     gradient?: number;
     gradientHeadingDeg?: number;
+    /**
+     * Surface heights at evenly spaced stations along the pad's axis, from
+     * -halfD to +halfD; replaces `heightMsl` and the gradient where present.
+     * Runways and taxiways follow their own graded ground, not a plane.
+     */
+    profile?: number[];
     /** ICAO identifier of the airfield this pad belongs to, where it has one. */
     icao?: string;
 }

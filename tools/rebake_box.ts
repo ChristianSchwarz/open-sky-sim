@@ -4,6 +4,9 @@
  * apply a change to the grading or the bridges to an area, since a graded
  * tile is never graded again in place (bake_planet_grade.ts).
  *
+ * The tile stages go to the bake satellites as an import's do, unless
+ * SATELLITES=0.
+ *
  *   npm run rebake:box -- --bbox w,s,e,n
  *   npm run rebake:box -- --at lat,lon [--tiles N]
  *
@@ -49,7 +52,9 @@ function parse(argv: string[]): number[] {
 
 const box = parse(process.argv.slice(2));
 console.log(`rebake_box: ${box.map(v => v.toFixed(5)).join(',')}`);
-for (const step of meshSteps(box)) {
+const satellites = process.env.SATELLITES !== '0';
+console.log(`rebake_box: satellites ${satellites ? 'on' : 'off (SATELLITES=0)'}`);
+for (const step of meshSteps(box, satellites)) {
     console.log(`\n== ${step.label}`);
     const r = spawnSync(step.cmd, step.args, { stdio: 'inherit' });
     if (r.status !== 0) {

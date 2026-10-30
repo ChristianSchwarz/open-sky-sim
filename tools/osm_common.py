@@ -1172,6 +1172,26 @@ class DemSampler:
         row = int(round((b.north - lat) / (b.north - b.south) * cells))
         return float(grid[min(cells, max(0, row)), min(cells, max(0, col))])
 
+    def sample_bilinear(self, lon: float, lat: float) -> float:
+        """Height at lon/lat interpolated between the four nodes around it, or
+        NaN where the pyramid holds no data. A profile read off `sample`
+        steps at every node it passes; this one is the surface the mesh draws."""
+        x = int(math.floor((lon + 180.0) / self.span))
+        y = int(math.floor((90.0 - lat) / self.span))
+        grid = self._tile(x, y)
+        if grid is None:
+            return float('nan')
+        b = tile_bounds(self.zoom, x, y)
+        cells = self.n - 1
+        fc = min(float(cells), max(0.0, (lon - b.west) / (b.east - b.west) * cells))
+        fr = min(float(cells), max(0.0, (b.north - lat) / (b.north - b.south) * cells))
+        c0 = min(cells - 1, int(fc))
+        r0 = min(cells - 1, int(fr))
+        tc, tr = fc - c0, fr - r0
+        top = grid[r0, c0] * (1 - tc) + grid[r0, c0 + 1] * tc
+        bottom = grid[r0 + 1, c0] * (1 - tc) + grid[r0 + 1, c0 + 1] * tc
+        return float(top * (1 - tr) + bottom * tr)
+
 def indexed_tiles(index_path: str, zoom: int) -> Set[Tuple[int, int]]:
     """The tiles a PIX1 index.bin lists at one zoom; empty without one."""
     out: Set[Tuple[int, int]] = set()

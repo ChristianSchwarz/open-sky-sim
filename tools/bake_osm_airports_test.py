@@ -1,7 +1,7 @@
 """Tests for tools/bake_osm_airports.py.
 
 The parts a wrong answer would be hard to spot in the rendered world: which way
-a runway points, how long it is, and what plane the terrain gets cut to. A
+a runway points, how long it is, and what surface the terrain is laid on. A
 heading read backwards still draws a runway — just one you land on downwind.
 """
 from __future__ import annotations
@@ -22,8 +22,7 @@ from bake_osm_airports import (
     designator_bearing,
     designator_for,
     fit_axis,
-    fit_plane,
-    gradient_limit,
+    grade_airfield,
     merge_items,
     metres_per_degree,
     parse_ref,
@@ -347,55 +346,125 @@ class TaxiwayWidthTest(unittest.TestCase):
         self.assertEqual(taxiway_width_m({}, 'seaplane base'), 10.5)
 
 
-class FitPlaneTest(unittest.TestCase):
+class FakeDem:
+    """A DEM given as a function of local metres about (LAT0, LON0)."""
 
-    def samples(self, gradient: float, intercept: float, noise=()):
-        pts = []
-        # An even count, so alternating noise averages to exactly zero and
-        # the residual numbers below are the ones the arithmetic promises.
-        for i in range(100):
-            along = -1500.0 + i * 30.0
-            n = noise[i % len(noise)] if noise else 0.0
-            pts.append((along, intercept + gradient * along + n))
-        return pts
+    def __init__(self, height):
+        self.frame = LocalFrame(LAT0, LON0)
+        self.height = height
 
-    def test_recovers_a_real_slope(self):
-        fit = fit_plane(self.samples(0.006, 24.0), gradient_limit(3000.0))
-        self.assertAlmostEqual(fit['gradient'], 0.006, places=6)
-        self.assertAlmostEqual(fit['heightMsl'], 24.0, places=6)
-        self.assertFalse(fit['clamped'])
-        self.assertAlmostEqual(fit['residualMaxM'], 0.0, places=6)
+    def sample_bilinear(self, lon: float, lat: float) -> float:
+        return self.height(*self.frame.to_m(lon, lat))
 
-    def test_clamps_a_slope_no_runway_could_have(self):
-        # 5% over 3 km is not drainage, it is the DEM disagreeing with itself.
-        fit = fit_plane(self.samples(0.05, 100.0), gradient_limit(3000.0))
-        self.assertTrue(fit['clamped'])
-        self.assertAlmostEqual(fit['gradient'], 0.01)
-        self.assertAlmostEqual(fit['gradientRaw'], 0.05, places=6)
+    sample = sample_bilinear
 
-    def test_the_clamped_plane_is_re_centred_on_the_ground(self):
-        # Keeping the tilted fit's intercept would leave the plane offset from
-        # the terrain it is supposed to sit in. Mean residual has to stay zero.
-        pts = self.samples(0.05, 100.0)
-        fit = fit_plane(pts, gradient_limit(3000.0))
-        residuals = [h - (fit['heightMsl'] + fit['gradient'] * a) for a, h in pts]
-        self.assertAlmostEqual(sum(residuals) / len(residuals), 0.0, places=6)
 
-    def test_reports_how_far_the_ground_is_from_the_plane(self):
-        # +1 -1 -1 +1, not +1 -1: an alternating pattern is not orthogonal to a
-        # linear ramp, so the fit would absorb part of it as a gradient and the
-        # residual would come out a hair over the metre that was put in.
-        fit = fit_plane(self.samples(0.0, 10.0, noise=(1.0, -1.0, -1.0, 1.0)),
-                        gradient_limit(3000.0))
-        self.assertAlmostEqual(fit['residualMaxM'], 1.0, places=6)
-        self.assertAlmostEqual(fit['residualRmsM'], 1.0, places=6)
+def runway_at(ref: str, heading: float, length: float, e: float = 0.0, n: float = 0.0,
+              surface: str = 'asphalt', width: float = 45.0) -> Runway:
+    lon, lat = LocalFrame(LAT0, LON0).to_lonlat(e, n)
+    return Runway(
+        ref=ref, heading_deg=heading, length_m=length, width_m=width,
+        surface=surface, lit=True, lat=lat, lon=lon,
+        thresholds=[[lat, lon], [lat, lon]], osm_id=1,
+        ref_derived=False, ref_delta_deg=0.0, width_measured=False,
+        length_tag_m=None, width_implausible=False,
+    )
 
-    def test_a_short_strip_may_be_steeper(self):
-        self.assertEqual(gradient_limit(3000.0), 0.01)
-        self.assertEqual(gradient_limit(800.0), 0.02)
 
-    def test_too_few_samples_is_no_fit_rather_than_a_bad_one(self):
-        self.assertEqual(fit_plane([(0.0, 1.0)], 0.01), {})
+def graded(runways, height, **kw) -> Airfield:
+    airfield = Airfield(name='Test', icao='TEST', iata='', kind='international',
+                        lat=LAT0, lon=LON0, ele_tag_m=None, osm_id=1, runways=runways, **kw)
+    airfield.pads = platform_pads(airfield)
+    reason = grade_airfield(airfield, FakeDem(height))
+    if reason is not None:
+        raise AssertionError(reason)
+    return airfield
+
+
+def profile_slopes(pad: dict):
+    prof = pad['profile']
+    step = 2 * pad['halfD'] / (len(prof) - 1)
+    return [(b - a) / step for a, b in zip(prof, prof[1:])], step
+
+
+class GradeAirfieldTest(unittest.TestCase):
+
+    def test_a_gentle_slope_is_left_as_the_ground_has_it(self):
+        # 0.6 % up to the north: within every limit, so the runway follows it.
+        airfield = graded([runway_at('18/36', 0.0, 3000.0)], lambda e, n: 100.0 + 0.006 * n)
+        pad = airfield.pads[-1]
+        slopes, _ = profile_slopes(pad)
+        for s in slopes:
+            self.assertAlmostEqual(s, 0.006, places=4)
+        self.assertEqual(airfield.fit['runways'][0]['status'], 'ok')
+        self.assertAlmostEqual(pad['heightMsl'], 100.0, places=1)
+
+    def test_a_hill_under_a_long_runway_is_graded_to_annex_14(self):
+        # A 12 m hump halfway down: the ground rises 6 % on its flanks.
+        hump = lambda e, n: 100.0 + 12.0 * math.exp(-(n / 200.0) ** 2)
+        airfield = graded([runway_at('18/36', 0.0, 3000.0)], hump)
+        pad = airfield.pads[-1]
+        slopes, step = profile_slopes(pad)
+        self.assertLessEqual(max(abs(s) for s in slopes), 0.0125 + 1e-6)
+        prof = pad['profile']
+        self.assertLessEqual((max(prof) - min(prof)) / (step * (len(prof) - 1)), 0.01 + 1e-6)
+        report = airfield.fit['runways'][0]
+        self.assertEqual(report['status'], 'graded')
+        self.assertGreater(report['naturalLocal'], 0.03)
+        # Cut into the hill and filled either side, not a shelf at one level.
+        self.assertGreater(max(prof) - min(prof), 2.0)
+
+    def test_a_crossing_runway_meets_the_first_one_without_a_step(self):
+        ground = lambda e, n: 100.0 + 0.008 * n + 0.004 * e
+        airfield = graded([runway_at('18/36', 0.0, 3000.0), runway_at('09/27', 90.0, 2000.0)], ground)
+        longest, crossing = airfield.pads[-2], airfield.pads[-1]
+        # Both at the crossing point, the middle of each.
+        mid = lambda p: p['profile'][len(p['profile']) // 2]
+        self.assertAlmostEqual(mid(longest), mid(crossing), delta=0.05)
+
+    def test_a_steep_grass_strip_keeps_its_slope(self):
+        airfield = graded([runway_at('09/27', 90.0, 600.0, surface='grass', width=30.0)],
+                          lambda e, n: 500.0 + 0.08 * e)
+        report = airfield.fit['runways'][0]
+        self.assertEqual(report['status'], 'steep')
+        slopes, _ = profile_slopes(airfield.pads[-1])
+        self.assertAlmostEqual(max(slopes), 0.08, places=3)
+
+    def test_a_steep_paved_strip_is_graded_and_reported(self):
+        airfield = graded([runway_at('09/27', 90.0, 600.0)], lambda e, n: 500.0 + 0.08 * e)
+        report = airfield.fit['runways'][0]
+        self.assertEqual(report['status'], 'suspect')
+        slopes, _ = profile_slopes(airfield.pads[-1])
+        self.assertLessEqual(max(abs(s) for s in slopes), 0.02 + 1e-6)
+
+    def test_a_taxiway_on_level_ground_gets_no_pads(self):
+        frame = LocalFrame(LAT0, LON0)
+        pts = [frame.to_lonlat(100.0, -500.0), frame.to_lonlat(400.0, -500.0), frame.to_lonlat(400.0, 500.0)]
+        taxiway = {'widthM': 18.0, 'points': [[lat, lon] for lon, lat in pts]}
+        airfield = graded([runway_at('18/36', 0.0, 3000.0)], lambda e, n: 100.0, taxiways=[taxiway])
+        self.assertEqual(airfield.fit['taxiways']['pads'], 0)
+        self.assertEqual(len(airfield.pads), 1)
+
+    def test_a_steep_taxiway_is_graded_into_pads_pinned_to_the_runway(self):
+        # Ground falling 5 % eastwards; the taxiway leaves the runway due east.
+        frame = LocalFrame(LAT0, LON0)
+        pts = [frame.to_lonlat(0.0, 0.0), frame.to_lonlat(400.0, 0.0)]
+        taxiway = {'widthM': 18.0, 'points': [[lat, lon] for lon, lat in pts]}
+        airfield = graded([runway_at('18/36', 0.0, 3000.0)], lambda e, n: 100.0 - 0.05 * e,
+                          taxiways=[taxiway])
+        taxi = airfield.fit['taxiways']
+        self.assertGreater(taxi['pads'], 0)
+        pad = airfield.pads[0]
+        slopes, _ = profile_slopes(pad)
+        self.assertLessEqual(max(abs(s) for s in slopes), 0.015 + 1e-6)
+        # Taxiways first, so the runway is applied over them where they meet.
+        self.assertNotIn('gradient', pad)
+        self.assertEqual(airfield.pads[-1]['halfW'] - airfield.pads[-1]['featherM'], 45.0 / 2 + 10.0)
+
+    def test_the_summary_plane_is_the_primary_runway(self):
+        airfield = graded([runway_at('18/36', 0.0, 3000.0)], lambda e, n: 100.0 + 0.006 * n)
+        self.assertAlmostEqual(airfield.plane['heightMsl'], 100.0, places=1)
+        self.assertAlmostEqual(airfield.plane['gradient'], 0.006, places=4)
 
 
 class PlatformPadsTest(unittest.TestCase):
@@ -412,19 +481,16 @@ class PlatformPadsTest(unittest.TestCase):
                         lat=LAT0, lon=LON0, ele_tag_m=None, osm_id=1,
                         runways=[runway], **kw)
 
-    def test_the_pad_covers_the_runway_and_its_strip(self):
+    def test_the_pad_covers_the_runway_and_a_margin(self):
         pads = platform_pads(self.airfield())
         self.assertEqual(len(pads), 1)
         pad = pads[0]
         self.assertAlmostEqual(pad['headingDeg'], 32.0)
         # Half-extents are the pad's outer edge, feather included, so the
-        # fully flattened core is what is left inside them. Long enough for the
-        # runway plus an overrun at each end...
-        self.assertGreater(pad['halfD'] - pad['featherM'], 3100.0 / 2.0)
-        # ...and at least the ICAO graded strip across, which is wider than the
-        # pavement. A pad the width of the tarmac leaves the ground falling
-        # away at the runway edge.
-        self.assertGreaterEqual(pad['halfW'] - pad['featherM'], 75.0)
+        # fully flattened core is what is left inside them: the pavement plus
+        # a 10 m margin on every side, no ICAO strip.
+        self.assertAlmostEqual(pad['halfD'] - pad['featherM'], 3100.0 / 2.0 + 10.0)
+        self.assertAlmostEqual(pad['halfW'] - pad['featherM'], 45.0 / 2.0 + 10.0)
 
     def test_an_apron_pad_lines_up_with_the_runway(self):
         frame = LocalFrame(LAT0, LON0)

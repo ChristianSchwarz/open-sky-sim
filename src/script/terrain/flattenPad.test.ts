@@ -221,3 +221,32 @@ describe('pad grid', () => {
         assert.ok(covered > 500, `only ${covered} samples landed on a pad`);
     });
 });
+
+describe('flatten pad profile', () => {
+    // A runway graded over a hump: up 2 m to the middle, down again.
+    const HUMP: FlattenPad = {
+        centerX: 0, centerZ: 0, halfW: 60, halfD: 1000, featherM: 30, heightMsl: 102,
+        axisE: 0, axisN: 1, profile: [100, 102, 100],
+    };
+
+    it('reads the profile along the axis, level across it', () => {
+        assert.equal(padSurfaceHeight(0, 0, HUMP), 102);
+        assert.equal(padSurfaceHeight(0, -500, HUMP), 101);
+        assert.equal(padSurfaceHeight(40, 500, HUMP), 101);
+        assert.equal(padSurfaceHeight(0, 1000, HUMP), 100);
+    });
+
+    it('is held level past its ends', () => {
+        assert.equal(padSurfaceHeight(0, 1500, HUMP), 100);
+    });
+
+    it('turns with the pad', () => {
+        const east: FlattenPad = { ...HUMP, axisE: 1, axisN: 0 };
+        assert.equal(padSurfaceHeight(-500, 0, east), 101);
+        assert.equal(padSurfaceHeight(0, -500, east), 102);
+    });
+
+    it('takes the place of a gradient', () => {
+        assert.equal(padSurfaceHeight(0, -500, { ...HUMP, gradE: 0.5, gradN: 0.5 }), 101);
+    });
+});

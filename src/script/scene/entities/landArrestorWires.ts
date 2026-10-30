@@ -8,7 +8,7 @@
  * which way the deck is landed on, so every wire is a field each way.
  */
 import * as THREE from 'three';
-import { airfieldPlaneSceneAt } from '../../state/activeAirfield';
+import { airfieldSurfaceSceneAt } from '../../state/activeAirfield';
 import { Airfield } from '../../terrain/airfields';
 import { EnuBasis } from '../../terrain/geodesy';
 import { AIRFIELD_SURFACE_EPS_M } from '../airfield/airfieldModel';
@@ -42,7 +42,7 @@ export function landArrestorWiresOf(
     const out: LandArrestorWire[] = [];
     for (const airfield of airfields) {
         const at = (p: number[]): THREE.Vector3 =>
-            airfieldPlaneSceneAt(airfield, basis, p[0], p[1], AIRFIELD_SURFACE_EPS_M + LAND_WIRE_CLEARANCE_M);
+            airfieldSurfaceSceneAt(airfield, basis, p[0], p[1], AIRFIELD_SURFACE_EPS_M + LAND_WIRE_CLEARANCE_M);
         for (const wire of airfield.arrestingWires ?? []) {
             if (wire.points.length < 2) {
                 continue;
