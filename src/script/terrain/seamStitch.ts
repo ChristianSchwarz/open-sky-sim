@@ -84,6 +84,10 @@ export interface SeamState {
     orig: Int16Array;
     /** Each side's surface edges, sorted along the side. */
     edges: SideEdges[];
+    /** Each side's entries in the border table. */
+    sideEntries: Int32Array[];
+    /** Per entry, the other entry of the same vertex (a corner's other side), or -1. */
+    twin: Int32Array;
     /** Master and its version per side, as last applied. */
     signature: string;
     /**
@@ -102,6 +106,9 @@ interface SideEdges {
     pb: Float64Array;
     va: Uint32Array;
     vb: Uint32Array;
+    /** Both ends' positions as baked, 3 each: the tile's own edge before any move. */
+    oa: Float64Array;
+    ob: Float64Array;
 }
 
 const OPPOSITE = [PTM_SIDE_E, PTM_SIDE_W, PTM_SIDE_S, PTM_SIDE_N];
@@ -174,13 +181,31 @@ function stateOf(tile: StitchableTile): SeamState | undefined {
         return undefined;
     }
     const pos = positionsOf(g).array as Int16Array;
-    const orig = new Int16Array(border.vertices.length * 3);
-    for (let i = 0; i < border.vertices.length; i++) {
+    const entries = border.vertices.length;
+    const orig = new Int16Array(entries * 3);
+    const twin = new Int32Array(entries).fill(-1);
+    const entryOf = new Map<number, number>();
+    const sideLists: number[][] = [[], [], [], []];
+    for (let i = 0; i < entries; i++) {
         const v = borderEntryIndex(border.vertices[i]);
         orig[i * 3] = pos[v * 3];
         orig[i * 3 + 1] = pos[v * 3 + 1];
         orig[i * 3 + 2] = pos[v * 3 + 2];
+        sideLists[borderEntrySide(border.vertices[i])].push(i);
+        const other = entryOf.get(v);
+        if (other === undefined) {
+            entryOf.set(v, i);
+        } else {
+            twin[i] = other;
+            twin[other] = i;
+        }
     }
+    const bakedAt = (v: number, out: Float64Array, at: number) => {
+        const i = entryOf.get(v)!;
+        out[at] = orig[i * 3];
+        out[at + 1] = orig[i * 3 + 1];
+        out[at + 2] = orig[i * 3 + 2];
+    };
     const perSide: number[][] = [[], [], [], []];
     for (let e = 0; e < border.edges.length / 2; e++) {
         perSide[borderEntrySide(border.edges[e * 2])].push(e);
@@ -193,6 +218,7 @@ function stateOf(tile: StitchableTile): SeamState | undefined {
             lo: new Float64Array(n), hi: new Float64Array(n),
             pa: new Float64Array(n), pb: new Float64Array(n),
             va: new Uint32Array(n), vb: new Uint32Array(n),
+            oa: new Float64Array(n * 3), ob: new Float64Array(n * 3),
         };
         list.forEach((e, i) => {
             out.pa[i] = border.edgeParams[e * 2];
@@ -201,10 +227,14 @@ function stateOf(tile: StitchableTile): SeamState | undefined {
             out.hi[i] = Math.max(out.pa[i], out.pb[i]);
             out.va[i] = borderEntryIndex(border.edges[e * 2]);
             out.vb[i] = borderEntryIndex(border.edges[e * 2 + 1]);
+            bakedAt(out.va[i], out.oa, i * 3);
+            bakedAt(out.vb[i], out.ob, i * 3);
         });
         return out;
     });
-    tile.seam = { orig, edges, signature: '', version: ++stamps };
+    tile.seam = {
+        orig, edges, sideEntries: sideLists.map(l => Int32Array.from(l)), twin, signature: '', version: ++stamps,
+    };
     return tile.seam;
 }
 
@@ -246,6 +276,18 @@ function pointOn(
     return out.copy(a).lerp(b, t);
 }
 
+/** Point at `param` on edge `i` as baked (oa/ob), into `out`. */
+function bakedPointOn(edges: SideEdges, i: number, param: number, out: THREE.Vector3): THREE.Vector3 {
+    const len = edges.pb[i] - edges.pa[i];
+    const t = len === 0 ? 0 : Math.min(1, Math.max(0, (param - edges.pa[i]) / len));
+    const j = i * 3;
+    return out.set(
+        edges.oa[j] + (edges.ob[j] - edges.oa[j]) * t,
+        edges.oa[j + 1] + (edges.ob[j + 1] - edges.oa[j + 1]) * t,
+        edges.oa[j + 2] + (edges.ob[j + 2] - edges.oa[j + 2]) * t,
+    );
+}
+
 const _a = new THREE.Vector3();
 const _b = new THREE.Vector3();
 const _own = new THREE.Vector3();
@@ -253,6 +295,7 @@ const _master = new THREE.Vector3();
 const _toLocal = new THREE.Matrix4();
 
 const I16_MAX = 32767;
+const clampI16 = (q: number) => Math.max(-I16_MAX, Math.min(I16_MAX, Math.round(q)));
 let stamps = 0;
 
 /**
@@ -268,8 +311,17 @@ export const SEAM_FILL_MIN_GAP_M = 0.5;
  * call. `drawn` is what is on screen this pass, without the ancestors drawn
  * under a leaf dissolve; their children are what the neighbours meet.
  * Returns how many tiles moved.
+ *
+ * Past `budgetMs` the rest waits for the next call: their signatures are
+ * still stale then, so they are taken up in the same masters-first order. A
+ * burst of arrivals restitches its neighbours too, and done in one frame
+ * that was a 30-70 ms hitch; a frame or two with a seam as baked is a crack
+ * the skirt covers.
  */
-export function stitchSeams(drawn: ReadonlyArray<{ id: TileKey; tile: StitchableTile }>): number {
+export function stitchSeams(
+    drawn: ReadonlyArray<{ id: TileKey; tile: StitchableTile }>, budgetMs = Infinity,
+): number {
+    const started = performance.now();
     const byKey = new Map<string, StitchableTile>();
     for (const d of drawn) {
         byKey.set(tileKeyString(d.id), d.tile);
@@ -279,6 +331,7 @@ export function stitchSeams(drawn: ReadonlyArray<{ id: TileKey; tile: Stitchable
     // before anything is read off it.
     const order = [...drawn].sort((a, b) => a.id.z - b.id.z || a.id.y - b.id.y || a.id.x - b.id.x);
     let moved = 0;
+    let restitched = 0;
     for (const { id, tile } of order) {
         const state = stateOf(tile);
         if (!state) {
@@ -295,6 +348,11 @@ export function stitchSeams(drawn: ReadonlyArray<{ id: TileKey; tile: Stitchable
         if (signature === state.signature) {
             continue;
         }
+        // At least one a call, so a single slow tile cannot stall the rest.
+        if (restitched > 0 && performance.now() - started > budgetMs) {
+            break;
+        }
+        restitched++;
         state.signature = signature;
         if (applyStitch(id, tile, state, masters)) {
             state.version = ++stamps;
@@ -315,22 +373,14 @@ function applyStitch(
     const smoothAttr = tile.landGeometrySmooth ? positionsOf(tile.landGeometrySmooth) : undefined;
     const smoothIndex = tile.landGeometrySmooth?.getIndex()?.array;
 
-    // This tile's own edge, as baked: where its surface was before any move.
-    const firstEntry = new Map<number, number>();
-    for (let i = border.vertices.length - 1; i >= 0; i--) {
-        firstEntry.set(borderEntryIndex(border.vertices[i]), i);
-    }
-    const readOwn = (v: number, out: THREE.Vector3) => {
-        const i = firstEntry.get(v)!;
-        return out.set(state.orig[i * 3], state.orig[i * 3 + 1], state.orig[i * 3 + 2]);
-    };
-
     // New position per border entry; a corner is on two sides, and the side
-    // with the coarser master wins it, so it is applied last.
+    // with the coarser master wins it, so it is applied last. Both of a
+    // corner's entries take it: the vertex is one.
+    const entries = border.vertices.length;
+    const target = new Int16Array(entries * 3);
+    const targeted = new Uint8Array(entries);
     const rank = (side: number) => masters[side]?.id.z ?? 99;
     const sideOrder = [0, 1, 2, 3].sort((a, b) => rank(b) - rank(a));
-    // Per vertex, not per entry: a corner has an entry on each of its sides.
-    const target = new Map<number, [number, number, number]>();
     for (const side of sideOrder) {
         const m = masters[side];
         if (!m) {
@@ -342,10 +392,7 @@ function applyStitch(
             out.set(mPos[v * 3], mPos[v * 3 + 1], mPos[v * 3 + 2]).applyMatrix4(_toLocal);
         const ownEdges = state.edges[side];
         const masterEdges = m.state.edges[OPPOSITE[side]];
-        for (let i = 0; i < border.vertices.length; i++) {
-            if (borderEntrySide(border.vertices[i]) !== side) {
-                continue;
-            }
+        for (const i of state.sideEntries[side]) {
             const p = border.vertexParams[i];
             const oe = edgeAt(ownEdges, p);
             const mp = masterParam(id, side, m.id, p);
@@ -353,11 +400,19 @@ function applyStitch(
             if (oe < 0 || me < 0) {
                 continue;
             }
-            pointOn(ownEdges, oe, p, readOwn, _own);
+            bakedPointOn(ownEdges, oe, p, _own);
             pointOn(masterEdges, me, mp, readMaster, _master);
-            const q = (k: number) => Math.max(-I16_MAX, Math.min(I16_MAX,
-                Math.round(state.orig[i * 3 + k] + _master.getComponent(k) - _own.getComponent(k))));
-            target.set(borderEntryIndex(border.vertices[i]), [q(0), q(1), q(2)]);
+            const x = clampI16(state.orig[i * 3] + _master.x - _own.x);
+            const y = clampI16(state.orig[i * 3 + 1] + _master.y - _own.y);
+            const z = clampI16(state.orig[i * 3 + 2] + _master.z - _own.z);
+            for (const e of [i, state.twin[i]]) {
+                if (e >= 0) {
+                    target[e * 3] = x;
+                    target[e * 3 + 1] = y;
+                    target[e * 3 + 2] = z;
+                    targeted[e] = 1;
+                }
+            }
         }
     }
 
@@ -366,10 +421,10 @@ function applyStitch(
     let hi = -Infinity;
     for (let i = 0; i < border.vertices.length; i++) {
         const v = borderEntryIndex(border.vertices[i]);
-        const to = target.get(v) ?? [state.orig[i * 3], state.orig[i * 3 + 1], state.orig[i * 3 + 2]];
+        const to = targeted[i] ? target : state.orig;
         for (let k = 0; k < 3; k++) {
-            if (pos[v * 3 + k] !== to[k]) {
-                pos[v * 3 + k] = to[k];
+            if (pos[v * 3 + k] !== to[i * 3 + k]) {
+                pos[v * 3 + k] = to[i * 3 + k];
                 changed = true;
                 lo = Math.min(lo, v);
                 hi = Math.max(hi, v);
@@ -378,9 +433,9 @@ function applyStitch(
         if (smoothAttr && smoothIndex) {
             const s = smoothIndex[v];
             const sp = smoothAttr.array as Int16Array;
-            sp[s * 3] = to[0];
-            sp[s * 3 + 1] = to[1];
-            sp[s * 3 + 2] = to[2];
+            sp[s * 3] = to[i * 3];
+            sp[s * 3 + 1] = to[i * 3 + 1];
+            sp[s * 3 + 2] = to[i * 3 + 2];
         }
     }
     if (changed) {
@@ -483,8 +538,22 @@ export function seamFillVertices(id: TileKey, tile: StitchableTile, state: SeamS
             if (startAt && startAt.distanceTo(a) >= minGap) {
                 line.push({ p: pa, at: startAt });
             }
-            for (const q of inner) {
-                if (q.p > pa + PARAM_EPS && q.p < pb - PARAM_EPS && q.p - lastP > PARAM_EPS
+            // Only the master's vertices inside this edge's span: `inner` is
+            // sorted, so start at the first past pa (scanning it all for every
+            // edge was quadratic in the side's vertex count).
+            let lo = 0;
+            let hi = inner.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (inner[mid].p <= pa + PARAM_EPS) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            for (let k = lo; k < inner.length && inner[k].p < pb - PARAM_EPS; k++) {
+                const q = inner[k];
+                if (q.p - lastP > PARAM_EPS
                     && q.at.distanceTo(_own.lerpVectors(a, b, tOf(q.p))) >= minGap) {
                     line.push(q);
                     lastP = q.p;

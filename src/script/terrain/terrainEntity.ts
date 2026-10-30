@@ -65,7 +65,7 @@ import { buildAirfieldExclusion, AirfieldExclusion } from './airfieldExclusion';
 import { coverInPtmTile } from './finestCover';
 import { Airfield } from './airfields';
 import { OceanPatch, buildOceanPatch, disposeOceanPatch, mergeOceanPatches } from './oceanPatch';
-import { PtmTile, decodePtm } from './ptm';
+import { PtmTile } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
 import { seamFillVisibleAt, stitchSeams } from './seamStitch';
 import { canCarryFill, fillVersionOf, showFill, writeFill } from './seamFillTail';
@@ -95,6 +95,7 @@ import {
 import { publishTerrainStats, trackTerrainMaterial } from './debug';
 import { refreshWeldPositions } from './smoothWeld';
 import { SmoothWelder } from './smoothWelder';
+import { PtmDecoder } from './ptmDecoder';
 import { sphereInTile } from './tileFrameBounds';
 
 /**
@@ -160,6 +161,8 @@ const TREE_INITIAL_ATTACHES_PER_FRAME = 1;
 
 /** Main-thread time a frame may spend ordering tree patches (orderTreesFor), ms. */
 const TREE_REORDER_MS = 1;
+/** Main thread a pass may spend restitching seams; the rest follow next pass (stitchSeams). */
+const SEAM_STITCH_MS = 3;
 
 /** SMOOTH welds out with the workers at once, see TerrainEntity.pumpSmooth. */
 const SMOOTH_IN_FLIGHT = 4;
@@ -402,6 +405,8 @@ export class TerrainEntity implements Entity {
 
     /** The SMOOTH weld, on workers (see pumpSmooth). */
     private readonly welder = new SmoothWelder();
+    /** Mesh tiles decoded and their land prepared off the main thread. */
+    private readonly ptmDecoder = new PtmDecoder();
     /** Tiles whose weld is out with the welder. */
     private readonly smoothPending = new Set<TileMeshes>();
     /** A tile may be missing its SMOOTH geometry: one came in, a weld came back, or SMOOTH was switched on. */
@@ -921,9 +926,9 @@ export class TerrainEntity implements Entity {
         this.meshStore = new TileStore<PtmTile>({
             baseUrl: base,
             url: (id) => meshTileUrl(this.manifest, id.z, id.x, id.y, base),
-            decode: (buf) => decodePtm(buf),
+            decode: (buf) => this.ptmDecoder.decode(buf),
             sizeOf: (t) => t.landPositions.byteLength + t.waterPositions.byteLength
-                + t.landNormals.byteLength + t.landAttrs.byteLength
+                + t.landNormals.byteLength + t.landAttrs.byteLength + (t.landRegionSizes?.byteLength ?? 0)
                 + t.waterIndices.byteLength,
             maxBytes: MESH_CACHE_BYTES,
             exists: (id) => (this.meshIndex ? this.meshIndex.has(id) : true),
@@ -2404,7 +2409,7 @@ export class TerrainEntity implements Entity {
             }
             this.group.add(this.oceanPatchFor(node.id, updateUniforms).group);
         }
-        stitchSeams(stitched);
+        stitchSeams(stitched, SEAM_STITCH_MS);
         this.pruneOceans(extraOceans);
         this.pruneEdgeFill();
     }

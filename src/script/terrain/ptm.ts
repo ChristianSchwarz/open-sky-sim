@@ -284,6 +284,12 @@ export interface PtmTile {
     riverIndices: Uint16Array;
     /** Undefined for a tile baked without one. */
     border?: PtmBorder;
+    /**
+     * Not in the file: the land's region widths, set with leaned normals by
+     * prepareLand (landPrep.ts) in the decode worker. Absent, tileMesh
+     * prepares the land itself at upload.
+     */
+    landRegionSizes?: Uint16Array;
 }
 
 function align4(n: number): number {

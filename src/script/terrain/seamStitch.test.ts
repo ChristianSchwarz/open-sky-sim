@@ -169,6 +169,34 @@ describe('stitchSeams', () => {
         assert.deepEqual(heights(tWithEast), [0, 10, 40, 40]);
     });
 
+    it('over its budget leaves the rest for the next call, masters first', () => {
+        const m = coarse();
+        const tEast = tile(
+            [[300, 50, 0], [300, 60, 100]],
+            [[PTM_SIDE_W, 0, 0], [PTM_SIDE_W, 1, 1]],
+            [[PTM_SIDE_W, 0, 1, 0, 1]],
+        );
+        const tWithEast = tile(
+            [[100, 2, 0], [100, 12, 100], [300, 40, 0], [300, 40, 100]],
+            [[PTM_SIDE_W, 0, 0], [PTM_SIDE_W, 1, 1], [PTM_SIDE_E, 2, 0], [PTM_SIDE_E, 3, 1]],
+            [[PTM_SIDE_W, 0, 1, 0, 1], [PTM_SIDE_E, 2, 3, 0, 1]],
+        );
+        const drawn = [
+            { id: { z: 4, x: 3, y: 0 }, tile: tEast },
+            { id: T_ID, tile: tWithEast },
+            { id: M_ID, tile: m },
+        ];
+        // No time at all: one tile a call, the coarse master first.
+        stitchSeams(drawn, 0);
+        assert.deepEqual(heights(tWithEast), [2, 12, 40, 40], 'not reached yet');
+        stitchSeams(drawn, 0);
+        assert.deepEqual(heights(tWithEast), [0, 10, 40, 40]);
+        assert.deepEqual(heights(tEast), [50, 60], 'not reached yet');
+        stitchSeams(drawn, 0);
+        assert.deepEqual(heights(tEast), [40, 40]);
+        assert.equal(stitchSeams(drawn, 0), 0, 'settled');
+    });
+
     it('leaves a tile with no border table alone', () => {
         const m = coarse();
         const t = fine();

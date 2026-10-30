@@ -44,8 +44,11 @@ export interface TileStoreOptions<T> {
     baseUrl: string;
     /** Absolute URL for a tile. */
     url: (id: TileKey) => string;
-    /** Decode raw bytes. Should be cheap; PTM1 decoding is O(1) by design. */
-    decode: (bytes: ArrayBuffer) => T;
+    /**
+     * Decode raw bytes: cheap, or on a worker (PtmDecoder). A decoder may
+     * take the buffer over (transfer it), so it is not read afterwards.
+     */
+    decode: (bytes: ArrayBuffer) => T | Promise<T>;
     /** Approximate retained size, for the byte budget. */
     sizeOf: (value: T) => number;
     /** Called when a value is evicted, so GPU resources can be released. */
@@ -366,9 +369,14 @@ export class TileStore<T> {
                 }
                 buf = await inflateGzip(buf);
             }
-            this.bytesInFlight += buf.byteLength;
-            const value = this.opts.decode(buf);
-            this.bytesInFlight -= buf.byteLength;
+            const bytes = buf.byteLength;
+            this.bytesInFlight += bytes;
+            let value: T;
+            try {
+                value = await this.opts.decode(buf);
+            } finally {
+                this.bytesInFlight -= bytes;
+            }
             this.put(job.id, value);
             this.finish(job, value, started);
         } catch (err) {
