@@ -25,6 +25,8 @@ import { meshSteps } from './areaImport';
 
 // Trimmed: `set PYTHON=python && ...` in cmd leaves a trailing space in it.
 const PYTHON = process.env.PYTHON?.trim() || (process.platform === 'win32' ? 'python' : 'python3');
+/** bake_osm_airports.py EXIT_PARTIAL. */
+const AIRPORTS_PARTIAL = 2;
 const MEASURE_ONCE = /py_leaf_pool\.ts|import_lod2\.py|measure_buildings\.py|measure_roof_shapes\.py/;
 
 function parse(argv: string[]): { areas?: string[]; skipAirports: boolean; state: string } {
@@ -39,10 +41,14 @@ function parse(argv: string[]): { areas?: string[]; skipAirports: boolean; state
     return out;
 }
 
-function run(label: string, cmd: string, args: string[]): void {
+function run(label: string, cmd: string, args: string[], partialCode?: number): void {
     const t0 = Date.now();
     console.log(`\n== ${label}`);
     const r = spawnSync(cmd, args, { stdio: 'inherit' });
+    if (partialCode !== undefined && r.status === partialCode) {
+        console.log(`== ${label}: partial (exit ${partialCode}), going on`);
+        return;
+    }
     if (r.status !== 0) {
         throw new Error(`"${label}" failed (exit ${r.status ?? r.signal}${r.error ? `: ${r.error.message}` : ''})`);
     }
@@ -62,7 +68,11 @@ console.log(`rebake_airfields: ${areas.map(a => a.name).join(', ')}; satellites 
 if (!args.skipAirports) {
     for (const a of areas) {
         run(`grading the airfields of ${a.name}`, PYTHON,
-            ['tools/bake_osm_airports.py', `--bbox=${a.west},${a.south},${a.east},${a.north}`]);
+            ['tools/bake_osm_airports.py', `--bbox=${a.west},${a.south},${a.east},${a.north}`],
+            // Every Overpass mirror failed for the area: the manifest is
+            // written and the area keeps the airfields it had, whose pads are
+            // re-baked as they are.
+            AIRPORTS_PARTIAL);
     }
 }
 
