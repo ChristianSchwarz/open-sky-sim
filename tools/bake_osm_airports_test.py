@@ -871,6 +871,22 @@ class OwnerTest(unittest.TestCase):
             self.assertIn(key, out)
         self.assertNotIn('helipads', out)
 
+    def test_a_building_keeps_its_outline_simplified(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        frame = LocalFrame(LAT0, LON0)
+        # An L, with a facade mapped node by node along its long wall.
+        corners = [(0, 200)] + [(x, 200) for x in range(10, 80, 10)] + [
+            (80, 200), (80, 220), (20, 220), (20, 260), (0, 260)]
+        ids = list(range(900, 900 + len(corners)))
+        nodes = {i: frame.to_lonlat(e, n) for i, (e, n) in zip(ids, corners)}
+        terminal = {'type': 'way', 'id': 20, 'nodes': ids + [ids[0]], 'tags': {'aeroway': 'terminal'}}
+        found = assemble_airfields(elements_and_nodes(field, runway, (terminal, nodes)))
+        ring = found[0].buildings[0]['ring']
+        self.assertEqual(ring[0], ring[-1])
+        # The facade's straight run of nodes collapses: six corners, closed.
+        self.assertEqual(len(ring), 7)
+
     def test_first_listed_polygon_wins_when_two_contain_the_runway(self):
         outer = aerodrome_way(10, LAT0, LON0, 6000.0, {'name': 'outer'}, first_node=100)
         inner = aerodrome_way(11, LAT0, LON0, 2000.0, {'name': 'inner'}, first_node=200)

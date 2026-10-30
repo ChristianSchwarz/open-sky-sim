@@ -41,6 +41,8 @@ const colors: PaletteColors = {
     [PaletteCategory.LIGHT_RED]: '#e0e0e0',
     [PaletteCategory.LIGHT_GREEN]: '#e0e0e0',
     [PaletteCategory.LIGHT_YELLOW]: '#e0e0e0',
+    [PaletteCategory.LIGHT_WHITE]: '#e0e0e0',
+    [PaletteCategory.LIGHT_BLUE]: '#e0e0e0',
 
     [PaletteCategory.GLASS]: '#282828',
 

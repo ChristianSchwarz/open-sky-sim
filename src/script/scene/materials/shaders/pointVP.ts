@@ -6,6 +6,13 @@ export const PointVertProgram: string = `
   uniform float halfWidth;
   uniform float halfHeight;
   uniform int shadingType;
+  // Size of the point: uPointSizePx pixels, or - for a light, uPointSizeM > 0 -
+  // that many metres across as the camera sees it, held between
+  // uPointSizePx and uPointMaxPx so a far light stays a dot and a near one
+  // does not grow into a square.
+  uniform float uPointSizePx;
+  uniform float uPointSizeM;
+  uniform float uPointMaxPx;
 
   varying vec3 vPosition;
   // Unused (uGrazingHighlight is always 0 here) but declared to match the
@@ -18,9 +25,11 @@ ${LOG_DEPTH_PARS_VERTEX}
     vPosition = vec3(tmpPos.x, 0.0, tmpPos.z);
     vNormalView = vec3(0.0, 0.0, 1.0);
     vViewDir = vec3(0.0, 0.0, 1.0);
-    gl_PointSize = 1.0;
 
     vec4 pos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = uPointSizeM > 0.0
+      ? clamp(uPointSizeM * projectionMatrix[1][1] * halfHeight / max(pos.w, 1e-3), uPointSizePx, uPointMaxPx)
+      : uPointSizePx;
     if (shadingType != 3) {
       pos.x = floor(pos.x / pos.w * halfWidth + 0.5) / halfWidth * pos.w;
       pos.y = floor(pos.y / pos.w * halfHeight + 0.5) / halfHeight * pos.w;

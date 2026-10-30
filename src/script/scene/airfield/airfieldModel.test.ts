@@ -9,7 +9,7 @@ import {
 import { SceneMaterialManager } from '../materials/materials';
 import {
     AIRFIELD_SURFACE_EPS_M, GROUND_STRIP_LIGHTEN, buildAirfieldModel, buildingHeightM, embankmentLine,
-    repaintGroundStrip, smoothCentreline,
+    gridPieces, repaintGroundStrip, smoothCentreline,
 } from './airfieldModel';
 
 /**
@@ -35,9 +35,17 @@ function materialOf(o: THREE.Object3D): BuiltProps {
     return ((o as THREE.Mesh).material as THREE.Material).userData as BuiltProps;
 }
 
+/**
+ * The meshes among a level's objects. The lights are points beside them,
+ * night-only, and have tests of their own (airfieldLights.test.ts).
+ */
+function meshes(objects: THREE.Object3D[]): THREE.Object3D[] {
+    return objects.filter(o => !(o as THREE.Points).isPoints);
+}
+
 /** Palette categories the built geometry actually uses, per LOD level. */
 function categories(objects: THREE.Object3D[]): Set<string> {
-    return new Set(objects.map(
+    return new Set(meshes(objects).map(
         o => ((o as THREE.Mesh).material as THREE.Material).userData.category as string));
 }
 
@@ -185,7 +193,7 @@ function sharpestTurn(path: readonly { e: number; n: number }[]): number {
 
 function triangles(objects: THREE.Object3D[]): number {
     let n = 0;
-    for (const obj of objects) {
+    for (const obj of meshes(objects)) {
         const geometry = (obj as THREE.Mesh).geometry;
         n += geometry.getAttribute('position').count / 3;
     }
@@ -195,7 +203,7 @@ function triangles(objects: THREE.Object3D[]): number {
 /** Every vertex of a level, in the model's own frame. */
 function vertices(objects: THREE.Object3D[]): THREE.Vector3[] {
     const out: THREE.Vector3[] = [];
-    for (const obj of objects) {
+    for (const obj of meshes(objects)) {
         const pos = (obj as THREE.Mesh).geometry.getAttribute('position');
         for (let i = 0; i < pos.count; i++) {
             out.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
@@ -798,7 +806,7 @@ describe('airfield model', () => {
         /** Face normals of every triangle in a level, in scene axes. */
         function normalsY(objects: THREE.Object3D[]): number[] {
             const out: number[] = [];
-            for (const o of objects) {
+            for (const o of meshes(objects)) {
                 const p = (o as THREE.Mesh).geometry.getAttribute('position');
                 for (let t = 0; t < p.count; t += 3) {
                     const a = new THREE.Vector3(p.getX(t), p.getY(t), p.getZ(t));
@@ -826,6 +834,51 @@ describe('airfield model', () => {
                         `a face points down with the ring ${clockwise ? 'clockwise' : 'ccw'}`);
                 }
             }
+        });
+
+        it('cuts an apron into pieces no bigger than a grid cell, keeping its area', () => {
+            // An L, as aprons beside a terminal often are.
+            const ring = [
+                { e: 3, n: 7 }, { e: 247, n: 7 }, { e: 247, n: 61 },
+                { e: 91, n: 61 }, { e: 91, n: 333 }, { e: 3, n: 333 },
+            ];
+            const area = (r: { e: number; n: number }[]) => {
+                let sum = 0;
+                for (let i = 0; i < r.length; i++) {
+                    const a = r[i];
+                    const b = r[(i + 1) % r.length];
+                    sum += a.e * b.n - b.e * a.n;
+                }
+                return sum / 2;
+            };
+            const pieces = gridPieces(ring, 20);
+            assert.ok(Math.abs(pieces.reduce((s, p) => s + area(p), 0) - area(ring)) < 1e-6);
+            for (const piece of pieces) {
+                assert.ok(area(piece) > 0, 'a piece turned clockwise');
+                const es = piece.map(p => p.e);
+                const ns = piece.map(p => p.n);
+                assert.ok(Math.max(...es) - Math.min(...es) <= 20 + 1e-9);
+                assert.ok(Math.max(...ns) - Math.min(...ns) <= 20 + 1e-9);
+            }
+            // Small enough for one cell: left whole.
+            assert.equal(gridPieces([{ e: 1, n: 1 }, { e: 9, n: 1 }, { e: 9, n: 9 }], 20).length, 1);
+        });
+
+        it('drapes a big apron over the ground inside it, not just at its corners', () => {
+            // A 2 m rise in the middle of the apron, which corner-only
+            // triangles would have left showing through it.
+            const centre = enuAt(27.9320, -15.3890);
+            const ground = (e: number, n: number) =>
+                12.97 + 2 * Math.max(0, 1 - Math.hypot(e - centre.e, n - centre.n) / 60);
+            const built = buildAirfieldModel(
+                gclp({ aprons: [apronRing(false)] }), BASIS, MATERIALS, ground)!;
+            const bare = buildAirfieldModel(gclp(), BASIS, MATERIALS, ground)!;
+            const added = triangles(built.model.lod[0].flats) - triangles(bare.model.lod[0].flats);
+            // 200 x 220 m in 20 m cells: about a hundred cells, two triangles each.
+            assert.ok(added > 150, `${added} triangles`);
+            const top = Math.max(...vertices(built.model.lod[0].flats)
+                .map(v => elevationOf(v, built.origin)));
+            assert.ok(top > 12.97 + 2 + AIRFIELD_SURFACE_EPS_M - 0.5, `highest vertex ${top}`);
         });
 
         it('draws the same apron either way round', () => {
@@ -894,6 +947,44 @@ describe('airfield model', () => {
                     `a wall faces inward (dot ${f.n.dot(outward).toFixed(2)})`);
             }
             assert.equal(roofs, 2, 'the roof is not two up-facing triangles');
+        });
+
+        it('extrudes the mapped outline, walls out and roof up, where it has one', () => {
+            // An L, as GCFV's bent terminal is: drawn as its box it came out
+            // as two slabs at an angle to each other.
+            const lat = 27.9320, lon = -15.3870;
+            const dLat = 1 / 111000, dLon = 1 / (111000 * Math.cos(lat * Math.PI / 180));
+            const at = (e: number, n: number) => [lat + n * dLat, lon + e * dLon];
+            const ring = [at(0, 0), at(80, 0), at(80, 20), at(20, 20), at(20, 60), at(0, 60), at(0, 0)];
+            const built = buildAirfieldModel(
+                gclp({ buildings: [building({ ring })] }), BASIS, MATERIALS, () => 0)!;
+            const tris: THREE.Vector3[][] = [];
+            for (const o of built.model.lod[0].volumes) {
+                const p = (o as THREE.Mesh).geometry.getAttribute('position');
+                for (let t = 0; t < p.count; t += 3) {
+                    tris.push([0, 1, 2].map(k => new THREE.Vector3(p.getX(t + k), p.getY(t + k), p.getZ(t + k))));
+                }
+            }
+            const normal = (t: THREE.Vector3[]) =>
+                t[1].clone().sub(t[0]).cross(t[2].clone().sub(t[0])).normalize();
+            const roofs = tris.filter(t => normal(t).y > 0.9);
+            // Twelve walls (six edges, two triangles each), and a roof of the L's area.
+            assert.equal(tris.length - roofs.length, 12);
+            const roofArea = roofs.reduce((a, t) =>
+                a + t[1].clone().sub(t[0]).cross(t[2].clone().sub(t[0])).length() / 2, 0);
+            assert.ok(Math.abs(roofArea - (80 * 20 + 20 * 40)) < 30, `roof ${roofArea.toFixed(0)} m2`);
+            const inside = (q: THREE.Vector3) => roofs.some(([a, b, c]) => {
+                const side = (p: THREE.Vector3, r: THREE.Vector3) =>
+                    (r.x - p.x) * (q.z - p.z) - (r.z - p.z) * (q.x - p.x);
+                const s1 = side(a, b), s2 = side(b, c), s3 = side(c, a);
+                return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
+            });
+            for (const t of tris.filter(t => Math.abs(normal(t).y) < 0.1)) {
+                const centre = t[0].clone().add(t[1]).add(t[2]).divideScalar(3);
+                const n = normal(t).setY(0).normalize();
+                assert.ok(!inside(centre.clone().addScaledVector(n, 0.5)), 'a wall faces inward');
+                assert.ok(inside(centre.clone().addScaledVector(n, -0.5)), 'a wall stands off the roof');
+            }
         });
 
         it('stands on the lowest corner, not on its centre', () => {

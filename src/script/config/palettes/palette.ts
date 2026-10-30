@@ -45,6 +45,8 @@ export enum PaletteCategory {
     LIGHT_RED = 'LIGHT_RED',
     LIGHT_GREEN = 'LIGHT_GREEN',
     LIGHT_YELLOW = 'LIGHT_YELLOW',
+    LIGHT_WHITE = 'LIGHT_WHITE',
+    LIGHT_BLUE = 'LIGHT_BLUE',
 
     SCENERY_SPECKLE = 'SCENERY_SPEKLE',
 
@@ -167,6 +169,8 @@ const FogColorCategoryMap: Map<PaletteCategory, PaletteFogCategories> = new Map(
     [PaletteCategory.LIGHT_RED, PaletteCategory.FOG_LIGHT],
     [PaletteCategory.LIGHT_GREEN, PaletteCategory.FOG_LIGHT],
     [PaletteCategory.LIGHT_YELLOW, PaletteCategory.FOG_LIGHT],
+    [PaletteCategory.LIGHT_WHITE, PaletteCategory.FOG_LIGHT],
+    [PaletteCategory.LIGHT_BLUE, PaletteCategory.FOG_LIGHT],
     [PaletteCategory.FX_FIRE, PaletteCategory.FOG_LIGHT],
 ]);
 
@@ -176,6 +180,8 @@ const FogValueCategoryMap: Map<PaletteCategory, PaletteFogCategories> = new Map(
     [PaletteCategory.LIGHT_RED, PaletteCategory.FOG_LIGHT],
     [PaletteCategory.LIGHT_GREEN, PaletteCategory.FOG_LIGHT],
     [PaletteCategory.LIGHT_YELLOW, PaletteCategory.FOG_LIGHT],
+    [PaletteCategory.LIGHT_WHITE, PaletteCategory.FOG_LIGHT],
+    [PaletteCategory.LIGHT_BLUE, PaletteCategory.FOG_LIGHT],
     [PaletteCategory.FX_FIRE, PaletteCategory.FOG_LIGHT],
     // Ocean keeps reading farther than land fog would allow.
     [PaletteCategory.TERRAIN_WATER, PaletteCategory.FOG_LIGHT],

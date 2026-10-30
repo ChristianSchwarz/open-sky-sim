@@ -1441,6 +1441,11 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
                 'lat': lat_c, 'lon': lon_c, 'headingDeg': heading,
                 'widthM': width, 'depthM': depth,
                 'heightM': building_height_m(tags),
+                # The outline itself, which the runtime extrudes. The box
+                # above is what the colliders and the height rules use; drawn
+                # as the box, GCFV's bent terminal came out as two slabs at
+                # 14 degrees to each other.
+                'ring': building_outline(ring),
             })
         elif aeroway == 'taxilane' and coords:
             # A taxiway in all but name, inside an apron: laid and graded as one.
@@ -1582,6 +1587,29 @@ def attach_ski_jumps(airfield: Airfield) -> None:
             'lat': base_lat, 'lon': base_lon, 'headingDeg': heading,
             'lengthM': depth, 'widthM': width,
         })
+
+
+# A building outline is simplified to this, metres: a terminal's facade
+# mapped node by node is hundreds of points for a wall that is straight.
+BUILDING_SIMPLIFY_M = 0.5
+
+
+def building_outline(ring: Sequence[Tuple[float, float]]) -> List[List[float]]:
+    """A building's `(lon, lat)` ring as a closed `[lat, lon]` outline,
+    simplified to BUILDING_SIMPLIFY_M."""
+    lon0 = sum(c[0] for c in ring) / len(ring)
+    lat0 = sum(c[1] for c in ring) / len(ring)
+    frame = LocalFrame(lat0, lon0)
+    poly = Polygon([frame.to_m(c[0], c[1]) for c in ring])
+    if poly.is_valid:
+        simple = poly.simplify(BUILDING_SIMPLIFY_M, preserve_topology=True)
+        if not simple.is_empty and simple.geom_type == 'Polygon':
+            poly = simple
+    out = []
+    for e, n in poly.exterior.coords:
+        lon, lat = frame.to_lonlat(e, n)
+        out.append([round(lat, 7), round(lon, 7)])
+    return out
 
 
 def _ref_of(tags: dict) -> dict:

@@ -234,6 +234,12 @@ type SceneMaterialMeshProperties = {
 
 interface SceneMaterialPointProperties {
     type: SceneMaterialPrimitiveType.POINT;
+    /** Pixels across; the least, for a light with `sizeM`. Default 1. */
+    sizePx?: number;
+    /** A light this many metres across, as the camera sees it, between `sizePx` and `maxPx`. */
+    sizeM?: number;
+    /** The most pixels a `sizeM` light grows to. */
+    maxPx?: number;
 }
 
 interface SceneMaterialLineProperties {
@@ -636,6 +642,15 @@ export class SceneMaterialManager implements KernelTask {
                         ? (properties.minPixels ?? 0)
                         : 0,
                 },
+                uPointSizePx: {
+                    value: properties.type === SceneMaterialPrimitiveType.POINT ? (properties.sizePx ?? 1) : 1,
+                },
+                uPointSizeM: {
+                    value: properties.type === SceneMaterialPrimitiveType.POINT ? (properties.sizeM ?? 0) : 0,
+                },
+                uPointMaxPx: {
+                    value: properties.type === SceneMaterialPrimitiveType.POINT ? (properties.maxPx ?? 1) : 1,
+                },
                 uMinHalfPixels: {
                     value: properties.type === SceneMaterialPrimitiveType.MESH
                         && !properties.shaded && properties.river
@@ -822,7 +837,9 @@ export class SceneMaterialManager implements KernelTask {
             properties.category === PaletteCategory.SCENERY_SPECKLE ||
             properties.category === PaletteCategory.LIGHT_RED ||
             properties.category === PaletteCategory.LIGHT_GREEN ||
-            properties.category === PaletteCategory.LIGHT_YELLOW;
+            properties.category === PaletteCategory.LIGHT_YELLOW ||
+            properties.category === PaletteCategory.LIGHT_WHITE ||
+            properties.category === PaletteCategory.LIGHT_BLUE;
     }
 
     private isFx(properties: SceneMaterialProperties): boolean {

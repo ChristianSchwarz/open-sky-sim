@@ -28,6 +28,7 @@ import { TileCover } from '../../terrain/tileHeightIndex';
 import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../materials/materials';
 import { Model } from '../models/models';
 import { updateUniforms } from '../utils';
+import { buildAirfieldLights, navaidUnits } from './airfieldLights';
 import { rasteriseMarkings } from './runwayMarkingTexture';
 import { MarkingKind, MarkingRect, isPaintedSurface, runwayMarkings } from './runwayMarkings';
 
@@ -865,7 +866,12 @@ export function buildAirfieldModel(
         parts.solid = level === 0 ? solidPavement : undefined;
         addDecks(parts, airfield, toEnu, place);
         parts.solid = undefined;
-        levels.push({ flats: parts.build(materials), volumes: solids.build(materials) });
+        // Lights at every level: from kilometres out at night they are what
+        // there is of an airfield. Built again per level, as an object has
+        // one parent.
+        const lights = buildAirfieldLights(airfield, toEnu, place, drape,
+            AIRFIELD_SURFACE_EPS_M, materials, buildingHeightM);
+        levels.push({ flats: [...parts.build(materials), ...lights], volumes: solids.build(materials) });
     }
     const groundStrips: GroundStrip[] = unpaved.map(({ runway, paint, zoom, points }) => {
         const key = paintKey(paint);
@@ -1499,6 +1505,10 @@ function addBuildings(
     parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place,
 ): void {
     for (const building of airfield.buildings) {
+        if (building.ring !== undefined && building.ring.length >= 4) {
+            addBuildingOutline(parts, building, building.ring, toEnu, place);
+            continue;
+        }
         const centre = toEnu(building.lat, building.lon);
         const r = building.headingDeg * Math.PI / 180;
         // The footprint's long axis, and the direction across it.
@@ -1541,6 +1551,54 @@ function addBuildings(
             parts.addQuad(category, low[j], high[j], high[i], low[i]);
         }
         parts.addQuad(category, high[0], high[1], high[2], high[3]);
+    }
+}
+
+/**
+ * A building extruded from its mapped outline: walls up every edge and a flat
+ * roof over the whole, standing on its lowest corner's ground as the boxes do.
+ */
+function addBuildingOutline(
+    parts: MeshParts, building: AirfieldBuilding, latLonRing: number[][], toEnu: ToEnu, place: Place,
+): void {
+    const ring = latLonRing.map(p => toEnu(p[0], p[1]));
+    const first = ring[0];
+    const last = ring[ring.length - 1];
+    if (Math.abs(first.e - last.e) < 1e-6 && Math.abs(first.n - last.n) < 1e-6) {
+        ring.pop();
+    }
+    if (ring.length < 3 || Math.abs(signedArea(ring)) < 2) {
+        return;
+    }
+    // Counter-clockwise, as addBuildings' feet are, so the walls face out.
+    if (signedArea(ring) < 0) {
+        ring.reverse();
+    }
+    let faces: number[][];
+    try {
+        faces = THREE.ShapeUtils.triangulateShape(ring.map(p => new THREE.Vector2(p.e, p.n)), []);
+    } catch {
+        return;
+    }
+    const ground = ring.map(p => place(p.e, p.n, 0));
+    let baseY = Infinity;
+    for (const g of ground) {
+        baseY = Math.min(baseY, g.y);
+    }
+    const height = buildingHeightM(building);
+    const category = BUILDING_CATEGORY[building.kind] ?? PaletteCategory.SCENERY_BUILDING_CONCRETE;
+    const low = ground.map(g => g.clone().setY(baseY));
+    const high = low.map(g => g.clone().setY(baseY + height));
+    for (let i = 0; i < ring.length; i++) {
+        const j = (i + 1) % ring.length;
+        parts.addQuad(category, low[j], high[j], high[i], low[i]);
+    }
+    for (const [a, b, c] of faces) {
+        if (upward(high[a], high[b], high[c])) {
+            parts.add(category, high[a], high[b], high[c]);
+        } else {
+            parts.add(category, high[c], high[b], high[a]);
+        }
     }
 }
 
@@ -1857,14 +1915,10 @@ const WINDSOCK_MAST_WIDTH_M = 0.2;
 const WINDSOCK_LENGTH_M = 3.6;
 const WINDSOCK_MOUTH_M = 0.9;
 const WINDSOCK_TAIL_M = 0.35;
-/** Light units of a PAPI or VASI: their spacing across the runway, and each box. */
-const PAPI_SPACING_M = 9;
+/** Each PAPI or VASI light unit's box. */
 const PAPI_UNIT_ALONG_M = 0.8;
 const PAPI_UNIT_ACROSS_M = 1.2;
 const PAPI_UNIT_HEIGHT_M = 1;
-/** Units of one type closer than this are each mapped as its own node, one box apiece. */
-const PAPI_UNIT_CLUSTER_M = 40;
-const NAVAID_UNITS: Record<string, number> = { papi: 4, apapi: 2, vasi: 2 };
 
 type EN = { e: number; n: number };
 
@@ -2137,31 +2191,18 @@ function addWindsocks(
 }
 
 /**
- * PAPI and VASI light units: a row of boxes across the runway they serve,
- * centred on the node - or one box per node where each unit is mapped as its
- * own. Approach lighting and the rest are not drawn.
+ * PAPI and VASI light units as boxes, where {@link navaidUnits} puts them: a
+ * row across the runway they serve, or one per node where each unit is
+ * mapped as its own. Their lights are airfieldLights.ts's.
  */
 function addNavigationAids(
     parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place,
 ): void {
-    const aids = airfield.navigationAids ?? [];
-    const at = aids.map(a => toEnu(a.lat, a.lon));
-    aids.forEach((aid, i) => {
-        const units = NAVAID_UNITS[aid.type];
-        if (units === undefined || aid.headingDeg === undefined) {
-            return;
-        }
-        const single = aids.some((other, j) => j !== i && other.type === aid.type
-            && Math.hypot(at[j].e - at[i].e, at[j].n - at[i].n) < PAPI_UNIT_CLUSTER_M);
-        const axis = bearingAxisAt(aid.lat, aid.lon, aid.headingDeg, toEnu);
-        const count = single ? 1 : units;
-        for (let k = 0; k < count; k++) {
-            const centre = offsetAlong(at[i], axis, 0, (k - (count - 1) / 2) * PAPI_SPACING_M);
-            addBlock(parts, PaletteCategory.SCENERY_BUILDING_METAL_WHITE,
-                rectFeet(centre, axis, PAPI_UNIT_ALONG_M / 2, PAPI_UNIT_ACROSS_M / 2),
-                place, 0, PAPI_UNIT_HEIGHT_M);
-        }
-    });
+    for (const { centre, axis } of navaidUnits(airfield, toEnu)) {
+        addBlock(parts, PaletteCategory.SCENERY_BUILDING_METAL_WHITE,
+            rectFeet(centre, axis, PAPI_UNIT_ALONG_M / 2, PAPI_UNIT_ACROSS_M / 2),
+            place, 0, PAPI_UNIT_HEIGHT_M);
+    }
 }
 
 /** One closed `[lat, lon]` ring, triangulated flat at `place`. */
@@ -2192,23 +2233,89 @@ function addFilledRing(
     if (signedArea(ring) < 0) {
         ring.reverse();
     }
-    const contour = ring.map(p => new THREE.Vector2(p.e, p.n));
-    let faces: number[][];
-    try {
-        faces = THREE.ShapeUtils.triangulateShape(contour, []);
-    } catch {
-        // A self-intersecting apron is a mapping error, not a reason to
-        // drop the whole airfield.
-        return;
-    }
-    for (const face of faces) {
-        const corners = face.map(i => place(ring[i].e, ring[i].n, AIRFIELD_SURFACE_EPS_M)) as
-            [THREE.Vector3, THREE.Vector3, THREE.Vector3];
-        if (plates !== undefined) {
-            parts.addMaterialTri(category, plates.material, corners,
-                face.map(i => plates.runwayGrid(ring[i].e, ring[i].n)));
-        } else {
-            parts.add(category, ...corners);
+    // Cut along a grid before it is draped, as a taxiway is cut into steps:
+    // triangulated from its outline alone, GCFV's 27 ha apron was eight
+    // triangles hung between its corners, and the ground between them came
+    // up through it along the terminal.
+    for (const piece of gridPieces(ring, FILL_CELL_M)) {
+        const contour = piece.map(p => new THREE.Vector2(p.e, p.n));
+        let faces: number[][];
+        try {
+            faces = THREE.ShapeUtils.triangulateShape(contour, []);
+        } catch {
+            // A self-intersecting apron is a mapping error, not a reason to
+            // drop the whole airfield.
+            continue;
+        }
+        for (const face of faces) {
+            const corners = face.map(i => place(piece[i].e, piece[i].n, AIRFIELD_SURFACE_EPS_M)) as
+                [THREE.Vector3, THREE.Vector3, THREE.Vector3];
+            if (plates !== undefined) {
+                parts.addMaterialTri(category, plates.material, corners,
+                    face.map(i => plates.runwayGrid(piece[i].e, piece[i].n)));
+            } else {
+                parts.add(category, ...corners);
+            }
         }
     }
+}
+
+/** The grid an apron, deck or helipad is cut along before it is draped, metres. */
+const FILL_CELL_M = 20;
+
+/**
+ * A counter-clockwise ring cut along the lines of a `cell`-metre grid: the
+ * part of it in each cell, counter-clockwise. Cut on a grid fixed in east and
+ * north, so two pieces either side of a line share every vertex on it and
+ * draping them opens no crack. A ring inside one cell comes back whole.
+ */
+export function gridPieces(ring: readonly EN[], cell: number): EN[][] {
+    let minE = Infinity, minN = Infinity, maxE = -Infinity, maxN = -Infinity;
+    for (const p of ring) {
+        minE = Math.min(minE, p.e); maxE = Math.max(maxE, p.e);
+        minN = Math.min(minN, p.n); maxN = Math.max(maxN, p.n);
+    }
+    const i0 = Math.floor(minE / cell), i1 = Math.ceil(maxE / cell);
+    const j0 = Math.floor(minN / cell), j1 = Math.ceil(maxN / cell);
+    if (i1 - i0 <= 1 && j1 - j0 <= 1) {
+        return [ring.slice()];
+    }
+    // Sutherland-Hodgman against one column, then each cell of it.
+    const clip = (poly: EN[], keep: (p: EN) => number): EN[] => {
+        const out: EN[] = [];
+        for (let k = 0; k < poly.length; k++) {
+            const a = poly[k];
+            const b = poly[(k + 1) % poly.length];
+            const da = keep(a);
+            const db = keep(b);
+            if (da >= 0) {
+                out.push(a);
+            }
+            if ((da >= 0) !== (db >= 0)) {
+                const t = da / (da - db);
+                out.push({ e: a.e + (b.e - a.e) * t, n: a.n + (b.n - a.n) * t });
+            }
+        }
+        return out;
+    };
+    const pieces: EN[][] = [];
+    for (let i = i0; i < i1; i++) {
+        const column = clip(clip(ring.slice(), p => p.e - i * cell), p => (i + 1) * cell - p.e);
+        if (column.length < 3) {
+            continue;
+        }
+        for (let j = j0; j < j1; j++) {
+            // A vertex exactly on a line comes out twice; the triangulator
+            // wants each once.
+            const piece = clip(clip(column, p => p.n - j * cell), p => (j + 1) * cell - p.n)
+                .filter((p, k, all) => {
+                    const q = all[(k + 1) % all.length];
+                    return Math.abs(p.e - q.e) > 1e-9 || Math.abs(p.n - q.n) > 1e-9;
+                });
+            if (piece.length >= 3 && Math.abs(signedArea(piece)) > 1e-3) {
+                pieces.push(piece);
+            }
+        }
+    }
+    return pieces;
 }

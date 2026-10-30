@@ -86,6 +86,12 @@ export interface AirfieldBuilding {
      * and the footprint instead.
      */
     heightM?: number | null;
+    /**
+     * The outline as mapped, closed `[lat, lon]`, which is what is drawn;
+     * the box above stays for the colliders and the height rules. Absent on
+     * fields baked before outlines were kept, which are drawn as the box.
+     */
+    ring?: number[][];
 }
 
 /**
