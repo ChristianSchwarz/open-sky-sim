@@ -18,7 +18,11 @@ export interface SurfacePadCollider {
     halfWidth: number;
     /** World Y of the surface top, at the pad centre. */
     surfaceY: number;
-    /** World Y of the surrounding ground the edge skirt blends down to. */
+    /**
+     * World Y of the surrounding ground the edge skirt blends down to, at the
+     * pad centre. On a sloping pad the skirt falls by the same depth below the
+     * surface beside it (`surfaceY - baseY`), not to this height.
+     */
     baseY: number;
     /** Horizontal skirt width beyond the pad edge (m); avoids a hard vertical lip. */
     feather: number;
@@ -49,7 +53,8 @@ export interface SurfacePadCollider {
 /**
  * Pad surface Y at (worldX, worldZ), or -Infinity when the point is outside
  * the pad footprint (plus its feather skirt). Inside the rectangle this is the
- * pad's own plane; across the skirt it ramps down to `baseY`.
+ * pad's own surface; across the skirt it ramps down by the pad's depth
+ * (`surfaceY - baseY`) below the surface beside it.
  */
 export function sampleSurfacePadY(
     worldX: number,
@@ -199,7 +204,12 @@ function padY(worldX: number, worldZ: number, pad: SurfacePadCollider, feather: 
     // step the pavement down at both thresholds.
     const surfaceY = pad.surfaceY + (pad.slope ?? 0) * localZ + profileRise(pad, localZ);
     if (out <= 0) return surfaceY;
-    return pad.baseY + (surfaceY - pad.baseY) * (1 - out / feather);
+    // The skirt falls by the pad's own depth below the surface *here*, not
+    // to `baseY` itself: on a sloping runway the centre's base is metres
+    // above the low threshold, and ramping up to it put a 13 m invisible
+    // wall in front of El Hierro's low end.
+    const baseY = surfaceY - (pad.surfaceY - pad.baseY);
+    return baseY + (surfaceY - baseY) * (1 - out / feather);
 }
 
 /** {@link SurfacePadCollider.profile} at `along` metres from the centre, held level past the ends. */

@@ -92,7 +92,18 @@ describe('sloping pads', () => {
         // centre height instead would drop the pavement 4 m at the threshold.
         const y = sampleSurfacePadY(0, 1520, SLOPED);
         const atEdge = 100 + 0.008 * 1520;
-        assert.ok(Math.abs(y - (90 + (atEdge - 90) * 0.5)) < 1e-9, `blended to ${y}`);
+        assert.ok(Math.abs(y - (atEdge - 10 * 0.5)) < 1e-9, `blended to ${y}`);
+    });
+
+    it('never rises out of the low end (regression: a 13 m wall before El Hierro 16)', () => {
+        // The skirt falls by the pad's depth below the surface beside it. It
+        // used to ramp to the centre's base, metres above a low threshold.
+        const steep = { ...SLOPED, slope: 0.02 };
+        for (let d = 1; d < 40; d += 3) {
+            const y = sampleSurfacePadY(0, -1500 - d, steep);
+            const atEdge = 100 - 0.02 * 1500;
+            assert.ok(y <= atEdge + 1e-9 && y >= atEdge - 10 - 1e-9, `${d} m past the low end at ${y}`);
+        }
     });
 
     it('is unchanged when no slope is given', () => {
