@@ -14,10 +14,17 @@
  * measure-once stages there (lidar lines, LoD2, roof colours and shapes) read
  * nothing the pads change and are left out.
  *
- *   npm run rebake:airfields -- [--areas DACH,Kanaren] [--skip-airports] [--old-only] [--state file]
+ *   npm run rebake:airfields -- [--areas DACH,Kanaren] [--skip-airports] [--old-only] [--cover-pbf FILE] [--state file]
  *
  * `--old-only` re-bakes only the leaves the old runway pads reached and the
  * new ones do not, for an area re-baked before those were counted.
+ *
+ * `--cover-pbf FILE` re-bakes the leaves the aerodrome perimeters and pads
+ * reach instead, starting with the cover (tools/bake_planet_cover.py, which
+ * paints the ground inside a perimeter from the land around it): one cover run
+ * per block, against the imagery of the import chunk the block lies in
+ * (data/cover/chunks) and the OSM landuse from FILE, as the import ran it.
+ * The airport bake is handed FILE too.
  *
  * Resumable: every finished area is appended to the state file
  * (data/imports/rebake_airfields.done by default, `area` or `area:old-only`)
@@ -37,17 +44,39 @@ const PYTHON = process.env.PYTHON?.trim() || (process.platform === 'win32' ? 'py
 const AIRPORTS_PARTIAL = 2;
 const MEASURE_ONCE = /py_leaf_pool\.ts|import_lod2\.py|measure_buildings\.py|measure_roof_shapes\.py/;
 
-function parse(argv: string[]): { areas?: string[]; skipAirports: boolean; oldOnly: boolean; state: string } {
-    const out = { areas: undefined as string[] | undefined, skipAirports: false, oldOnly: false, state: 'data/imports/rebake_airfields.done' };
+function parse(argv: string[]): { areas?: string[]; skipAirports: boolean; oldOnly: boolean; coverPbf?: string; state: string } {
+    const out = {
+        areas: undefined as string[] | undefined, skipAirports: false, oldOnly: false,
+        coverPbf: undefined as string | undefined, state: 'data/imports/rebake_airfields.done',
+    };
     for (let i = 0; i < argv.length; i++) {
         const k = argv[i];
         if (k === '--areas') out.areas = argv[++i].split(',');
         else if (k === '--skip-airports') out.skipAirports = true;
         else if (k === '--old-only') out.oldOnly = true;
+        else if (k === '--cover-pbf') out.coverPbf = argv[++i];
         else if (k === '--state') out.state = argv[++i];
         else throw new Error(`unknown argument ${k}`);
     }
+    if (out.oldOnly && out.coverPbf) {
+        throw new Error('--old-only and --cover-pbf pick different leaves; pass one');
+    }
     return out;
+}
+
+const COVER_CHUNKS = path.join('data', 'cover', 'chunks');
+
+/** The import chunk's cover sources a box's centre lies in (dirs are named w_s_e_n). */
+function chunkSources(box: number[]): string {
+    const cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
+    for (const dir of fs.existsSync(COVER_CHUNKS) ? fs.readdirSync(COVER_CHUNKS) : []) {
+        const b = dir.split('_').map(Number);
+        const sources = path.join(COVER_CHUNKS, dir, 'sources.json');
+        if (b.length === 4 && b[0] <= cx && cx < b[2] && b[1] <= cy && cy < b[3] && fs.existsSync(sources)) {
+            return sources;
+        }
+    }
+    throw new Error(`no cover chunk under ${COVER_CHUNKS} holds ${box.join(',')}`);
 }
 
 function run(label: string, cmd: string, args: string[], partialCode?: number): void {
@@ -77,7 +106,8 @@ console.log(`rebake_airfields: ${areas.map(a => a.name).join(', ')}; satellites 
 if (!args.skipAirports) {
     for (const a of areas) {
         run(`grading the airfields of ${a.name}`, PYTHON,
-            ['tools/bake_osm_airports.py', `--bbox=${a.west},${a.south},${a.east},${a.north}`],
+            ['tools/bake_osm_airports.py', `--bbox=${a.west},${a.south},${a.east},${a.north}`,
+                ...(args.coverPbf ? [`--pbf=${args.coverPbf}`] : [])],
             // Every Overpass mirror failed for the area: the manifest is
             // written and the area keeps the airfields it had, whose pads are
             // re-baked as they are.
@@ -89,12 +119,13 @@ fs.mkdirSync(path.dirname(args.state), { recursive: true });
 const done = new Set(fs.existsSync(args.state) ? fs.readFileSync(args.state, 'utf8').split(/\r?\n/).filter(Boolean) : []);
 const t0 = Date.now();
 for (const a of areas) {
-    const key = args.oldOnly ? `${a.name}:old-only` : a.name;
+    const key = args.oldOnly ? `${a.name}:old-only` : args.coverPbf ? `${a.name}:cover` : a.name;
     if (done.has(key)) {
         console.log(`\n${key}: done before`);
         continue;
     }
-    const r = spawnSync(PYTHON, ['tools/airfield_rebake_boxes.py', '--area', a.name, ...(args.oldOnly ? ['--old-only'] : [])],
+    const pick = args.oldOnly ? ['--old-only'] : args.coverPbf ? ['--perimeters'] : [];
+    const r = spawnSync(PYTHON, ['tools/airfield_rebake_boxes.py', '--area', a.name, ...pick],
         { encoding: 'utf8' });
     if (r.status !== 0) {
         throw new Error(`airfield_rebake_boxes.py --area ${a.name} failed: ${r.stderr}`);
@@ -110,6 +141,11 @@ for (const a of areas) {
     const all = boxes.map(b => b.split(',').map(Number));
     const union = [Math.min(...all.map(b => b[0])), Math.min(...all.map(b => b[1])),
         Math.max(...all.map(b => b[2])), Math.max(...all.map(b => b[3]))];
+    if (args.coverPbf) {
+        all.forEach((box, i) => run(`${key}: cover, block ${i + 1}/${all.length}`, PYTHON,
+            ['tools/bake_planet_cover.py', `--bbox=${box.join(',')}`, '--osm-landuse', `--pbf=${args.coverPbf}`,
+                `--sources=${chunkSources(box)}`]));
+    }
     for (const step of meshSteps(union, satellites)) {
         if (step.args.some(x => MEASURE_ONCE.test(x))) {
             continue;

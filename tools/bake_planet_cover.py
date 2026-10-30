@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from airfield_ground import AirfieldGround, Perimeter, airfield_perimeters
 from cover_patches import FIXED_CLASSES, _box_sums, enlarge_patches, halo_nodes
 
 warnings.filterwarnings('ignore', category=DeprecationWarning, module='rasterio')
@@ -252,6 +253,43 @@ def stamp_airfield_classes(
     return changed
 
 
+def ground_reader(
+    landcover: Sequence[Source], imagery: Sequence[Source],
+    class_lut: np.ndarray, color_lut: np.ndarray,
+):
+    """The ground colours an airfield's fill is drawn from, over any grid.
+
+    The tile bake's colour rule - imagery, else the class colour - minus
+    water: a field on the shore would otherwise fill with the sea.
+    """
+    def read(bounds: Tuple[float, float, float, float], rows: int, cols: int):
+        classes = np.zeros((rows, cols), dtype=np.uint8)
+        for src_lc in landcover:
+            got = src_lc.read_onto(bounds, (rows, cols), Resampling.mode)
+            if got is None:
+                continue
+            fresh = (classes == CLS_UNKNOWN) & (got[0] != 0)
+            classes[fresh] = class_lut[got[0]][fresh]
+        colors = np.zeros((rows, cols, 3), dtype=np.uint8)
+        covered = np.zeros((rows, cols), dtype=bool)
+        for src_img in imagery:
+            got = src_img.read_onto(bounds, (rows, cols), Resampling.average)
+            if got is None:
+                continue
+            fresh = (~covered) & np.any(got != 0, axis=0)
+            for b in range(3):
+                colors[..., b][fresh] = got[b][fresh]
+            covered |= fresh
+        known_class = classes != CLS_UNKNOWN
+        gaps = ~covered & known_class
+        colors[gaps] = color_lut[classes][gaps]
+        valid = (covered | known_class) & (classes != CLS_WATER)
+        if not valid.any():
+            return None
+        return colors, valid
+    return read
+
+
 def build_class_lut() -> np.ndarray:
     """256-entry lookup so the whole raster converts in one indexing op."""
     lut = np.full(256, CLS_UNKNOWN, dtype=np.uint8)
@@ -303,13 +341,16 @@ class Source:
         self.ds.close()
 
     def read_onto(
-        self, bounds: Tuple[float, float, float, float], size: int, resampling: Resampling,
+        self, bounds: Tuple[float, float, float, float], size, resampling: Resampling,
     ) -> Optional[np.ndarray]:
         """Resample this raster onto a size*size grid over `bounds`.
+
+        `size` may also be (rows, cols), for a grid that is not square.
 
         Returns None when the raster does not reach the tile at all, which is
         the common case: most of an ocean-heavy coverage has no land in it.
         """
+        rows, cols = (size, size) if isinstance(size, int) else size
         west, south, east, north = bounds
         sw, ss, se, sn = self.ds.bounds
         if east <= sw or west >= se or north <= ss or south >= sn:
@@ -339,8 +380,8 @@ class Source:
         window = rasterio.windows.Window(
             col_off, row_off, col_end - col_off, row_end - row_off)
         # 4x the target is plenty to resample from and bounds the read.
-        out_w = int(min(window.width, size * 4))
-        out_h = int(min(window.height, size * 4))
+        out_w = int(min(window.width, cols * 4))
+        out_h = int(min(window.height, rows * 4))
         data = self.ds.read(
             self.bands,
             window=window,
@@ -351,14 +392,14 @@ class Source:
         src_transform = self.ds.window_transform(window) * rasterio.Affine.scale(
             window.width / out_w, window.height / out_h)
 
-        dst = np.zeros((len(self.bands), size, size), dtype=data.dtype)
+        dst = np.zeros((len(self.bands), rows, cols), dtype=data.dtype)
         reproject(
             source=data,
             destination=dst,
             src_transform=src_transform,
             src_crs=self.ds.crs,
             src_nodata=self.nodata,
-            dst_transform=transform_from_bounds(west, south, east, north, size, size),
+            dst_transform=transform_from_bounds(west, south, east, north, cols, rows),
             dst_crs='EPSG:4326',
             dst_nodata=self.nodata,
             resampling=resampling,
@@ -551,6 +592,11 @@ def bake_tile(
     if gaps.any():
         colors[gaps] = color_lut[classes][gaps]
 
+    # Inside an airfield's perimeter the imagery is the airfield; the ground
+    # there takes the countryside's colour instead (airfield_ground.py).
+    if _airfield_ground is not None:
+        _airfield_ground.apply(colors, bounds, size)
+
     flags = PLC_FLAG_REAL_IMAGERY if covered.any() else 0
 
     out_dir = os.path.join(out_root, str(z), str(x))
@@ -583,6 +629,9 @@ _cover_pads: Sequence[dict] = ()
 _cover_osm_tree: Optional['STRtree'] = None
 _cover_osm_polys: Sequence['Polygon'] = ()
 _cover_osm_classes: Sequence[int] = ()
+# The airfield fills, per process: set by main for an in-process bake and by
+# _init_cover_worker in each worker, which solves its own (see AirfieldGround).
+_airfield_ground: Optional[AirfieldGround] = None
 
 
 def _init_cover_worker(
@@ -590,10 +639,11 @@ def _init_cover_worker(
     landcover_paths: Sequence[str], imagery_paths: Sequence[str],
     patch_m: float, pads: Sequence[dict],
     osm_tree: Optional['STRtree'], osm_polys: Sequence['Polygon'], osm_classes: Sequence[int],
+    perimeters: Sequence[Perimeter] = (),
 ) -> None:
     global _cover_src_dir, _cover_out_root, _cover_landcover, _cover_imagery
     global _cover_class_lut, _cover_color_lut, _cover_patch_m, _cover_pads
-    global _cover_osm_tree, _cover_osm_polys, _cover_osm_classes
+    global _cover_osm_tree, _cover_osm_polys, _cover_osm_classes, _airfield_ground
 
     def vsicurl(p: str) -> str:
         return f'/vsicurl/{p}' if p.startswith('http') else p
@@ -609,6 +659,8 @@ def _init_cover_worker(
     _cover_osm_tree = osm_tree
     _cover_osm_polys = osm_polys
     _cover_osm_classes = osm_classes
+    _airfield_ground = AirfieldGround(perimeters, ground_reader(
+        _cover_landcover, _cover_imagery, _cover_class_lut, _cover_color_lut)) if perimeters else None
 
 
 def _cover_worker(zxy: Tuple[int, int, int]) -> Optional[Tuple[int, bool, int, int]]:
@@ -791,6 +843,7 @@ def walk_tiles(src: str, max_zoom: int) -> List[Tuple[int, int, int]]:
 
 
 def main() -> None:
+    global _airfield_ground
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--src', default=DEFAULT_SRC, help='pyramid to read and write into')
     ap.add_argument('--out', help='write .plc here instead of alongside the .pdm')
@@ -887,6 +940,16 @@ def main() -> None:
     pads = airfield_pads(manifest)
     if pads:
         print(f'airfields: {len(pads)} platform rectangles painted as built ground')
+    perimeters = airfield_perimeters(manifest)
+    if args.bbox:
+        reach = parse_bbox(args.bbox)
+        perimeters = [p for p in perimeters
+                      if p.bounds[0] < reach[2] and p.bounds[2] > reach[0]
+                      and p.bounds[1] < reach[3] and p.bounds[3] > reach[1]]
+    if perimeters and not args.ancestors_only:
+        print(f'airfields: {len(perimeters)} perimeters painted from the ground around them')
+        _airfield_ground = AirfieldGround(perimeters, ground_reader(
+            landcover, imagery, class_lut, color_lut))
 
     osm_tree = None
     osm_polys: List = []
@@ -948,7 +1011,7 @@ def main() -> None:
         pool = mp.get_context('spawn').Pool(
             jobs, initializer=_init_cover_worker,
             initargs=(args.src, out_root, landcover_paths, imagery_paths, args.patch_m, pads,
-                      osm_tree, osm_polys, osm_classes))
+                      osm_tree, osm_polys, osm_classes, perimeters))
     written, with_imagery, paved_nodes, osm_nodes, total_bytes = (0, 0, 0, 0, 0) if args.ancestors_only else bake_tiles(
         finest, args.src, out_root, landcover, imagery,
         landcover_paths, imagery_paths, class_lut, color_lut, args.patch_m, pads, pool,

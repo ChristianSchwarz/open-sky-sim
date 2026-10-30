@@ -446,6 +446,10 @@ class Airfield:
     fit: Optional[dict] = None
     pads: List[dict] = field(default_factory=list)
     area: str = ''
+    #: The aerodrome polygon's outer ring, `[lat, lon]`; empty for a node-only
+    #: aerodrome. The cover bake paints the ground inside it from the
+    #: countryside around it rather than from the imagery.
+    perimeter: List[List[float]] = field(default_factory=list)
 
     @property
     def longest_m(self) -> float:
@@ -1083,6 +1087,25 @@ def _polygon_of(element: dict, ways: Dict[int, dict], nodes: Dict[int, Tuple[flo
     return best
 
 
+# About a metre: the perimeter only says which cover nodes (tens of metres
+# apart) are inside the airfield, so OSM's fence-post detail is dead weight in
+# the manifest.
+PERIMETER_SIMPLIFY_DEG = 1e-5
+
+
+def perimeter_ring(poly) -> List[List[float]]:
+    """An aerodrome polygon's outer ring as `[lat, lon]`, simplified."""
+    if poly.geom_type == 'MultiPolygon':
+        poly = max(poly.geoms, key=lambda g: g.area)
+    if poly.geom_type != 'Polygon' or poly.is_empty:
+        return []
+    ring = poly.exterior.simplify(PERIMETER_SIMPLIFY_DEG, preserve_topology=False)
+    coords = list(ring.coords)
+    if len(coords) < 4:
+        coords = list(poly.exterior.coords)
+    return [[round(c[1], 7), round(c[0], 7)] for c in coords]
+
+
 class AerodromeIndex:
     """Which aerodrome an aeroway element belongs to, answered from two STRtrees.
 
@@ -1188,6 +1211,8 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
             ele_tag_m=ele,
             osm_id=int(el.get('id', 0)),
         )
+        if poly is not None:
+            airfield.perimeter = perimeter_ring(poly)
         airfields.append(airfield)
         polygons.append((poly, airfield))
 
@@ -1967,6 +1992,7 @@ def airfield_to_json(airfield: Airfield) -> dict:
         **({'decks': airfield.decks} if airfield.decks else {}),
         **({'skiJumps': airfield.ski_jumps} if airfield.ski_jumps else {}),
         **({'embankments': airfield.embankments} if airfield.embankments else {}),
+        **({'perimeter': airfield.perimeter} if airfield.perimeter else {}),
     }
 
 
