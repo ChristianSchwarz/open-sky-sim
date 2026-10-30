@@ -273,8 +273,11 @@ export interface BuildTileInput {
      * laid out in. A pad is an oriented box in ENU and ENU axes turn with
      * position, so a pad far from the bake's origin has to be measured in its
      * own frame or it sits skewed against the local north the runtime uses.
+     *
+     * `fenced` marks a pad inside its airfield's mapped perimeter, where the
+     * cover bake already filled the ground from the countryside around it.
      */
-    pads?: Array<FlattenPad & { basis: EnuBasis; lat: number; lon: number }>;
+    pads?: Array<FlattenPad & { basis: EnuBasis; lat: number; lon: number; fenced?: boolean }>;
     /** Observed cover. Omit and every land facet falls back to plain grass. */
     cover?: TileCover;
     /**
@@ -443,6 +446,26 @@ function padsNearTile(pads: BuildTileInput['pads'], bounds: LonLatBounds): NearP
         }
     }
     return near;
+}
+
+/** Whether a point is in the flattened core of any of `near`; undefined for none. */
+function inPadCore(near: NearPad[]): ((lon: number, lat: number) => boolean) | undefined {
+    if (near.length === 0) {
+        return undefined;
+    }
+    return (lon: number, lat: number): boolean => {
+        for (const { pad, latSpan, lonSpan } of near) {
+            if (Math.abs(lat - pad.lat) > latSpan || Math.abs(lon - pad.lon) > lonSpan) {
+                continue;
+            }
+            geodeticToEcef(lat, lon, 0, _ecef);
+            ecefToEnu(pad.basis, _ecef, _padEnu);
+            if (padBlendWeight(_padEnu.e, _padEnu.n, pad) >= 1) {
+                return true;
+            }
+        }
+        return false;
+    };
 }
 
 /**
@@ -773,21 +796,12 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     // is where the platform blends into whatever is around it, and if that is
     // the sea then blending into the sea is right.
     const nearPads = padsNearTile(input.pads, bounds);
-    const paved = nearPads.length > 0
-        ? (lon: number, lat: number): boolean => {
-            for (const { pad, latSpan, lonSpan } of nearPads) {
-                if (Math.abs(lat - pad.lat) > latSpan || Math.abs(lon - pad.lon) > lonSpan) {
-                    continue;
-                }
-                geodeticToEcef(lat, lon, 0, _ecef);
-                ecefToEnu(pad.basis, _ecef, _padEnu);
-                if (padBlendWeight(_padEnu.e, _padEnu.n, pad) >= 1) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        : undefined;
+    const paved = inPadCore(nearPads);
+    // The pads whose facets take the raster colour rather than the regional
+    // one. Not a fenced pad: inside the perimeter the raster is the filled
+    // ground, which the regional mean around it does not match, so its
+    // facets would stand out as a darker patch the shape of the pad.
+    const pavedColour = inPadCore(nearPads.filter(p => !p.pad.fenced));
 
     const shoreline = buildShoreline({
         polygons: input.polygons ?? [],
@@ -1761,11 +1775,11 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
         // else here: it does not need to blend smoothly into the district
         // around it the way natural ground does.
         let paved3: readonly [number, number, number] | undefined;
-        if (ground && paved !== undefined) {
+        if (ground && pavedColour !== undefined) {
             const mx = (a.e + b.e + c.e) / 3, mz = (a.n + b.n + c.n) / 3, mu = (a.u + b.u + c.u) / 3;
             const ecef = enuToEcef(basis, { e: mx, n: mz, u: mu });
             const geo = ecefToGeodetic(ecef.x, ecef.y, ecef.z);
-            if (paved(geo.lon, geo.lat)) {
+            if (pavedColour(geo.lon, geo.lat)) {
                 paved3 = [facet[1], facet[2], facet[3]];
             }
         }

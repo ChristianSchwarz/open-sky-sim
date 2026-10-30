@@ -1,10 +1,15 @@
-"""Airfield ground colour from the countryside around it, not the imagery.
+"""Airfield ground from the countryside around it, not the imagery.
 
 Inside an aerodrome's perimeter the imagery is the airfield itself: runways,
 aprons, terminals and car parks, a grey rectangle the size of the field that
 the modelled pavement then sits on top of, slightly offset and never quite the
 same shape. So the cover bake paints every node inside the perimeter from the
 ground just outside it instead, interpolated across the field.
+
+The same goes for the landcover class, which is classified from the same
+imagery and paints the airfield built-up or bare in the Landcover and Hybrid
+colour modes. It is filled the same way, one channel per class found around
+the field, and each node takes the strongest.
 
 The interpolation is harmonic (Laplace's equation with the outside as fixed
 values): smooth, exact at the fence, and with no preferred direction, so a
@@ -54,13 +59,17 @@ class Perimeter:
 
 @dataclass
 class AirfieldFill:
-    """The filled colour grid over one airfield's bounds plus margin.
+    """The filled grids over one airfield's bounds plus margin.
 
     Rows run north to south, columns west to east, cell centres at
     `west + (col + 0.5) * cell_w` - a rasterio grid over `bounds`.
     """
     bounds: Bounds
     colors: np.ndarray  # (rows, cols, 3) float32
+    #: The classes found around the field, and each one's filled weight,
+    #: (rows, cols, len(class_ids)) float32.
+    class_ids: np.ndarray
+    class_weights: np.ndarray
 
 
 def _metres_per_degree(lat_deg: float) -> Tuple[float, float]:
@@ -172,10 +181,11 @@ def harmonic_fill(values: np.ndarray, known: np.ndarray) -> np.ndarray:
     pr, pc = r2 * 2 - rows, c2 * 2 - cols
     kv = np.pad(values * known[..., None], ((0, pr), (0, pc), (0, 0)))
     kw = np.pad(known.astype(np.float32), ((0, pr), (0, pc)))
-    sv = kv.reshape(r2, 2, c2, 2, 3).sum(axis=(1, 3))
+    channels = values.shape[2]
+    sv = kv.reshape(r2, 2, c2, 2, channels).sum(axis=(1, 3))
     sw = kw.reshape(r2, 2, c2, 2).sum(axis=(1, 3))
     coarse_known = sw > 0
-    coarse = np.zeros((r2, c2, 3), dtype=np.float32)
+    coarse = np.zeros((r2, c2, channels), dtype=np.float32)
     coarse[coarse_known] = sv[coarse_known] / sw[coarse_known][:, None]
     coarse = harmonic_fill(coarse, coarse_known)
 
@@ -185,34 +195,38 @@ def harmonic_fill(values: np.ndarray, known: np.ndarray) -> np.ndarray:
     return _relax(start, known, SWEEPS_PER_LEVEL)
 
 
-def build_fill(
-    perimeter: Perimeter,
-    read_colors: Callable[[Bounds, int, int], Optional[Tuple[np.ndarray, np.ndarray]]],
-) -> Optional[AirfieldFill]:
+#: What `read_ground(bounds, rows, cols)` returns: the ground colour
+#: (rows, cols, 3), its class (rows, cols) and which cells are usable ground,
+#: or None for no data.
+GroundReader = Callable[[Bounds, int, int], Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]]
+
+
+def build_fill(perimeter: Perimeter, read_ground: GroundReader) -> Optional[AirfieldFill]:
     """Solve one airfield's fill.
 
-    `read_colors(bounds, rows, cols)` returns the ground colour over that grid
-    as (rows, cols, 3) and which cells it actually has, or None for no data -
-    the cover bake's imagery with its class-colour fallback.
+    `read_ground` is the cover bake's imagery with its class-colour fallback,
+    and its landcover classes, over the fill's grid.
     """
     bounds, rows, cols = fill_bounds(perimeter)
-    got = read_colors(bounds, rows, cols)
+    got = read_ground(bounds, rows, cols)
     if got is None:
         return None
-    colors, valid = got
+    colors, classes, valid = got
     inside = ring_mask(perimeter.ring, bounds, rows, cols)
     known = valid & ~inside
     if not known.any():
         return None
     colors = colors.astype(np.float32)
     colors = _box_blur_known(colors, known)
-    return AirfieldFill(bounds, harmonic_fill(colors, known))
+    class_ids = np.unique(classes[known]).astype(np.uint8)
+    one_hot = (classes[..., None] == class_ids[None, None, :]).astype(np.float32)
+    return AirfieldFill(bounds, harmonic_fill(colors, known), class_ids, harmonic_fill(one_hot, known))
 
 
-def sample_fill(fill: AirfieldFill, lons: np.ndarray, lats: np.ndarray) -> np.ndarray:
-    """Bilinear colour of the fill at each (lon, lat), as (n, 3) float32."""
+def sample_grid(fill: AirfieldFill, grid: np.ndarray, lons: np.ndarray, lats: np.ndarray) -> np.ndarray:
+    """Bilinear value of one of the fill's grids at each (lon, lat), (n, channels)."""
     west, south, east, north = fill.bounds
-    rows, cols = fill.colors.shape[:2]
+    rows, cols = grid.shape[:2]
     fx = (lons - west) / (east - west) * cols - 0.5
     fy = (north - lats) / (north - south) * rows - 0.5
     fx = np.clip(fx, 0, cols - 1)
@@ -221,12 +235,23 @@ def sample_fill(fill: AirfieldFill, lons: np.ndarray, lats: np.ndarray) -> np.nd
     y0 = np.minimum(np.floor(fy).astype(int), rows - 2) if rows > 1 else np.zeros_like(fy, dtype=int)
     tx = (fx - x0)[:, None]
     ty = (fy - y0)[:, None]
-    c = fill.colors
+    c = grid
     x1 = np.minimum(x0 + 1, cols - 1)
     y1 = np.minimum(y0 + 1, rows - 1)
     top = c[y0, x0] * (1 - tx) + c[y0, x1] * tx
     bottom = c[y1, x0] * (1 - tx) + c[y1, x1] * tx
     return top * (1 - ty) + bottom * ty
+
+
+def sample_fill(fill: AirfieldFill, lons: np.ndarray, lats: np.ndarray) -> np.ndarray:
+    """Bilinear colour of the fill at each (lon, lat), as (n, 3) float32."""
+    return sample_grid(fill, fill.colors, lons, lats)
+
+
+def sample_classes(fill: AirfieldFill, lons: np.ndarray, lats: np.ndarray) -> np.ndarray:
+    """The strongest class of the fill at each (lon, lat), as (n,) uint8."""
+    weights = sample_grid(fill, fill.class_weights, lons, lats)
+    return fill.class_ids[np.argmax(weights, axis=1)]
 
 
 def _overlaps(a: Bounds, b: Bounds) -> bool:
@@ -241,29 +266,23 @@ class AirfieldGround:
     answer, and only the few tiles over a field ever ask for it.
     """
 
-    def __init__(self, perimeters: Sequence[Perimeter],
-                 read_colors: Callable[[Bounds, int, int], Optional[Tuple[np.ndarray, np.ndarray]]]):
+    def __init__(self, perimeters: Sequence[Perimeter], read_ground: GroundReader):
         self.perimeters = list(perimeters)
-        self.read_colors = read_colors
+        self.read_ground = read_ground
         self._fills: Dict[int, Optional[AirfieldFill]] = {}
 
     def fill_for(self, perimeter: Perimeter) -> Optional[AirfieldFill]:
         if perimeter.key not in self._fills:
-            self._fills[perimeter.key] = build_fill(perimeter, self.read_colors)
+            self._fills[perimeter.key] = build_fill(perimeter, self.read_ground)
         return self._fills[perimeter.key]
 
-    def apply(self, colors: np.ndarray, bounds: Bounds, size: int) -> int:
-        """Repaint a tile's nodes inside any perimeter. Returns nodes changed.
-
-        `colors` is the tile's (size, size, 3) node grid, rows north to south,
-        nodes on the tile edges.
-        """
+    def _inside(self, bounds: Bounds, size: int):
+        """(fill, node rows, node cols, lons, lats) per perimeter over the tile."""
         west, south, east, north = bounds
         dx = (east - west) / (size - 1)
         dy = (north - south) / (size - 1)
         # A rasterio grid whose cell centres are the nodes.
         node_bounds = (west - dx / 2, south - dy / 2, east + dx / 2, north + dy / 2)
-        changed = 0
         for perimeter in self.perimeters:
             if not _overlaps(perimeter.bounds, node_bounds):
                 continue
@@ -274,9 +293,29 @@ class AirfieldGround:
             if fill is None:
                 continue
             rows, cols = np.nonzero(mask)
-            lons = west + cols * dx
-            lats = north - rows * dy
+            yield fill, rows, cols, west + cols * dx, north - rows * dy
+
+    def apply_classes(self, classes: np.ndarray, bounds: Bounds, size: int) -> int:
+        """Reclass a tile's nodes inside any perimeter. Returns nodes changed.
+
+        `classes` is the tile's (size, size) node grid, rows north to south,
+        nodes on the tile edges. Called before the OSM landuse and pad stamps,
+        which are mapped facts rather than imagery and still win.
+        """
+        changed = 0
+        for fill, rows, cols, lons, lats in self._inside(bounds, size):
+            classes[rows, cols] = sample_classes(fill, lons, lats)
+            changed += len(rows)
+        return changed
+
+    def apply(self, colors: np.ndarray, bounds: Bounds, size: int) -> int:
+        """Repaint a tile's nodes inside any perimeter. Returns nodes changed.
+
+        `colors` is the tile's (size, size, 3) node grid, laid out as above.
+        """
+        changed = 0
+        for fill, rows, cols, lons, lats in self._inside(bounds, size):
             rgb = sample_fill(fill, lons, lats)
             colors[rows, cols] = np.clip(np.rint(rgb), 0, 255).astype(np.uint8)
-            changed += int(mask.sum())
+            changed += len(rows)
         return changed

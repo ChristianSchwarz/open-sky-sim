@@ -482,6 +482,8 @@ interface AirfieldRecord {
     icao?: string;
     area?: string;
     pads?: FlattenPadRecord[];
+    /** The aerodrome's mapped outline, [lat, lon]; see airfield_ground.py. */
+    perimeter?: number[][];
 }
 
 /**
@@ -499,6 +501,7 @@ function padRecordsFor(
     src: { airfields?: { items?: AirfieldRecord[] }; maxZoom: number; seaLevel?: number },
     areas: Array<{ name: string; west: number; south: number; east: number; north: number }>,
     srcDir: string,
+    fenced: Set<FlattenPadRecord>,
 ): FlattenPadRecord[] {
     const records: FlattenPadRecord[] = [];
 
@@ -529,7 +532,11 @@ function padRecordsFor(
     let airfieldPads = 0;
     for (const airfield of airfields) {
         for (const pad of airfield.pads ?? []) {
-            records.push({ ...pad, icao: airfield.icao });
+            const record = { ...pad, icao: airfield.icao };
+            records.push(record);
+            if (airfield.perimeter?.length) {
+                fenced.add(record);
+            }
             airfieldPads++;
         }
     }
@@ -561,7 +568,8 @@ async function main(): Promise<void> {
     // is unchanged to the last decimal.
     const areas: Array<{ name: string; west: number; south: number; east: number; north: number }> =
         src.areas?.length ? src.areas : [{ name: 'terrain', ...src.coverage }];
-    const padRecords = padRecordsFor(src, areas, args.src);
+    const fencedRecords = new Set<FlattenPadRecord>();
+    const padRecords = padRecordsFor(src, areas, args.src, fencedRecords);
     const airfieldsFile = src.airfields?.items?.length ? src.airfields : undefined;
     // Each pad is evaluated in a frame centred on itself. The pad is an
     // oriented box in ENU and ENU axes turn with position, so a box laid out in
@@ -573,7 +581,10 @@ async function main(): Promise<void> {
             const enu = ecefToEnu(padBasis, geodeticToEcef(lat, lon, 0));
             return { e: enu.e, n: enu.n };
         };
-        return { ...padFromRecord(rec, toEnu), basis: padBasis, lat: rec.lat, lon: rec.lon };
+        return {
+            ...padFromRecord(rec, toEnu), basis: padBasis, lat: rec.lat, lon: rec.lon,
+            fenced: fencedRecords.has(rec),
+        };
     });
 
     let tiles = args.only.length > 0

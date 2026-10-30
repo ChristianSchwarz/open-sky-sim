@@ -42,7 +42,7 @@ export interface MeshTileConfig {
     maxZoom: number;
     budget: number;
     basis: EnuBasis;
-    pads: Array<FlattenPad & { basis: EnuBasis; lat: number; lon: number }>;
+    pads: Array<FlattenPad & { basis: EnuBasis; lat: number; lon: number; fenced?: boolean }>;
     /** Regional ground colour cells; see groundColor.ts. Omit for none. */
     groundMeans?: GroundMeans;
 }

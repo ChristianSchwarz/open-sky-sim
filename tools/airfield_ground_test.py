@@ -9,6 +9,8 @@ from airfield_ground import (
     AirfieldGround, Perimeter, airfield_perimeters, fill_bounds, harmonic_fill, ring_mask,
 )
 
+TREE, CROP, BUILT = 1, 4, 5
+
 # A square field about 1 km a side near Kempten.
 RING = [(10.30, 47.70), (10.313, 47.70), (10.313, 47.709), (10.30, 47.709), (10.30, 47.70)]
 FIELD = Perimeter(1, RING, (10.30, 47.70, 10.313, 47.709))
@@ -16,13 +18,17 @@ FIELD = Perimeter(1, RING, (10.30, 47.70, 10.313, 47.709))
 
 def west_east_ground(bounds, rows, cols):
     """Imagery that is forest to the west and farmland to the east, with a
-    grey airfield painted where the perimeter is."""
+    grey, built-up airfield painted where the perimeter is."""
     colors = np.zeros((rows, cols, 3), dtype=np.uint8)
+    classes = np.zeros((rows, cols), dtype=np.uint8)
     colors[:, : cols // 2] = (40, 80, 40)
     colors[:, cols // 2:] = (160, 150, 90)
+    classes[:, : cols // 2] = TREE
+    classes[:, cols // 2:] = CROP
     inside = ring_mask(RING, bounds, rows, cols)
     colors[inside] = (128, 128, 128)
-    return colors, np.ones((rows, cols), dtype=bool)
+    classes[inside] = BUILT
+    return colors, classes, np.ones((rows, cols), dtype=bool)
 
 
 class HarmonicFillTest(unittest.TestCase):
@@ -85,9 +91,25 @@ class AirfieldGroundTest(unittest.TestCase):
         ground.apply(right, (mid, 47.69, 10.323, 47.719), size)
         np.testing.assert_array_equal(left[:, -1], right[:, 0])
 
+    def test_classes_inside_perimeter_come_from_outside(self):
+        ground = AirfieldGround([FIELD], west_east_ground)
+        size = 129
+        bounds = (10.29, 47.69, 10.323, 47.719)
+        classes = np.full((size, size), BUILT, dtype=np.uint8)
+        ground.apply_classes(classes, bounds, size)
+        dx = (bounds[2] - bounds[0]) / (size - 1)
+        dy = (bounds[3] - bounds[1]) / (size - 1)
+        def at(lon, lat):
+            return classes[round((bounds[3] - lat) / dy), round((lon - bounds[0]) / dx)]
+        self.assertEqual(at(10.3015, 47.7045), TREE)
+        self.assertEqual(at(10.3115, 47.7045), CROP)
+        # Outside the perimeter nothing changes.
+        self.assertEqual(at(10.295, 47.695), BUILT)
+
     def test_no_known_ground_leaves_tile_alone(self):
         def all_water(bounds, rows, cols):
-            return np.zeros((rows, cols, 3), dtype=np.uint8), np.zeros((rows, cols), dtype=bool)
+            return (np.zeros((rows, cols, 3), dtype=np.uint8), np.zeros((rows, cols), dtype=np.uint8),
+                    np.zeros((rows, cols), dtype=bool))
         ground = AirfieldGround([FIELD], all_water)
         colors = np.full((33, 33, 3), 77, dtype=np.uint8)
         ground.apply(colors, (10.29, 47.69, 10.323, 47.719), 33)

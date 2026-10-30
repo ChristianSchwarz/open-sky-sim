@@ -257,10 +257,11 @@ def ground_reader(
     landcover: Sequence[Source], imagery: Sequence[Source],
     class_lut: np.ndarray, color_lut: np.ndarray,
 ):
-    """The ground colours an airfield's fill is drawn from, over any grid.
+    """The ground an airfield's fill is drawn from, over any grid.
 
-    The tile bake's colour rule - imagery, else the class colour - minus
-    water: a field on the shore would otherwise fill with the sea.
+    The tile bake's colour rule - imagery, else the class colour - and the
+    raw landcover classes, minus water: a field on the shore would otherwise
+    fill with the sea.
     """
     def read(bounds: Tuple[float, float, float, float], rows: int, cols: int):
         classes = np.zeros((rows, cols), dtype=np.uint8)
@@ -286,7 +287,7 @@ def ground_reader(
         valid = (covered | known_class) & (classes != CLS_WATER)
         if not valid.any():
             return None
-        return colors, valid
+        return colors, classes, valid
     return read
 
 
@@ -569,6 +570,10 @@ def bake_tile(
     # The crop leaves a view into the padded array; the encoder needs the
     # bytes contiguous.
     classes = np.ascontiguousarray(classes)
+    # Before the stamps: inside an airfield's perimeter the class comes from
+    # the ground around it, then mapped landuse and pavement go on top.
+    if _airfield_ground is not None:
+        _airfield_ground.apply_classes(classes, bounds, size)
     osm_nodes = 0
     if osm_tree is not None:
         osm_nodes = stamp_landuse_classes(classes, bounds, size, osm_tree, osm_polys, osm_classes)
