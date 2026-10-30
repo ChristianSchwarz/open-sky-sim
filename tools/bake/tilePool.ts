@@ -21,7 +21,12 @@
  * a satellite on an older protocol is turned away.
  *
  * A satellite that stops heartbeating for LEASE_TIMEOUT_MS has its jobs put
- * back in the queue; a result that arrives after that is dropped.
+ * back in the queue; a result that arrives after that is dropped. So does a
+ * job still out after OVERDUE_FACTOR times the pass's p95 tile time (never
+ * sooner than OVERDUE_FLOOR_MS), heartbeat or not: a satellite whose tile
+ * code hung kept the last 6 of the DACH mesh pass for ever (2026-10-30). An
+ * overdue tile goes to the local workers when there are any, else to another
+ * satellite, and fails the pass after MAX_OVERRUNS tries.
  */
 
 import * as crypto from 'node:crypto';
@@ -44,6 +49,14 @@ export const TOKEN_FILE = path.join('data', 'satellite', 'token');
 /** A job config longer than this goes by hash, as a blob the satellite caches. */
 const INLINE_CONFIG_BYTES = 8192;
 const LEASE_TIMEOUT_MS = 90_000;
+/** A job out longer than this many times the pass's p95 tile time is taken back, heartbeat or not... */
+const OVERDUE_FACTOR = 5;
+/** ...but never sooner than this, */
+const OVERDUE_FLOOR_MS = 10 * 60_000;
+/** ...and only once this many of the pass's tiles have finished (a chunk stage's jobs take long from the start). */
+const OVERDUE_MIN_SAMPLES = 5;
+/** A tile overdue this many times is an error, not another try. */
+const MAX_OVERRUNS = 3;
 const DISCOVERY_RETRY_MS = 10_000;
 const LONG_POLL_MS = 20_000;
 /** Recently read input files kept for the satellites' blob requests, bytes. */
@@ -73,9 +86,11 @@ export interface PoolOptions {
     t0: number;
     /** Most jobs one satellite holds at once (a chunk stage: 1, the job takes every thread). Unset: one per thread. */
     perSatellite?: number;
+    /** The least age at which a job is taken back from a satellite that still heartbeats (OVERDUE_FLOOR_MS); the tests shorten it. */
+    overdueFloorMs?: number;
 }
 
-interface Lease { idx: number; pass: number; satId: string; beat: number; job: Job }
+interface Lease { idx: number; pass: number; satId: string; start: number; beat: number; job: Job }
 interface Job {
     id: number; kind: RemoteKind; key: TileKey; inputs: Record<string, string | null>; outputs: string[]; codeSha: string;
     /** The config (remoteTiles.ts encodeWire): inline, or the hash of a blob holding it. */
@@ -92,6 +107,8 @@ const keyOf = (k: TileKey) => `${k.z}/${k.x}/${k.y}`;
 export class TilePool<R> {
     private readonly workers: Worker[] = [];
     private readonly idle = new Set<Worker>();
+    /** When each busy local worker was handed its tile. */
+    private readonly started = new Map<Worker, number>();
     private server?: http.Server;
     private udp?: dgram.Socket;
     private discoveryRetry?: NodeJS.Timeout;
@@ -120,6 +137,10 @@ export class TilePool<R> {
     private run?: {
         pass: number; tiles: readonly TileKey[]; queue: number[]; results: Array<R | undefined>; finished: boolean[];
         errors: string[]; done: number; dispatched: number; stoppedForDisk: boolean; lastLine: number; resolve: () => void;
+        /** How long the finished tiles took, ms. */
+        durations: number[];
+        /** Tiles taken back as overdue: how often, and from which satellites. */
+        overdue: Map<number, { n: number; sats: Set<string> }>;
     };
 
     constructor(private readonly opts: PoolOptions) {}
@@ -128,6 +149,11 @@ export class TilePool<R> {
         for (let i = 0; i < this.opts.local.jobs; i++) {
             const w = new Worker(this.opts.local.file, { execArgv: this.opts.local.execArgv, workerData: this.opts.local.workerData ?? this.opts.cfg });
             w.on('message', (msg: { idx: number; result: R | { error: string } }) => {
+                const t = this.started.get(w);
+                this.started.delete(w);
+                if (t !== undefined) {
+                    this.run?.durations.push(Date.now() - t);
+                }
                 this.idle.add(w);
                 this.complete(msg.idx, msg.result);
                 this.feedIdle();
@@ -153,7 +179,7 @@ export class TilePool<R> {
             const run = {
                 pass, tiles, queue: tiles.map((_, i) => i), results: new Array<R | undefined>(tiles.length),
                 finished: new Array<boolean>(tiles.length).fill(false), errors: [] as string[], done: 0, dispatched: 0,
-                stoppedForDisk: false, lastLine: 0,
+                stoppedForDisk: false, lastLine: 0, durations: [] as number[], overdue: new Map<number, { n: number; sats: Set<string> }>(),
                 resolve: () => {
                     this.run = undefined;
                     process.stdout.write('\n');
@@ -201,26 +227,53 @@ export class TilePool<R> {
 
     // --- the queue ------------------------------------------------------------
 
-    /** The next tile index to hand out, or undefined (queue empty, or the disk is low). */
-    private take(): number | undefined {
+    /**
+     * The next tile index to hand out (to satellite `satId`, or a local
+     * worker), or undefined (queue empty, nothing in it for that satellite, or
+     * the disk is low).
+     */
+    private take(satId?: string): number | undefined {
         const run = this.run;
         if (!run || run.stoppedForDisk) {
             return undefined;
         }
-        while (run.queue.length > 0) {
+        for (let i = 0; i < run.queue.length; i++) {
+            const idx = run.queue[i];
+            if (run.finished[idx]) {
+                run.queue.splice(i--, 1);
+                continue;
+            }
+            if (satId !== undefined && this.keepsFrom(idx, satId)) {
+                continue;
+            }
             if (run.dispatched % 50 === 0 && this.opts.diskLow()) {
                 run.stoppedForDisk = true;
                 run.queue.length = 0;
                 this.maybeFinish();
                 return undefined;
             }
-            const idx = run.queue.shift()!;
-            if (!run.finished[idx]) {
-                run.dispatched++;
-                return idx;
-            }
+            run.queue.splice(i, 1);
+            run.dispatched++;
+            return idx;
         }
         return undefined;
+    }
+
+    /**
+     * Whether an overdue tile stays away from satellite `satId`: every
+     * satellite leaves it to the local workers, and without those a satellite
+     * it overran on leaves it to one it has not - unless there is none, when
+     * it gets another try there (MAX_OVERRUNS ends that).
+     */
+    private keepsFrom(idx: number, satId: string): boolean {
+        const o = this.run!.overdue.get(idx);
+        if (!o) {
+            return false;
+        }
+        if (this.workers.length > 0) {
+            return true;
+        }
+        return o.sats.has(satId) && [...this.sats.keys()].some(id => !o.sats.has(id));
     }
 
     private feedIdle(): void {
@@ -230,6 +283,7 @@ export class TilePool<R> {
                 return;
             }
             this.idle.delete(w);
+            this.started.set(w, Date.now());
             w.postMessage({ idx, key: this.run!.tiles[idx], pass: this.run!.pass });
         }
     }
@@ -292,7 +346,7 @@ export class TilePool<R> {
         if (this.opts.satellites!.discovery !== false) {
             this.listenForSatellites(port);
         }
-        this.expiry = setInterval(() => this.expireLeases(), 5000);
+        this.expiry = setInterval(() => this.expireLeases(), Math.min(5000, (this.opts.overdueFloorMs ?? OVERDUE_FLOOR_MS) / 3));
         const ips = Object.values(os.networkInterfaces()).flat().filter(i => i && i.family === 'IPv4' && !i.internal).map(i => i!.address);
         console.log(`satellites: listening on port ${port} (${ips.join(', ')}), `
             + `${this.opts.satellites!.discovery === false ? 'no discovery' : `discovery on UDP ${DISCOVERY_PORT}`}, tile code ${this.codeSha.slice(0, 12)}`);
@@ -450,9 +504,13 @@ export class TilePool<R> {
             if (sat && this.atCapacity(sat)) {
                 continue;
             }
+            // One with nothing in the queue for it (only tiles kept from it, keepsFrom) waits on.
+            if (sat && !this.sendJob(sat, w.res)) {
+                continue;
+            }
             this.waiters.splice(this.waiters.indexOf(w), 1);
             clearTimeout(w.timer);
-            if (!sat || !this.sendJob(sat, w.res)) {
+            if (!sat) {
                 w.res.writeHead(204).end();
             }
         }
@@ -486,7 +544,7 @@ export class TilePool<R> {
     }
 
     private sendJob(sat: Satellite, res: http.ServerResponse): boolean {
-        const idx = this.take();
+        const idx = this.take(sat.id);
         if (idx === undefined) {
             return false;
         }
@@ -502,20 +560,55 @@ export class TilePool<R> {
             inputs, outputs: outputsOf(kind, key, this.opts.cfg), codeSha: this.codeSha,
             progress: { done: run.done, total: run.tiles.length, pass: run.pass },
         };
-        this.leases.set(job.id, { idx, pass: run.pass, satId: sat.id, beat: Date.now(), job });
+        this.leases.set(job.id, { idx, pass: run.pass, satId: sat.id, start: Date.now(), beat: Date.now(), job });
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(job));
         return true;
     }
 
+    /** How long a job may be out before it is taken back though its satellite heartbeats; Infinity until the pass has a measure. */
+    private overdueMs(): number {
+        const d = this.run?.durations;
+        if (!d || d.length < OVERDUE_MIN_SAMPLES) {
+            return Infinity;
+        }
+        const sorted = [...d].sort((a, b) => a - b);
+        return Math.max(this.opts.overdueFloorMs ?? OVERDUE_FLOOR_MS, OVERDUE_FACTOR * sorted[Math.floor(0.95 * (sorted.length - 1))]);
+    }
+
     private expireLeases(): void {
         const now = Date.now();
+        const overdueMs = this.leases.size > 0 ? this.overdueMs() : Infinity;
         for (const [id, l] of this.leases) {
-            if (now - l.beat > LEASE_TIMEOUT_MS) {
-                this.leases.delete(id);
-                if (this.run && this.run.pass === l.pass && !this.run.finished[l.idx]) {
-                    console.warn(`\nwarning: ${this.sats.get(l.satId)?.name ?? l.satId} stopped answering; ${keyOf(l.job.key)} goes back in the queue`);
-                    this.requeue(l.idx);
-                }
+            const silent = now - l.beat > LEASE_TIMEOUT_MS;
+            if (!silent && now - l.start <= overdueMs) {
+                continue;
+            }
+            this.leases.delete(id);
+            const run = this.run;
+            if (!run || run.pass !== l.pass || run.finished[l.idx]) {
+                continue;
+            }
+            const name = this.sats.get(l.satId)?.name ?? l.satId;
+            if (silent) {
+                console.warn(`\nwarning: ${name} stopped answering; ${keyOf(l.job.key)} goes back in the queue`);
+                this.requeue(l.idx);
+                continue;
+            }
+            // Heartbeating but not finishing: its tile code hung (or crawls) on this tile.
+            const o = run.overdue.get(l.idx) ?? { n: 0, sats: new Set<string>() };
+            o.n++;
+            o.sats.add(l.satId);
+            run.overdue.set(l.idx, o);
+            const age = duration(now - l.start);
+            if (o.n >= MAX_OVERRUNS) {
+                console.warn(`\nwarning: ${keyOf(l.job.key)} overran ${o.n} times (last on ${name}, ${age}); it fails`);
+                this.complete(l.idx, { error: `${keyOf(l.job.key)}: still running after ${age} on ${name}, overdue ${o.n} times` });
+            } else {
+                const to = this.workers.length > 0 ? 'for the local workers'
+                    : [...this.sats.keys()].some(s => !o.sats.has(s)) ? `for a satellite other than ${name}` : `for ${name} again, the only satellite`;
+                console.warn(`\nwarning: ${keyOf(l.job.key)} still running on ${name} after ${age} `
+                    + `(limit ${duration(overdueMs)}); it goes back in the queue ${to}`);
+                this.requeue(l.idx);
             }
         }
         for (const [id, s] of this.sats) {
@@ -587,6 +680,7 @@ export class TilePool<R> {
             return;
         }
         sat.done++;
+        this.run.durations.push(Date.now() - lease.start);
         this.complete(lease.idx, result);
         // The satellite has room again (see atCapacity).
         this.wakeWaiters();
@@ -655,6 +749,10 @@ export class TilePool<R> {
         // The file may have been rewritten since it was hashed.
         return crypto.createHash('sha1').update(bytes).digest('hex') === sha ? bytes : undefined;
     }
+}
+
+function duration(ms: number): string {
+    return ms < 120_000 ? `${(ms / 1000).toFixed(1)} s` : `${(ms / 60_000).toFixed(1)} min`;
 }
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
