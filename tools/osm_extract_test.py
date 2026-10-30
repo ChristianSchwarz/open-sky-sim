@@ -1,10 +1,14 @@
 """Tests for tools/osm_extract.py: picking the extracts that cover a bbox."""
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from unittest import mock
 
 from shapely.geometry import box
 
+import osm_extract
 from osm_extract import Source, _bbox_from_clip_name, _geometry_bbox, parse_bbox, plan_sources, regions_near
 
 
@@ -126,6 +130,75 @@ class BboxFromClipName(unittest.TestCase):
     def test_ignores_a_partial_or_foreign_file(self):
         self.assertIsNone(_bbox_from_clip_name('1_2_3_4.osm.pbf.part'))
         self.assertIsNone(_bbox_from_clip_name('lisbon.osm.pbf'))
+
+
+def _touch(path, size=1, mtime=None):
+    with open(path, 'wb') as fh:
+        fh.write(b'x' * size)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+class Planet(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.planet_dir = os.path.join(self.tmp.name, 'planet')
+        self.clips_dir = os.path.join(self.tmp.name, 'pbf')
+        os.makedirs(self.planet_dir)
+        os.makedirs(self.clips_dir)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        os.environ.pop(osm_extract.PLANET_ENV, None)
+        self.addCleanup(env.stop)
+        for name, value in (('PLANET_DIR', self.planet_dir), ('CLIPS_DIR', self.clips_dir),
+                            ('COVERAGE_FILE', os.path.join(self.tmp.name, 'extracts.json'))):
+            patch = mock.patch.object(osm_extract, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_finds_none_without_a_planet(self):
+        self.assertIsNone(osm_extract.find_planet(self.planet_dir))
+
+    def test_takes_the_newest_finished_planet(self):
+        _touch(os.path.join(self.planet_dir, 'planet-260901.osm.pbf'), mtime=1000)
+        newest = _touch(os.path.join(self.planet_dir, 'planet-261026.osm.pbf'), mtime=2000)
+        _touch(os.path.join(self.planet_dir, 'planet-latest.osm.pbf.md5'), mtime=3000)
+        self.assertEqual(osm_extract.find_planet(self.planet_dir), newest)
+
+    def test_skips_a_planet_aria2_is_still_writing(self):
+        done = _touch(os.path.join(self.planet_dir, 'planet-260901.osm.pbf'), mtime=1000)
+        partial = _touch(os.path.join(self.planet_dir, 'planet-261026.osm.pbf'), mtime=2000)
+        _touch(partial + '.aria2')
+        self.assertEqual(osm_extract.find_planet(self.planet_dir), done)
+
+    def test_env_names_the_planet(self):
+        path = _touch(os.path.join(self.tmp.name, 'elsewhere.osm.pbf'))
+        os.environ[osm_extract.PLANET_ENV] = path
+        self.assertEqual(osm_extract.find_planet(self.planet_dir), path)
+
+    def test_clip_covering_takes_the_smallest_whole_cover(self):
+        _touch(os.path.join(self.clips_dir, '5_45_17_55.osm.pbf'), size=100)
+        small = _touch(os.path.join(self.clips_dir, '10_47_14_50.osm.pbf'), size=10)
+        _touch(os.path.join(self.clips_dir, '12_47_13_48.osm.pbf'), size=1)  # only part of the box
+        self.assertEqual(osm_extract.clip_covering((11.0, 47.5, 12.5, 48.5), 'out.osm.pbf'), small)
+
+    def test_extract_clips_the_planet_without_geofabrik(self):
+        planet = _touch(os.path.join(self.planet_dir, 'planet-261026.osm.pbf'))
+        out = os.path.join(self.clips_dir, '11_47.5_12.5_48.5.osm.pbf')
+        with mock.patch.object(osm_extract, 'load_index', side_effect=AssertionError('index fetched')), \
+                mock.patch.object(osm_extract, 'clip_pbf') as clip:
+            osm_extract.ensure_extract((11.0, 47.5, 12.5, 48.5), out)
+        clip.assert_called_once_with(planet, out, (11.0, 47.5, 12.5, 48.5))
+
+    def test_extract_prefers_a_covering_clip_over_the_planet(self):
+        _touch(os.path.join(self.planet_dir, 'planet-261026.osm.pbf'))
+        clip_src = _touch(os.path.join(self.clips_dir, '10_47_14_50.osm.pbf'))
+        out = os.path.join(self.clips_dir, '11_47.5_12.5_48.5.osm.pbf')
+        with mock.patch.object(osm_extract, 'clip_pbf') as clip:
+            osm_extract.ensure_extract((11.0, 47.5, 12.5, 48.5), out)
+        clip.assert_called_once_with(clip_src, out, (11.0, 47.5, 12.5, 48.5))
 
 
 if __name__ == '__main__':

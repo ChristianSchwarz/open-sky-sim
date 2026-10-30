@@ -27,6 +27,11 @@ does the whole thing without a human in the loop:
 5. Record the downloaded region's coverage in `data/osm-cache/extracts.json`,
    so the importer's map can shade "you already have this on disk".
 
+A whole-planet file in `data/imports/planet/` (or `OSM_PLANET_PBF`) replaces
+steps 1-3: every import is clipped from it, without the Geofabrik index or a
+download (see `find_planet`). Only an earlier import's clip that already
+covers the whole bbox goes first - a few hundred MB read instead of 89 GB.
+
 Usage::
 
     python tools/osm_extract.py --bbox 7.6,45.9,7.8,46.0 --out data/imports/pbf/area.osm.pbf
@@ -70,6 +75,9 @@ INDEX_CACHE = os.path.join(PROJECT_ROOT, 'data', 'osm-cache', 'geofabrik-index.j
 REGIONS_DIR = os.path.join(PROJECT_ROOT, 'data', 'imports', 'geofabrik')
 CLIPS_DIR = os.path.join(PROJECT_ROOT, 'data', 'imports', 'pbf')
 COVERAGE_FILE = os.path.join(PROJECT_ROOT, 'data', 'osm-cache', 'extracts.json')
+# planet-YYMMDD.osm.pbf from planet.openstreetmap.org; a junction to E: here.
+PLANET_DIR = os.path.join(PROJECT_ROOT, 'data', 'imports', 'planet')
+PLANET_ENV = 'OSM_PLANET_PBF'
 # The index changes as Geofabrik adds/splits regions, but not from one import
 # to the next - a week-old copy is still the right answer.
 INDEX_MAX_AGE_S = 7 * 24 * 3600
@@ -296,6 +304,16 @@ def ensure_extract(
     if os.path.exists(out_path):
         print(f'{out_path} already covers this bbox, reusing it')
         return out_path
+    planet = find_planet()
+    if planet:
+        source = clip_covering(bbox, out_path) or planet
+        print(f'sources     {source}')
+        if source == planet:
+            _record_coverage({'id': 'planet', 'name': f'OSM planet ({os.path.basename(planet)})',
+                              'bbox': (-180.0, -90.0, 180.0, 90.0)})
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        clip_pbf(source, out_path, bbox)
+        return out_path
     index = load_index(refresh_index)
     near = regions_near(index, bbox)
     sources = plan_sources(bbox, near, local_sources(near, out_path))
@@ -340,6 +358,47 @@ def _bbox_from_clip_name(name: str) -> Optional[Tuple[float, float, float, float
     except ValueError:
         return None
     return west, south, east, north
+
+
+def find_planet(planet_dir: Optional[str] = None) -> Optional[str]:
+    """The whole-planet `.osm.pbf` to clip every import from, or None.
+
+    `OSM_PLANET_PBF` names one outright; otherwise the newest
+    `planet-*.osm.pbf` in `planet_dir`. A file aria2 is still writing (its
+    `.aria2` control file beside it) is not finished and does not count -
+    a sparse half-download clips without error into a box with holes.
+    """
+    override = os.environ.get(PLANET_ENV)
+    if override:
+        if os.path.isfile(override):
+            return override
+        print(f'warning: {PLANET_ENV}={override} does not exist, ignoring it')
+        return None
+    planet_dir = planet_dir or PLANET_DIR
+    if not os.path.isdir(planet_dir):
+        return None
+    done = [os.path.join(planet_dir, n) for n in os.listdir(planet_dir)
+            if n.startswith('planet-') and n.endswith('.osm.pbf')
+            and not os.path.exists(os.path.join(planet_dir, n + '.aria2'))]
+    return max(done, key=os.path.getmtime) if done else None
+
+
+def clip_covering(bbox: Tuple[float, float, float, float], out_path: str) -> Optional[str]:
+    """The smallest earlier clip whose own bbox holds all of `bbox`, or None."""
+    if not os.path.isdir(CLIPS_DIR):
+        return None
+    target = box(*bbox)
+    skip = os.path.normcase(os.path.abspath(out_path))
+    best: Optional[Tuple[int, str]] = None
+    for name in os.listdir(CLIPS_DIR):
+        path = os.path.join(CLIPS_DIR, name)
+        cbbox = _bbox_from_clip_name(name)
+        if not cbbox or os.path.normcase(os.path.abspath(path)) == skip or not box(*cbbox).covers(target):
+            continue
+        size = os.path.getsize(path)
+        if best is None or size < best[0]:
+            best = (size, path)
+    return best[1] if best else None
 
 
 def local_sources(near: Sequence[Tuple[dict, object]], out_path: str) -> List[Source]:
