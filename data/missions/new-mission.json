@@ -1,6 +1,28 @@
 {
   "version": 1,
   "name": "New mission",
-  "flights": [],
-  "area": "Nord Kap"
+  "flights": [
+    {
+      "name": "Flight 1",
+      "aircraftId": "3443641237_global_skies_collection_f_14d_f_14d_mat_r8046504498158259320",
+      "control": "player",
+      "start": {
+        "kind": "air",
+        "lat": 28.49659554881126,
+        "lon": -13.864808042302599,
+        "altM": 1000,
+        "speedMps": 125,
+        "headingDeg": 0
+      },
+      "waypoints": [],
+      "land": {
+        "kind": "runway",
+        "airfield": "GCFV",
+        "designator": "01",
+        "lat": 28.45062055034716,
+        "lon": -13.863823888070902
+      }
+    }
+  ],
+  "area": "Kanaren"
 }
