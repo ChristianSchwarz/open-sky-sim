@@ -2,16 +2,35 @@ import { computed, signal } from '@angular/core';
 import { Flight, FlightEndpoint, MAX_ALT_M, MAX_FLIGHTS, MAX_SPEED_MPS, MISSION_VERSION, Mission, Waypoint, validateMission } from './flightPlan';
 import * as store from './missionStore';
 import { missionUrl } from '../state/appRoute';
+import { UnitSystems } from '../state/gameDefs';
 
 /** What a click on the map does: add a waypoint to the selected flight, or set its start or landing. */
 export type PickMode = 'waypoint' | 'start' | 'land';
 /** A point of the selected flight: a waypoint by its index, its start or its landing. */
 export type SelectedPoint = number | 'start' | 'land';
 
+/** The selected flight's route on the map, and its selected point's card in the panel. */
+export const SELECTED_COLOUR = '#4dd0e1';
+
 export const FT = 0.3048;
 export const KT = 0.514444;
-const DEFAULT_ALT_M = 10_000 * FT;
-const DEFAULT_SPEED_MPS = 350 * KT;
+const KMH = 1 / 3.6;
+
+/** A unit altitudes or speeds are shown in: SI (m, m/s) per unit, and its label. */
+export interface DisplayUnit {
+    si: number;
+    label: string;
+}
+
+/** Altitudes in the settings' unit system: metres or feet. */
+export function altitudeUnit(units: UnitSystems): DisplayUnit {
+    return units === UnitSystems.IMPERIAL ? { si: FT, label: 'ft' } : { si: 1, label: 'm' };
+}
+
+/** Speeds in the settings' unit system: km/h or knots. */
+export function speedUnit(units: UnitSystems): DisplayUnit {
+    return units === UnitSystems.IMPERIAL ? { si: KT, label: 'kt' } : { si: KMH, label: 'km/h' };
+}
 
 /** One end of a runway the editor can start a flight from or land it on. */
 export interface RunwayEnd {
@@ -59,6 +78,17 @@ export class MissionEditor {
     /** False on a page without the dev server: nothing can be saved or flown. */
     readonly serverAvailable = signal(false);
     readonly errors = computed(() => validateMission(this.mission()));
+    /** The settings' unit system, which altitudes and speeds are shown and typed in. */
+    readonly units = signal(UnitSystems.METRIC);
+
+    /** A new point's altitude and speed: round numbers in the units shown. */
+    private get defaultAltM(): number {
+        return this.units() === UnitSystems.IMPERIAL ? 10_000 * FT : 3_000;
+    }
+
+    private get defaultSpeedMps(): number {
+        return this.units() === UnitSystems.IMPERIAL ? 350 * KT : 650 * KMH;
+    }
 
     constructor(readonly host: MissionEditorHost) {
         this.mission.update(m => ({ ...m, area: host.area }));
@@ -92,7 +122,7 @@ export class MissionEditor {
             name: `Flight ${m.flights.length + 1}`,
             aircraftId: this.host.defaultAircraftId,
             control: m.flights.some(f => f.control === 'player') ? 'ai' : 'player',
-            start: { kind: 'air', lat: c.lat, lon: c.lon, altM: DEFAULT_ALT_M, speedMps: DEFAULT_SPEED_MPS, headingDeg: 0 },
+            start: { kind: 'air', lat: c.lat, lon: c.lon, altM: this.defaultAltM, speedMps: this.defaultSpeedMps, headingDeg: 0 },
             waypoints: [],
         }));
         this.selectFlight(this.mission().flights.length - 1);
@@ -161,7 +191,7 @@ export class MissionEditor {
             const s = m.flights[i].start;
             if (s.kind !== 'air') {
                 m.flights[i].start = {
-                    kind: 'air', lat: s.lat, lon: s.lon, altM: DEFAULT_ALT_M, speedMps: DEFAULT_SPEED_MPS, headingDeg: 0,
+                    kind: 'air', lat: s.lat, lon: s.lon, altM: this.defaultAltM, speedMps: this.defaultSpeedMps, headingDeg: 0,
                 };
             }
         });
@@ -183,7 +213,7 @@ export class MissionEditor {
         this.edit(m => {
             const f = m.flights[i];
             if (f.land) {
-                f.waypoints.push({ lat: f.land.lat, lon: f.land.lon, altM: DEFAULT_ALT_M, speedMps: DEFAULT_SPEED_MPS });
+                f.waypoints.push({ lat: f.land.lat, lon: f.land.lon, altM: this.defaultAltM, speedMps: this.defaultSpeedMps });
                 delete f.land;
             }
         });
@@ -199,7 +229,43 @@ export class MissionEditor {
         }
     }
 
-    /** A click on the map at (lat, lon), as {@link pick} says. */
+    /**
+     * A turning point after flight i's point `after` (before the landing when
+     * that is the point), selected: halfway to the next point, or past the end
+     * as far again as the leg before it.
+     */
+    addWaypointAfter(i: number, after: SelectedPoint): void {
+        const f = this.mission().flights[i];
+        if (!f) {
+            return;
+        }
+        const route = [f.start, ...f.waypoints, ...(f.land ? [f.land] : [])];
+        // Index in the route of the point the new one follows.
+        const k = after === 'start' ? 0 : after === 'land' ? route.length - 2 : after + 1;
+        const a = route[k];
+        const b = route[k + 1];
+        const prev = route[k - 1];
+        const at = b ? { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 }
+            // About 5 km north with no leg to go by.
+            : prev ? { lat: 2 * a.lat - prev.lat, lon: 2 * a.lon - prev.lon } : { lat: a.lat + 0.05, lon: a.lon };
+        const like = 'altM' in a ? a : f.waypoints[k - 1];
+        const j = k;
+        this.edit(m => m.flights[i].waypoints.splice(j, 0, {
+            ...at, altM: like?.altM ?? this.defaultAltM, speedMps: like?.speedMps ?? this.defaultSpeedMps,
+        }));
+        this.selectPoint(i, j);
+    }
+
+    /** Flight i's point removed: a turning point, or the landing; the start stays. */
+    deletePoint(i: number, point: SelectedPoint): void {
+        if (point === 'land') {
+            this.clearLanding(i);
+        } else if (point !== 'start') {
+            this.removeWaypoint(i, point);
+        }
+    }
+
+    /** A double-click on the map at (lat, lon), as {@link pick} says. */
     clickMap(lat: number, lon: number): void {
         const i = this.selected();
         const f = this.mission().flights[i];
@@ -210,11 +276,10 @@ export class MissionEditor {
         if (mode === 'waypoint') {
             // After the selected waypoint, else at the end; the new one is then selected.
             const sel = this.selectedPoint();
-            const at = sel === 'start' ? 0
-                : sel === 'land' || sel === undefined ? f.waypoints.length : sel + 1;
+            const at = sel === 'start' ? 0 : sel === 'land' || sel === undefined ? f.waypoints.length : sel + 1;
             const prev = f.waypoints[at - 1] ?? (f.start.kind === 'air' ? f.start : undefined);
             this.edit(m => m.flights[i].waypoints.splice(at, 0, {
-                lat, lon, altM: prev?.altM ?? DEFAULT_ALT_M, speedMps: prev?.speedMps ?? DEFAULT_SPEED_MPS,
+                lat, lon, altM: prev?.altM ?? this.defaultAltM, speedMps: prev?.speedMps ?? this.defaultSpeedMps,
             }));
             this.selectedPoint.set(at);
             return;
@@ -227,8 +292,8 @@ export class MissionEditor {
             } else if (mode === 'start') {
                 const old = flight.start.kind === 'air' ? flight.start : undefined;
                 flight.start = {
-                    kind: 'air', lat, lon, altM: old?.altM ?? DEFAULT_ALT_M,
-                    speedMps: old?.speedMps ?? DEFAULT_SPEED_MPS, headingDeg: old?.headingDeg ?? 0,
+                    kind: 'air', lat, lon, altM: old?.altM ?? this.defaultAltM,
+                    speedMps: old?.speedMps ?? this.defaultSpeedMps, headingDeg: old?.headingDeg ?? 0,
                 };
             }
         });
@@ -262,8 +327,8 @@ export class MissionEditor {
             const f = m.flights[i];
             const old = f.start.kind === 'air' ? f.start : undefined;
             f.start = end ? { kind: 'runway', ...end } : {
-                kind: 'air', lat, lon, altM: old?.altM ?? DEFAULT_ALT_M,
-                speedMps: old?.speedMps ?? DEFAULT_SPEED_MPS, headingDeg: old?.headingDeg ?? 0,
+                kind: 'air', lat, lon, altM: old?.altM ?? this.defaultAltM,
+                speedMps: old?.speedMps ?? this.defaultSpeedMps, headingDeg: old?.headingDeg ?? 0,
             };
         });
     }

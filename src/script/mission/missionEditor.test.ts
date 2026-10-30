@@ -82,6 +82,22 @@ describe('MissionEditor', () => {
         assert.equal(e.selectedPoint(), undefined);
     });
 
+    it('adds a waypoint from the menu halfway on, or past the end, and deletes any point but the start', () => {
+        const e = editor();
+        e.addFlight();
+        e.moveStart(0, 0, 0);
+        e.clickMap(0, 2);
+        e.addWaypointAfter(0, 'start');
+        assert.deepEqual(e.mission().flights[0].waypoints.map(w => [w.lat, w.lon]), [[0, 1], [0, 2]]);
+        assert.equal(e.selectedPoint(), 0);
+        e.addWaypointAfter(0, 1);
+        assert.deepEqual(e.mission().flights[0].waypoints.map(w => [w.lat, w.lon]), [[0, 1], [0, 2], [0, 3]]);
+        assert.equal(e.selectedPoint(), 2);
+        e.deletePoint(0, 'start');
+        e.deletePoint(0, 0);
+        assert.deepEqual(e.mission().flights[0].waypoints.map(w => w.lon), [2, 3]);
+    });
+
     it('drops the waypoint selection with another flight', () => {
         const e = editor();
         e.addFlight();
@@ -101,7 +117,7 @@ describe('MissionEditor', () => {
         assert.deepEqual(e.mission().flights[0].start, { kind: 'runway', ...RUNWAY });
         e.moveStart(0, 52.0, 13.0);
         assert.deepEqual(e.mission().flights[0].start,
-            { kind: 'air', lat: 52.0, lon: 13.0, altM: 10_000 * 0.3048, speedMps: 350 * 0.514444, headingDeg: 0 });
+            { kind: 'air', lat: 52.0, lon: 13.0, altM: 3_000, speedMps: 650 * (1 / 3.6), headingDeg: 0 });
         // A waypoint added with the start selected goes first.
         e.clickMap(1, 1);
         e.selectPoint(0, 'start');
@@ -118,7 +134,7 @@ describe('MissionEditor', () => {
         e.moveLand(0, 52.0, 13.0);
         assert.deepEqual(e.mission().flights[0].land, { kind: 'runway', ...RUNWAY }, 'moved off the runway');
         e.clickMap(1, 1);
-        assert.equal(e.mission().flights[0].waypoints.length, 1, 'a waypoint with the landing selected goes last');
+        assert.equal(e.mission().flights[0].waypoints.length, 1, 'a waypoint with the landing selected goes before it');
         e.selectPoint(0, 'land');
         e.clearLanding(0);
         assert.equal(e.mission().flights[0].land, undefined);

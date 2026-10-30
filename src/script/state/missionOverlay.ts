@@ -1,21 +1,23 @@
 /**
  * The waypoint editor's routes on the F12 map: per flight a line from its
  * start through its waypoints to its runway, the waypoints numbered. A
- * waypoint drags to move and right-clicks away; everything else lets the
- * pointer through to the map, whose clicks the editor turns into waypoints.
+ * waypoint drags to move, and a click on the selected
+ * one opens a menu beside it to add a waypoint after it or delete it;
+ * everything else lets the pointer through to the map, whose double-clicks
+ * the editor turns into waypoints.
  *
  * Redrawn when the view or the mission changes, from {@link MapView.pageOf}.
  */
 
 import * as THREE from 'three';
 import { Flight, FlightEndpoint } from '../mission/flightPlan';
-import { FT, MissionEditor, SelectedPoint } from '../mission/missionEditor';
+import { MissionEditor, SELECTED_COLOUR, SelectedPoint, altitudeUnit, speedUnit } from '../mission/missionEditor';
 import { Airfield } from '../terrain/airfields';
 import { airfieldSymbolsSvg } from './airfieldSymbols';
 import { MapView } from './mapView';
 
 const SVG = 'http://www.w3.org/2000/svg';
-const SELECTED = '#4dd0e1';
+const SELECTED = SELECTED_COLOUR;
 const PLAYER = '#ffcc33';
 const OTHER = '#d8e4ee';
 /** A press on a waypoint moving less than this (px) selects it without moving it. */
@@ -25,11 +27,20 @@ const DRAG_SLOP_PX = 3;
 const WP = 'mission-wp pointer-events-auto cursor-move';
 /** A label outlined in the map's background so it reads over routes. */
 const LABEL = 'mission-wp-label stroke-[#0d1a26] stroke-3 [paint-order:stroke]';
+const MENU_ITEM = 'block w-full cursor-pointer border-0 bg-transparent px-3 py-1.5 text-left text-inherit hover:bg-white/10'
+    + ' disabled:cursor-default'
+    + ' disabled:opacity-40 disabled:hover:bg-transparent';
 
 export class MissionOverlay {
     private readonly svg: SVGSVGElement;
     private drawn: unknown[] = [];
-    private drag: { flight: number; point: SelectedPoint; x: number; y: number; moving: boolean } | undefined;
+    private drag: {
+        flight: number; point: SelectedPoint; x: number; y: number; moving: boolean;
+        /** Already selected when pressed: a click (no drag) then opens the menu. */
+        wasSelected: boolean;
+    } | undefined;
+    /** The selected point's menu, while open. */
+    private menu: HTMLElement | undefined;
 
     constructor(
         private readonly map: MapView, private readonly editor: MissionEditor,
@@ -41,13 +52,15 @@ export class MissionOverlay {
         this.svg.setAttribute('class', 'mission-overlay pointer-events-none fixed top-0 left-(--map-split) z-4 h-full'
             + ' w-[calc(100%-var(--map-split))] font-mono text-[11px] font-bold');
         document.body.appendChild(this.svg);
-        map.onGroundClick = (lat, lon) => editor.clickMap(lat, lon);
+        map.onGroundDoubleClick = (lat, lon) => editor.clickMap(lat, lon);
         this.svg.addEventListener('pointerdown', e => {
             const at = pointOf(e.target);
             if (!at || e.button !== 0) {
                 return;
             }
-            this.drag = { ...at, x: e.clientX, y: e.clientY, moving: false };
+            const wasSelected = at.flight === editor.selected() && at.point === editor.selectedPoint();
+            this.drag = { ...at, x: e.clientX, y: e.clientY, moving: false, wasSelected };
+            this.closeMenu();
             editor.selectPoint(at.flight, at.point);
             e.preventDefault();
         });
@@ -68,7 +81,28 @@ export class MissionOverlay {
                 editor.moveWaypoint(d.flight, d.point, g.lat, g.lon);
             }
         });
-        window.addEventListener('pointerup', () => { this.drag = undefined; });
+        window.addEventListener('pointerup', e => {
+            const d = this.drag;
+            this.drag = undefined;
+            const marker = (e.target as Element | null)?.closest?.('[data-wp]');
+            if (d && !d.moving && d.wasSelected && marker) {
+                // Beside the symbol, not its label: the ring when selected, else the circle or square.
+                const symbol = marker.querySelector('circle, rect') ?? marker;
+                this.openMenu(d.flight, d.point, symbol.getBoundingClientRect());
+            }
+        });
+        // A press anywhere but the menu closes it; so does Escape.
+        window.addEventListener('pointerdown', e => {
+            if (this.menu && !this.menu.contains(e.target as Node)) {
+                this.closeMenu();
+            }
+        }, true);
+        window.addEventListener('keydown', e => {
+            if (this.menu && e.key === 'Escape') {
+                this.closeMenu();
+                e.stopPropagation();
+            }
+        }, true);
         // Delete or Backspace removes the selected waypoint or landing, unless a field of the panel has the keys.
         window.addEventListener('keydown', e => {
             const j = editor.selectedPoint();
@@ -83,19 +117,15 @@ export class MissionOverlay {
             }
             e.preventDefault();
         });
-        this.svg.addEventListener('contextmenu', e => {
-            const at = pointOf(e.target);
-            e.preventDefault();
-            if (at && typeof at.point === 'number') {
-                editor.removeWaypoint(at.flight, at.point);
-            }
-        });
+        // No browser menu over the markers; a right-click does nothing to a waypoint.
+        this.svg.addEventListener('contextmenu', e => e.preventDefault());
     }
 
     /** Shown with the map, hidden while the game flies; the editor keeps its mission meanwhile. */
     setShown(on: boolean): void {
         this.svg.style.display = on ? '' : 'none';
         this.drag = undefined;
+        this.closeMenu();
         this.drawn = [];
     }
 
@@ -105,10 +135,12 @@ export class MissionOverlay {
         const m = this.camera.matrixWorld.elements;
         const key = [this.map.viewVersion, m[12], m[13], m[14], m[8], m[10], window.innerWidth, window.innerHeight,
             document.body.style.getPropertyValue('--map-split'), this.editor.mission(), this.editor.selected(),
-            this.editor.selectedPoint(), this.airfields()];
+            this.editor.selectedPoint(), this.airfields(), this.editor.units()];
         if (key.every((v, i) => v === this.drawn[i])) {
             return;
         }
+        // The menu belongs where the point was: gone once the view or the route moves.
+        this.closeMenu();
         this.drawn = key;
         // Placed over the map only, so routes off its left edge do not run over the panel.
         const box = this.svg.getBoundingClientRect();
@@ -118,10 +150,51 @@ export class MissionOverlay {
         this.svg.innerHTML = `<g transform="translate(${-box.left},0)">${parts.join('')}</g>`;
     }
 
+    /** The menu of flight's `point` beside its marker at `box` (page px). */
+    private openMenu(flight: number, point: SelectedPoint, box: DOMRect): void {
+        this.closeMenu();
+        const menu = this.menu = document.createElement('div');
+        menu.setAttribute('role', 'menu');
+        menu.className = 'fixed z-5 min-w-36 rounded border border-white/20 bg-[#0d1a26] py-1 text-sm text-white/90 shadow-lg';
+        menu.style.left = `${box.right + 6}px`;
+        menu.style.top = `${box.top}px`;
+        const item = (label: string, enabled: boolean, run: () => void) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.setAttribute('role', 'menuitem');
+            b.className = MENU_ITEM;
+            b.textContent = label;
+            b.disabled = !enabled;
+            b.addEventListener('click', () => {
+                this.closeMenu();
+                run();
+            });
+            menu.appendChild(b);
+        };
+        item('Add waypoint', true, () => this.editor.addWaypointAfter(flight, point));
+        // The takeoff is the flight's start: it can be moved, not deleted.
+        item('Delete waypoint', point !== 'start', () => this.editor.deletePoint(flight, point));
+        document.body.appendChild(menu);
+        // On the left of the point instead where the right would run off the page.
+        const width = menu.getBoundingClientRect().width;
+        if (box.right + 6 + width > window.innerWidth) {
+            menu.style.left = `${box.left - 6 - width}px`;
+        }
+    }
+
+    private closeMenu(): void {
+        this.menu?.remove();
+        this.menu = undefined;
+    }
+
     private flightSvg(f: Flight, i: number): string {
         const selected = i === this.editor.selected();
         const colour = selected ? SELECTED : f.control === 'player' ? PLAYER : OTHER;
         const at = (p: { lat: number; lon: number }) => this.map.pageOf(p.lat, p.lon);
+        const alt = altitudeUnit(this.editor.units());
+        const spd = speedUnit(this.editor.units());
+        // Feet to the hundred, metres to the ten.
+        const altStep = alt.label === 'ft' ? 100 : 10;
         const line = [f.start, ...f.waypoints, ...(f.land ? [f.land] : [])].map(at)
             .filter((p): p is { x: number; y: number } => p !== undefined);
         let out = `<g opacity="${selected ? 1 : 0.6}">`;
@@ -143,9 +216,10 @@ export class MissionOverlay {
             out += `<g data-wp="${i},${j}" class="${WP}" transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">`
                 + (picked ? `<circle r="14" fill="none" stroke="#ffffff" stroke-width="2"/>` : '')
                 + `<circle r="9" fill="${picked ? colour : '#0d1a26'}" stroke="${colour}" stroke-width="2"/>`
-                + `<text text-anchor="middle" dy="4" fill="${picked ? '#0d1a26' : colour}">${j + 1}</text>`
+                + `<text text-anchor="middle" dy="4" fill="${picked ? '#0d1a26' : colour}">${j + 2}</text>`
                 + (selected ? `<text x="13" dy="4" class="${LABEL}" fill="${colour}">`
-                    + `${Math.round(w.altM / FT / 100) * 100} ft · ${Math.round(w.speedMps / 0.514444)} kt</text>` : '')
+                    + `${Math.round(w.altM / alt.si / altStep) * altStep} ${alt.label} · `
+                    + `${Math.round(w.speedMps / spd.si)} ${spd.label}</text>` : '')
                 + '</g>';
         });
         return `${out}</g>`;
@@ -174,9 +248,9 @@ export class MissionOverlay {
         return `<g${drag} transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">`
             + (picked ? `<circle r="${r + 5}" fill="none" stroke="#ffffff" stroke-width="2"/>` : '')
             + `${shape} fill="${fill}" stroke="${colour}" stroke-width="${onRunway ? 3 : 2}"/>`
-            // Numbered 0 like the panel's list; on a runway the chart symbol is inside instead.
+            // Numbered 1 like the panel's list; on a runway the chart symbol is inside instead.
             + (kind === 'start' && !onRunway
-                ? `<text text-anchor="middle" dy="4" fill="${picked ? '#0d1a26' : colour}">0</text>` : '')
+                ? `<text text-anchor="middle" dy="4" fill="${picked ? '#0d1a26' : colour}">1</text>` : '')
             + `<text x="${r + 4}" dy="4" class="${LABEL}" fill="${colour}">${escapeXml(text)}</text></g>`;
     }
 }

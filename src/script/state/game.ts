@@ -3829,6 +3829,8 @@ export class Game {
                     this.navigateApp(missionUrl(id));
                 },
             });
+            editor.units.set(this.configService.unitSystem.getActive());
+            this.configService.unitSystem.addChangeListener(units => editor.units.set(units));
             this.missionOverlay = new MissionOverlay(
                 map, editor, this.playerCamera.main, () => this.chartAirfields);
             this.missionPanelHost = document.body.appendChild(document.createElement('rfs-mission-panel'));

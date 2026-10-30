@@ -35,10 +35,6 @@ const URL_WRITE_DELAY_MS = 400;
 const MAX_TILT_DEG = 75;
 /** Degrees of tilt per pixel dragged with both buttons down. */
 const TILT_PER_PX = 0.25;
-/** A press that moves less than this (px) is a click, not a drag. */
-const CLICK_SLOP_PX = 4;
-/** A click waits this long (ms) for a second one: a double-click zooms and is no click. */
-const CLICK_DELAY_MS = 250;
 
 export interface MapAircraft {
     lat: number;
@@ -138,7 +134,8 @@ export class MapView {
             // Wraps rather than covering the scale bar when the split leaves the map narrow.
             + ' max-w-[calc(100%-var(--map-split)-280px)]');
         help.textContent =
-            'drag to move · wheel or double-click to zoom · left+right drag to tilt · arrows / WASD · +/- · C centres the aircraft';
+            'drag to move · wheel or +/- to zoom · double-click adds a waypoint · left+right drag to tilt · arrows / WASD'
+            + ' · C centres the aircraft';
         this.bindPointer();
         const divider = el('div', 'map-divider fixed inset-y-0 left-(--map-split) z-6 -ml-[3px] w-1.5 cursor-col-resize touch-none'
             + ' bg-[#3c5468] hover:bg-[#8aa0b2]');
@@ -288,8 +285,8 @@ export class MapView {
     /** Bumped on every pan, zoom and tilt; see Game.fitMapDetail. */
     viewVersion = 0;
 
-    /** A left click on the ground, not a drag or a double-click (the waypoint editor's). */
-    onGroundClick: ((lat: number, lon: number) => void) | undefined;
+    /** A double-click on the ground (the waypoint editor's); without one a double-click zooms. */
+    onGroundDoubleClick: ((lat: number, lon: number) => void) | undefined;
 
     /**
      * Page position of a point on the ground, or undefined behind the camera.
@@ -331,8 +328,6 @@ export class MapView {
         const c = this.host.container;
         const pointers = new Map<number, { x: number; y: number }>();
         let pinch = 0;
-        let press: { x: number; y: number } | undefined;
-        let clickTimer = 0;
         const local = (e: { clientX: number; clientY: number }): [number, number] => {
             const r = c.getBoundingClientRect();
             return [e.clientX - r.left, e.clientY - r.top];
@@ -349,7 +344,6 @@ export class MapView {
             }
             c.setPointerCapture(e.pointerId);
             pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-            press = pointers.size === 1 && e.button === 0 ? { x: e.clientX, y: e.clientY } : undefined;
             c.classList.add('map-dragging');
             if (pointers.size === 2) {
                 const [a, b] = [...pointers.values()];
@@ -382,13 +376,6 @@ export class MapView {
             }
         });
         const release = (e: PointerEvent): void => {
-            if (press && e.type === 'pointerup'
-                && Math.hypot(e.clientX - press.x, e.clientY - press.y) < CLICK_SLOP_PX) {
-                const at = this.geodeticAtPage(e.clientX, e.clientY);
-                window.clearTimeout(clickTimer);
-                clickTimer = window.setTimeout(() => at && this.onGroundClick?.(at.lat, at.lon), CLICK_DELAY_MS);
-            }
-            press = undefined;
             pointers.delete(e.pointerId);
             if (!this.shown) {
                 pointers.clear();
@@ -413,8 +400,12 @@ export class MapView {
             if (!this.shown) {
                 return;
             }
-            window.clearTimeout(clickTimer);
-            this.zoomAt(e.shiftKey ? 0.5 : 2, ...local(e));
+            const at = this.onGroundDoubleClick && this.geodeticAtPage(e.clientX, e.clientY);
+            if (at) {
+                this.onGroundDoubleClick!(at.lat, at.lon);
+            } else if (!this.onGroundDoubleClick) {
+                this.zoomAt(e.shiftKey ? 0.5 : 2, ...local(e));
+            }
         });
     }
 

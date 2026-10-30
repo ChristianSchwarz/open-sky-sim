@@ -5,12 +5,12 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
 import { FlightControl, FlightEndpoint, MAX_ALT_M, MAX_FLIGHTS, MAX_SPEED_MPS } from '../../mission/flightPlan';
-import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missionEditor';
+import { MissionEditor, RunwayEnd, SELECTED_COLOUR, altitudeUnit, speedUnit } from '../../mission/missionEditor';
 
 /**
- * The waypoint editor (F12 map's left pane), three levels under a breadcrumb:
- * the mission's flights; one flight's aircraft and AI or player control; that
- * flight's waypoints: its start, turning points and landing. The map
+ * The waypoint editor (F12 map's left pane), two levels under a breadcrumb:
+ * the mission's flights; one flight's aircraft and AI or player control with
+ * its waypoints below: its takeoff, turning points and landing. The map
  * on the right is where points are placed (state/missionOverlay.ts).
  */
 @Component({
@@ -65,12 +65,7 @@ import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missio
         <button mat-button type="button" [disabled]="view() === 'flights'" (click)="level.set('flights')">Flights</button>
         @if (view() !== 'flights') {
             <span class="opacity-50">›</span>
-            <button mat-button type="button" [disabled]="view() === 'flight'" (click)="level.set('flight')">
-                {{ flight()!.name }}</button>
-        }
-        @if (view() === 'waypoints') {
-            <span class="opacity-50">›</span>
-            <button mat-button type="button" disabled>Waypoints</button>
+            <button mat-button type="button" disabled>{{ flight()!.name }}</button>
         }
     </nav>
 
@@ -92,7 +87,6 @@ import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missio
     } @else {
         @let f = flight()!;
         @let i = e.selected();
-        @if (view() === 'flight') {
             <mat-form-field class="w-full" subscriptSizing="dynamic">
                 <mat-label>Flight</mat-label>
                 <input matInput autocomplete="off" [value]="f.name"
@@ -113,24 +107,20 @@ import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missio
                 }
             </mat-button-toggle-group>
 
-            <button mat-stroked-button type="button" (click)="e.pick.set('waypoint'); level.set('waypoints')">
-                Enter waypoints ({{ f.waypoints.length + 1 + (f.land ? 1 : 0) }}) ›</button>
-        } @else {
+            <h3 class="m-0 mt-2 text-sm font-medium opacity-80">Waypoints</h3>
             @let last = f.waypoints.length - 1;
-            <div class="flex flex-col gap-2 rounded border border-white/20 p-2"
-                [class.bg-cyan-400/15]="e.selectedPoint() === 'start'" (click)="e.selectPoint(i, 'start')">
+            <fieldset class="flex flex-col gap-2 rounded border border-white/20 p-2 pt-1"
+                [class.bg-cyan-400/15]="e.selectedPoint() === 'start'" [style.border-color]="e.selectedPoint() === 'start' ? selectedColour : null" (click)="e.selectPoint(i, 'start')">
+                <legend class="px-1 font-mono text-xs opacity-80">1</legend>
                 <div class="flex items-center gap-2">
-                    <span class="w-6 text-center font-mono">0</span>
                     <mat-form-field class="min-w-0 flex-1" subscriptSizing="dynamic">
                         <mat-label>Type</mat-label>
                         <mat-select [value]="f.start.kind === 'runway' ? 'start' : 'turn'"
                             (selectionChange)="$event.value === 'start' ? setAirport(i, 'start', airports(f.start)[0]) : e.setAirStart(i)">
-                            <mat-option value="start" [disabled]="airports(f.start).length === 0">Start</mat-option>
+                            <mat-option value="start" [disabled]="airports(f.start).length === 0">Takeoff</mat-option>
                             <mat-option value="turn">Turning point</mat-option>
                         </mat-select>
                     </mat-form-field>
-                    <button mat-stroked-button type="button" (click)="pickOn('start')">
-                        {{ e.pick() === 'start' ? 'Click the map…' : 'Pick on map' }}</button>
                 </div>
                 @if (f.start.kind === 'runway') {
                     <div class="grid grid-cols-2 gap-2">
@@ -155,24 +145,24 @@ import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missio
                 } @else {
                     <div class="grid grid-cols-2 gap-2">
                         <mat-form-field subscriptSizing="dynamic">
-                            <mat-label>Alt ft</mat-label>
-                            <input matInput type="number" [value]="ft(f.start.altM)"
-                                (change)="e.updateAirStart(i, { altM: num($event) * FT })">
+                            <mat-label>Alt {{ alt().label }}</mat-label>
+                            <input matInput type="number" [value]="toAlt(f.start.altM)"
+                                (change)="e.updateAirStart(i, { altM: num($event) * alt().si })">
                         </mat-form-field>
                         <mat-form-field subscriptSizing="dynamic">
-                            <mat-label>Speed kt</mat-label>
-                            <input matInput type="number" [value]="kt(f.start.speedMps)"
-                                (change)="e.updateAirStart(i, { speedMps: num($event) * KT })">
+                            <mat-label>Speed {{ spd().label }}</mat-label>
+                            <input matInput type="number" [value]="toSpd(f.start.speedMps)"
+                                (change)="e.updateAirStart(i, { speedMps: num($event) * spd().si })">
                         </mat-form-field>
                     </div>
                 }
-            </div>
+            </fieldset>
 
             @for (w of f.waypoints; track $index; let j = $index) {
-                <div class="flex flex-col gap-2 rounded border border-white/20 p-2"
-                    [class.bg-cyan-400/15]="j === e.selectedPoint()" (click)="e.selectPoint(i, j)">
+                <fieldset class="flex flex-col gap-2 rounded border border-white/20 p-2 pt-1"
+                    [class.bg-cyan-400/15]="j === e.selectedPoint()" [style.border-color]="j === e.selectedPoint() ? selectedColour : null" (click)="e.selectPoint(i, j)">
+                    <legend class="px-1 font-mono text-xs opacity-80">{{ j + 2 }}</legend>
                     <div class="flex items-center gap-2">
-                        <span class="w-6 text-center font-mono">{{ j + 1 }}</span>
                         <mat-form-field class="min-w-0 flex-1" subscriptSizing="dynamic">
                             <mat-label>Type</mat-label>
                             <mat-select value="turn" [disabled]="j !== last || !!f.land"
@@ -186,25 +176,25 @@ import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missio
                     </div>
                     <div class="grid grid-cols-2 gap-2">
                         <mat-form-field subscriptSizing="dynamic">
-                            <mat-label>Alt ft</mat-label>
-                            <input matInput type="number" [value]="ft(w.altM)"
-                                (change)="e.updateWaypoint(i, j, { altM: num($event) * FT })">
+                            <mat-label>Alt {{ alt().label }}</mat-label>
+                            <input matInput type="number" [value]="toAlt(w.altM)"
+                                (change)="e.updateWaypoint(i, j, { altM: num($event) * alt().si })">
                         </mat-form-field>
                         <mat-form-field subscriptSizing="dynamic">
-                            <mat-label>Speed kt</mat-label>
-                            <input matInput type="number" [value]="kt(w.speedMps)"
-                                (change)="e.updateWaypoint(i, j, { speedMps: num($event) * KT })">
+                            <mat-label>Speed {{ spd().label }}</mat-label>
+                            <input matInput type="number" [value]="toSpd(w.speedMps)"
+                                (change)="e.updateWaypoint(i, j, { speedMps: num($event) * spd().si })">
                         </mat-form-field>
                     </div>
-                </div>
+                </fieldset>
             }
 
             @if (f.land?.kind === 'runway') {
                 @let land = $any(f.land);
-                <div class="flex flex-col gap-2 rounded border border-white/20 p-2"
-                    [class.bg-cyan-400/15]="e.selectedPoint() === 'land'" (click)="e.selectPoint(i, 'land')">
+                <fieldset class="flex flex-col gap-2 rounded border border-white/20 p-2 pt-1"
+                    [class.bg-cyan-400/15]="e.selectedPoint() === 'land'" [style.border-color]="e.selectedPoint() === 'land' ? selectedColour : null" (click)="e.selectPoint(i, 'land')">
+                    <legend class="px-1 font-mono text-xs opacity-80">{{ f.waypoints.length + 2 }}</legend>
                     <div class="flex items-center gap-2">
-                        <span class="w-6 text-center font-mono">{{ f.waypoints.length + 1 }}</span>
                         <mat-form-field class="min-w-0 flex-1" subscriptSizing="dynamic">
                             <mat-label>Type</mat-label>
                             <mat-select value="land" (selectionChange)="$event.value === 'turn' && e.landingToTurningPoint(i)">
@@ -212,8 +202,6 @@ import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missio
                                 <mat-option value="land">Landing</mat-option>
                             </mat-select>
                         </mat-form-field>
-                        <button mat-stroked-button type="button" (click)="pickOn('land')">
-                            {{ e.pick() === 'land' ? 'Click the map…' : 'Pick on map' }}</button>
                     </div>
                     <div class="grid grid-cols-2 gap-2">
                         <mat-form-field subscriptSizing="dynamic">
@@ -234,9 +222,8 @@ import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missio
                             </mat-select>
                         </mat-form-field>
                     </div>
-                </div>
+                </fieldset>
             }
-        }
     }
 </div>
 `,
@@ -244,21 +231,23 @@ import { FT, KT, MissionEditor, PickMode, RunwayEnd } from '../../mission/missio
 export class MissionPanel {
     readonly editor = input.required<MissionEditor>();
     readonly maxFlights = MAX_FLIGHTS;
-    // The template sees only members: a bare imported FT there is undefined and every typed value NaN.
-    readonly FT = FT;
-    readonly KT = KT;
+    /** The selected flight's route colour on the map, round the selected point's card. */
+    readonly selectedColour = SELECTED_COLOUR;
+    /** Altitudes and speeds in the settings' units. */
+    readonly alt = computed(() => altitudeUnit(this.editor().units()));
+    readonly spd = computed(() => speedUnit(this.editor().units()));
     readonly controls: ReadonlyArray<{ value: FlightControl; label: string }> = [
         { value: 'ai', label: 'AI' }, { value: 'player', label: 'Player' },
     ];
-    /** Breadcrumb level: the flight list, one flight, or its waypoints. */
-    readonly level = signal<'flights' | 'flight' | 'waypoints'>('flights');
+    /** Breadcrumb level: the flight list, or one flight with its waypoints. */
+    readonly level = signal<'flights' | 'flight'>('flights');
     readonly flight = computed(() => this.editor().mission().flights[this.editor().selected()]);
     /** The level shown: back to the list when the selected flight is gone (removed, another mission loaded). */
     readonly view = computed(() => this.flight() ? this.level() : 'flights');
 
     /**
      * A validation message in the panel's terms: `flights[0].waypoints[0].altM: 0-20000 m`
-     * becomes `Flight 1, waypoint 1: altitude 0-65617 ft`, numbered as the list is.
+     * becomes `Flight 1, waypoint 2: altitude 0-20000 m` (or ft), numbered as the list is.
      */
     readableError(err: string): string {
         const m = /^flights\[(\d+)\]\.(?:(start|land)|waypoints\[(\d+)\])\.?(\w*): (.*)$/.exec(err);
@@ -266,11 +255,11 @@ export class MissionPanel {
             return err;
         }
         const f = this.editor().mission().flights[Number(m[1])];
-        const point = m[2] === 'start' ? 'waypoint 0' : m[2] === 'land'
-            ? `waypoint ${(f?.waypoints.length ?? 0) + 1}` : `waypoint ${Number(m[3]) + 1}`;
+        const point = m[2] === 'start' ? 'waypoint 1' : m[2] === 'land'
+            ? `waypoint ${(f?.waypoints.length ?? 0) + 2}` : `waypoint ${Number(m[3]) + 2}`;
         const what = ({
-            altM: () => `altitude 0-${Math.round(MAX_ALT_M / FT)} ft`,
-            speedMps: () => `speed 1-${Math.round(MAX_SPEED_MPS / KT)} kt`,
+            altM: () => `altitude 0-${this.toAlt(MAX_ALT_M)} ${this.alt().label}`,
+            speedMps: () => `speed ${this.toSpd(1)}-${this.toSpd(MAX_SPEED_MPS)} ${this.spd().label}`,
         } as Record<string, () => string>)[m[4]]?.() ?? `${m[4]} ${m[5]}`;
         return `${f?.name ?? `Flight ${Number(m[1]) + 1}`}, ${point}: ${what}`;
     }
@@ -332,23 +321,18 @@ export class MissionPanel {
         }
     }
 
-    pickOn(mode: PickMode): void {
-        const e = this.editor();
-        e.pick.set(e.pick() === mode ? 'waypoint' : mode);
-    }
-
     describe(p: FlightEndpoint): string {
         return p.kind === 'runway'
             ? `${p.airfield} runway ${p.designator}`
             : `in the air, ${p.lat.toFixed(3)}, ${p.lon.toFixed(3)}`;
     }
 
-    ft(m: number): number {
-        return Math.round(m / FT);
+    toAlt(m: number): number {
+        return Math.round(m / this.alt().si);
     }
 
-    kt(mps: number): number {
-        return Math.round(mps / KT);
+    toSpd(mps: number): number {
+        return Math.round(mps / this.spd().si);
     }
 
     value(e: Event): string {
