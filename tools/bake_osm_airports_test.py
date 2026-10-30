@@ -764,6 +764,113 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(found[0].embankments, [])
         self.assertNotIn('embankments', airfield_to_json(found[0]))
 
+    def test_an_airstrip_hosts_its_runway_like_an_aerodrome(self):
+        strip, strip_nodes = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Farm'}, first_node=100)
+        strip['tags']['aeroway'] = 'airstrip'
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        found = assemble_airfields(elements_and_nodes((strip, strip_nodes), runway))
+        self.assertEqual([a.name for a in found], ['Farm'])
+        self.assertEqual(len(found[0].perimeter) > 0, True)
+
+    def test_a_taxilane_is_laid_as_a_taxiway(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        lane, lane_nodes = way_from_bearing(15, 0.0, 120.0, {'aeroway': 'taxilane'})
+        lane['nodes'] = [600, 601]
+        lane_nodes = {600: lane_nodes[1], 601: lane_nodes[2]}
+        found = assemble_airfields(elements_and_nodes(field, runway, (lane, lane_nodes)))
+        self.assertEqual(len(found[0].taxiways), 1)
+        self.assertTrue(found[0].taxiways[0]['taxilane'])
+
+    def test_a_helipad_node_is_a_default_square_and_an_area_keeps_its_outline(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        lat, lon = offset(LAT0, LON0, 0.0, 400.0)
+        node = {'type': 'node', 'id': 700, 'lat': lat, 'lon': lon,
+                'tags': {'aeroway': 'helipad', 'ref': 'H1'}}
+        area, area_nodes = aerodrome_way(16, *offset(LAT0, LON0, 0.0, -400.0), 15.0, {}, first_node=800)
+        area['tags'] = {'aeroway': 'helipad', 'surface': 'concrete'}
+        found = assemble_airfields(elements_and_nodes(field, runway, node, (area, area_nodes)))
+        pads = found[0].helipads
+        self.assertEqual(len(pads), 2)
+        self.assertEqual((pads[0]['widthM'], pads[0]['ref']), (20.0, 'H1'))
+        self.assertAlmostEqual(pads[1]['widthM'], 30.0, delta=0.5)
+        self.assertEqual(pads[1]['surface'], 'concrete')
+        self.assertEqual(airfield_to_json(found[0])['helipads'], pads)
+
+    def test_a_holding_position_node_becomes_a_bar_across_its_taxiway(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        taxi, taxi_nodes = way_from_bearing(15, 0.0, 300.0, {'aeroway': 'taxiway', 'width': '20'},
+                                            lat=offset(LAT0, LON0, 0.0, 200.0)[0])
+        taxi['nodes'] = [600, 601]
+        taxi_nodes = {600: taxi_nodes[1], 601: taxi_nodes[2]}
+        lat, lon = offset(LAT0, LON0, 3.0, 150.0)
+        hold = {'type': 'node', 'id': 700, 'lat': lat, 'lon': lon,
+                'tags': {'aeroway': 'holding_position'}}
+        lat, lon = offset(LAT0, LON0, 0.0, -900.0)
+        lost = {'type': 'node', 'id': 701, 'lat': lat, 'lon': lon,
+                'tags': {'aeroway': 'holding_position'}}
+        found = assemble_airfields(elements_and_nodes(field, runway, (taxi, taxi_nodes), hold, lost))
+        holds = found[0].holding_positions
+        self.assertEqual(len(holds), 1)
+        self.assertEqual(holds[0]['kind'], 'runway')
+        (a_lat, a_lon), (b_lat, b_lon) = holds[0]['points']
+        frame = LocalFrame(LAT0, LON0)
+        ae, an = frame.to_m(a_lon, a_lat)
+        be, bn = frame.to_m(b_lon, b_lat)
+        # Across a north-south taxiway: east-west, as wide as it, on its centreline.
+        self.assertAlmostEqual(abs(be - ae), 20.0, delta=0.1)
+        self.assertAlmostEqual(an, bn, delta=0.1)
+        self.assertAlmostEqual((ae + be) / 2, 0.0, delta=0.1)
+
+    def test_a_papi_takes_the_heading_of_the_runway_it_stands_beside(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+        lat, lon = offset(LAT0, LON0, -400.0, 60.0)
+        papi = {'type': 'node', 'id': 700, 'lat': lat, 'lon': lon,
+                'tags': {'aeroway': 'navigationaid', 'navigationaid': 'PAPI'}}
+        lat, lon = offset(LAT0, LON0, 0.0, 1500.0)
+        far = {'type': 'node', 'id': 701, 'lat': lat, 'lon': lon,
+               'tags': {'aeroway': 'navigationaid', 'navigationaid': 'vasi'}}
+        edge = {'type': 'node', 'id': 702, 'lat': LAT0, 'lon': LON0,
+                'tags': {'aeroway': 'navigationaid', 'navigationaid': 'rwe'}}
+        found = assemble_airfields(elements_and_nodes(field, runway, papi, far, edge))
+        # The edge light is one of thousands and not kept.
+        papi_out, far_out = found[0].navigation_aids
+        self.assertEqual(papi_out['type'], 'papi')
+        self.assertAlmostEqual(papi_out['headingDeg'], found[0].runways[0].heading_deg)
+        self.assertNotIn('headingDeg', far_out)
+
+    def test_windsocks_stands_gates_bridges_and_fuel_go_with_their_aerodrome(self):
+        field = aerodrome_way(10, LAT0, LON0, 3000.0, {'name': 'Saki'}, first_node=100)
+        runway = runway_way(12, LAT0, LON0, first_node=300)
+
+        def point(node_id, tags):
+            lat, lon = offset(LAT0, LON0, 50.0, 300.0)
+            return {'type': 'node', 'id': node_id, 'lat': lat, 'lon': lon, 'tags': tags}
+        bridge, bridge_nodes = way_from_bearing(15, 90.0, 30.0, {'aeroway': 'jet_bridge'})
+        bridge['nodes'] = [600, 601]
+        bridge_nodes = {600: bridge_nodes[1], 601: bridge_nodes[2]}
+        stand, stand_nodes = way_from_bearing(16, 0.0, 60.0, {'aeroway': 'parking_position', 'ref': '12'})
+        stand['nodes'] = [610, 611]
+        stand_nodes = {610: stand_nodes[1], 611: stand_nodes[2]}
+        found = assemble_airfields(elements_and_nodes(
+            field, runway, (bridge, bridge_nodes), (stand, stand_nodes),
+            point(700, {'aeroway': 'windsock', 'lit': 'yes'}),
+            point(701, {'aeroway': 'gate', 'ref': 'A3'}),
+            point(702, {'aeroway': 'fuel'})))
+        a = found[0]
+        self.assertEqual(a.windsocks[0]['lit'], True)
+        self.assertEqual(a.gates[0]['ref'], 'A3')
+        self.assertEqual(len(a.fuel), 1)
+        self.assertEqual(a.jet_bridges[0]['widthM'], 3.0)
+        self.assertEqual((a.parking_positions[0]['ref'], len(a.parking_positions[0]['points'])), ('12', 2))
+        out = airfield_to_json(a)
+        for key in ('windsocks', 'gates', 'fuel', 'jetBridges', 'parkingPositions'):
+            self.assertIn(key, out)
+        self.assertNotIn('helipads', out)
+
     def test_first_listed_polygon_wins_when_two_contain_the_runway(self):
         outer = aerodrome_way(10, LAT0, LON0, 6000.0, {'name': 'outer'}, first_node=100)
         inner = aerodrome_way(11, LAT0, LON0, 2000.0, {'name': 'inner'}, first_node=200)

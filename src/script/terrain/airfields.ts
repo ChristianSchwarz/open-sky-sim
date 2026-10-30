@@ -41,6 +41,16 @@ export interface AirfieldRunway {
     skiJump?: boolean;
     /** Laid in concrete plates (OSM `surface=concrete:plates`); the joints are drawn. */
     plates?: boolean;
+    /** The OSM way this runway came from. */
+    osmId?: number;
+    /** True bearing minus what `ref` implies - mostly magnetic declination. */
+    refDeltaDeg?: number | null;
+    /** True when the runway was mapped as an area and `widthM` was measured off it. */
+    widthMeasured?: boolean;
+    /** OSM's own `length` tag, where it has one. Not used for placement. */
+    lengthTagM?: number | null;
+    /** True when OSM's `width` was too narrow to believe and the class default was used. */
+    widthImplausible?: boolean;
 }
 
 interface AirfieldTaxiway {
@@ -49,6 +59,8 @@ interface AirfieldTaxiway {
     points: number[][];
     /** OSM `surface`, where tagged. */
     surface?: string;
+    /** Mapped as `aeroway=taxilane`: a taxiway's path across an apron to the stands. */
+    taxilane?: boolean;
 }
 
 interface AirfieldApron {
@@ -69,11 +81,11 @@ export interface AirfieldBuilding {
     /** Along it. */
     depthM: number;
     /**
-     * Height from OSM's `height` or `building:levels`, absent where it has
+     * Height from OSM's `height` or `building:levels`, null where it has
      * neither — which is almost always. The renderer infers one from the kind
      * and the footprint instead.
      */
-    heightM?: number;
+    heightM?: number | null;
 }
 
 /**
@@ -88,6 +100,62 @@ interface AirfieldPlane {
     headingDeg: number;
 }
 
+/** What grading did to one strip (`airfield_grade.grade_profile`). */
+export interface AirfieldStripReport {
+    /** `steep` is a strip kept as steep as it really is; `suspect` moved a lot of earth. */
+    status: 'ok' | 'graded' | 'steep' | 'suspect';
+    /** Name of the limits it was graded to, `runway code 1/2` and the like. */
+    limits: string;
+    naturalOverall: number;
+    naturalLocal: number;
+    overall: number;
+    local: number;
+    /** Tightest vertical curve; null where the profile is straight. */
+    minRadiusM: number | null;
+    /** Largest cut or fill between the ground and the profile. */
+    earthworkM: number;
+    /** Fraction of stations the DEM had a height for. */
+    measured: number;
+}
+
+/** What grading did to an apron (`airfield_grade.fit_apron_plane`). */
+export interface AirfieldApronReport {
+    status: 'ok' | 'graded';
+    naturalGradient: number;
+    gradient: number;
+    earthworkM: number;
+}
+
+/** The bake's per-element grading reports; diagnostics, nothing at runtime reads them. */
+export interface AirfieldFit {
+    runways: (AirfieldStripReport & { ref: string })[];
+    aprons: AirfieldApronReport[];
+    taxiways: {
+        count: number;
+        /** Taxiway count per {@link AirfieldStripReport.status}. */
+        status: Partial<Record<AirfieldStripReport['status'], number>>;
+        /** Taxiways that leave the ground by more than the pad tolerance. */
+        padded: number;
+        pads: number;
+        earthworkMaxM: number;
+        localMax: number;
+    };
+    earthworkMaxM: number;
+}
+
+/** The single-plane fit airfields baked before per-element grading still carry. */
+export interface AirfieldPlaneFit {
+    heightMsl: number;
+    gradient: number;
+    gradientRaw: number;
+    clamped: boolean;
+    samples: number;
+    samplesTrimmed: number;
+    residualRmsM: number;
+    residualMaxM: number;
+    outlierMaxM: number;
+}
+
 export interface Airfield {
     name: string;
     icao: string;
@@ -99,7 +167,13 @@ export interface Airfield {
     lat: number;
     lon: number;
     elevationM: number;
+    /** What OSM's `ele` says, beside the DEM-fitted `elevationM`; null where untagged. */
+    eleTagM?: number | null;
+    /** The OSM aerodrome element (or runway way, for a field with none). */
+    osmId?: number;
     plane: AirfieldPlane;
+    /** How the bake graded it; null where it was not graded. */
+    fit?: AirfieldFit | AirfieldPlaneFit | null;
     runways: AirfieldRunway[];
     taxiways: AirfieldTaxiway[];
     aprons: AirfieldApron[];
@@ -113,6 +187,87 @@ export interface Airfield {
     skiJumps?: AirfieldSkiJump[];
     /** OSM `man_made=embankment`; absent on the fields that have none. */
     embankments?: AirfieldEmbankment[];
+    /**
+     * The aerodrome polygon's outer ring, `[lat, lon]`; absent on a node-only
+     * aerodrome. The cover bake paints the ground inside it from the land around it.
+     */
+    perimeter?: number[][];
+    /** OSM `aeroway=helipad`; absent on the fields that have none. */
+    helipads?: AirfieldHelipad[];
+    /** OSM `aeroway=holding_position`, each as the bar across its taxiway. */
+    holdingPositions?: AirfieldHoldingPosition[];
+    /** OSM `aeroway=parking_position`: stands, as lead-in lines or points. */
+    parkingPositions?: AirfieldParkingPosition[];
+    /** OSM `aeroway=gate`: boarding gates. Data only; nothing draws them. */
+    gates?: AirfieldPoint[];
+    /** OSM `aeroway=jet_bridge`. */
+    jetBridges?: AirfieldJetBridge[];
+    /** OSM `aeroway=windsock`. */
+    windsocks?: AirfieldWindsock[];
+    /** OSM `aeroway=navigationaid`: PAPI, APAPI and VASI. */
+    navigationAids?: AirfieldNavigationAid[];
+    /** OSM `aeroway=fuel`. Data only; nothing draws them. */
+    fuel?: AirfieldPoint[];
+}
+
+/** A tagged point on a field: a gate, a fuel stand. */
+export interface AirfieldPoint {
+    lat: number;
+    lon: number;
+    ref?: string;
+}
+
+/** A helipad as an oriented rectangle, from its outline or a default square about its point. */
+export interface AirfieldHelipad {
+    lat: number;
+    lon: number;
+    /** Bearing of the `depthM` side. */
+    headingDeg: number;
+    widthM: number;
+    depthM: number;
+    ref?: string;
+    /** OSM `surface`, where tagged. */
+    surface?: string;
+}
+
+/** Where an aircraft stops short of a runway: a bar across the taxiway. */
+export interface AirfieldHoldingPosition {
+    /** `[lat, lon]` from one taxiway edge to the other. */
+    points: number[][];
+    /** OSM `holding_position:type`; `runway` where untagged. */
+    kind: string;
+    ref?: string;
+}
+
+/** A stand: its lead-in line where mapped as a way, else its point. */
+export interface AirfieldParkingPosition {
+    /** `[lat, lon]` along the lead-in line. */
+    points?: number[][];
+    lat?: number;
+    lon?: number;
+    ref?: string;
+}
+
+export interface AirfieldJetBridge {
+    /** `[lat, lon]` along the tube, terminal end first as OSM draws it. */
+    points: number[][];
+    widthM: number;
+}
+
+export interface AirfieldWindsock {
+    lat: number;
+    lon: number;
+    lit: boolean;
+}
+
+export interface AirfieldNavigationAid {
+    lat: number;
+    lon: number;
+    /** OSM `navigationaid`, lower case: only the slope indicators, `papi`, `apapi` and `vasi`, are baked. */
+    type: string;
+    /** The runway it serves and that runway's heading; absent beside none. */
+    runway?: string;
+    headingDeg?: number;
 }
 
 /** An earth bank - a revetment round a hardstand, a blast wall - drawn as a berm. */

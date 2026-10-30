@@ -172,6 +172,34 @@ EMBANKMENT_HEIGHT_RANGE_M = (0.5, 20.0)
 # fields are a single tagged point with the runways drawn separately.
 ORPHAN_ASSIGN_RADIUS_M = 5000.0
 
+# The furniture of a field rather than its surfaces, fetched as the `details`
+# group: as nodes, and as ways for the ones OSM maps as lines or areas.
+# `helipad` ways come with the runways; only its nodes are asked for here.
+DETAIL_NODE_AEROWAYS = ('helipad', 'holding_position', 'parking_position', 'gate',
+                        'windsock', 'navigationaid', 'fuel')
+DETAIL_WAY_AEROWAYS = ('taxilane', 'stopway', 'holding_position', 'parking_position',
+                       'jet_bridge', 'fuel')
+# A helipad mapped as a point is drawn this size across, metres: the FATO of
+# a light helicopter, about twice its rotor.
+HELIPAD_DEFAULT_SIZE_M = 20.0
+# A boarding bridge's tube, when OSM gives no `width`.
+JET_BRIDGE_DEFAULT_WIDTH_M = 3.0
+# A holding position mapped as a node is drawn across the taxiway it sits on,
+# if one runs within this of it.
+HOLDING_POSITION_REACH_M = 25.0
+# A PAPI or VASI is lined up with the runway whose centreline (extended this
+# far past each threshold, for the approach lights) passes within reach.
+NAVAID_RUNWAY_REACH_M = 300.0
+NAVAID_RUNWAY_EXTEND_M = 1000.0
+# The `navigationaid` values kept: the slope indicators. Busy fields map every
+# light as one - GCLP has 2,123, of which 8 are PAPI units and the rest are
+# taxiway and runway edge, centreline and touchdown lights (txe, txc, rwe, rwc,
+# rwt), guard lights (rgl) and the approach lights (als), one node apiece.
+NAVAID_TYPES = ('papi', 'apapi', 'vasi')
+# What hosts runways and everything else: an airstrip is an aerodrome mapped
+# under the older, narrower tag.
+FIELD_AEROWAYS = ('aerodrome', 'airstrip')
+
 # Platform footprint margins, metres.
 #
 # A runway pad is the pavement plus a 10 m flat margin all round, ringed by a
@@ -450,6 +478,27 @@ class Airfield:
     #: aerodrome. The cover bake paints the ground inside it from the
     #: countryside around it rather than from the imagery.
     perimeter: List[List[float]] = field(default_factory=list)
+    #: `aeroway=helipad`: `{'lat', 'lon', 'headingDeg', 'widthM', 'depthM'}`,
+    #: plus `ref` and `surface` where tagged.
+    helipads: List[dict] = field(default_factory=list)
+    #: `aeroway=holding_position`, each `{'points', 'kind'}`: the bar across
+    #: the taxiway, `[lat, lon]`. A node comes in as `{'at'}` and is turned
+    #: into a bar by `attach_holding_positions`.
+    holding_positions: List[dict] = field(default_factory=list)
+    #: `aeroway=parking_position`: the lead-in line as `points`, or a node's
+    #: `lat`/`lon`; `ref` where tagged.
+    parking_positions: List[dict] = field(default_factory=list)
+    #: `aeroway=gate`: `{'lat', 'lon'}` plus `ref`.
+    gates: List[dict] = field(default_factory=list)
+    #: `aeroway=jet_bridge`: `{'points', 'widthM'}` along the tube.
+    jet_bridges: List[dict] = field(default_factory=list)
+    #: `aeroway=windsock`: `{'lat', 'lon', 'lit'}`.
+    windsocks: List[dict] = field(default_factory=list)
+    #: `aeroway=navigationaid`: `{'lat', 'lon', 'type'}` (papi, vasi, als...),
+    #: plus the `runway` and its `headingDeg` from `attach_navigation_aids`.
+    navigation_aids: List[dict] = field(default_factory=list)
+    #: `aeroway=fuel`: `{'lat', 'lon'}`.
+    fuel: List[dict] = field(default_factory=list)
 
     @property
     def longest_m(self) -> float:
@@ -859,6 +908,8 @@ AREA_PHASES: Tuple[Tuple[str, str, float], ...] = (
     ('aprons', 'fetching OSM aprons and buildings', 6),
     ('wires', 'fetching OSM arresting gear, decks and ski-jumps', 2),
     ('embankments', 'fetching OSM embankments', 3),
+    ('fields', 'fetching OSM airstrips', 1),
+    ('details', 'fetching OSM helipads, holding positions, stands and windsocks', 4),
     ('assemble', 'assembling airfields', 4),
     ('sample', 'sampling platforms', 20),
 )
@@ -923,6 +974,15 @@ def embankments_tags(tags: dict) -> bool:
     return tags.get('man_made') == 'embankment'
 
 
+def fields_tags(tags: dict) -> bool:
+    """`aeroway=airstrip`: a field in all but name, hosting runways like an aerodrome."""
+    return tags.get('aeroway') == 'airstrip'
+
+
+def details_tags(tags: dict) -> bool:
+    return tags.get('aeroway') in DETAIL_NODE_AEROWAYS + DETAIL_WAY_AEROWAYS
+
+
 # Cache key and tag test of each group, as overpass_airports reads them from
 # a local extract - what osm_prefetch.py fills the cache under.
 PBF_GROUPS = (
@@ -932,6 +992,8 @@ PBF_GROUPS = (
     ('aprons', aprons_tags),
     ('wires', gear_tags),
     ('embankments', embankments_tags),
+    ('fields', fields_tags),
+    ('details', details_tags),
 )
 
 
@@ -1010,6 +1072,20 @@ def overpass_airports(
     def embankments(c: Bounds) -> str:
         return _aeroway_query([f'way["man_made"="embankment"]({c.as_overpass()})'])
 
+    # Groups of their own rather than more clauses in the old ones, so every
+    # area's cached aerodrome and apron answers stay valid. Airstrips are as
+    # few as aerodromes, so the light grid; the details are as many as the
+    # taxiways, so the standard grid and the sea skip.
+    def fields(c: Bounds) -> str:
+        return _aeroway_query(
+            [f'{kind}["aeroway"="airstrip"]({c.as_overpass()})'
+             for kind in ('node', 'way', 'relation')])
+
+    def details(c: Bounds) -> str:
+        return _aeroway_query(
+            [f'node["aeroway"="{kind}"]({c.as_overpass()})' for kind in DETAIL_NODE_AEROWAYS]
+            + [f'way["aeroway"="{kind}"]({c.as_overpass()})' for kind in DETAIL_WAY_AEROWAYS])
+
     # Same tag test as the query closures above, for the PBF path.
 
     groups = (
@@ -1019,6 +1095,8 @@ def overpass_airports(
         ('aprons', 'aprons and buildings', aprons, aprons_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
         ('wires', 'arresting gear, decks and ski-jumps', wires, gear_tags, OVERPASS_LIGHT_CELL_ZOOM, True, None),
         ('embankments', 'embankments', embankments, embankments_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
+        ('fields', 'airstrips', fields, fields_tags, OVERPASS_LIGHT_CELL_ZOOM, True, None),
+        ('details', 'aeroway details', details, details_tags, OVERPASS_CELL_ZOOM, True, skip_sea),
     )
 
     # One pass over the file covers all four groups - see pbf_elements_groups's
@@ -1186,7 +1264,7 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
 
     for el in elements:
         tags = el.get('tags') or {}
-        if tags.get('aeroway') != 'aerodrome':
+        if tags.get('aeroway') not in FIELD_AEROWAYS:
             continue
         poly = None
         if el.get('type') in ('way', 'relation'):
@@ -1202,7 +1280,7 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
             continue
         ele = tagged_number(tags.get('ele'))
         airfield = Airfield(
-            name=tags.get('name') or tags.get('icao') or f'aerodrome {el.get("id")}',
+            name=tags.get('name') or tags.get('icao') or f'{tags["aeroway"]} {el.get("id")}',
             icao=str(tags.get('icao', '')).upper(),
             iata=str(tags.get('iata', '')).upper(),
             kind=aerodrome_kind(tags),
@@ -1281,7 +1359,7 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
                     })
             continue
         aeroway = tags.get('aeroway')
-        if aeroway is None or aeroway == 'aerodrome':
+        if aeroway is None or aeroway in FIELD_AEROWAYS:
             continue
         coords = [nodes[nid] for nid in el.get('nodes', []) if nid in nodes]             if el.get('type') == 'way' else []
         if not coords and el.get('type') == 'way':
@@ -1364,6 +1442,50 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
                 'widthM': width, 'depthM': depth,
                 'heightM': building_height_m(tags),
             })
+        elif aeroway == 'taxilane' and coords:
+            # A taxiway in all but name, inside an apron: laid and graded as one.
+            host.taxiways.append({
+                'widthM': taxiway_width_m(tags, host.kind),
+                'points': [[c[1], c[0]] for c in coords],
+                'taxilane': True,
+                **({'surface': str(tags['surface'])} if tags.get('surface') else {}),
+            })
+        elif aeroway == 'stopway' and coords:
+            # Pavement past a runway end, as `runway=stopway` is.
+            default_width = DEFAULT_RUNWAY_WIDTH_M.get(host.kind, DEFAULT_RUNWAY_WIDTH_M['ga'])
+            pad = pavement_pad(el, nodes, default_width)
+            if pad is not None:
+                host.extra_pads.append(pad)
+        elif aeroway == 'helipad':
+            host.helipads.append(helipad_of(el, tags, nodes, rel_rings, lat, lon))
+        elif aeroway == 'holding_position':
+            hold: dict = {'kind': str(tags.get('holding_position:type') or 'runway')}
+            if len(coords) >= 2:
+                hold['points'] = [[c[1], c[0]] for c in coords]
+            else:
+                hold['at'] = [lat, lon]
+            host.holding_positions.append({**hold, **_ref_of(tags)})
+        elif aeroway == 'parking_position':
+            stand = ({'points': [[c[1], c[0]] for c in coords]} if len(coords) >= 2
+                     else {'lat': lat, 'lon': lon})
+            host.parking_positions.append({**stand, **_ref_of(tags)})
+        elif aeroway == 'gate':
+            host.gates.append({'lat': lat, 'lon': lon, **_ref_of(tags)})
+        elif aeroway == 'jet_bridge' and len(coords) >= 2:
+            width = tagged_width_m(tags)
+            host.jet_bridges.append({
+                'points': [[c[1], c[0]] for c in coords],
+                'widthM': width if width is not None and 1.5 <= width <= 6.0
+                else JET_BRIDGE_DEFAULT_WIDTH_M,
+            })
+        elif aeroway == 'windsock':
+            host.windsocks.append({'lat': lat, 'lon': lon, 'lit': tags.get('lit') == 'yes'})
+        elif aeroway == 'navigationaid':
+            kind = str(tags.get('navigationaid', '')).lower()
+            if kind in NAVAID_TYPES:
+                host.navigation_aids.append({'lat': lat, 'lon': lon, 'type': kind})
+        elif aeroway == 'fuel':
+            host.fuel.append({'lat': lat, 'lon': lon})
 
     # A runway inside no aerodrome at all is its own field. Disused strips and
     # farm airfields are mapped this way constantly, and dropping them would
@@ -1387,6 +1509,8 @@ def assemble_airfields(data: dict, on_progress: Optional[PhaseProgress] = None) 
         attach_ski_jumps(airfield)
         attach_deck_runways(airfield)
         airfield.runways = dedupe_runways(airfield.runways)
+        attach_holding_positions(airfield)
+        attach_navigation_aids(airfield)
     return [a for a in airfields if a.runways]
 
 
@@ -1458,6 +1582,93 @@ def attach_ski_jumps(airfield: Airfield) -> None:
             'lat': base_lat, 'lon': base_lon, 'headingDeg': heading,
             'lengthM': depth, 'widthM': width,
         })
+
+
+def _ref_of(tags: dict) -> dict:
+    return {'ref': str(tags['ref'])} if tags.get('ref') else {}
+
+
+def helipad_of(
+    el: dict, tags: dict, nodes: Dict[int, Tuple[float, float]],
+    rel_rings: Sequence[Sequence[Tuple[float, float]]], lat: float, lon: float,
+) -> dict:
+    """One helipad as an oriented square: its outline where it is mapped as an
+    area, else HELIPAD_DEFAULT_SIZE_M (or its tagged width) about the point."""
+    ring = (_ring_of(el, nodes) if el.get('type') == 'way'
+            else rel_rings[0] if rel_rings else None)
+    if ring is not None:
+        lat, lon, heading, width, depth = _oriented_footprint(ring)
+    else:
+        tagged = tagged_width_m(tags) or tagged_number(tags.get('diameter'))
+        size = tagged if tagged is not None and 5.0 <= tagged <= 100.0 else HELIPAD_DEFAULT_SIZE_M
+        heading, width, depth = 0.0, size, size
+    return {
+        'lat': lat, 'lon': lon, 'headingDeg': heading, 'widthM': width, 'depthM': depth,
+        **_ref_of(tags),
+        **({'surface': str(tags['surface'])} if tags.get('surface') else {}),
+    }
+
+
+def attach_holding_positions(airfield: Airfield) -> None:
+    """Turn each holding position mapped as a node into a bar across the
+    taxiway it sits on, as wide as that taxiway. One with no taxiway within
+    HOLDING_POSITION_REACH_M has nothing to be drawn across and is dropped."""
+    kept = []
+    for hold in airfield.holding_positions:
+        if 'at' not in hold:
+            kept.append(hold)
+            continue
+        lat, lon = hold.pop('at')
+        frame = LocalFrame(lat, lon)
+        best: Optional[Tuple[float, float, float, float, float, float]] = None
+        for taxiway in airfield.taxiways:
+            pts = [frame.to_m(p[1], p[0]) for p in taxiway['points']]
+            for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+                dx, dy = x1 - x0, y1 - y0
+                seg = math.hypot(dx, dy)
+                if seg < 1e-6:
+                    continue
+                t = max(0.0, min(1.0, -(x0 * dx + y0 * dy) / (seg * seg)))
+                cx, cy = x0 + dx * t, y0 + dy * t
+                reach = math.hypot(cx, cy)
+                if reach <= HOLDING_POSITION_REACH_M and (best is None or reach < best[0]):
+                    best = (reach, cx, cy, dx / seg, dy / seg, float(taxiway['widthM']))
+        if best is None:
+            continue
+        # Centred on the taxiway, not on the node: a node a few metres off
+        # the centreline would hang the bar off one edge.
+        _reach, cx, cy, ux, uy, width = best
+        half = width / 2.0
+        ends = [frame.to_lonlat(cx - uy * s, cy + ux * s) for s in (-half, half)]
+        hold['points'] = [[e[1], e[0]] for e in ends]
+        kept.append(hold)
+    airfield.holding_positions = kept
+
+
+def attach_navigation_aids(airfield: Airfield) -> None:
+    """Line each visual landing aid up with the runway it serves: the one whose
+    centreline, run on NAVAID_RUNWAY_EXTEND_M past either threshold for the
+    approach lights, passes nearest within NAVAID_RUNWAY_REACH_M. One beside
+    no runway keeps its point and no heading."""
+    for aid in airfield.navigation_aids:
+        frame = LocalFrame(aid['lat'], aid['lon'])
+        best: Optional[Tuple[float, Runway]] = None
+        for runway in airfield.runways:
+            (a_lat, a_lon), (b_lat, b_lon) = runway.thresholds[0], runway.thresholds[-1]
+            x0, y0 = frame.to_m(a_lon, a_lat)
+            x1, y1 = frame.to_m(b_lon, b_lat)
+            dx, dy = x1 - x0, y1 - y0
+            seg = math.hypot(dx, dy)
+            if seg < 1e-6:
+                continue
+            ext = NAVAID_RUNWAY_EXTEND_M / seg
+            t = max(-ext, min(1.0 + ext, -(x0 * dx + y0 * dy) / (seg * seg)))
+            reach = math.hypot(x0 + dx * t, y0 + dy * t)
+            if reach <= NAVAID_RUNWAY_REACH_M and (best is None or reach < best[0]):
+                best = (reach, runway)
+        if best is not None:
+            aid['runway'] = best[1].ref
+            aid['headingDeg'] = best[1].heading_deg
 
 
 def tagged_number(raw) -> Optional[float]:
@@ -1993,6 +2204,14 @@ def airfield_to_json(airfield: Airfield) -> dict:
         **({'skiJumps': airfield.ski_jumps} if airfield.ski_jumps else {}),
         **({'embankments': airfield.embankments} if airfield.embankments else {}),
         **({'perimeter': airfield.perimeter} if airfield.perimeter else {}),
+        **({'helipads': airfield.helipads} if airfield.helipads else {}),
+        **({'holdingPositions': airfield.holding_positions} if airfield.holding_positions else {}),
+        **({'parkingPositions': airfield.parking_positions} if airfield.parking_positions else {}),
+        **({'gates': airfield.gates} if airfield.gates else {}),
+        **({'jetBridges': airfield.jet_bridges} if airfield.jet_bridges else {}),
+        **({'windsocks': airfield.windsocks} if airfield.windsocks else {}),
+        **({'navigationAids': airfield.navigation_aids} if airfield.navigation_aids else {}),
+        **({'fuel': airfield.fuel} if airfield.fuel else {}),
     }
 
 

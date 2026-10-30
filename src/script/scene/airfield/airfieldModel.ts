@@ -431,7 +431,7 @@ const BUILDING_SHAPE: Record<AirfieldBuilding['kind'],
 
 /** Height of one building, from OSM where it says so and from its shape where not. */
 export function buildingHeightM(building: AirfieldBuilding): number {
-    if (building.heightM !== undefined && building.heightM > 0) {
+    if (building.heightM != null && building.heightM > 0) {
         return building.heightM;
     }
     const shape = BUILDING_SHAPE[building.kind] ?? BUILDING_SHAPE.hangar;
@@ -830,7 +830,17 @@ export function buildAirfieldModel(
             addAprons(parts, airfield, toEnu, drape, pavement, platedPavement);
             addTaxiways(parts, airfield, toEnu, drape, kinds.has('centreline'), pavement, platedPavement);
             parts.solid = undefined;
+            addHelipads(parts, airfield, toEnu, drape, pavement, kinds.has('centreline'));
+            // Paint and furniture a few metres across: the finest level only,
+            // as the taxiway centreline is.
+            if (kinds.has('centreline')) {
+                addHoldingPositions(parts, airfield, toEnu, drape);
+                addParkingLines(parts, airfield, toEnu, drape);
+                addWindsocks(solids, airfield, toEnu, drape, primary.headingDeg);
+                addNavigationAids(solids, airfield, toEnu, drape);
+            }
             addBuildings(solids, airfield, toEnu, drape);
+            addJetBridges(solids, airfield, toEnu, drape);
             // Solid at the finest level, like the pavement: an aircraft
             // taxiing into a revetment rolls up it rather than through.
             solids.solid = level === 0 ? solidPavement : undefined;
@@ -1821,6 +1831,337 @@ function addDecks(parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Pla
     for (const deck of airfield.decks ?? []) {
         addFilledRing(parts, deck.ring, toEnu, place, PaletteCategory.SCENERY_BASE_DECK_RUST);
     }
+}
+
+/** Helipad paint, as fractions of the pad's shorter side: the H's height, width and stroke. */
+const HELIPAD_H_HEIGHT = 0.3;
+const HELIPAD_H_WIDTH = 0.18;
+const HELIPAD_H_STROKE = 0.045;
+/** The white line round a helipad's edge. */
+const HELIPAD_EDGE_M = 0.5;
+/**
+ * Width of each line of a holding position, and of the gap between them; and
+ * the dashes of its dashed pair. ICAO's lines are 0.15 m, which no pixel
+ * this sim draws a taxiway at would show; doubled, the pattern still reads.
+ */
+const HOLD_LINE_M = 0.3;
+const HOLD_DASH_M = 1;
+/** A boarding bridge's tube: how high under it, and how tall it is. */
+const JET_BRIDGE_CLEARANCE_M = 4;
+const JET_BRIDGE_HEIGHT_M = 3;
+/** The pillar under a jet bridge's outer end, square. */
+const JET_BRIDGE_PILLAR_M = 0.8;
+/** A windsock's mast, and its sock: length, and the mouth and tail across. */
+const WINDSOCK_MAST_M = 6;
+const WINDSOCK_MAST_WIDTH_M = 0.2;
+const WINDSOCK_LENGTH_M = 3.6;
+const WINDSOCK_MOUTH_M = 0.9;
+const WINDSOCK_TAIL_M = 0.35;
+/** Light units of a PAPI or VASI: their spacing across the runway, and each box. */
+const PAPI_SPACING_M = 9;
+const PAPI_UNIT_ALONG_M = 0.8;
+const PAPI_UNIT_ACROSS_M = 1.2;
+const PAPI_UNIT_HEIGHT_M = 1;
+/** Units of one type closer than this are each mapped as its own node, one box apiece. */
+const PAPI_UNIT_CLUSTER_M = 40;
+const NAVAID_UNITS: Record<string, number> = { papi: 4, apapi: 2, vasi: 2 };
+
+type EN = { e: number; n: number };
+
+/**
+ * The four corners of a rectangle `halfAlong` either way along `axis` and
+ * `halfAcross` either side of it, about `centre`.
+ */
+function rectFeet(centre: EN, axis: EN, halfAlong: number, halfAcross: number): EN[] {
+    const at = (u: number, v: number) => ({
+        e: centre.e + axis.e * u + axis.n * v,
+        n: centre.n + axis.n * u - axis.e * v,
+    });
+    return [at(-halfAlong, -halfAcross), at(-halfAlong, halfAcross),
+        at(halfAlong, halfAcross), at(halfAlong, -halfAcross)];
+}
+
+/** {@link rectFeet} laid flat on `place`, facing up. */
+function addFlatRect(
+    parts: MeshParts, paint: Paint, centre: EN, axis: EN,
+    halfAlong: number, halfAcross: number, lift: number, place: Place,
+): void {
+    const [a, b, c, d] = rectFeet(centre, axis, halfAlong, halfAcross)
+        .map(f => place(f.e, f.n, lift));
+    addUpQuad(parts, paint, a, b, c, d);
+}
+
+/** `centre` moved `along` metres down `axis` and `across` to its right. */
+function offsetAlong(centre: EN, axis: EN, along: number, across: number): EN {
+    return {
+        e: centre.e + axis.e * along + axis.n * across,
+        n: centre.n + axis.n * along - axis.e * across,
+    };
+}
+
+/**
+ * A box standing on its lowest corner's ground, from `baseLift` to `topLift`
+ * above it: walls, a roof and, for one that stands clear of the ground (a jet
+ * bridge), a floor.
+ */
+function addBlock(
+    parts: MeshParts, paint: Paint, feet: EN[], place: Place,
+    baseLift: number, topLift: number, withFloor = false,
+): void {
+    // Wound as addBuildings' feet are: counter-clockwise seen from above.
+    const ring = signedArea(feet) > 0 ? feet : [...feet].reverse();
+    const ground = ring.map(f => place(f.e, f.n, 0));
+    let baseY = Infinity;
+    for (const g of ground) {
+        baseY = Math.min(baseY, g.y);
+    }
+    const low = ground.map(g => g.clone().setY(baseY + baseLift));
+    const high = ground.map(g => g.clone().setY(baseY + topLift));
+    for (let i = 0; i < ring.length; i++) {
+        const j = (i + 1) % ring.length;
+        parts.addQuad(paint, low[j], high[j], high[i], low[i]);
+    }
+    parts.addQuad(paint, high[0], high[1], high[2], high[3]);
+    if (withFloor) {
+        parts.addQuad(paint, low[3], low[2], low[1], low[0]);
+    }
+}
+
+/**
+ * Helipads: a square of the field's pavement (none on a grass pad) and, at
+ * the finest level, the white edge and the H, upright along the pad.
+ */
+function addHelipads(
+    parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place,
+    pavement: PaletteCategory, withPaint: boolean,
+): void {
+    const white = PaletteCategory.SCENERY_BASE_RUNWAY_LINES;
+    const lift = AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M;
+    for (const pad of airfield.helipads ?? []) {
+        const halfD = pad.depthM / 2;
+        const halfW = pad.widthM / 2;
+        if (halfD < 1 || halfW < 1) {
+            continue;
+        }
+        const centre = toEnu(pad.lat, pad.lon);
+        const axis = bearingAxisAt(pad.lat, pad.lon, pad.headingDeg, toEnu);
+        if (pad.surface !== 'grass') {
+            addFlatRect(parts, pavement, centre, axis, halfD, halfW, AIRFIELD_SURFACE_EPS_M, place);
+        }
+        if (!withPaint) {
+            continue;
+        }
+        const edge = HELIPAD_EDGE_M / 2;
+        for (const side of [-1, 1]) {
+            addFlatRect(parts, white, offsetAlong(centre, axis, 0, side * (halfW - edge)),
+                axis, halfD, edge, lift, place);
+            addFlatRect(parts, white, offsetAlong(centre, axis, side * (halfD - edge), 0),
+                axis, edge, halfW, lift, place);
+        }
+        const size = Math.min(pad.widthM, pad.depthM);
+        const hh = size * HELIPAD_H_HEIGHT / 2;
+        const hw = size * HELIPAD_H_WIDTH / 2;
+        const stroke = size * HELIPAD_H_STROKE / 2;
+        for (const side of [-1, 1]) {
+            addFlatRect(parts, white, offsetAlong(centre, axis, 0, side * (hw - stroke)),
+                axis, hh, stroke, lift, place);
+        }
+        addFlatRect(parts, white, centre, axis, stroke, hw - 2 * stroke, lift, place);
+    }
+}
+
+/**
+ * Holding positions, in the taxiway yellow. One short of a runway is ICAO's
+ * pattern A - two solid lines on the taxiway side, two dashed on the runway's
+ * - and any other kind a single dashed line.
+ */
+function addHoldingPositions(
+    parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place,
+): void {
+    const yellow = PaletteCategory.SCENERY_FIELD_YELLOW;
+    const lift = AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M;
+    const runways = airfield.runways.map(r => r.thresholds.map(t => toEnu(t[0], t[1])));
+    for (const hold of airfield.holdingPositions ?? []) {
+        if (hold.points.length < 2) {
+            continue;
+        }
+        const a = toEnu(hold.points[0][0], hold.points[0][1]);
+        const last = hold.points[hold.points.length - 1];
+        const b = toEnu(last[0], last[1]);
+        const len = Math.hypot(b.e - a.e, b.n - a.n);
+        if (len < 1) {
+            continue;
+        }
+        const axis = { e: (b.e - a.e) / len, n: (b.n - a.n) / len };
+        const mid = { e: (a.e + b.e) / 2, n: (a.n + b.n) / 2 };
+        // Which side of the bar the runway is: towards the nearest point of
+        // the nearest centreline. `offsetAlong`'s across runs to the right of
+        // the bar's axis; flip it so that positive is towards the runway.
+        let toward = 1;
+        let nearest = Infinity;
+        for (const [p, q] of runways) {
+            if (p === undefined || q === undefined) {
+                continue;
+            }
+            const de = q.e - p.e;
+            const dn = q.n - p.n;
+            const l2 = de * de + dn * dn;
+            const t = l2 > 0 ? Math.max(0, Math.min(1, ((mid.e - p.e) * de + (mid.n - p.n) * dn) / l2)) : 0;
+            const ce = p.e + de * t - mid.e;
+            const cn = p.n + dn * t - mid.n;
+            const d = Math.hypot(ce, cn);
+            if (d < nearest) {
+                nearest = d;
+                toward = ce * axis.n - cn * axis.e >= 0 ? 1 : -1;
+            }
+        }
+        const lines: { across: number; dashed: boolean }[] = hold.kind === 'runway'
+            ? [-1.5, -0.5, 0.5, 1.5].map(k => ({ across: k * 2 * HOLD_LINE_M * toward, dashed: k > 0 }))
+            : [{ across: 0, dashed: true }];
+        for (const { across, dashed } of lines) {
+            if (!dashed) {
+                addFlatRect(parts, yellow, offsetAlong(mid, axis, 0, across),
+                    axis, len / 2, HOLD_LINE_M / 2, lift, place);
+                continue;
+            }
+            for (let u = -len / 2; u < len / 2; u += 2 * HOLD_DASH_M) {
+                const dash = Math.min(HOLD_DASH_M, len / 2 - u);
+                addFlatRect(parts, yellow, offsetAlong(mid, axis, u + dash / 2, across),
+                    axis, dash / 2, HOLD_LINE_M / 2, lift, place);
+            }
+        }
+    }
+}
+
+/** A painted line along `points`, cut into steps so it follows the ground. */
+function addStripe(
+    parts: MeshParts, paint: Paint, points: readonly EN[], width: number, lift: number, place: Place,
+): void {
+    for (let i = 0; i + 1 < points.length; i++) {
+        const a = points[i];
+        const b = points[i + 1];
+        const len = Math.hypot(b.e - a.e, b.n - a.n);
+        if (len < DEGENERATE_SEGMENT_M) {
+            continue;
+        }
+        const axis = { e: (b.e - a.e) / len, n: (b.n - a.n) / len };
+        const steps = Math.max(1, Math.ceil(len / TAXIWAY_STEP_M));
+        const step = len / steps;
+        for (let s = 0; s < steps; s++) {
+            addFlatRect(parts, paint, offsetAlong(a, axis, (s + 0.5) * step, 0),
+                axis, step / 2, width / 2, lift, place);
+        }
+    }
+}
+
+/** Stands mapped as lead-in lines, in the taxiway centreline's yellow. */
+function addParkingLines(
+    parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place,
+): void {
+    for (const stand of airfield.parkingPositions ?? []) {
+        if (stand.points === undefined || stand.points.length < 2) {
+            continue;
+        }
+        addStripe(parts, PaletteCategory.SCENERY_FIELD_YELLOW,
+            stand.points.map(p => toEnu(p[0], p[1])), TAXIWAY_STRIPE_M,
+            AIRFIELD_SURFACE_EPS_M + PAINT_LIFT_M, place);
+    }
+}
+
+/** Boarding bridges: a tube on stilts along each leg, a pillar under the outer end. */
+function addJetBridges(
+    parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place,
+): void {
+    const metal = PaletteCategory.SCENERY_BUILDING_METAL;
+    for (const bridge of airfield.jetBridges ?? []) {
+        const points = bridge.points.map(p => toEnu(p[0], p[1]));
+        for (let i = 0; i + 1 < points.length; i++) {
+            const a = points[i];
+            const b = points[i + 1];
+            const len = Math.hypot(b.e - a.e, b.n - a.n);
+            if (len < 1) {
+                continue;
+            }
+            const axis = { e: (b.e - a.e) / len, n: (b.n - a.n) / len };
+            addBlock(parts, metal, rectFeet(offsetAlong(a, axis, len / 2, 0), axis, len / 2, bridge.widthM / 2),
+                place, JET_BRIDGE_CLEARANCE_M, JET_BRIDGE_CLEARANCE_M + JET_BRIDGE_HEIGHT_M, true);
+        }
+        const end = points[points.length - 1];
+        if (points.length >= 2) {
+            const half = JET_BRIDGE_PILLAR_M / 2;
+            addBlock(parts, metal, rectFeet(end, { e: 0, n: 1 }, half, half),
+                place, 0, JET_BRIDGE_CLEARANCE_M);
+        }
+    }
+}
+
+/**
+ * Windsocks: a white mast and a red and white sock off the top of it, flying
+ * down `headingDeg` - the primary runway, there being no wind to fly it by.
+ */
+function addWindsocks(
+    parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place, headingDeg: number,
+): void {
+    const bands = [PaletteCategory.SCENERY_BUILDING_METAL_RED,
+        PaletteCategory.SCENERY_BUILDING_METAL_WHITE,
+        PaletteCategory.SCENERY_BUILDING_METAL_RED];
+    for (const sock of airfield.windsocks ?? []) {
+        const foot = toEnu(sock.lat, sock.lon);
+        const half = WINDSOCK_MAST_WIDTH_M / 2;
+        addBlock(parts, PaletteCategory.SCENERY_BUILDING_METAL_WHITE,
+            rectFeet(foot, { e: 0, n: 1 }, half, half), place, 0, WINDSOCK_MAST_M);
+        const axis = bearingAxisAt(sock.lat, sock.lon, headingDeg, toEnu);
+        const baseY = place(foot.e, foot.n, 0).y;
+        // The section `u` metres down the sock: its four corners, round the
+        // axis, at the height of the masthead less half the mouth.
+        const section = (u: number): THREE.Vector3[] => {
+            const r = (WINDSOCK_MOUTH_M + (WINDSOCK_TAIL_M - WINDSOCK_MOUTH_M) * u / WINDSOCK_LENGTH_M) / 2;
+            const y = baseY + WINDSOCK_MAST_M - WINDSOCK_MOUTH_M / 2;
+            return [[r, r], [-r, r], [-r, -r], [r, -r]].map(([across, up]) => {
+                const at = offsetAlong(foot, axis, u, across);
+                return place(at.e, at.n, 0).setY(y + up);
+            });
+        };
+        const step = WINDSOCK_LENGTH_M / bands.length;
+        for (let k = 0; k < bands.length; k++) {
+            const near = section(k * step);
+            const far = section((k + 1) * step);
+            for (let i = 0; i < 4; i++) {
+                const j = (i + 1) % 4;
+                // Both ways round: seen from inside its mouth as well as out.
+                parts.addQuad(bands[k], near[i], near[j], far[j], far[i]);
+                parts.addQuad(bands[k], far[i], far[j], near[j], near[i]);
+            }
+        }
+    }
+}
+
+/**
+ * PAPI and VASI light units: a row of boxes across the runway they serve,
+ * centred on the node - or one box per node where each unit is mapped as its
+ * own. Approach lighting and the rest are not drawn.
+ */
+function addNavigationAids(
+    parts: MeshParts, airfield: Airfield, toEnu: ToEnu, place: Place,
+): void {
+    const aids = airfield.navigationAids ?? [];
+    const at = aids.map(a => toEnu(a.lat, a.lon));
+    aids.forEach((aid, i) => {
+        const units = NAVAID_UNITS[aid.type];
+        if (units === undefined || aid.headingDeg === undefined) {
+            return;
+        }
+        const single = aids.some((other, j) => j !== i && other.type === aid.type
+            && Math.hypot(at[j].e - at[i].e, at[j].n - at[i].n) < PAPI_UNIT_CLUSTER_M);
+        const axis = bearingAxisAt(aid.lat, aid.lon, aid.headingDeg, toEnu);
+        const count = single ? 1 : units;
+        for (let k = 0; k < count; k++) {
+            const centre = offsetAlong(at[i], axis, 0, (k - (count - 1) / 2) * PAPI_SPACING_M);
+            addBlock(parts, PaletteCategory.SCENERY_BUILDING_METAL_WHITE,
+                rectFeet(centre, axis, PAPI_UNIT_ALONG_M / 2, PAPI_UNIT_ACROSS_M / 2),
+                place, 0, PAPI_UNIT_HEIGHT_M);
+        }
+    });
 }
 
 /** One closed `[lat, lon]` ring, triangulated flat at `place`. */

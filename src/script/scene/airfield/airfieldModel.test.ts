@@ -233,6 +233,52 @@ describe('airfield model', () => {
         assert.equal(counts[2], 2);
     });
 
+    it('draws helipads, holding positions, stands, windsocks, PAPIs and jet bridges', () => {
+        const lat = 27.9300;
+        const lon = -15.3920;
+        const furnished = gclp({
+            taxiways: [{ widthM: 23, points: [[lat, lon - 0.002], [lat, lon + 0.002]] }],
+            helipads: [{ lat: lat + 0.004, lon, headingDeg: 0, widthM: 20, depthM: 20 }],
+            holdingPositions: [{ kind: 'runway', points: [[lat - 0.0001, lon], [lat + 0.0001, lon]] }],
+            parkingPositions: [{ points: [[lat + 0.001, lon], [lat + 0.0015, lon]] }, { lat, lon }],
+            windsocks: [{ lat: lat - 0.002, lon, lit: false }],
+            navigationAids: [
+                { lat: lat - 0.003, lon, type: 'papi', headingDeg: 21.4 },
+                { lat: lat - 0.004, lon, type: 'als' },
+            ],
+            jetBridges: [{ widthM: 3, points: [[lat + 0.002, lon], [lat + 0.002, lon + 0.0003]] }],
+            gates: [{ lat, lon, ref: 'A1' }],
+            fuel: [{ lat, lon }],
+        });
+        const plain = buildAirfieldModel(gclp({ taxiways: furnished.taxiways }), BASIS, MATERIALS)!.model.lod;
+        const built = buildAirfieldModel(furnished, BASIS, MATERIALS)!.model.lod;
+        const finite = (objects: THREE.Object3D[]) => (objects as THREE.Mesh[]).every(m => {
+            const p = m.geometry.getAttribute('position');
+            for (let i = 0; i < p.count * 3; i++) {
+                if (!Number.isFinite(p.array[i])) {
+                    return false;
+                }
+            }
+            return true;
+        });
+        for (const level of built) {
+            assert.ok(finite(level.flats) && finite(level.volumes));
+        }
+        // Level 0: the pad, its edge and H (4 + 3 rects), the hold's two solid
+        // lines and two dashed ones, one stand's lead-in line.
+        assert.ok(triangles(built[0].flats) > triangles(plain[0].flats) + 2 * (1 + 4 + 3 + 2 + 2 + 1));
+        // Level 1 keeps the pad's pavement and drops its paint.
+        assert.equal(triangles(built[1].flats), triangles(plain[1].flats) + 2);
+        // Volumes at level 0: the windsock (mast and three bands both ways
+        // round), four PAPI boxes, the bridge tube and pillar. The ALS draws nothing.
+        const box = 2 * 5;
+        const windsock = box + 3 * 4 * 2 * 2;
+        const bridge = (box + 2) + box;
+        assert.equal(triangles(built[0].volumes) - triangles(plain[0].volumes), windsock + 4 * box + bridge);
+        // Level 1: only the bridge.
+        assert.equal(triangles(built[1].volumes) - triangles(plain[1].volumes), bridge);
+    });
+
     it('runs the plate joints of a plated runway through its paint, on the runway UVs', () => {
         const plated = gclp({ runways: [{ ...gclp().runways[0], surface: 'concrete', plates: true }] });
         const flats = buildAirfieldModel(plated, BASIS, MATERIALS)!.model.lod[0].flats as THREE.Mesh[];
