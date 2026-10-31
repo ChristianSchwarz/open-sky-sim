@@ -410,7 +410,7 @@ export function paintDirections(
  * and brightness together - and it turned every deep sunset colour pale, since
  * the strongest hues are exactly the ones that overflow.
  */
-function fitToGamut(c: [number, number, number]): void {
+export function fitToGamut(c: [number, number, number]): void {
     const peak = Math.max(c[0], c[1], c[2]);
     if (peak <= 1) {
         return;

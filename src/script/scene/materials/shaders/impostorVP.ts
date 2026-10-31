@@ -1,3 +1,4 @@
+import { HAZE_PARS_VERTEX } from './haze';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 
 /**
@@ -19,6 +20,7 @@ export const ImpostorVertProgram: string = `
   varying vec3 vNormalView;
   varying vec3 vViewDir;
 ${LOG_DEPTH_PARS_VERTEX}
+${HAZE_PARS_VERTEX}
   void main() {
     vec4 worldBase = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
     float s = length(instanceMatrix[0].xyz);
@@ -27,6 +29,7 @@ ${LOG_DEPTH_PARS_VERTEX}
     viewCenter.xy += position.xy * s;
 
     vPosition = vec3(worldBase.x, 0.0, worldBase.z);
+    vHazeRay = worldBase.xyz;
     vNormalView = vec3(0.0, 0.0, 1.0);
     vViewDir = vec3(0.0, 0.0, 1.0);
 

@@ -1,3 +1,4 @@
+import { HAZE_PARS_VERTEX } from './haze';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 import { TILE_BATCH_PARS_VERTEX, TILE_BATCH_VERTEX } from './tileBatch';
 
@@ -27,6 +28,7 @@ const shader = (highp: boolean): string => `
   varying float vSecondTone;
 #endif
 ${LOG_DEPTH_PARS_VERTEX}
+${HAZE_PARS_VERTEX}
 ${TILE_BATCH_PARS_VERTEX}
   void main() {
 ${TILE_BATCH_VERTEX}
@@ -38,6 +40,7 @@ ${TILE_BATCH_VERTEX}
     vec4 viewPos = modelViewMatrix * vec4(position, 1.0);
   #endif
     vPosition = vec3(worldPos.x, 0.0, worldPos.z);
+    vHazeRay = worldPos.xyz;
     vNormalView = normalize(normalMatrix * normal);
     vViewDir = -viewPos.xyz;
     vUv = uv;

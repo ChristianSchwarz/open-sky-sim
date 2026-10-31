@@ -1,3 +1,4 @@
+import { HAZE_PARS_VERTEX } from './haze';
 import { LOD_FADE_NEAR, LOD_FADE_SOFTNESS } from '../../../terrain/lod';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 import { TERRAIN_COVER_PARS } from './terrainCover';
@@ -107,6 +108,7 @@ ${TERRAIN_COVER_PARS}
   /** Height of this fragment over the camera (scene y, camera at the origin). */
   varying float vHeightOverCamera;
 ${LOG_DEPTH_PARS_VERTEX}
+${HAZE_PARS_VERTEX}
 
   /**
    * How far in the leaf dissolve is at this vertex: 0 still the parent, 1
@@ -156,6 +158,7 @@ ${LOG_DEPTH_PARS_VERTEX}
     vLight = uSunAmbient * skyView + uSunDirect * ndl;
 
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vHazeRay = worldPos.xyz;
     float d = length(worldPos.xyz);
     vDist = d;
     // The camera sits at the origin, and a faceted vertex carries its facet's

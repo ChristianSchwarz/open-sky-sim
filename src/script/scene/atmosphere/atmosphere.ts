@@ -371,7 +371,7 @@ export function multipleScatteringTable(params: AtmosphereParams, sunDir: Vec3):
 }
 
 /** Linear lookup into {@link multipleScatteringTable}'s altitude bins. */
-function multipleScatteringAt(table: Rgb[], params: AtmosphereParams, altitude: number, out: Rgb): Rgb {
+export function multipleScatteringAt(table: Rgb[], params: AtmosphereParams, altitude: number, out: Rgb): Rgb {
     const topAltitude = params.topRadius - params.groundRadius;
     const position = Math.min(1, Math.max(0, altitude / topAltitude)) * (table.length - 1);
     const low = Math.floor(position);

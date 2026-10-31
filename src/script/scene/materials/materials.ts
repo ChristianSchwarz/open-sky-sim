@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { ShaderMaterial } from 'three';
-import { FogColorCategory, FogValueCategory, PALETTE_FX_PREFIX, Palette, PaletteCategory, PaletteColor, PaletteColorShade } from "../../config/palettes/palette";
+import { PALETTE_FX_PREFIX, Palette, PaletteCategory, PaletteColor, PaletteColorShade } from "../../config/palettes/palette";
 import { DisplayShading, FogQuality } from '../../config/profiles/profile';
 import { KernelTask } from '../../core/kernel';
 import { assertExpr } from '../../utils/asserts';
@@ -22,6 +22,7 @@ import {
 } from './shaders/terrainVP';
 import { COLOUR_ADJUST_UNIFORMS, ColourTweak, adjustColourInPlace, defaultColourTweak } from './shaders/colourAdjust';
 import { SUN_UNIFORMS } from './shaders/sun';
+import { HAZE_UNIFORMS } from './shaders/haze';
 import { LANDUSE_BLEND_DEFAULT } from '../../terrain/tones';
 import { VERTEX_TONE_COUNT } from './shaders/shadedVP';
 import { makeNoCoverTexture } from '../../terrain/coverTextures';
@@ -286,8 +287,6 @@ interface SceneFlatMaterialUniforms {
     shadingType: { value: number; };
     color: { value: THREE.Color; };
     colorSecondary: { value: THREE.Color; };
-    fogDensity: { value: number; };
-    fogColor: { value: THREE.Color; };
     fogType: { value: number; };
     alphaDither: { value: number; };
     colorDither: { value: number; };
@@ -301,8 +300,6 @@ interface SceneShadedMaterialUniforms {
     shadingType: { value: number; };
     color: { value: THREE.Color; };
     colorSecondary: { value: THREE.Color; };
-    fogDensity: { value: number; };
-    fogColor: { value: THREE.Color; };
     normalModelMatrix: { value: THREE.Matrix3; };
     /** World-Y clip; very negative = disabled. */
     clipBelowY: { value: number; };
@@ -360,8 +357,6 @@ export class SceneMaterialManager implements KernelTask {
     private readonly colorCache: ColorCache = new ColorCache();
     private palette: Palette;
     private fog: FogQuality;
-    /** Distance fog is off: the user preferred the clear horizon (2026-10-28). */
-    private fogDensityScale = 0;
     private shading: DisplayShading;
     /** Every live material; a disposed one leaves (see build). */
     private materials = new Set<THREE.ShaderMaterial>();
@@ -623,8 +618,6 @@ export class SceneMaterialManager implements KernelTask {
                 color: { value: new THREE.Color(properties.rawColor ?? PaletteColor(this.palette, properties.category)) },
                 colorSecondary: { value: new THREE.Color(properties.rawColor ?? PaletteColorShade(this.palette, properties.category)) },
                 fogType: { value: this.fog },
-                fogDensity: { value: this.palette.values[FogValueCategory(properties.category)] * this.fogDensityScale },
-                fogColor: { value: new THREE.Color(PaletteColor(this.palette, FogColorCategory(properties.category))) },
                 alphaDither: {
                     value: properties.type === SceneMaterialPrimitiveType.MESH && !properties.shaded
                         ? (properties.alphaDither ?? 0)
@@ -713,8 +706,9 @@ export class SceneMaterialManager implements KernelTask {
                 // Shared by reference: moving the sun (time of day) rewrites
                 // these once and every material sees it.
                 ...SUN_UNIFORMS,
-                // Likewise the player's colour sliders.
+                // Likewise the player's colour sliders, and the haze.
                 ...COLOUR_ADJUST_UNIFORMS,
+                ...HAZE_UNIFORMS,
             },
             ...(properties.type === SceneMaterialPrimitiveType.MESH && properties.shaded) ? {
                 distance: { value: 0 },
@@ -884,17 +878,6 @@ export class SceneMaterialManager implements KernelTask {
         assertExpr(false, 'This should never happen');
     }
 
-    /**
-     * Scale every material's distance fog, 0 to switch it off. The fog is by
-     * distance whatever the FogQuality - the terrain's included - so the map
-     * mode, looking down from kilometres up, turns it off here.
-     */
-    setFogDensityScale(scale: number): void {
-        this.fogDensityScale = scale;
-        this.paintedPalette = undefined;
-        this.setPalette(this.palette);
-    }
-
     setPalette(palette: Palette) {
         this.palette = palette;
         const toPaint = palette === this.paintedPalette ? this.unpainted : this.materials;
@@ -959,8 +942,6 @@ export class SceneMaterialManager implements KernelTask {
             u.uMarkColorA.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[0])));
             u.uMarkColorB.value.copy(this.colorCache.getColor(PaletteColor(palette, d.markCategories[1])));
         }
-        u.fogDensity.value = palette.values[FogValueCategory(c)] * this.fogDensityScale;
-        u.fogColor.value.copy(this.colorCache.getColor(PaletteColor(palette, FogColorCategory(c))));
         if (d.particles && d.ramp) {
             if (d.category === PaletteCategory.FX_SMOKE) {
                 d.ramp[0].copy(this.colorCache.getColor(PaletteColor(palette, PaletteCategory.FX_SMOKE)));

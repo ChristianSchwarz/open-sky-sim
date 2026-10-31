@@ -1,3 +1,4 @@
+import { HAZE_PARS_VERTEX } from './haze';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 
 /** Size of the VERTEX_TONES colour table (see `vertexTones` in materials.ts). */
@@ -73,6 +74,7 @@ export const ShadedVertProgram: string = `
   }
 #endif
 ${LOG_DEPTH_PARS_VERTEX}
+${HAZE_PARS_VERTEX}
   void main() {
 #ifdef VERTEX_TONES
     int toneIndex = int(tone + 0.5);
@@ -116,6 +118,7 @@ ${LOG_DEPTH_PARS_VERTEX}
 
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldY = worldPos.y;
+    vHazeRay = worldPos.xyz;
     vDist = length(worldPos.xyz);
 
     // Rim light. The lists are drawn camera-relative, so the camera is at the

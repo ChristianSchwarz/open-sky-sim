@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { EARTH_ATMOSPHERE } from '../../atmosphere/atmosphere';
 import { EARTH_MAP_PARS_FRAGMENT, EARTH_MAP_UNIFORMS } from '../../earthMap';
+import { HAZE_PARS_FRAGMENT, HAZE_UNIFORMS } from '../../materials/shaders/haze';
 import { SCENE_DEPTH_PARS_FRAGMENT, SCENE_DEPTH_SKY_CUT, SCENE_DEPTH_UNIFORMS } from '../../materials/shaders/sceneDepth';
 import { WGS84_A, WGS84_B } from '../../../terrain/geodesy';
 import { Model, ModelLibBuilder } from '../models';
@@ -118,8 +119,7 @@ const FRAGMENT_PROGRAM = `
   // not ground (a cloud, an aircraft) and keeps its own colour.
   uniform float uRampM;
   uniform float uRampTopM;
-  uniform vec3 uFogColor;
-  uniform float uFogDensity;
+${HAZE_PARS_FRAGMENT}
 ${SCENE_DEPTH_PARS_FRAGMENT}
 
   const float A = ${WGS84_A.toFixed(1)};
@@ -439,8 +439,9 @@ ${EARTH_MAP_PARS_FRAGMENT}
       // Low down the fill outside the areas is drawn as land, so the map's
       // water is painted on it too, in the bake's sea colour like the map mode.
       globeColour.rgb = mix(globeColour.rgb, uMapWater, water * (1.0 - uWeight));
-      float fog = 1.0 - clamp(exp2(-uFogDensity * tEnd), 0.0, 1.0);
-      globeColour.rgb = mix(globeColour.rgb, uFogColor, fog * 0.92 * (1.0 - uWeight));
+      // The terrain's haze, so the fill past an area's edge recedes with the
+      // tiles beside it. It fades out as the shell's own air takes over.
+      globeColour.rgb = applyHaze(globeColour.rgb, dir * tEnd, 0.0);
       // Over terrain the map's sea comes in on the later schedule, inside an
       // area or out: the fill is the same water as an area's sea, so an
       // area's edge does not show as a step in it. The map's land comes in
@@ -496,8 +497,6 @@ export const ATMOSPHERE_SHELL_UNIFORMS = {
     uLowFill: { value: 0 },
     uRampM: { value: 1 },
     uRampTopM: { value: 0 },
-    uFogColor: { value: new THREE.Color() },
-    uFogDensity: { value: 0 },
     uAreas: { value: Array.from({ length: SHELL_MAX_AREAS }, () => new THREE.Vector4()) },
     uAreaCount: { value: 0 },
 };
@@ -515,7 +514,7 @@ export class AtmosphereShellModelLibBuilder implements ModelLibBuilder {
         const material = new THREE.ShaderMaterial({
             vertexShader: VERTEX_PROGRAM,
             fragmentShader: FRAGMENT_PROGRAM,
-            uniforms: { ...ATMOSPHERE_SHELL_UNIFORMS, ...EARTH_MAP_UNIFORMS, ...SCENE_DEPTH_UNIFORMS },
+            uniforms: { ...ATMOSPHERE_SHELL_UNIFORMS, ...EARTH_MAP_UNIFORMS, ...SCENE_DEPTH_UNIFORMS, ...HAZE_UNIFORMS },
             depthTest: false,
             depthWrite: false,
             transparent: true,

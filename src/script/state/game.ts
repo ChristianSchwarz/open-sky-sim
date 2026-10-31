@@ -25,11 +25,12 @@ const SUN_SKYLINE_RANGE_M = 100_000;
  * clouds' light, which a few frames' lag cannot show.
  */
 const SUN_SKYLINE_EVERY_FRAMES = 4;
-import { paintSkyDome, SkyDome, skyDomeOf } from '../scene/models/lib/skyDomeModelBuilder';
+import { fitToGamut, makeSkyPainter, paintSkyDome, SkyDome, skyDomeOf } from '../scene/models/lib/skyDomeModelBuilder';
 import { paintSunBloom } from '../scene/models/lib/sunModelBuilder';
 import { ATMOSPHERE_SHELL_UNIFORMS, SHELL_MAX_AREAS } from '../scene/models/lib/atmosphereShellModelBuilder';
 import { earthMap } from '../scene/earthMap';
 import { SPACE_FOG } from '../scene/materials/shaders/spaceFog';
+import { HAZE_UNIFORMS, setScatterSun } from '../scene/materials/shaders/haze';
 import { Model } from '../scene/models/models';
 import { terrainMaxZoomForAltitudeM } from '../terrain/lod';
 import { EDGE_LIFT_FADE_M } from '../terrain/terrainEntity';
@@ -3071,11 +3072,13 @@ export class Game {
      * cannot difference two numbers 6.4 Mm long.
      */
     private updateAtmosphereShell(): void {
+        const camera = this.playerCamera.main;
+        const altitude = camera.position.y;
+        // The haze integrates its air from this height down each ray.
+        HAZE_UNIFORMS.uHazeCameraAlt.value = altitude;
         if (!this.atmosphereShell) {
             return;
         }
-        const camera = this.playerCamera.main;
-        const altitude = camera.position.y;
         // The map draws the shell at any height, for the globe map outside
         // the baked areas (uMapMode), and without the air.
         const weight = this.mapView ? 1
@@ -3129,10 +3132,7 @@ export class Game {
         u.uLowFill.value = lowFill ? 1 : 0;
         u.uRampM.value = EDGE_LIFT_FADE_M;
         u.uRampTopM.value = this.planetTerrain.edgeLiftTopM;
-        (u.uFogColor.value as THREE.Color).set(PaletteColor(this.palette, PaletteCategory.FOG_TERRAIN));
         (u.uMapWater.value as THREE.Color).set(PaletteColor(this.palette, PaletteCategory.TERRAIN_WATER));
-        // No fog, matching the terrain (MaterialManager.fogDensityScale).
-        u.uFogDensity.value = 0;
         u.uSun.value.copy(SUN_DIRECTION);
         u.uCamHeight.value = height;
         u.uWeight.value = weight;
@@ -6589,6 +6589,12 @@ export class Game {
             paintSkyDome(this.skyDome, this.noonPalette, this.midnightPalette,
                 SUN_STATE.nightMix, SUN_DIRECTION);
         }
+        // The air's scattering, calibrated to the dome's horizon from the same painter.
+        const sky = makeSkyPainter(this.noonPalette, this.midnightPalette, SUN_STATE.nightMix, SUN_DIRECTION);
+        setScatterSun((x, y, z, out) => {
+            sky(x, y, z, out);
+            fitToGamut(out);
+        }, SUN_DIRECTION, SUN_STATE.nightMix);
         // The bloom shares the dome's painter, so the two agree by construction
         // rather than by two sets of constants being kept in step by hand.
         if (this.sunModel) {

@@ -1,3 +1,4 @@
+import { HAZE_PARS_VERTEX } from './haze';
 import { ALONG_STEP_M } from '../../../terrain/ptr';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 import { TILE_BATCH_PARS_VERTEX, TILE_BATCH_VERTEX } from './tileBatch';
@@ -100,6 +101,7 @@ const riverVert = (rail: boolean): string => `
   varying vec3 vNormalView;
   varying vec3 vViewDir;
 ${LOG_DEPTH_PARS_VERTEX}
+${HAZE_PARS_VERTEX}
 ${TILE_BATCH_PARS_VERTEX}
   void main() {
 ${TILE_BATCH_VERTEX}
@@ -108,6 +110,7 @@ ${TILE_BATCH_VERTEX}
 #endif
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vPosition = vec3(worldPos.x, 0.0, worldPos.z);
+    vHazeRay = worldPos.xyz;
     vNormalView = vec3(0.0, 0.0, 1.0);
     vViewDir = vec3(0.0, 0.0, 1.0);
 

@@ -1,3 +1,4 @@
+import { HAZE_PARS_VERTEX } from './haze';
 import { COLOUR_ADJUST_PARS } from './colourAdjust';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 
@@ -67,6 +68,7 @@ ${COLOUR_ADJUST_PARS}
   varying vec3 vLeaf;
   varying vec3 vTrunk;
 ${LOG_DEPTH_PARS_VERTEX}
+${HAZE_PARS_VERTEX}
   void main() {
     vec4 worldBase = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
     float s = length(instanceMatrix[0].xyz);
@@ -126,6 +128,7 @@ ${LOG_DEPTH_PARS_VERTEX}
     viewCenter.z += position.y * s * sinElev;
 
     vPosition = vec3(worldBase.x, 0.0, worldBase.z);
+    vHazeRay = worldBase.xyz;
     // Leaf colour is per instance, so resolve it here (a handful of vertices)
     // rather than per pixel: the ground colour mixed 50:50 with the palette
     // green, darkened by the brightness factor, then pushed away from its own

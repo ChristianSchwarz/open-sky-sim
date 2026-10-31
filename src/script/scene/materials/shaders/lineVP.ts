@@ -1,3 +1,4 @@
+import { HAZE_PARS_VERTEX } from './haze';
 import { LOG_DEPTH_PARS_VERTEX, LOG_DEPTH_VERTEX } from './logDepth';
 
 export const LineVertProgram: string = `
@@ -13,9 +14,11 @@ export const LineVertProgram: string = `
   varying vec3 vNormalView;
   varying vec3 vViewDir;
 ${LOG_DEPTH_PARS_VERTEX}
+${HAZE_PARS_VERTEX}
   void main() {
     vec4 tmpPos = modelMatrix * vec4(position, 1.0);
     vPosition = vec3(tmpPos.x, 0.0, tmpPos.z);
+    vHazeRay = tmpPos.xyz;
     vNormalView = vec3(0.0, 0.0, 1.0);
     vViewDir = vec3(0.0, 0.0, 1.0);
 

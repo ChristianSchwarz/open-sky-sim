@@ -1,3 +1,4 @@
+import { HAZE_MATERIAL_PARS_FRAGMENT } from './haze';
 import { LOG_DEPTH_FRAGMENT, LOG_DEPTH_PARS_FRAGMENT } from './logDepth';
 
 /**
@@ -22,14 +23,14 @@ export const TreeBillboardFragProgram: string = `
   uniform float vCameraD;
   uniform int shadingType;
   uniform int fogType;
-  uniform float fogDensity;
-  uniform vec3 fogColor;
+  varying vec3 vHazeRay;
 
   varying vec3 vPosition;
   varying vec2 vUv;
   varying vec3 vLeaf;
   varying vec3 vTrunk;
 ${LOG_DEPTH_PARS_FRAGMENT}
+${HAZE_MATERIAL_PARS_FRAGMENT}
   void main() {
     vec4 texel = texture2D(uMap, vUv);
     if (texel.a < 0.5) {
@@ -47,24 +48,7 @@ ${LOG_DEPTH_PARS_FRAGMENT}
     // test above (fir's #45482a is already right at the 0.12 edge).
     vec3 tinted = mix(texel.rgb * vTrunk * 0.7, leaf, canopyMask);
 
-    float distance = 0.0;
-    float fogSteps = 12.0;
-
-    if (fogType == 1) {
-      distance = dot(vPosition, vCameraNormal) + vCameraD;
-    } else if (fogType == 2) {
-      vec3 dV = vPosition - vCameraPos;
-      distance = sqrt(dot(dV, dV));
-      fogSteps = 24.0;
-    }
-
-    float fogFactor = exp2(-fogDensity * distance);
-    fogFactor = 1.0 - clamp(fogFactor, 0.0, 1.0);
-    if (shadingType != 3) {
-      fogFactor = floor(fogFactor * fogSteps + 0.5) / fogSteps;
-    }
-
-    gl_FragColor = mix(vec4(tinted, 1.0), vec4(fogColor, 1.0), fogFactor * 0.92);
+    gl_FragColor = vec4(hazed(tinted, vHazeRay), 1.0);
 ${LOG_DEPTH_FRAGMENT}
   }
 `;

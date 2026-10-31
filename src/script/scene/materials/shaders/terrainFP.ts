@@ -1,3 +1,4 @@
+import { HAZE_MATERIAL_PARS_FRAGMENT } from './haze';
 import { DITHER_PARS_FRAGMENT } from './dither';
 import { LOG_DEPTH_FRAGMENT, LOG_DEPTH_PARS_FRAGMENT } from './logDepth';
 import { TERRAIN_COVER_PARS } from './terrainCover';
@@ -35,8 +36,7 @@ export const TerrainFragProgram: string = `
   uniform float distance;
   uniform int shadingType;
   uniform int fogType;
-  uniform float fogDensity;
-  uniform vec3 fogColor;
+  varying vec3 vHazeRay;
 
   uniform sampler2D uCoverTex;
   uniform float uHasCoverTex;
@@ -55,6 +55,7 @@ export const TerrainFragProgram: string = `
   varying float vCameraAbove;
   varying float vHeightOverCamera;
 ${LOG_DEPTH_PARS_FRAGMENT}
+${HAZE_MATERIAL_PARS_FRAGMENT}
 ${DITHER_PARS_FRAGMENT}
 ${TERRAIN_COVER_PARS}
   /**
@@ -120,17 +121,6 @@ ${TERRAIN_COVER_PARS}
       discard;
     }
 
-    float fogSteps = 12.0;
-    if (fogType == 2) {
-      fogSteps = 24.0;
-    }
-
-    float fogFactor = exp2(-fogDensity * vDist);
-    fogFactor = 1.0 - clamp(fogFactor, 0.0, 1.0);
-    if (shadingType != 3) {
-      fogFactor = floor(fogFactor * fogSteps + 0.5) / fogSteps;
-    }
-
     vec3 base = vBase;
     vec3 light = vLight;
     if (uHasCoverTex > 0.5 && uCoverEnabled > 0.5 && vDist > uCoverFromM) {
@@ -150,7 +140,7 @@ ${TERRAIN_COVER_PARS}
       }
     }
     vec3 diffuse = base * light;
-    gl_FragColor = mix(vec4(diffuse, 1.0), vec4(fogColor, 1.0), fogFactor * 0.92);
+    gl_FragColor = vec4(hazed(diffuse, vHazeRay), 1.0);
 ${LOG_DEPTH_FRAGMENT}
   }
 `;
