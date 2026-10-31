@@ -24,7 +24,6 @@ import { FieldModelLibBuilder, FieldModelType } from './scene/models/lib/fieldMo
 import { HILL_MODEL_BASE_RADIUS, HILL_MODEL_HEIGHT, MOUNTAIN_MODEL_BASE_RADIUS, MOUNTAIN_MODEL_HEIGHT, MountainModelLibBuilder } from './scene/models/lib/mountainModelBuilder';
 import { ArrestorCablesModelLibBuilder } from './scene/models/lib/arrestorCablesModelBuilder';
 import { TailhookModelLibBuilder } from './scene/models/lib/tailhookModelBuilder';
-import { SkiJumpModelLibBuilder } from './scene/models/lib/skiJumpModelBuilder';
 import { SkyDomeModelLibBuilder } from './scene/models/lib/skyDomeModelBuilder';
 import { AtmosphereShellModelLibBuilder } from './scene/models/lib/atmosphereShellModelBuilder';
 import { SunModelLibBuilder } from './scene/models/lib/sunModelBuilder';
@@ -94,7 +93,6 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
         new FieldModelLibBuilder('pavement', FieldModelType.SQUARE, PaletteCategory.SCENERY_ROAD_SECONDARY),
         new MountainModelLibBuilder('hill', HILL_MODEL_BASE_RADIUS, HILL_MODEL_HEIGHT, PaletteCategory.SCENERY_MOUNTAIN_GRASS, false, false),
         new MountainModelLibBuilder('mountain', MOUNTAIN_MODEL_BASE_RADIUS, MOUNTAIN_MODEL_HEIGHT, PaletteCategory.SCENERY_MOUNTAIN_GRASS, false, false),
-        new SkiJumpModelLibBuilder('skiJump'),
         new ArrestorCablesModelLibBuilder('arrestorCables'),
         new TailhookModelLibBuilder('tailhook'),
         new TracerModelLibBuilder('tracer'),
