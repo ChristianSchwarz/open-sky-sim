@@ -328,10 +328,36 @@ const GO_AROUND_HEIGHT = 300;
 const GO_AROUND_GUARD_AGL = 100;
 /** Go-arounds on one runway before diverting to another. */
 const MAX_GO_AROUNDS = 2;
-/** Best sustained-turn airspeed (m/s). Faster = huge circles the player can sit in. */
-const CORNER_SPEED = 180;
+/**
+ * Airspeed (m/s) to turn-fight at. Lift runs out at ~18-20 deg AoA well
+ * before the g limit, so g grows with speed squared (full stick: 2.3 g at
+ * 120 m/s, 4.1 g at 180, 6.3 g at 240) and turn RATE grows with speed while
+ * the radius stays about the same: faster turns better right up to the
+ * overspeed cap. At 180 the AI could not follow a merge round (see
+ * tools/dogfight_merge.ts).
+ */
+const CORNER_SPEED = 230;
 /** Angle-off above which pursuit bleeds toward corner speed for a tighter turn. */
 const CORNER_SPEED_AO = 35 * Math.PI / 180;
+/** Inside this range (m) and closing, pursuit matches the target's speed instead of overrunning it. */
+const RATE_MATCH_RANGE = 600;
+/** Overtake (m/s) kept over the target while matching, so the range still closes to guns. */
+const RATE_MATCH_OVERTAKE = 15;
+/** Never slow below this (m/s) to match a target: under it the jet cannot turn (2 g at 120). */
+const FIGHT_MIN_SPEED = 160;
+/**
+ * Below this airspeed (m/s) a fighting pilot stops pointing the nose up: the
+ * steepest climb it will aim for falls from FIGHT_CLIMB_MAX here to
+ * FIGHT_CLIMB_FLOOR at FIGHT_UNLOAD_SPEED. Without it both pilots chased
+ * each other straight up into the vertical and hung there at 10 m/s.
+ */
+const FIGHT_SLOW_SPEED = 170;
+const FIGHT_UNLOAD_SPEED = 110;
+const FIGHT_CLIMB_MAX = 45 * Math.PI / 180;
+const FIGHT_CLIMB_FLOOR = -15 * Math.PI / 180;
+/** Look-ahead (s) and miss distance (m) under which a pass would be a collision. */
+const DECONFLICT_LOOKAHEAD_S = 4;
+const DECONFLICT_MISS_M = 150;
 
 const PITCH_KP = 1.0;                // pitch-angle error (rad) -> pitch command
 // No AI pitch-RATE damping by default: the FM2 FCS already damps the short period
@@ -347,6 +373,8 @@ const VS_PER_ALT = 0.06;             // altitude error (m) -> desired vertical s
 const MAX_VS = 120;                  // clamp on commanded vertical speed (m/s)
 const PITCH_MIN = -0.6;
 const PITCH_MAX = 0.9;
+/** The stick a max-performance turn may pull: full, for the last ~8 % of g. */
+const HARD_TURN_PITCH_MAX = 1.0;
 
 const THROTTLE_KP = 0.02;            // speed error (m/s) -> throttle rate (1/s)
 const AIRFIELD_THROTTLE_KP = 0.04;   // speed error (m/s) -> throttle, proportional, in the airfield phases
@@ -393,9 +421,30 @@ const HARD_TURN_ENTER = 8 * Math.PI / 180;
 const HARD_TURN_EXIT = 5 * Math.PI / 180;
 const HARD_TURN_FULL_PULL_ANGLE = 45 * Math.PI / 180;
 const HARD_TURN_MIN_PULL = 0.45;
-const HARD_TURN_BANK_GAIN = 5.5;
-const REVERSAL_LATCH_ENTER = 150 * Math.PI / 180;
-const REVERSAL_LATCH_RELEASE = 110 * Math.PI / 180;
+/** Roll error (rad) past which a hard turn rolls before it pulls: pulling first only flies the wrong way. */
+const LIFT_ROLL_FIRST = 90 * Math.PI / 180;
+/** ... and under which it pulls with everything. */
+const LIFT_ROLL_ALIGNED = 30 * Math.PI / 180;
+/** Stick a hard turn keeps while rolling, to hold some g through the roll. */
+const LIFT_ROLL_PULL = 0.15;
+/** Airspeed (m/s) at which full stick holds 1 g (measured: 2.3 g at 120, 6.3 g at 240). */
+const ONE_G_SPEED = 90;
+/**
+ * Gun tracking: the lift commanded is the aim's line-of-sight rate times
+ * airspeed (to follow it), plus this gain (1/s) times airspeed times the aim
+ * error (to close it), plus 1 g. It replaced a hard turn that switched in at 8
+ * deg and out at 5 over gentle heading/pitch loops: the nose hunted 3-9 deg
+ * off the lead and almost never fired.
+ */
+const TRACK_GAIN = 6;
+const GRAVITY = 9.81;
+const AIM_RATE_EMA = 0.2;
+/** Stick (negative) a tracking pilot may push for a small correction rather than rolling inverted. */
+const TRACK_PUSH_MAX = -0.4;
+/** Below this commanded g (and well over the top) tracking pushes instead of rolling round. */
+const TRACK_PUSH_G = 2.5;
+/** Above this (m AGL, over the hard deck) a hard turn may pull while inverted, for a split-S or a nose-low lift-vector turn. */
+const INVERTED_PULL_AGL = 1200;
 
 // --- Gun lead / target prediction ------------------------------------------------
 const TARGET_ACCEL_CAP = 90;                 // ~9 g (m/s^2)
@@ -533,8 +582,6 @@ export class AiPilot implements AiPilotController {
     private hadSolution = false;
     /** Hard-turn latch: stay in max-performance turn until nearly aligned. */
     private hardTurnActive = false;
-    /** Reversal direction latch for near-180 deg turn commits. */
-    private reversalDir = 0;
     /** Pull-up override latch to add hysteresis to the GPWS. */
     private pullUpActive = false;
     /** Latched turn direction (+1/-1/0) to resolve the +/-180 deg heading ambiguity. */
@@ -622,6 +669,10 @@ export class AiPilot implements AiPilotController {
     private readonly toPoint = new THREE.Vector3();
     private readonly bulletVel = new THREE.Vector3();
     private readonly aimDir = new THREE.Vector3();
+    private readonly liftDir = new THREE.Vector3();
+    private readonly prevAimDir = new THREE.Vector3();
+    private readonly aimRate = new THREE.Vector3();
+    private hasPrevAimDir = false;
     private readonly lpos = new THREE.Vector3();
     private readonly lvel = new THREE.Vector3();
     private readonly slot = new THREE.Vector3();
@@ -1007,14 +1058,18 @@ export class AiPilot implements AiPilotController {
     }
 
     /** Immediate pitch command without slew limiting — used for max-g hard turns. */
-    private applyPitchImmediate(raw: number): void {
-        this.pitchCmdState = this.limitPitchForAttitude(raw);
+    private applyPitchImmediate(raw: number, max = PITCH_MAX): void {
+        this.pitchCmdState = this.limitPitchForAttitude(raw, max);
         this.aircraft.setPitch(this.pitchCmdState);
     }
 
     /**
-     * Max-performance turn toward a world-space direction: roll hard toward the
-     * aim bearing and pull near the pitch limit, easing off as the nose closes.
+     * Max-performance turn toward a world-space direction: put the lift vector
+     * on the aim (allowing for the g the turn must spend holding the aircraft
+     * up) and pull near the pitch limit, easing off as the nose closes. Rolling
+     * only toward the aim's compass bearing, as this did before, ignored where
+     * the aim was in the vertical: chasing a target in a climb it kept pulling
+     * the nose up whatever the aim said, and hung there at 10 m/s.
      * Returns true while the hard turn is active this frame.
      */
     private commandHardTurn(aimDirection: THREE.Vector3, delta: number, desiredSpeed: number): boolean {
@@ -1036,33 +1091,42 @@ export class AiPilot implements AiPilotController {
             return false;
         }
 
-        let desiredHeading = Math.atan2(this.aimDir.x, this.aimDir.z);
-        desiredHeading = this.avoidObstacles(desiredHeading);
-        let hErr = wrapPi(desiredHeading - this.heading);
-        if (this.reversalDir !== 0) {
-            if (Math.abs(hErr) < REVERSAL_LATCH_RELEASE) {
-                this.reversalDir = 0;
-            } else {
-                hErr = this.reversalDir * Math.abs(hErr);
-            }
-        } else if (Math.abs(hErr) > REVERSAL_LATCH_ENTER) {
-            this.reversalDir = hErr >= 0 ? 1 : -1;
-            hErr = this.reversalDir * Math.abs(hErr);
+        // Swing the aim's compass bearing round an obstacle, keeping its climb.
+        const aimHeading = Math.atan2(this.aimDir.x, this.aimDir.z);
+        const avoidHeading = this.avoidObstacles(aimHeading);
+        if (avoidHeading !== aimHeading) {
+            const horiz = Math.hypot(this.aimDir.x, this.aimDir.z);
+            this.aimDir.set(Math.sin(avoidHeading) * horiz, this.aimDir.y, Math.cos(avoidHeading) * horiz);
         }
-        const desiredBank = clamp(-hErr * HARD_TURN_BANK_GAIN, -MAX_BANK_COMBAT, MAX_BANK_COMBAT);
-        this.commandBank(desiredBank);
+
+        // The lift the turn wants: toward the aim at what the wing can give at
+        // this speed, plus 1 g to hold the aircraft up. Only its part across
+        // the nose matters to where the lift vector goes.
+        const speed = Math.max(1, this.aircraft.getAirspeed());
+        const availableG = Math.min(9, (speed / ONE_G_SPEED) ** 2);
+        this.liftDir.copy(this.aimDir).addScaledVector(this.fwd, -this.fwd.dot(this.aimDir));
+        if (this.liftDir.lengthSq() < 1e-6) {
+            this.liftDir.copy(this.up); // aim dead astern: keep pulling the way we are
+        }
+        this.liftDir.normalize().multiplyScalar(availableG);
+        this.liftDir.y += 1;
+        this.liftDir.addScaledVector(this.fwd, -this.fwd.dot(this.liftDir));
+        // Roll that puts the lift vector there: banking moves `up` toward -`right`.
+        const rollErr = Math.atan2(-this.liftDir.dot(this.right), this.liftDir.dot(this.up));
+        this.aircraft.setRoll(clamp(rollErr * ROLL_KP, -1, 1));
         this.aircraft.setYaw(clamp(this.bank * ROLL_YAW_COORD, -0.3, 0.3));
 
         const pullT = clamp(aimAngle / HARD_TURN_FULL_PULL_ANGLE, 0, 1);
-        const pull = HARD_TURN_MIN_PULL + pullT * (PITCH_MAX - HARD_TURN_MIN_PULL);
-        this.applyPitchImmediate(pull);
+        let pull = HARD_TURN_MIN_PULL + pullT * (HARD_TURN_PITCH_MAX - HARD_TURN_MIN_PULL);
+        const rollT = clamp((Math.abs(rollErr) - LIFT_ROLL_ALIGNED) / (LIFT_ROLL_FIRST - LIFT_ROLL_ALIGNED), 0, 1);
+        pull += (LIFT_ROLL_PULL - pull) * rollT;
 
         // Overspeed guard still applies during hard turns.
         const over = this.aircraft.getAirspeed() - this.maxSpeed;
         if (over > 0) {
-            const floor = clamp(over * OVERSPEED_ELEV_GAIN, 0, OVERSPEED_ELEV_MAX);
-            this.applyPitchImmediate(Math.max(pull, floor));
+            pull = Math.max(pull, clamp(over * OVERSPEED_ELEV_GAIN, 0, OVERSPEED_ELEV_MAX));
         }
+        this.applyFightPitch(pull);
 
         this.commandSpeed(desiredSpeed, delta);
         return true;
@@ -1073,11 +1137,11 @@ export class AiPilot implements AiPilotController {
      * elevator command pulls the nose toward the ground, so we suppress aft stick
      * and let the roll loop bring the aircraft upright first.
      */
-    private limitPitchForAttitude(pitch: number): number {
+    private limitPitchForAttitude(pitch: number, max = PITCH_MAX): number {
         if (this.up.y < 0) {
             return clamp(pitch, PITCH_MIN, 0.1);
         }
-        return clamp(pitch, PITCH_MIN, PITCH_MAX);
+        return clamp(pitch, PITCH_MIN, max);
     }
 
     /** Extra back-pressure to hold the nose up while banked (upright only). */
@@ -1575,8 +1639,8 @@ export class AiPilot implements AiPilotController {
             case DogfightMode.EXTEND: this.doExtend(delta); break;
             case DogfightMode.HIGH_YOYO: this.doHighYoYo(delta, range); break;
             case DogfightMode.LOW_YOYO: this.doLowYoYo(delta, range); break;
-            case DogfightMode.LAG_PURSUE: this.doLagPursue(delta, range, ao); break;
-            case DogfightMode.PURSUE: default: this.doPursue(delta, range, ao); break;
+            case DogfightMode.LAG_PURSUE: this.doLagPursue(delta, range, ao, closure); break;
+            case DogfightMode.PURSUE: default: this.doPursue(delta, range, ao, closure); break;
         }
 
         // Only PURSUE/LAG_PURSUE actually aim at the target this frame; every
@@ -1675,6 +1739,7 @@ export class AiPilot implements AiPilotController {
         if (this.dogfightMode !== mode) {
             this.dogfightMode = mode;
             this.maneuverTimer = 0;
+            this.hasPrevAimDir = false;
         }
     }
 
@@ -1731,24 +1796,68 @@ export class AiPilot implements AiPilotController {
      * Pick a pursuit airspeed that keeps turn radius tight. High combat speed
      * with small bank changes is what produced the easy-to-trail lazy circles.
      */
-    private combatTurnSpeed(range: number, ao: number): number {
-        if (this.alwaysEngage) {
-            if (range < 500 || ao >= 25 * Math.PI / 180) {
-                return Math.min(CORNER_SPEED, this.combatSpeed > CORNER_SPEED ? CORNER_SPEED : this.combatSpeed * 0.95);
-            }
+    private combatTurnSpeed(range: number, ao: number, closure: number): number {
+        // Tucked in behind and closing: hold a small overtake on the target
+        // rather than overrunning it, but never so slow the jet cannot turn.
+        if (range < RATE_MATCH_RANGE && closure > 0 && ao < CORNER_SPEED_AO) {
+            return Math.max(FIGHT_MIN_SPEED, this.tvel.length() + RATE_MATCH_OVERTAKE);
         }
-        if (range < 250) {
-            return Math.min(this.combatSpeed * 0.65, CORNER_SPEED);
+        if (ao >= CORNER_SPEED_AO || this.alwaysEngage) {
+            return Math.max(this.combatSpeed, CORNER_SPEED);
         }
-        if (ao >= CORNER_SPEED_AO) {
-            const t = clamp((ao - CORNER_SPEED_AO) / (Math.PI / 2 - CORNER_SPEED_AO), 0, 1);
-            return this.combatSpeed + (CORNER_SPEED - this.combatSpeed) * t;
+        return Math.max(this.combatSpeed, FIGHT_MIN_SPEED);
+    }
+
+    /**
+     * The steepest climb (rad) a fighting pilot may aim at this airspeed:
+     * unrestricted while fast, falling to nose-low as it runs out of speed.
+     */
+    private fightClimbLimit(): number {
+        const t = clamp((this.aircraft.getAirspeed() - FIGHT_UNLOAD_SPEED) / (FIGHT_SLOW_SPEED - FIGHT_UNLOAD_SPEED), 0, 1);
+        return t >= 1 ? Math.PI / 2 : FIGHT_CLIMB_FLOOR + (FIGHT_CLIMB_MAX - FIGHT_CLIMB_FLOOR) * t;
+    }
+
+    /** Hold `aimDir` (unit) below {@link fightClimbLimit}. */
+    private capAimClimb(): void {
+        const limit = this.fightClimbLimit();
+        if (limit >= Math.PI / 2 || Math.asin(clamp(this.aimDir.y, -1, 1)) <= limit) {
+            return;
         }
-        return this.combatSpeed;
+        const horiz = Math.hypot(this.aimDir.x, this.aimDir.z);
+        const hx = horiz > 1e-6 ? this.aimDir.x / horiz : Math.sin(this.heading);
+        const hz = horiz > 1e-6 ? this.aimDir.z / horiz : Math.cos(this.heading);
+        this.aimDir.set(hx * Math.cos(limit), Math.sin(limit), hz * Math.cos(limit));
+    }
+
+    /**
+     * Steer `aimDir` (unit) off a collision course with the target: if the
+     * straight-line paths come within {@link DECONFLICT_MISS_M} in the next few
+     * seconds, aim far enough aside at the closest point to pass clear. Without
+     * this a head-on merge between two lead-pursuing pilots ended in a midair.
+     */
+    private deconflictAim(): void {
+        this.toPoint.copy(this.tpos).sub(this.pos);
+        this.bulletVel.copy(this.tvel).sub(this.vel); // relative velocity (scratch)
+        const relSpeedSq = this.bulletVel.lengthSq();
+        if (relSpeedSq < 1) return;
+        const tc = -this.toPoint.dot(this.bulletVel) / relSpeedSq;
+        if (tc <= 0 || tc > DECONFLICT_LOOKAHEAD_S) return;
+        // Target relative to us at the closest point; push our aim the other way.
+        this.toPoint.addScaledVector(this.bulletVel, tc);
+        const miss = this.toPoint.length();
+        if (miss >= DECONFLICT_MISS_M) return;
+        if (miss > 1) {
+            this.toPoint.multiplyScalar(-1 / miss);
+        } else {
+            // Dead on: pass the other aircraft on our left, as pilots do.
+            this.toPoint.set(Math.cos(this.heading), 0, -Math.sin(this.heading));
+        }
+        const along = Math.max(50, Math.sqrt(relSpeedSq) * tc);
+        this.aimDir.multiplyScalar(along).addScaledVector(this.toPoint, DECONFLICT_MISS_M - miss).normalize();
     }
 
     /** Turn/pitch toward `this.aim`, hold `desiredSpeed`, and fire on a predicted hit. */
-    private steerAtAimAndFire(delta: number, range: number, desiredSpeed: number, maxBank: number = MAX_BANK_COMBAT): void {
+    private steerAtAimAndFire(delta: number, range: number, desiredSpeed: number): void {
         this.toPoint.copy(this.aim).sub(this.pos);
         const aimDist = this.toPoint.length();
         if (aimDist < 1e-3) {
@@ -1756,30 +1865,85 @@ export class AiPilot implements AiPilotController {
             return;
         }
         this.aimDir.copy(this.toPoint).divideScalar(aimDist);
+        this.deconflictAim();
+        this.capAimClimb();
 
-        const turnSpeed = desiredSpeed;
-        const aimAngle = Math.acos(clamp(this.fwd.dot(this.aimDir), -1, 1));
-        if (this.alwaysEngage && aimAngle > 3 * Math.PI / 180) {
-            this.hardTurnActive = true;
-        }
-        if (!this.commandHardTurn(this.aimDir, delta, turnSpeed)) {
-            const horiz = Math.hypot(this.toPoint.x, this.toPoint.z);
-            let desiredHeading = Math.atan2(this.toPoint.x, this.toPoint.z);
-            desiredHeading = this.avoidObstacles(desiredHeading);
-            const desiredElev = Math.atan2(this.toPoint.y, horiz);
-
-            this.commandHeading(desiredHeading, maxBank);
-            this.commandElevation(desiredElev);
-            this.commandSpeed(desiredSpeed, delta);
-        }
-
+        this.commandTrack(delta, desiredSpeed);
         this.firing = this.evaluateFireSolution(range);
     }
 
+    /**
+     * Fly the nose onto `this.aimDir` and keep it there (see {@link TRACK_GAIN}):
+     * roll the lift vector onto the acceleration that does it and pull just the
+     * g it takes. Stick here is a g command, 1 g at neutral and roughly
+     * {@link maxStickG} at full aft.
+     */
+    private commandTrack(delta: number, desiredSpeed: number): void {
+        if (this.hasPrevAimDir && delta > 1e-4) {
+            this.liftDir.copy(this.aimDir).sub(this.prevAimDir).divideScalar(delta);
+            this.aimRate.lerp(this.liftDir, AIM_RATE_EMA);
+        } else {
+            this.aimRate.set(0, 0, 0);
+        }
+        this.prevAimDir.copy(this.aimDir);
+        this.hasPrevAimDir = true;
+
+        const speed = Math.max(1, this.aircraft.getAirspeed());
+        const aimAngle = Math.acos(clamp(this.fwd.dot(this.aimDir), -1, 1));
+        // Aim error as an angle, pointing across the nose toward the aim.
+        this.liftDir.copy(this.aimDir).addScaledVector(this.fwd, -this.fwd.dot(this.aimDir));
+        if (this.liftDir.lengthSq() < 1e-8) {
+            this.liftDir.copy(this.up); // dead astern: any way round, the way we pull now
+        }
+        this.liftDir.normalize().multiplyScalar(aimAngle * TRACK_GAIN * speed)
+            .addScaledVector(this.aimRate, speed);
+        this.liftDir.y += GRAVITY;
+        this.liftDir.addScaledVector(this.fwd, -this.fwd.dot(this.liftDir));
+        const liftG = this.liftDir.length() / GRAVITY;
+
+        // Small corrections over the top are pushed, not rolled 180 deg for.
+        let rollErr = Math.atan2(-this.liftDir.dot(this.right), this.liftDir.dot(this.up));
+        let wantG = liftG;
+        if (Math.abs(rollErr) > LIFT_ROLL_FIRST + Math.PI / 6 && liftG < TRACK_PUSH_G) {
+            rollErr = wrapPi(rollErr + Math.PI);
+            wantG = -liftG;
+        }
+        this.aircraft.setRoll(liftG > 0.2 ? clamp(rollErr * ROLL_KP, -1, 1) : 0);
+        this.aircraft.setYaw(clamp(this.bank * ROLL_YAW_COORD, -0.3, 0.3));
+
+        let pull = clamp((wantG - 1) / (this.maxStickG(speed) - 1), TRACK_PUSH_MAX, HARD_TURN_PITCH_MAX);
+        const rollT = clamp((Math.abs(rollErr) - LIFT_ROLL_ALIGNED) / (LIFT_ROLL_FIRST - LIFT_ROLL_ALIGNED), 0, 1);
+        if (pull > LIFT_ROLL_PULL) {
+            pull += (LIFT_ROLL_PULL - pull) * rollT;
+        }
+        const over = speed - this.maxSpeed;
+        if (over > 0) {
+            pull = Math.max(pull, clamp(over * OVERSPEED_ELEV_GAIN, 0, OVERSPEED_ELEV_MAX));
+        }
+        this.applyFightPitch(pull);
+        this.commandSpeed(desiredSpeed, delta);
+    }
+
+    /** The g full stick gives at `speed` (m/s), from the measured 2.3 g at 120 to 6.3 g at 240. */
+    private maxStickG(speed: number): number {
+        return clamp(0.0333 * speed - 1.7, 1.2, 9);
+    }
+
+    /** Stick for a fight: full aft allowed, and a pull while inverted when high enough for it. */
+    private applyFightPitch(pull: number): void {
+        const agl = this.pos.y - this.world.groundHeightAt(this.pos.x, this.pos.z);
+        if (this.up.y < 0 && agl > this.hardDeck + INVERTED_PULL_AGL) {
+            this.pitchCmdState = clamp(pull, PITCH_MIN, HARD_TURN_PITCH_MAX);
+            this.aircraft.setPitch(this.pitchCmdState);
+        } else {
+            this.applyPitchImmediate(pull, HARD_TURN_PITCH_MAX);
+        }
+    }
+
     /** Straight lead-pursuit intercept — the default, common case. */
-    private doPursue(delta: number, range: number, ao: number): void {
+    private doPursue(delta: number, range: number, ao: number, closure: number): void {
         this.computeBallisticAim();
-        this.steerAtAimAndFire(delta, range, this.combatTurnSpeed(range, ao));
+        this.steerAtAimAndFire(delta, range, this.combatTurnSpeed(range, ao, closure));
     }
 
     /**
@@ -1788,7 +1952,7 @@ export class AiPilot implements AiPilotController {
      * radius the airframe can't sustain just to keep pointing at an
      * unreachable lead point.
      */
-    private doLagPursue(delta: number, range: number, ao: number): void {
+    private doLagPursue(delta: number, range: number, ao: number, closure: number): void {
         this.computeBallisticAim();
 
         const span = Math.max(1e-3, Math.PI - LAG_ANGLE_OFF_TRIGGER);
@@ -1796,7 +1960,7 @@ export class AiPilot implements AiPilotController {
         this.aim.lerp(this.tpos, blend);
         this.clampAimToHardDeck();
 
-        this.steerAtAimAndFire(delta, range, this.combatTurnSpeed(range, ao));
+        this.steerAtAimAndFire(delta, range, this.combatTurnSpeed(range, ao, closure));
     }
 
     /**
