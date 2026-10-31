@@ -110,7 +110,7 @@ describe('airfield lights', () => {
             category: categoryOf(p), fade: (p.material as THREE.Material).userData.fadeM as [number, number],
         }));
         for (const { fade } of fades) {
-            assert.ok(fade && fade[0] > 0 && fade[1] > fade[0], `fade ${fade}`);
+            assert.ok(fade && fade[0] === 0 && fade[1] > 0, `fade ${fade}`);
         }
         const blue = fades.find(f => f.category === 'LIGHT_BLUE');
         assert.ok(blue, 'taxiway lights');
