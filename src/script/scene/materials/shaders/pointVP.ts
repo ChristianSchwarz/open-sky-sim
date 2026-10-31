@@ -13,6 +13,11 @@ export const PointVertProgram: string = `
   uniform float uPointSizePx;
   uniform float uPointSizeM;
   uniform float uPointMaxPx;
+#ifdef POINT_FADE
+  // Whole up to uPointFadeM.x metres from the camera, gone at .y.
+  uniform vec2 uPointFadeM;
+  varying float vPointFade;
+#endif
 
   varying vec3 vPosition;
   // Unused (uGrazingHighlight is always 0 here) but declared to match the
@@ -26,7 +31,11 @@ ${LOG_DEPTH_PARS_VERTEX}
     vNormalView = vec3(0.0, 0.0, 1.0);
     vViewDir = vec3(0.0, 0.0, 1.0);
 
-    vec4 pos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vec4 viewPos = modelViewMatrix * vec4(position, 1.0);
+    vec4 pos = projectionMatrix * viewPos;
+#ifdef POINT_FADE
+    vPointFade = 1.0 - smoothstep(uPointFadeM.x, uPointFadeM.y, length(viewPos.xyz));
+#endif
     gl_PointSize = uPointSizeM > 0.0
       ? clamp(uPointSizeM * projectionMatrix[1][1] * halfHeight / max(pos.w, 1e-3), uPointSizePx, uPointMaxPx)
       : uPointSizePx;

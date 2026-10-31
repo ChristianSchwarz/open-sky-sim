@@ -10,9 +10,10 @@ import { papiWhite, runwayIsLit } from './airfieldLights';
 import { buildAirfieldModel } from './airfieldModel';
 
 const MATERIALS = {
-    build: (p: { category: string }) => {
+    build: (p: { category: string; fadeM?: readonly [number, number] }) => {
         const m = new THREE.MeshBasicMaterial();
         m.userData.category = p.category;
+        m.userData.fadeM = p.fadeM;
         return m;
     },
 } as unknown as SceneMaterialManager;
@@ -99,6 +100,23 @@ describe('airfield lights', () => {
                 assert.ok(kinds.has(c), `${c} missing at level ${level}`);
             }
         }
+    });
+
+    it('fades every light out with distance, the taxiway first and the flashers last', () => {
+        const field = gclp({
+            taxiways: [{ widthM: 23, points: [[27.92, -15.40], [27.925, -15.40]] }],
+        });
+        const fades = lightsOf(field).map(p => ({
+            category: categoryOf(p), fade: (p.material as THREE.Material).userData.fadeM as [number, number],
+        }));
+        for (const { fade } of fades) {
+            assert.ok(fade && fade[0] > 0 && fade[1] > fade[0], `fade ${fade}`);
+        }
+        const blue = fades.find(f => f.category === 'LIGHT_BLUE');
+        assert.ok(blue, 'taxiway lights');
+        const farthest = Math.max(...fades.map(f => f.fade[1]));
+        assert.ok(blue.fade[1] < farthest);
+        assert.ok(farthest >= 15000, 'flashers reach the farthest');
     });
 
     it('puts a light on each edge every 60 m', () => {

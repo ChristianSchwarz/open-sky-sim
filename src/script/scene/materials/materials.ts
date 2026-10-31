@@ -240,6 +240,11 @@ interface SceneMaterialPointProperties {
     sizeM?: number;
     /** The most pixels a `sizeM` light grows to. */
     maxPx?: number;
+    /**
+     * Metres from the camera over which the point fades out: whole up to the
+     * first, gone at the second. Blended, so leave depthWrite off. Default none.
+     */
+    fadeM?: readonly [number, number];
 }
 
 interface SceneMaterialLineProperties {
@@ -478,6 +483,10 @@ export class SceneMaterialManager implements KernelTask {
         material.depthWrite = p.depthWrite;
         material.userData = data;
         material.uniforms = this.buildUniforms(p);
+        if (p.type === SceneMaterialPrimitiveType.POINT && p.fadeM) {
+            material.defines = { ...material.defines, POINT_FADE: '' };
+            material.transparent = true;
+        }
         if (p.type === SceneMaterialPrimitiveType.MESH && !p.shaded && p.railDetail) {
             material.transparent = true;
         }
@@ -650,6 +659,10 @@ export class SceneMaterialManager implements KernelTask {
                 },
                 uPointMaxPx: {
                     value: properties.type === SceneMaterialPrimitiveType.POINT ? (properties.maxPx ?? 1) : 1,
+                },
+                uPointFadeM: {
+                    value: new THREE.Vector2(...(properties.type === SceneMaterialPrimitiveType.POINT
+                        ? (properties.fadeM ?? [0, 0]) : [0, 0])),
                 },
                 uMinHalfPixels: {
                     value: properties.type === SceneMaterialPrimitiveType.MESH

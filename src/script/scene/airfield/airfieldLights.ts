@@ -85,13 +85,17 @@ const TAXIWAY_RUNWAY_CLEAR_M = 10;
 /** A helipad's perimeter lights, per side, corners included. */
 const HELIPAD_LIGHTS_PER_SIDE = 3;
 
-/** Light sizes: metres across as seen, and the least and most pixels. */
-const STEADY = { sizeM: 1.2, sizePx: 2, maxPx: 6 };
-const BRIGHT = { sizeM: 2, sizePx: 2, maxPx: 8 };
-const FLASH = { sizeM: 4, sizePx: 3, maxPx: 12 };
+/**
+ * Light sizes: metres across as seen, and the least and most pixels; and the
+ * distance they fade out over (metres from the camera, whole to gone), the
+ * brighter the farther.
+ */
+const STEADY = { sizeM: 1.2, sizePx: 2, maxPx: 6, fadeM: [3000, 8000] as const };
+const BRIGHT = { sizeM: 2, sizePx: 2, maxPx: 8, fadeM: [5000, 12000] as const };
+const FLASH = { sizeM: 4, sizePx: 3, maxPx: 12, fadeM: [8000, 16000] as const };
 /** Taxiway lights are a fraction of a runway light's intensity: a pixel from afar. */
-const DIM = { sizeM: 0.8, sizePx: 1, maxPx: 4 };
-type LightSize = typeof STEADY;
+const DIM = { sizeM: 0.8, sizePx: 1, maxPx: 4, fadeM: [1500, 4000] as const };
+type LightSize = { sizeM: number; sizePx: number; maxPx: number; fadeM: readonly [number, number] };
 
 /** A runway is lit when OSM says so, or when it is a paved runway of some length at a field that is not a club strip. */
 export function runwayIsLit(runway: AirfieldRunway, airfield: Airfield): boolean {

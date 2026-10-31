@@ -174,6 +174,9 @@ const shader = (kind: 'stroke' | 'flat' | 'rail'): string => {
 #ifdef VERTEX_ALPHA_DITHER
   varying float vDitherLevel;
 #endif
+#ifdef POINT_FADE
+  varying float vPointFade;
+#endif
 #ifdef INSTANCE_TONES
   varying vec3 vToneA;
   varying vec3 vToneB;
@@ -341,6 +344,12 @@ ${DITHER_PARS_FRAGMENT}
     // light does rather than sitting wherever the palette left it.
     diffuse *= overbright;
     gl_FragColor = mix(vec4(diffuse, 1.0), vec4(fogColor, 1.0), fogFactor * 0.92);
+#ifdef POINT_FADE
+    if (vPointFade <= 0.0) {
+      discard;
+    }
+    gl_FragColor.a = vPointFade;
+#endif
 ` + (rail ? `    gl_FragColor.a = railAlpha;
 ` : '') + (flat ? `    gl_FragColor.a = uOpacity;
 ` : '') + `${LOG_DEPTH_FRAGMENT}

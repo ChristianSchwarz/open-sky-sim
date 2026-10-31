@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { DepthFragProgram } from './depthFP';
 import { PointVertProgram } from './pointVP';
 
 /**
@@ -16,6 +17,13 @@ describe('point vertex program', () => {
         assert.equal(snaps.length, 2, 'expected one floor(...) snap each for x and y');
         assert.equal(snaps[0][1], '0.5');
         assert.equal(snaps[1][1], '0.5');
+    });
+
+    it('fades a POINT_FADE light by its distance from the camera, and the fragment uses it', () => {
+        assert.match(PointVertProgram, /#ifdef POINT_FADE[\s\S]*varying float vPointFade;/);
+        assert.match(PointVertProgram, /vPointFade = 1\.0 - smoothstep\(uPointFadeM\.x, uPointFadeM\.y, length\(viewPos\.xyz\)\)/);
+        assert.match(DepthFragProgram, /#ifdef POINT_FADE[\s\S]*varying float vPointFade;/);
+        assert.match(DepthFragProgram, /gl_FragColor\.a = vPointFade;/);
     });
 
     it('guards both snaps behind the same shadingType check', () => {
