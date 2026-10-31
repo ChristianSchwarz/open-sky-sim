@@ -96,7 +96,9 @@ const colors: PaletteColors = {
     [PaletteCategory.SCENERY_ROOF_GLASS]: '#363e40',
     [PaletteCategory.SCENERY_ROOF_WHITE]: '#404040',
 
-    [PaletteCategory.SCENERY_BASE_RUNWAY_LINES]: '#d0d0d0',
+    // Paint is not lit: every marking is as dark as the runway number and
+    // threshold stripes; the airfield lights do the showing.
+    [PaletteCategory.SCENERY_BASE_RUNWAY_LINES]: '#484848',
     [PaletteCategory.SCENERY_BASE_RUNWAY_THRESHOLD]: '#484848',
     [PaletteCategory.SCENERY_BASE_CONCRETE]: '#34312b',
     [PaletteCategory.SCENERY_BASE_DECK_RUST]: '#2a1a12',

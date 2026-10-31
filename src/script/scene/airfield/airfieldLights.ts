@@ -34,9 +34,14 @@ const LIGHT_HEIGHT_M = 0.4;
 /** Runway edge lights: spacing along, and how far outside the pavement edge. */
 const EDGE_SPACING_M = 60;
 const EDGE_OUTSIDE_M = 1.5;
-/** Runway centreline lights, on runways at least CENTRELINE_MIN_WIDTH_M wide. */
+/**
+ * Runway centreline lights, on every lit runway. Coded by what is left of the
+ * runway ahead: white, then red and white in turn from CENTRELINE_CODED_M
+ * before the end, and red only over the last CENTRELINE_RED_M.
+ */
 const CENTRELINE_SPACING_M = 30;
-const CENTRELINE_MIN_WIDTH_M = 45;
+const CENTRELINE_CODED_M = 900;
+const CENTRELINE_RED_M = 300;
 /** Threshold and end lights: spacing across, and how far outside the threshold. */
 const THRESHOLD_SPACING_M = 3;
 const THRESHOLD_OUTSIDE_M = 1;
@@ -191,6 +196,8 @@ interface LightGroup {
     size: LightSize;
     points: THREE.Vector3[];
     onEye?: (points: LightPoints, eye: THREE.Vector3, timeS: number) => void;
+    /** The object's name, where the group needs telling apart. */
+    name?: string;
 }
 
 /**
@@ -255,10 +262,24 @@ export function buildAirfieldLights(
             const along = length * k / (edgeCount - 1);
             edges.push(at(along, -half - EDGE_OUTSIDE_M), at(along, half + EDGE_OUTSIDE_M));
         }
-        if (runway.widthM >= CENTRELINE_MIN_WIDTH_M && airfield.kind === 'international') {
-            for (let along = CENTRELINE_SPACING_M / 2; along < length; along += CENTRELINE_SPACING_M) {
-                edges.push(at(along, 0, surfaceLift + 0.1));
+        // Centreline: the same fixtures twice, coded for each direction of
+        // travel and shown only to a viewer looking that way down the runway.
+        for (const forward of [true, false]) {
+            const white: THREE.Vector3[] = [];
+            const red: THREE.Vector3[] = [];
+            let k = 0;
+            for (let along = CENTRELINE_SPACING_M / 2; along < length; along += CENTRELINE_SPACING_M, k++) {
+                const left = forward ? length - along : along;
+                const isRed = left < CENTRELINE_RED_M || (left < CENTRELINE_CODED_M && k % 2 === 0);
+                (isRed ? red : white).push(at(along, 0, surfaceLift + 0.1));
             }
+            const start = at(0, 0);
+            // Seen from behind the start of the travel, looking down the runway.
+            const behind = at(forward ? -1 : 1, 0).sub(start);
+            groups.push({ category: PaletteCategory.LIGHT_WHITE, size: STEADY, points: white,
+                onEye: facingOnly(start, behind), name: 'centreline' });
+            groups.push({ category: PaletteCategory.LIGHT_RED, size: STEADY, points: red,
+                onEye: facingOnly(start, behind), name: 'centreline' });
         }
         // Each end: green threshold lights seen from the approach, red end
         // lights seen from the runway, at the same fixtures.
@@ -396,7 +417,9 @@ export function buildAirfieldLights(
     return groups.filter(g => g.points.length > 0).map(g => {
         const geometry = new THREE.BufferGeometry().setFromPoints(g.points);
         geometry.computeBoundingSphere();
-        return new LightPoints(geometry, materialFor(g.category, g.size), g.onEye);
+        const points = new LightPoints(geometry, materialFor(g.category, g.size), g.onEye);
+        points.name = g.name ?? '';
+        return points;
     });
 }
 

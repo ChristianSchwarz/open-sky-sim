@@ -122,8 +122,40 @@ describe('airfield lights', () => {
     it('puts a light on each edge every 60 m', () => {
         const edges = lightsOf(gclp()).filter(p => categoryOf(p) === 'LIGHT_WHITE' && p.onEye === undefined);
         const total = edges.reduce((n, p) => n + count(p), 0);
-        // 53 pairs of edge lights, 103 centreline lights and the approach lights.
-        assert.ok(total >= 2 * Math.round(3103 / 60) + 100, `${total}`);
+        // 53 pairs of edge lights and the approach lights.
+        assert.ok(total >= 2 * Math.round(3103 / 60), `${total}`);
+    });
+
+    it('codes the centreline red over the last 900 m, for each direction on its own', () => {
+        // A club strip too: every lit runway has its centreline lit.
+        const field = gclp({ kind: 'regional' } as Partial<Airfield>);
+        const lights = lightsOf(field);
+        const centre = lights.filter(p => p.name === 'centreline');
+        // White and red for each direction.
+        assert.equal(centre.length, 4);
+        const [whiteUp, redUp, whiteDown, redDown] = centre;
+        assert.equal(categoryOf(whiteUp), 'LIGHT_WHITE');
+        assert.equal(categoryOf(redUp), 'LIGHT_RED');
+        // 103 fixtures in all: last 300 m red (10), 300-900 m every other one (10).
+        assert.equal(count(whiteUp) + count(redUp), 103);
+        assert.equal(count(redUp), 20);
+        assert.equal(count(redDown), 20);
+        // Looking up the runway from the 03 approach: the up set shows, the down set does not.
+        const behind03 = new THREE.Vector3();
+        const pos = whiteUp.geometry.getAttribute('position');
+        const first = new THREE.Vector3().fromBufferAttribute(pos, 0);
+        const last = new THREE.Vector3().fromBufferAttribute(pos, pos.count - 1);
+        behind03.copy(first).addScaledVector(last.clone().sub(first).normalize(), -2000).setY(first.y + 100);
+        for (const p of centre) {
+            p.onEye!(p, behind03, 0);
+        }
+        assert.ok(shown(whiteUp) > 0 && shown(redUp) > 0);
+        assert.equal(shown(whiteDown), 0);
+        assert.equal(shown(redDown), 0);
+        // The red ones are at the far end, for the up direction.
+        const redPos = redUp.geometry.getAttribute('position');
+        const farRed = new THREE.Vector3().fromBufferAttribute(redPos, redPos.count - 1);
+        assert.ok(farRed.distanceTo(first) > 2800);
     });
 
     it('reads a PAPI two white two red on a 3 degree approach, and nothing from behind', () => {
@@ -159,7 +191,7 @@ describe('airfield lights', () => {
     });
 
     it('shows green to the approach and red to the runway, from the same fixtures', () => {
-        const bars = lightsOf(gclp()).filter(p => p.onEye !== undefined && count(p) > 4
+        const bars = lightsOf(gclp()).filter(p => p.onEye !== undefined && count(p) > 4 && p.name !== 'centreline'
             && (categoryOf(p) === 'LIGHT_GREEN' || categoryOf(p) === 'LIGHT_RED'));
         assert.equal(bars.length, 4);
         const [green, red] = bars;
@@ -174,7 +206,8 @@ describe('airfield lights', () => {
     });
 
     it('runs the approach flashers in towards the threshold', () => {
-        const flashers = lightsOf(gclp()).filter(p => p.onEye !== undefined && categoryOf(p) === 'LIGHT_WHITE' && count(p) > 4);
+        const flashers = lightsOf(gclp()).filter(p => p.onEye !== undefined && categoryOf(p) === 'LIGHT_WHITE' && count(p) > 4
+            && p.name !== 'centreline');
         assert.equal(flashers.length, 2);
         const f = flashers[0];
         const steps: number[] = [];
