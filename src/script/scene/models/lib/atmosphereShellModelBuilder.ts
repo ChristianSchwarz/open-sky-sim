@@ -48,6 +48,11 @@ export const SHELL_MAX_AREAS = 8;
 
 /** Width of the blend at an area's edge, degrees of arc (about 55 km). */
 const AREA_FEATHER_DEG = 0.5;
+/**
+ * A small area's blend is narrowed to this share of its shorter side: a full
+ * 0.5 deg across an island's box laid the map's coarse land over most of it.
+ */
+const AREA_FEATHER_SHARE = 0.1;
 
 /**
  * How far terrain may lie from the ellipsoid and still be believed: the
@@ -206,8 +211,9 @@ ${EARTH_MAP_PARS_FRAGMENT}
   }
 
   // How far inside a baked area a point is: 0 outside every area, rising to
-  // 1 at AREA_FEATHER in from the nearest edge. Boxes clip coasts their bake
-  // may not have mapped, so their edges are blended rather than drawn.
+  // 1 at AREA_FEATHER in from the nearest edge (less in a small area). Boxes
+  // clip coasts their bake may not have mapped, so their edges are blended
+  // rather than drawn.
   float bakedAreaDepth(vec2 ll) {
     float depth = 0.0;
     for (int i = 0; i < ${SHELL_MAX_AREAS}; i++) {
@@ -217,7 +223,9 @@ ${EARTH_MAP_PARS_FRAGMENT}
       vec4 r = uAreas[i];
       float ew = min(ll.y - r.x, r.z - ll.y) * cos(ll.x);
       float ns = min(ll.x - r.y, r.w - ll.x);
-      depth = max(depth, smoothstep(0.0, AREA_FEATHER, min(ew, ns)));
+      float feather = min(AREA_FEATHER,
+        ${AREA_FEATHER_SHARE.toFixed(3)} * min((r.z - r.x) * cos(ll.x), r.w - r.y));
+      depth = max(depth, smoothstep(0.0, feather, min(ew, ns)));
     }
     return depth;
   }
