@@ -137,8 +137,12 @@ function main(): void {
     const tiles = meshTiles.filter(inScope);
     // A coarse tile is drawn from far enough away that its strokes get the
     // mesh budget's worth of vertices and no more, as the rivers do.
+    // A leaf capped short of the pyramid carries the roads of every z12 tile
+    // under it (tools/gather_capped_leaves.py), and gets their vertices too.
     const budget = manifest.mesh.triangleBudget ?? DEFAULT_MAX_VERTS;
-    const capFor = (k: TileKey) => (isLeaf(k) ? args.maxVerts : Math.min(args.maxVerts, budget));
+    const capFor = (k: TileKey) => (isLeaf(k)
+        ? Math.min(PTR_MAX_VERTS, args.maxVerts * 4 ** (leafZoom - k.z))
+        : Math.min(args.maxVerts, budget));
 
     console.log(`bake_planet_roads: ${tiles.length} mesh tiles z${minZoom}..z${leafZoom}`
         + `${args.bbox ? ' (scoped)' : ''}, ${args.maxVerts} vertices per leaf`);

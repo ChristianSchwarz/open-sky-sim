@@ -106,6 +106,31 @@ interface TerrainManifestFile {
 const keyOf = (k: TileKey) => `${k.z}/${k.x}/${k.y}`;
 const tilePath = (dir: string, k: TileKey, ext: string) => path.join(dir, String(k.z), String(k.x), `${k.y}${ext}`);
 
+/**
+ * The tiles a leaf's footprints and roof stores are filed under: its own, or
+ * for a leaf capped short of the pyramid (an area's leafZoom) the srcZoom
+ * tiles beneath it, where bake_osm_buildings.py and the stores keep them.
+ */
+function footprintTiles(k: TileKey, srcZoom: number): TileKey[] {
+    const n = 1 << Math.max(0, srcZoom - k.z);
+    if (n === 1) {
+        return [k];
+    }
+    const out: TileKey[] = [];
+    for (let dy = 0; dy < n; dy++) {
+        for (let dx = 0; dx < n; dx++) {
+            out.push({ z: srcZoom, x: k.x * n + dx, y: k.y * n + dy });
+        }
+    }
+    return out;
+}
+
+/** Per-tile maps keyed by OSM id, so disjoint, as one; undefined when none was there. */
+function merged<V>(maps: (Map<number, V> | undefined)[]): Map<number, V> | undefined {
+    const present = maps.filter((m): m is Map<number, V> => m !== undefined);
+    return present.length <= 1 ? present[0] : new Map(present.flatMap(m => [...m]));
+}
+
 function main(): void {
     const args = parseArgs(process.argv.slice(2));
     const t0 = Date.now();
@@ -118,6 +143,7 @@ function main(): void {
     const leafZoom = manifest.mesh.maxZoom;
     const leafZoomAt = leafZoomOf(manifest.areas, leafZoom);
     const isLeaf = (k: TileKey) => isLeafTile(leafZoomAt, k);
+    const beneath = (k: TileKey) => footprintTiles(k, leafZoom);
     const basis = makeEnuBasis(manifest.enuOrigin.lat, manifest.enuOrigin.lon, manifest.enuOrigin.height);
     const meshTiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath ?? 'index_mesh.bin')));
     const tiles = meshTiles.filter(k => isLeaf(k) && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes))));
@@ -138,24 +164,27 @@ function main(): void {
     for (let i = 0; i < tiles.length; i++) {
         const k = tiles[i];
         const outPath = tilePath(args.dir, k, '.pbh');
-        const bvrPath = tilePath(args.src, k, '.bvr');
+        const footprints = beneath(k).filter(s => fs.existsSync(tilePath(args.src, s, '.bvr')));
         const ptmPath = tilePath(args.dir, k, '.ptm');
         let planned: PlannedBuilding[] = [];
         let frame;
-        if (fs.existsSync(bvrPath) && fs.existsSync(ptmPath)) {
-            const buildings = decodeBvr(fs.readFileSync(bvrPath));
+        if (footprints.length > 0 && fs.existsSync(ptmPath)) {
+            const buildings = footprints.flatMap(s => decodeBvr(fs.readFileSync(tilePath(args.src, s, '.bvr'))));
             // And the buildings only LoD2 has (tools/import_lod2.py), which take the same road.
-            const bvlPath = tilePath(args.src, k, '.bvl');
-            if (fs.existsSync(bvlPath)) {
-                const extra = decodeBvr(fs.readFileSync(bvlPath));
-                lod2Added += extra.length;
-                buildings.push(...extra);
+            for (const s of footprints) {
+                const bvlPath = tilePath(args.src, s, '.bvl');
+                if (fs.existsSync(bvlPath)) {
+                    const extra = decodeBvr(fs.readFileSync(bvlPath));
+                    lod2Added += extra.length;
+                    buildings.push(...extra);
+                }
             }
-            const measured = args.colours !== undefined ? readMeasuredRoofs(args.colours, k) : undefined;
+            const { colours, shapes: shapeStore, lod2: lod2Store } = args;
+            const measured = colours !== undefined ? merged(footprints.map(s => readMeasuredRoofs(colours, s))) : undefined;
             leavesMeasured += measured ? 1 : 0;
-            const shapes = args.shapes !== undefined ? readMeasuredShapes(args.shapes, k) : undefined;
+            const shapes = shapeStore !== undefined ? merged(footprints.map(s => readMeasuredShapes(shapeStore, s))) : undefined;
             leavesShaped += shapes ? 1 : 0;
-            const lod2 = args.lod2 !== undefined ? readLod2(args.lod2, k) : undefined;
+            const lod2 = lod2Store !== undefined ? merged(footprints.map(s => readLod2(lod2Store, s))) : undefined;
             leavesLod2 += lod2 ? 1 : 0;
             const tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
             const surface = tileSurface(tile, basis);

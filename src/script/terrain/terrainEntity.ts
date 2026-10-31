@@ -2423,7 +2423,10 @@ export class TerrainEntity implements Entity {
                 this.bridges.attach(node.id, meshes, priority);
                 this.roads.setUnder(meshes, node.under);
                 this.bridges.setUnder(meshes, node.under);
-                if (!node.under) {
+                // A capped area's leaf is drawn out to where only parents
+                // would be elsewhere; it takes its houses on where a z12
+                // leaf would stand, or every leaf of the island queues them.
+                if (!node.under && (node.id.z >= this.manifest.mesh.maxZoom || node.wantsFiner)) {
                     this.buildings.attach(node.id, meshes, priority);
                 }
                 // Walls, collision and the trees' mask: once per drawn tile.

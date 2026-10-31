@@ -1016,6 +1016,12 @@ export function chunkPoolStep(box: readonly number[], pbf: string, stage: 'coast
 function meshStepsLocal(box: readonly number[]): Step[] {
     const bbox = box.join(',');
     return [
+        // An area capped short of z12 meshes, drapes and bridges its leaves
+        // from their own road files: z12's, gathered up (a no-op elsewhere).
+        {
+            label: 'gathering capped leaves', cmd: PYTHON,
+            args: ['tools/gather_capped_leaves.py', `--bbox=${bbox}`],
+        },
         {
             label: 'baking meshes', cmd: process.execPath,
             args: ['--import', 'tsx', 'tools/bake_planet_mesh.ts', '--bbox', bbox],
@@ -1436,8 +1442,10 @@ export function ensureTerrain(): void {
             // The Python measuring stages (lidar, LoD2, roof colours and
             // shapes) are left out: each needs a box or a leaf to look at,
             // and they only add to a pyramid that has been baked with data.
-            const steps = meshSteps([]).filter(s => s.cmd === process.execPath)
-                .map(s => ({ ...s, args: s.args.slice(0, 3) }));
+            // Gathering capped leaves takes every capped area without one.
+            const gather = (s: Step) => s.args[0] === 'tools/gather_capped_leaves.py';
+            const steps = meshSteps([]).filter(s => s.cmd === process.execPath || gather(s))
+                .map(s => ({ ...s, args: s.args.slice(0, gather(s) ? 1 : 3) }));
             job.stepCount = steps.length;
             for (let i = 0; i < steps.length; i++) {
                 await runStep(job, steps[i], i);

@@ -354,7 +354,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          '(chunked imports)')
     ap.add_argument('--leaf-zoom', type=int,
                     help='finest zoom to mesh this area to, when short of the '
-                         'pyramid's (recorded on its area entry as leafZoom)')
+                         'pyramid maxZoom (recorded on its area entry as leafZoom)')
     ap.add_argument('--dry-run', action='store_true',
                     help='report what would be written and stop')
     ap.add_argument('--jobs', type=int, default=DEFAULT_JOBS,

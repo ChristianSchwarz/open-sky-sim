@@ -115,6 +115,10 @@ export const COAST_FULL_DETAIL_MIN_ZOOM = 11;
  * an exact fill there cost a mean 35k triangles per tile over Berlin - six
  * times the mesh budget, for edges no distance could show. Measured on a z9
  * tile before any gate: 73k fill and 16k outline triangles.
+ *
+ * A leaf capped short of z12 (an area's leafZoom) has them too: it is drawn
+ * from as close as a z12 leaf, and carries the z12 polygons
+ * (tools/gather_capped_leaves.py).
  */
 export const LANDUSE_DETAIL_MIN_ZOOM = 12;
 
@@ -828,7 +832,8 @@ export function buildTile(input: BuildTileInput): BuildTileResult {
     const hasRegions = input.regions !== undefined && input.regions.length > 0;
     const leafZoom = input.id.z >= (input.maxZoom ?? input.id.z);
     /** Exact fills and outlines; below this the polygons only colour facets. */
-    const landuseDetail = hasRegions && input.id.z >= LANDUSE_DETAIL_MIN_ZOOM;
+    const landuseDetail = hasRegions
+        && (input.id.z >= LANDUSE_DETAIL_MIN_ZOOM || (input.maxZoom !== undefined && input.id.z >= input.maxZoom));
     /** Node-level landuse classification, used only to average each polygon's colour. */
     const landuseField = hasRegions
         ? buildRegionField({ regions: input.regions!, bounds, size })

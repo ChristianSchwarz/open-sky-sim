@@ -53,6 +53,12 @@ export interface QuadNode {
      */
     under: boolean;
     /**
+     * A leaf of an area capped short of maxZoom (leafZoom.ts) that would have
+     * refined if anything were baked under it: drawn where a z12 leaf would
+     * be, so it carries what one would (its buildings). Set per pass.
+     */
+    wantsFiner?: boolean;
+    /**
      * A drawn leaf: the distance (m) its parent handed over at, which is the
      * far end of its dissolve. 0 for any node not dissolving.
      */
@@ -353,7 +359,7 @@ export class Quadtree {
             // ellipsoid's sagitta is its only real shape error.
             // Nothing is baked under an area's leaves: their absent children
             // would read as ocean and the land would refine into open sea.
-            const canRefine = node.id.z < zoomCap && node.id.z < this.leafZoomAt(node.id) && (
+            const wouldRefine = node.id.z < zoomCap && (
                 !(mapLod && node.ocean) && shouldRefine(
                     this.drawErrorM(node, leafScale), d, screenHeightPx, fovYDeg, farScale,
                 )
@@ -361,6 +367,9 @@ export class Quadtree {
                     ellipsoidSagittaM(node.id), d, screenHeightPx, fovYDeg, 1,
                 )
             );
+            const capped = node.id.z >= this.leafZoomAt(node.id);
+            const canRefine = wouldRefine && !capped;
+            node.wantsFiner = wouldRefine && capped;
 
             if (!canRefine) {
                 wantThis();
