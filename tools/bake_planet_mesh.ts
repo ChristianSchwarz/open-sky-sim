@@ -47,6 +47,7 @@ import * as zlib from 'node:zlib';
 import { decodePdm, encodePdmUncompressed } from '../src/script/terrain/demTile';
 import { GradeLine, carveGrid, decodeRgr } from './bake/roadGrade';
 import { decodePtm } from '../src/script/terrain/ptm';
+import { isPastLeaf, leafZoomOf } from '../src/script/terrain/leafZoom';
 import {
     HISTOGRAM_BINS, accumulateColors, luminanceWindow, medianCut, newColorHistogram,
 } from './bake/swatches';
@@ -593,6 +594,10 @@ async function main(): Promise<void> {
             return { z, x, y };
         })
         : walkTiles(args.src, maxZoom);
+    // An area capped short of maxZoom keeps its finer DEM tiles in the planet
+    // tree (heights and the data bakes still run to z12) but meshes none of them.
+    const leafZoom = leafZoomOf(src.areas, maxZoom);
+    tiles = tiles.filter(t => !isPastLeaf(leafZoom, t));
     if (args.bbox !== undefined) {
         const before = tiles.length;
         const box = args.bbox;
@@ -657,6 +662,7 @@ async function main(): Promise<void> {
         out: args.out,
         seaLevel: src.seaLevel ?? 0,
         maxZoom,
+        areas: src.areas,
         budget: args.budget,
         basis,
         pads,
@@ -766,7 +772,10 @@ async function main(): Promise<void> {
     const present = new Map<string, TileKey>();
     if (args.bbox !== undefined && fs.existsSync(indexPath)) {
         for (const k of decodeTileIndex(fs.readFileSync(indexPath))) {
-            present.set(`${k.z}/${k.x}/${k.y}`, k);
+            // Not past a capped area's leaves, which this bake never writes.
+            if (!isPastLeaf(leafZoom, k)) {
+                present.set(`${k.z}/${k.x}/${k.y}`, k);
+            }
         }
     }
     const carried = present.size;

@@ -40,6 +40,7 @@ import { FAR_LAND_EXT, FarLandConfig, FarLandResult } from './bake/farLandTile';
 import { tileFile } from './bake/railBedInputs';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 import { GB_PER_WORKER, localJobs } from './bake/localJobs';
+import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'farLandWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'farLandWorker.cjs');
@@ -130,8 +131,11 @@ async function main(): Promise<void> {
     const manifestPath = path.join(args.dir, 'manifest.json');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     const leafZoom: number = manifest.mesh.maxZoom;
+    // Leaves at their area's zoom; a capped area's are coarser (leafZoom.ts).
+    const leafZoomAt = leafZoomOf(manifest.areas as LeafZoomArea[] | undefined, leafZoom);
+    const isLeaf = (k: TileKey) => isLeafTile(leafZoomAt, k);
     const tiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath)))
-        .filter(k => k.z === leafZoom && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes))));
+        .filter(k => isLeaf(k) && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes))));
     // Resuming: a sidecar written after its leaf's mesh was is that mesh's.
     const mtime = (f: string) => (fs.existsSync(f) ? fs.statSync(f).mtimeMs : -1);
     const todo = tiles.filter(k => {
@@ -184,7 +188,7 @@ async function main(): Promise<void> {
             present.delete(keyOf(k));
         }
     }
-    fs.writeFileSync(indexPath, encodeTileIndex([...present.values()], leafZoom, leafZoom));
+    fs.writeFileSync(indexPath, encodeTileIndex([...present.values()], Math.min(leafZoom, ...[...present.values()].map(k => k.z)), leafZoom));
     manifest.farLand = {
         path: `{z}/{x}/{y}${FAR_LAND_EXT}`, indexPath: INDEX_FILE, encoding: 'PFL1', transport: 'gzip',
         zoom: leafZoom, levelsM: args.levelsM,

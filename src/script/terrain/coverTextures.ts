@@ -32,6 +32,7 @@ import { TileMeshes } from './tileMesh';
 import { LAND_TONE_BASE, TerrainTone } from './tones';
 import { TileStore } from './tileStore';
 import { TileKey, tileBounds } from './tiling';
+import { LeafZoomOf, leafZoomOf } from './leafZoom';
 
 /**
  * Decoded sidecars kept in memory. The GPU texture is built at attach and
@@ -248,7 +249,8 @@ export class CoverTextures {
     private readonly bakeBasis: EnuBasis;
     private readonly minZoom: number;
     private readonly maxZoom: number;
-    private readonly leafZoom: number;
+    /** The mesh's leaves: z12, or higher up in an area capped short of it (leafZoom.ts). */
+    private readonly leafZoomAt: LeafZoomOf;
     private readonly spec: TextureStreamManifest | undefined;
     private index: TileIndex | undefined;
     private attached = 0;
@@ -260,7 +262,7 @@ export class CoverTextures {
         this.spec = spec;
         this.minZoom = spec?.minZoom ?? 0;
         this.maxZoom = spec?.maxZoom ?? -1;
-        this.leafZoom = spec?.leafZoom ?? -1;
+        this.leafZoomAt = leafZoomOf(opts.manifest.areas, opts.manifest.mesh.maxZoom);
         this.store = spec === undefined ? undefined : new TileStore<PtxTile>({
             baseUrl: opts.baseUrl,
             url: (id) => textureTileUrl(opts.manifest, id.z, id.x, id.y, opts.baseUrl),
@@ -289,9 +291,13 @@ export class CoverTextures {
         this.index = index;
     }
 
+    private isLeaf(id: TileKey): boolean {
+        return id.z === this.leafZoomAt(id);
+    }
+
     /** Whether the bake wrote a texture for this tile. */
     has(id: TileKey): boolean {
-        if (id.z === this.leafZoom) {
+        if (this.isLeaf(id)) {
             // Sparse: only what the index lists.
             return this.index ? this.index.has(id) : false;
         }
@@ -345,7 +351,7 @@ export class CoverTextures {
         }
         const frame = coverFrame(id, this.bakeBasis, meshes.group.scale.x);
         const texture = buildCoverTexture(tile);
-        const leaf = id.z === this.leafZoom;
+        const leaf = this.isLeaf(id);
         const bounds = tileBounds(id);
         const binding: CoverBinding = {
             texture, east: frame.east, north: frame.north, k: frame.k,
@@ -366,7 +372,7 @@ export class CoverTextures {
 
     /** Show or hide a bound coarse tile's sheets as setCoverUnderlay says, building them the first time. */
     private syncUnderlay(id: TileKey, meshes: TileMeshes): void {
-        const want = underlay && id.z !== this.leafZoom;
+        const want = underlay && !this.isLeaf(id);
         const sheets = meshes.coverUnderlay;
         if (!sheets) {
             const binding = meshes.land?.userData.cover as CoverBinding | undefined;

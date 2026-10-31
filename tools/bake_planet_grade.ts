@@ -63,6 +63,7 @@ import { LIDAR_STORE_DIR } from './bake/lidarStore';
 import { LAND_SIMPLIFY_M } from './bake/simplifyLand';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 import { GB_PER_WORKER, localJobs } from './bake/localJobs';
+import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'gradeTileWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'gradeTileWorker.cjs');
@@ -188,6 +189,9 @@ async function main(): Promise<void> {
     const manifestPath = path.join(args.dir, 'manifest.json');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     const leafZoom: number = manifest.mesh.maxZoom;
+    const areas = manifest.areas as LeafZoomArea[] | undefined;
+    const leafZoomAt = leafZoomOf(areas, leafZoom);
+    const isLeaf = (k: TileKey) => isLeafTile(leafZoomAt, k);
     if (!manifest.roads) {
         console.log('bake_planet_grade: no roads in this pyramid, nothing to grade');
         return;
@@ -197,7 +201,7 @@ async function main(): Promise<void> {
     // Leaves read their neighbours' bridges, placed by the neighbours' centre heights.
     const centreHeights: Record<string, number> = {};
     for (const k of tiles) {
-        if (k.z !== leafZoom) {
+        if (!isLeaf(k)) {
             continue;
         }
         // Two rings: the first pass lays out the ring round the box too.
@@ -219,7 +223,7 @@ async function main(): Promise<void> {
         + `${(freeBytes(args.dir) / 1e9).toFixed(1)} GB free`);
     const lidar = args.lidar && fs.existsSync(args.lidarStore) ? { store: args.lidarStore, planet: args.src } : undefined;
     console.log(lidar ? `lidar: lines fitted to the measurements in ${args.lidarStore}` : 'lidar: none, the beds follow the land');
-    const cfg: GradeConfig = { dir: args.dir, enuOrigin: manifest.enuOrigin, leafZoom, centreHeights, freeBorder: args.freeBorder, lidar, simplifyM: args.simplifyM };
+    const cfg: GradeConfig = { dir: args.dir, enuOrigin: manifest.enuOrigin, leafZoom, areas, centreHeights, freeBorder: args.freeBorder, lidar, simplifyM: args.simplifyM };
     const errors: string[] = [];
     let stoppedForDisk = false;
     const diskLow = () => freeBytes(args.dir) < MIN_FREE_BYTES;
@@ -232,7 +236,9 @@ async function main(): Promise<void> {
     await pool.start();
     // A run killed before its cleanup left its .pbd1 files behind; they ship
     // with the tiles (31,696 of them, 0.5 GB, across DACH) unless swept.
-    const stale = sweepPass1(args.dir, leafZoom);
+    // Every level a leaf can be on: the mesh's finest and each area's cap.
+    const leafLevels = new Set([leafZoom, ...(areas ?? []).flatMap(a => (a.leafZoom !== undefined ? [a.leafZoom] : []))]);
+    const stale = [...leafLevels].reduce((n, z) => n + sweepPass1(args.dir, z), 0);
     if (stale > 0) {
         console.log(`removed ${stale} stale ${PASS1_EXT} files from an earlier run`);
     }
@@ -241,10 +247,10 @@ async function main(): Promise<void> {
         // The box's leaves and the ring round them: a ring tile's beds reach over its border into the box.
         const inBox = new Set(tiles.map(keyOf));
         const withStrokes = new Set(decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.roads.indexPath)))
-            .filter(k => k.z === leafZoom).map(keyOf));
+            .filter(isLeaf).map(keyOf));
         const seen = new Set<string>();
         for (const k of tiles) {
-            if (k.z !== leafZoom) {
+            if (!isLeaf(k)) {
                 continue;
             }
             for (let dy = -1; dy <= 1; dy++) {

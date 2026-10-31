@@ -21,6 +21,7 @@ import { TileMeshes, buildSmoothLandGeometryFromFaceted, leanEdgeNormals } from 
 import { TileStore } from './tileStore';
 import { TileKey } from './tiling';
 import { LAND_TONE_BASE } from './tones';
+import { LeafZoomOf, leafZoomOf } from './leafZoom';
 
 /** Decoded sidecars kept; a bound one no longer needs its bytes. */
 const FAR_LAND_CACHE_BYTES = 32 * 1024 * 1024;
@@ -50,6 +51,8 @@ export interface FarLandOptions {
 export class FarLandTiles {
     private readonly store: TileStore<PflTile> | undefined;
     private readonly zoom: number;
+    /** The leaves this is baked on: `zoom`, or higher up in an area capped short of it (leafZoom.ts). */
+    private readonly leafZoomAt: LeafZoomOf;
     private index: TileIndex | undefined;
     private attached = 0;
     private triangles = 0;
@@ -59,6 +62,7 @@ export class FarLandTiles {
     constructor(opts: FarLandOptions) {
         const spec = opts.manifest.farLand;
         this.zoom = spec?.zoom ?? -1;
+        this.leafZoomAt = leafZoomOf(opts.manifest.areas, this.zoom);
         this.store = spec === undefined ? undefined : new TileStore<PflTile>({
             baseUrl: opts.baseUrl,
             url: id => farLandTileUrl(opts.manifest, id.z, id.x, id.y, opts.baseUrl),
@@ -76,7 +80,7 @@ export class FarLandTiles {
 
     /** Whether the bake wrote far land for this tile. */
     has(id: TileKey): boolean {
-        return this.store !== undefined && id.z === this.zoom && (this.index ? this.index.has(id) : true);
+        return this.store !== undefined && id.z === this.leafZoomAt(id) && (this.index ? this.index.has(id) : true);
     }
 
     /** Start a frame's budget for welding levels (SMOOTH_BUILD_MS). */

@@ -97,6 +97,7 @@ import { refreshWeldPositions } from './smoothWeld';
 import { SmoothWelder } from './smoothWelder';
 import { PtmDecoder } from './ptmDecoder';
 import { sphereInTile } from './tileFrameBounds';
+import { LeafZoomOf, leafZoomOf } from './leafZoom';
 
 /**
  * The palette tone a landcover class is painted in.
@@ -977,7 +978,7 @@ export class TerrainEntity implements Entity {
                     // SMOOTH follows from the welder's workers (pumpSmooth):
                     // welded here it was a frame lost per leaf streamed in.
                     TerrainShading.FACETED,
-                    undefined, opts.manifest.mesh.maxZoom,
+                    undefined, this.leafZoomAt(id),
                 );
                 this.smoothBacklog = true;
                 // Trees (and ground clutter - see stones.ts) are attached
@@ -1325,7 +1326,7 @@ export class TerrainEntity implements Entity {
         if (pbd.beds.length === 0) {
             return undefined;
         }
-        const leaf = id.z === this.manifest.mesh.maxZoom;
+        const leaf = id.z === this.leafZoomAt(id);
         if (leaf) {
             this.heights.railBeds.set(tileKeyString(id), bedsToGeodetic(pbd.beds, this.tilePlacement(meshes)));
         }
@@ -1336,7 +1337,7 @@ export class TerrainEntity implements Entity {
         const e0 = ecefToEnu(this.railBedBasis, geodeticToEcef(lat, lon, 0));
         const e1 = ecefToEnu(this.railBedBasis, geodeticToEcef(lat, lon, 1000));
         const up: [number, number, number] = [(e1.e - e0.e) / 1000, (e1.u - e0.u) / 1000, -(e1.n - e0.n) / 1000];
-        const scale = 2 ** Math.max(0, this.manifest.mesh.maxZoom - id.z);
+        const scale = 2 ** Math.max(0, this.leafZoomAt(id) - id.z);
         return { onBed: buildRailBedExclusion(pbd.beds, up, 32 * scale) };
     }
 
@@ -1376,6 +1377,12 @@ export class TerrainEntity implements Entity {
         return this.manifest.mesh.maxZoom;
     }
 
+    /** A tile's finest zoom: its area's when that stops short of maxZoom (leafZoom.ts). */
+    private leafZoomAt(id: TileKey): number {
+        return (this.leafZoomOfCache ??= leafZoomOf(this.manifest.areas, this.manifest.mesh.maxZoom))(id);
+    }
+    private leafZoomOfCache?: LeafZoomOf;
+
     get coverage(): { west: number; south: number; east: number; north: number } {
         return this.manifest.coverage;
     }
@@ -1387,8 +1394,7 @@ export class TerrainEntity implements Entity {
 
     /** Pin tiles around a scene point so boot and spawn areas cannot be evicted. */
     async pinArea(x: number, z: number, radiusM: number, zoom: number): Promise<void> {
-        const span = 180 / (1 << zoom);
-        const ids = tilesAround(this.basis, x, z, radiusM, zoom, span);
+        const ids = this.tilesToPin(x, z, radiusM, zoom);
         for (const id of ids) {
             this.pinned.add(tileKeyString(id));
         }
@@ -1405,9 +1411,24 @@ export class TerrainEntity implements Entity {
      * known absent: pinning it again then streams nothing.
      */
     isAreaResident(x: number, z: number, radiusM: number, zoom: number): boolean {
-        const span = 180 / (1 << zoom);
-        return tilesAround(this.basis, x, z, radiusM, zoom, span)
+        return this.tilesToPin(x, z, radiusM, zoom)
             .every(id => this.streamer.has(id) || this.meshStore.isAbsent(id));
+    }
+
+    /**
+     * The tiles at `zoom` around a scene point, each raised to its area's
+     * leaves where those stop short of `zoom`: nothing is baked below them,
+     * so pinning z12 there would wait on nothing and pin nothing.
+     */
+    private tilesToPin(x: number, z: number, radiusM: number, zoom: number): TileKey[] {
+        const span = 180 / (1 << zoom);
+        const out = new Map<string, TileKey>();
+        for (const id of tilesAround(this.basis, x, z, radiusM, zoom, span)) {
+            const shift = id.z - Math.min(id.z, this.leafZoomAt(id));
+            const leaf = { z: id.z - shift, x: id.x >> shift, y: id.y >> shift };
+            out.set(tileKeyString(leaf), leaf);
+        }
+        return [...out.values()];
     }
 
     /** Keys of pinned tiles that are still neither uploaded nor known absent. */
@@ -1597,7 +1618,9 @@ export class TerrainEntity implements Entity {
             return undefined;
         }
         const g = geodeticOnSurfaceAtEnu(this.basis, x, northFromSceneZ(z));
-        const id = tileAtLonLat(zoom, g.lon, g.lat);
+        const finest = tileAtLonLat(zoom, g.lon, g.lat);
+        // An area capped short of maxZoom has its leaves higher up.
+        const id = tileAtLonLat(this.leafZoomAt(finest), g.lon, g.lat);
         if (this.meshStore.isAbsent(id)) {
             return undefined;
         }
@@ -1607,7 +1630,7 @@ export class TerrainEntity implements Entity {
         }
         const origin = tileOriginWorld(id, tile.centerHeightM, this.basis);
         return coverInPtmTile(
-            tile, (x - origin.x) / tile.quantScale, (z - origin.z) / tile.quantScale, zoom);
+            tile, (x - origin.x) / tile.quantScale, (z - origin.z) / tile.quantScale, id.z);
     }
 
     /** The index of the drawn land tile holding a scene point, if any. */

@@ -104,6 +104,8 @@ interface Job {
     id: string;
     name: string;
     bbox: [number, number, number, number];
+    /** Finest zoom to mesh the area to, when short of the pyramid's (leafZoom.ts). */
+    leafZoom?: number;
     /** Local `.osm.pbf` extract to read instead of Overpass — see areaImport.ts's `--pbf`. */
     pbf?: string;
     state: JobState;
@@ -805,7 +807,7 @@ export function chunkBbox(
  * later with the same DEM and coastline already on disk.
  */
 export function dataSteps(
-    job: { name: string; bbox: readonly number[]; pbf: string }, extend = false,
+    job: { name: string; bbox: readonly number[]; pbf: string; leafZoom?: number }, extend = false,
 ): Step[] {
     const bbox = job.bbox.join(',');
     const pbfArg = `--pbf=${job.pbf}`;
@@ -827,7 +829,8 @@ export function dataSteps(
             ? {
                 label: 'merging into the pyramid', cmd: PYTHON, lane: 'dem',
                 args: ['tools/merge_planet_dem.py', '--input', tif, '--name', job.name,
-                    ...(extend ? ['--extend-area'] : [])],
+                    ...(extend ? ['--extend-area'] : []),
+                    ...(job.leafZoom !== undefined ? [`--leaf-zoom=${job.leafZoom}`] : [])],
             }
             : {
                 label: 'baking the height pyramid', cmd: PYTHON, lane: 'dem',
@@ -1081,7 +1084,7 @@ async function runImport(job: Job): Promise<void> {
     // a chunk founds the pyramid or starts the area depends on which of the
     // chunks before it turned out to hold land.
     const chunkSteps = (ci: number, landBefore: boolean) =>
-        dataSteps({ name: job.name, bbox: chunks[ci], pbf }, landBefore).map(s => ({
+        dataSteps({ name: job.name, bbox: chunks[ci], pbf, leafZoom: job.leafZoom }, landBefore).map(s => ({
             ...s, label: many ? `chunk ${ci + 1}/${chunks.length}: ${s.label}` : s.label,
         }));
     const satellites = importWithSatellites();
@@ -1271,6 +1274,7 @@ export function startImport(req: Request, res: Response): void {
     const body = req.body ?? {};
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     const bbox = Array.isArray(body.bbox) ? body.bbox.map(Number) : [];
+    const leafZoom = body.leafZoom === undefined ? undefined : Number(body.leafZoom);
 
     if (!name || slug(name).length === 0) {
         res.status(400).json({ ok: false, error: 'give the area a name' });
@@ -1292,6 +1296,10 @@ export function startImport(req: Request, res: Response): void {
         });
         return;
     }
+    if (leafZoom !== undefined && !(Number.isInteger(leafZoom) && leafZoom >= 8 && leafZoom < SNAP_ZOOM)) {
+        res.status(400).json({ ok: false, error: `leafZoom must be a whole zoom from 8 to ${SNAP_ZOOM - 1}` });
+        return;
+    }
     if (readAreas().areas.some(a => a.name === name)) {
         res.status(409).json({ ok: false, error: `an area called "${name}" already exists` });
         return;
@@ -1299,7 +1307,8 @@ export function startImport(req: Request, res: Response): void {
 
     const id = `${slug(name)}-${jobs.size}-${process.hrtime.bigint().toString(36)}`;
     const job: Job = {
-        id, name, bbox: snapBboxToTiles([west, south, east, north]),
+        // A capped area snaps to its own leaves' edges, so none straddles its border.
+        id, name, bbox: snapBboxToTiles([west, south, east, north], leafZoom), leafZoom,
         state: 'running', log: [], warnings: [], step: 'starting',
         // A rough guess for the single-chunk, common case: overwritten with
         // the real count as soon as runImport has chunked the box.

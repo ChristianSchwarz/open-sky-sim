@@ -26,6 +26,7 @@ import {
     TileKey, approxTileEdgeMetres, childrenOf, rootTiles, tileKeyString,
 } from './tiling';
 import { TileWant } from './tileStreamer';
+import { LeafZoomOf, leafZoomOf } from './leafZoom';
 
 export interface QuadNode {
     id: TileKey;
@@ -142,10 +143,13 @@ export class Quadtree {
     private readonly roots: QuadNode[];
     private readonly nodes = new Map<string, QuadNode>();
     private readonly maxZoom: number;
+    /** Each tile's finest zoom: an area can stop short of maxZoom (leafZoom.ts). */
+    private readonly leafZoomAt: LeafZoomOf;
     private generation = 0;
 
     constructor(private readonly opts: QuadtreeOptions) {
         this.maxZoom = opts.maxZoom ?? opts.manifest.mesh.maxZoom;
+        this.leafZoomAt = leafZoomOf(opts.manifest.areas, this.maxZoom);
         this.roots = rootTiles().map(id => this.makeNode(id));
     }
 
@@ -216,7 +220,7 @@ export class Quadtree {
             // texels would cover more than MAP_TEXEL_PX pixels.
             err = Math.max(err, approxTileEdgeMetres(node.id) / MAP_TEXELS_PER_TILE / MAP_TEXEL_PX);
         }
-        if (node.id.z !== this.maxZoom - 1) {
+        if (node.id.z !== this.leafZoomAt(node.id) - 1) {
             return err;
         }
         if (!node.ocean) {
@@ -347,7 +351,9 @@ export class Quadtree {
             // Without the altitude cap an ocean node would refine on its level's
             // worst land error and split to the leaf across a whole sea; the
             // ellipsoid's sagitta is its only real shape error.
-            const canRefine = node.id.z < zoomCap && (
+            // Nothing is baked under an area's leaves: their absent children
+            // would read as ocean and the land would refine into open sea.
+            const canRefine = node.id.z < zoomCap && node.id.z < this.leafZoomAt(node.id) && (
                 !(mapLod && node.ocean) && shouldRefine(
                     this.drawErrorM(node, leafScale), d, screenHeightPx, fovYDeg, farScale,
                 )
@@ -392,7 +398,7 @@ export class Quadtree {
                 return;
             }
 
-            if (node.id.z === this.maxZoom - 1) {
+            if (node.id.z === this.leafZoomAt(node.id) - 1) {
                 this.dissolveLeaves(
                     node, centreDist, farScale, screenHeightPx, fovYDeg, leafScale, nowMs, draw,
                 );

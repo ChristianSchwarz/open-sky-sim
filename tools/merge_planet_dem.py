@@ -297,16 +297,22 @@ def merge(args: argparse.Namespace) -> int:
         print(f'areas       none recorded; adopting existing coverage as '
               f'"{args.existing_name}"')
     name = area_name_for(args.input, args.name)
+    prior = next((a for a in areas if a.get('name') == name), None)
     if args.extend_area:
         # A chunked import merges one box after another under one name; each
         # must grow the entry the previous chunk wrote, not replace it.
-        prior = next((a for a in areas if a.get('name') == name), None)
         if prior:
             claim = Bounds(
                 min(prior['west'], claim.west), min(prior['south'], claim.south),
                 max(prior['east'], claim.east), max(prior['north'], claim.north),
             )
     manifest['areas'] = merge_area(areas, name, claim)
+    # An area meshed short of the pyramid's finest zoom (leafZoom.ts). The
+    # heights still go to z12 - the physics reads them - but nothing below the
+    # leaf zoom is meshed. A later chunk keeps what the first one set.
+    leaf_zoom = args.leaf_zoom if args.leaf_zoom is not None else (prior or {}).get('leafZoom')
+    if leaf_zoom is not None:
+        next(a for a in manifest['areas'] if a['name'] == name)['leafZoom'] = leaf_zoom
     print(f'areas       {", ".join(a["name"] for a in manifest["areas"])}')
 
     errors = list(manifest.get('levelGeometricErrorM', []))
@@ -346,6 +352,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help='grow an existing area entry of the same name to the '
                          'union with this box instead of replacing it '
                          '(chunked imports)')
+    ap.add_argument('--leaf-zoom', type=int,
+                    help='finest zoom to mesh this area to, when short of the '
+                         'pyramid's (recorded on its area entry as leafZoom)')
     ap.add_argument('--dry-run', action='store_true',
                     help='report what would be written and stop')
     ap.add_argument('--jobs', type=int, default=DEFAULT_JOBS,

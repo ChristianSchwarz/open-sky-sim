@@ -24,11 +24,14 @@ import { TileKey } from '../../src/script/terrain/tiling';
 import { LidarStore } from './lidarStore';
 import { readTileFile, railBedInputFor, tileFile, tileOriginEnu, tileUp } from './railBedInputs';
 import { simplifyLand } from './simplifyLand';
+import { LeafZoomArea, leafZoomOf } from '../../src/script/terrain/leafZoom';
 
 export interface GradeConfig {
     dir: string;
     enuOrigin: { lat: number; lon: number; height: number };
     leafZoom: number;
+    /** The areas, for those whose leaves stop short of leafZoom (leafZoom.ts). */
+    areas?: LeafZoomArea[];
     /** Baked centre height of every tile a neighbour may be read from, by 'z/x/y'. */
     centreHeights: Record<string, number>;
     /**
@@ -110,11 +113,16 @@ function writeGz(p: string, bytes: Uint8Array): void {
  * them and the bridges). A tile graded already keeps its .pbd, which the
  * neighbours read instead.
  */
+/** Tile `k`'s own leaf zoom: its area's cap, else the mesh's finest. */
+function leafZoomFor(cfg: GradeConfig, k: TileKey): number {
+    return leafZoomOf(cfg.areas, cfg.leafZoom)(k);
+}
+
 export function bedsOfTile(cfg: GradeConfig, k: TileKey): GradeResult {
     const key = `${k.z}/${k.x}/${k.y}`;
     const t0 = performance.now();
     const basis = makeEnuBasis(cfg.enuOrigin.lat, cfg.enuOrigin.lon, cfg.enuOrigin.height);
-    const g = railBedInputFor(cfg.dir, k, basis, cfg.leafZoom, nb => cfg.centreHeights[`${nb.z}/${nb.x}/${nb.y}`], storeFor(cfg));
+    const g = railBedInputFor(cfg.dir, k, basis, leafZoomFor(cfg, k), nb => cfg.centreHeights[`${nb.z}/${nb.x}/${nb.y}`], storeFor(cfg));
     if (!g) {
         return { key, z: k.z, skipped: 'no-strokes' };
     }
@@ -197,7 +205,7 @@ export function gradeTile(cfg: GradeConfig, k: TileKey): GradeResult {
     const key = `${k.z}/${k.x}/${k.y}`;
     const t0 = performance.now();
     const basis = makeEnuBasis(cfg.enuOrigin.lat, cfg.enuOrigin.lon, cfg.enuOrigin.height);
-    const g = railBedInputFor(cfg.dir, k, basis, cfg.leafZoom, nb => cfg.centreHeights[`${nb.z}/${nb.x}/${nb.y}`], storeFor(cfg));
+    const g = railBedInputFor(cfg.dir, k, basis, leafZoomFor(cfg, k), nb => cfg.centreHeights[`${nb.z}/${nb.x}/${nb.y}`], storeFor(cfg));
     if (!g) {
         return { key, z: k.z, skipped: 'no-strokes' };
     }
@@ -206,7 +214,7 @@ export function gradeTile(cfg: GradeConfig, k: TileKey): GradeResult {
     }
     const ptmPath = tileFile(cfg.dir, k, '.ptm'), ptrPath = tileFile(cfg.dir, k, '.ptr'), pbdPath = tileFile(cfg.dir, k, '.pbd');
     const bytesBefore = sizeOf(ptmPath) + sizeOf(ptrPath) + sizeOf(pbdPath);
-    const leafFree = cfg.freeBorder && k.z === cfg.leafZoom;
+    const leafFree = cfg.freeBorder && k.z === leafZoomFor(cfg, k);
     const r = layRailBeds(leafFree
         ? { ...g.input, freeBorder: true, neighbourBeds: neighbourBeds(cfg, k, basis, g.tile.centerHeightM) }
         : g.input);
@@ -223,7 +231,7 @@ export function gradeTile(cfg: GradeConfig, k: TileKey): GradeResult {
     // grading's, and the stages before it refuse it. A leaf's is simplified
     // last (simplifyLand.ts), the drawn roads and rivers kept on it.
     const graded = r?.land ?? { positions: g.tile.landPositions, normals: g.tile.landNormals, attrs: g.tile.landAttrs };
-    const simplify = cfg.simplifyM !== 0 && k.z === cfg.leafZoom;
+    const simplify = cfg.simplifyM !== 0 && k.z === leafZoomFor(cfg, k);
     const lean = simplify ? simplifyLand(graded, g.tile, tileUp(basis, k), strokePointsOf(strokes, g.tile), cfg.simplifyM) : undefined;
     const land = lean?.land ?? graded;
     writeGz(ptmPath, writePtmLand(g.ptmBytes, land, lean?.border));

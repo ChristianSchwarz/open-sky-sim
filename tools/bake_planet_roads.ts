@@ -36,6 +36,7 @@ import { boundsOf } from './bake/coverTex';
 import { drapeRoads } from './bake/drapeRoads';
 import { decodeRvr } from './bake/rvr';
 import { LonLatBounds } from './bake/shoreline';
+import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
 /**
  * Stroke vertices a leaf may carry: 8k centreline points, or roughly 16k
@@ -94,6 +95,7 @@ function parseArgs(argv: string[]): Args {
 interface TerrainManifestFile {
     enuOrigin: { lat: number; lon: number; height: number };
     mesh: { indexPath: string; minZoom: number; maxZoom: number; triangleBudget?: number };
+    areas?: LeafZoomArea[];
     roads?: unknown;
     [key: string]: unknown;
 }
@@ -125,6 +127,8 @@ function main(): void {
         process.exit(1);
     }
     const leafZoom = manifest.mesh.maxZoom;
+    const leafZoomAt = leafZoomOf(manifest.areas, leafZoom);
+    const isLeaf = (k: TileKey) => isLeafTile(leafZoomAt, k);
     const minZoom = Math.max(planet.roads.minZoom, manifest.mesh.minZoom);
     const basis = makeEnuBasis(manifest.enuOrigin.lat, manifest.enuOrigin.lon, manifest.enuOrigin.height);
     const meshTiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath ?? 'index_mesh.bin')));
@@ -134,7 +138,7 @@ function main(): void {
     // A coarse tile is drawn from far enough away that its strokes get the
     // mesh budget's worth of vertices and no more, as the rivers do.
     const budget = manifest.mesh.triangleBudget ?? DEFAULT_MAX_VERTS;
-    const capFor = (z: number) => (z >= leafZoom ? args.maxVerts : Math.min(args.maxVerts, budget));
+    const capFor = (k: TileKey) => (isLeaf(k) ? args.maxVerts : Math.min(args.maxVerts, budget));
 
     console.log(`bake_planet_roads: ${tiles.length} mesh tiles z${minZoom}..z${leafZoom}`
         + `${args.bbox ? ' (scoped)' : ''}, ${args.maxVerts} vertices per leaf`);
@@ -160,7 +164,7 @@ function main(): void {
             tile = decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath)));
             assertUngradedPtm(tile, 'bake_planet_roads');
             level.roads += roads.length;
-            draped = drapeRoads(tile, basis, roads, capFor(k.z), k.z >= leafZoom);
+            draped = drapeRoads(tile, basis, roads, capFor(k), isLeaf(k));
         }
         if (draped === undefined || tile === undefined) {
             if (fs.existsSync(outPath)) {

@@ -30,6 +30,7 @@ import { TileMeshes } from './tileMesh';
 import { TileStore } from './tileStore';
 import { TileKey } from './tiling';
 import { sphereInTile } from './tileFrameBounds';
+import { LeafZoomOf, leafZoomOf } from './leafZoom';
 
 /** Decoded sidecars kept; a bound tile no longer needs its record bytes. */
 const BUILDING_CACHE_BYTES = 24 * 1024 * 1024;
@@ -244,6 +245,8 @@ const patchSphere = new THREE.Sphere();
 export class BuildingMeshes {
     private readonly store: TileStore<PbhTile> | undefined;
     private readonly zoom: number;
+    /** The leaves this is baked on: `zoom`, or higher up in an area capped short of it (leafZoom.ts). */
+    private readonly leafZoomAt: LeafZoomOf;
     private readonly material: THREE.Material;
     private readonly onBeforeRender: THREE.Mesh['onBeforeRender'] | undefined;
     private index: TileIndex | undefined;
@@ -263,6 +266,7 @@ export class BuildingMeshes {
     constructor(opts: BuildingMeshesOptions) {
         const spec = opts.manifest.buildings;
         this.zoom = spec?.maxZoom ?? -1;
+        this.leafZoomAt = leafZoomOf(opts.manifest.areas, this.zoom);
         this.material = opts.material;
         this.onBeforeRender = opts.onBeforeRender;
         this.store = spec === undefined ? undefined : new TileStore<PbhTile>({
@@ -294,7 +298,7 @@ export class BuildingMeshes {
 
     /** Whether the bake wrote a sidecar for this tile. */
     has(id: TileKey): boolean {
-        if (id.z !== this.zoom) {
+        if (id.z !== this.leafZoomAt(id)) {
             return false;
         }
         return this.index ? this.index.has(id) : true;

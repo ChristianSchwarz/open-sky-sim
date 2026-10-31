@@ -194,6 +194,8 @@ export interface FlattenPadManifest {
  */
 export interface TerrainArea extends LonLatBounds {
     name: string;
+    /** Finest zoom baked here when short of `mesh.maxZoom`; see leafZoom.ts. */
+    leafZoom?: number;
 }
 
 export interface TerrainManifest {

@@ -53,6 +53,7 @@ import { decodeRvr } from './bake/rvr';
 import { LonLatBounds } from './bake/shoreline';
 import { ROAD_MAJOR_MAX_CLASS } from '../src/script/terrain/ptr';
 import { TerrainClass } from '../src/script/terrain/tones';
+import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 import { TexLeafConfig, TexLeafResult } from './bake/texLeaf';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 import { GB_PER_WORKER, localJobs } from './bake/localJobs';
@@ -171,6 +172,7 @@ interface TerrainManifestFile {
     enuOrigin: { lat: number; lon: number; height: number };
     mesh: { path: string; indexPath: string; maxZoom: number; transport?: string };
     texture?: unknown;
+    areas?: LeafZoomArea[];
     [key: string]: unknown;
 }
 
@@ -263,6 +265,10 @@ async function main(): Promise<void> {
     }
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as TerrainManifestFile;
     const leafZoom = manifest.mesh.maxZoom;
+    // An area capped short of it has its leaves at its own zoom (leafZoom.ts):
+    // rasterised like any leaf, folded into its parents, never a parent itself.
+    const leafZoomAt = leafZoomOf(manifest.areas, leafZoom);
+    const isLeaf = (k: TileKey) => isLeafTile(leafZoomAt, k);
     const basis = makeEnuBasis(manifest.enuOrigin.lat, manifest.enuOrigin.lon, manifest.enuOrigin.height);
     const meshIndexPath = path.join(args.dir, manifest.mesh.indexPath ?? 'index_mesh.bin');
     const meshTiles = decodeTileIndex(fs.readFileSync(meshIndexPath));
@@ -280,9 +286,9 @@ async function main(): Promise<void> {
     const leafSize = Math.max(args.size, args.nearSize);
 
     // --- leaves: rasterise into the cache -----------------------------------
-    const leaves = (meshByLevel.get(leafZoom) ?? []).filter(inScope);
+    const leaves = meshTiles.filter(k => isLeaf(k) && inScope(k));
     const cacheMeta = loadCacheMeta(args.cache);
-    console.log(`bake_planet_tex: ${leaves.length} leaves at z${leafZoom}, `
+    console.log(`bake_planet_tex: ${leaves.length} leaves, z${leafZoom} unless capped, `
         + `${args.nearSize} texels from z${args.nearZoom}, ${args.size} below, `
         + `${LEAF_SUPERSAMPLE * LEAF_SUPERSAMPLE}x SSAA, `
         + `textures z${args.minZoom}..z${leafZoom - 1}${args.bbox ? ' (scoped)' : ''}`);
@@ -404,7 +410,7 @@ async function main(): Promise<void> {
     const perLevel: Array<{ z: number; size: number; count: number; raw: number; gz: number }> = [];
     for (let z = leafZoom - 1; z >= args.minZoom; z--) {
         const current = new Map<string, Raster>();
-        const parents = (meshByLevel.get(z) ?? []).filter(inScope);
+        const parents = (meshByLevel.get(z) ?? []).filter(k => inScope(k) && !isLeaf(k));
         const size = sizeAt(z);
         let raw = 0;
         let gz = 0;
@@ -417,7 +423,7 @@ async function main(): Promise<void> {
                     const childKey = keyOf(child);
                     let raster = previous.get(childKey);
                     if (raster === undefined) {
-                        raster = child.z === leafZoom
+                        raster = isLeaf(child)
                             ? leafRaster(child)
                             // A shipped child, roads painted in: a scoped run
                             // folds these for siblings outside its box, which
@@ -502,7 +508,7 @@ async function main(): Promise<void> {
     }
     const all = [...present.values()];
     const maxZoom = leafZoom - 1;
-    const hasLeaves = all.some(k => k.z === leafZoom);
+    const hasLeaves = all.some(isLeaf);
     fs.writeFileSync(indexPath, encodeTileIndex(all, args.minZoom, hasLeaves ? leafZoom : maxZoom));
 
     manifest.texture = {

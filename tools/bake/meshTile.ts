@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { decodePdm } from '../../src/script/terrain/demTile';
+import { LeafZoomArea, leafZoomOf } from '../../src/script/terrain/leafZoom';
 import { LanduseRegion, Watercourse, decodeLvr } from './lvr';
 import { PLC_FLAG_REAL_IMAGERY, decodePlc } from './plc';
 import { borderNodeKey, buildTile } from './buildTile';
@@ -40,6 +41,8 @@ export interface MeshTileConfig {
     seaLevel: number;
     /** Finest zoom in the pyramid; see BuildTileInput.maxZoom. */
     maxZoom: number;
+    /** The areas, for those that stop short of maxZoom; see leafZoom.ts. */
+    areas?: LeafZoomArea[];
     budget: number;
     basis: EnuBasis;
     pads: Array<FlattenPad & { basis: EnuBasis; lat: number; lon: number; fenced?: boolean }>;
@@ -418,7 +421,9 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
 
     const bounds = tileBounds(z, x, y);
     const edgeM = tileEdgeMetres(z, x, y);
-    const forcedBorderNodes = z === cfg.maxZoom ? lineBorderNodes(`${stem}.rvr`, bounds, dem.size, edgeM) : undefined;
+    // This tile's own leaf zoom: an area capped at z11 has its leaves there.
+    const leafZoom = leafZoomOf(cfg.areas, cfg.maxZoom)({ z, x, y });
+    const forcedBorderNodes = z === leafZoom ? lineBorderNodes(`${stem}.rvr`, bounds, dem.size, edgeM) : undefined;
     const baseSkirtM = skirtDepthForTile(parentErrorM(cfg.src, z, x, y, dem.geometricErrorM), edgeM);
     const skirtDepthM = skirtDepthAt(z, baseSkirtM);
     const cellM = edgeM / (dem.size - 1);
@@ -441,7 +446,7 @@ export function processTile(cfg: MeshTileConfig, task: TileTask): TileProcessRes
         borderSplitErrorM: Math.min(baseSkirtM * BORDER_ERROR_FRACTION, BORDER_SPLIT_ERROR_M),
         skirtSeamFactor: SKIRT_SEAM_FACTOR,
         geometricErrorM: dem.geometricErrorM,
-        maxZoom: cfg.maxZoom,
+        maxZoom: leafZoom,
         basis: cfg.basis,
         polygons,
         inland,

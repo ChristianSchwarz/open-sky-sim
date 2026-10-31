@@ -111,6 +111,7 @@ import { LonLatBounds } from './bake/shoreline';
 import { tileSurface } from './bake/tileSurface';
 import { LIDAR_STORE_DIR, LidarStore } from './bake/lidarStore';
 import { BED_TIERS, bedTierOf } from '../src/script/terrain/railBed';
+import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
 /** Parapets and walkways either side of a rail deck's track bed: RAIL_DECK_MARGIN_M in bake_osm_roads.py. */
 const RAIL_DECK_MARGIN_M = 2.0;
@@ -194,6 +195,7 @@ function parseArgs(argv: string[]): Args {
 interface TerrainManifestFile {
     enuOrigin: { lat: number; lon: number; height: number };
     mesh: { indexPath: string; minZoom: number; maxZoom: number };
+    areas?: LeafZoomArea[];
     bridges?: unknown;
     [key: string]: unknown;
 }
@@ -1192,11 +1194,13 @@ function main(): void {
     }
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as TerrainManifestFile;
     const leafZoom = manifest.mesh.maxZoom;
+    const leafZoomAt = leafZoomOf(manifest.areas, leafZoom);
+    const isLeaf = (k: TileKey) => isLeafTile(leafZoomAt, k);
     const basis = makeEnuBasis(manifest.enuOrigin.lat, manifest.enuOrigin.lon, manifest.enuOrigin.height);
     lidar = args.lidar && fs.existsSync(args.lidarStore) ? new LidarStore(args.lidarStore, args.src) : undefined;
     console.log(lidar ? `lidar: deck ends at the approaches measured in ${args.lidarStore}` : 'lidar: none');
     const meshTiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath ?? 'index_mesh.bin')));
-    const tiles = meshTiles.filter(k => k.z === leafZoom
+    const tiles = meshTiles.filter(k => isLeaf(k)
         && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes))));
     console.log(`bake_planet_bridges: ${tiles.length} leaf tiles z${leafZoom}${args.bbox ? ' (scoped)' : ''}`);
 
@@ -1550,13 +1554,14 @@ function main(): void {
     for (const k of written) {
         present.set(keyOf(k), k);
     }
-    fs.writeFileSync(indexPath, encodeTileIndex([...present.values()], leafZoom, leafZoom));
+    const minLeafZoom = Math.min(leafZoom, ...[...present.values()].map(k => k.z));
+    fs.writeFileSync(indexPath, encodeTileIndex([...present.values()], minLeafZoom, leafZoom));
     manifest.bridges = {
         path: '{z}/{x}/{y}.pbr',
         indexPath: 'index_bridges.bin',
         encoding: 'PBR1',
         transport: 'gzip',
-        minZoom: leafZoom,
+        minZoom: minLeafZoom,
         maxZoom: leafZoom,
     };
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);

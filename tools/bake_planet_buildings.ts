@@ -37,6 +37,7 @@ import { boundsOf } from './bake/coverTex';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import { LonLatBounds } from './bake/shoreline';
 import { tileSurface } from './bake/tileSurface';
+import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
 interface Args {
     dir: string;
@@ -97,6 +98,7 @@ function overlaps(a: LonLatBounds, b: LonLatBounds): boolean {
 interface TerrainManifestFile {
     enuOrigin: { lat: number; lon: number; height: number };
     mesh: { indexPath: string; minZoom: number; maxZoom: number };
+    areas?: LeafZoomArea[];
     buildings?: unknown;
     [key: string]: unknown;
 }
@@ -114,9 +116,11 @@ function main(): void {
     }
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as TerrainManifestFile;
     const leafZoom = manifest.mesh.maxZoom;
+    const leafZoomAt = leafZoomOf(manifest.areas, leafZoom);
+    const isLeaf = (k: TileKey) => isLeafTile(leafZoomAt, k);
     const basis = makeEnuBasis(manifest.enuOrigin.lat, manifest.enuOrigin.lon, manifest.enuOrigin.height);
     const meshTiles = decodeTileIndex(fs.readFileSync(path.join(args.dir, manifest.mesh.indexPath ?? 'index_mesh.bin')));
-    const tiles = meshTiles.filter(k => k.z === leafZoom && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes))));
+    const tiles = meshTiles.filter(k => isLeaf(k) && (args.bbox === undefined || (overlaps(boundsOf(k), args.bbox) && inBoxes(boundsOf(k), args.boxes))));
     console.log(`bake_planet_buildings: ${tiles.length} leaf tiles${args.bbox ? ' (scoped)' : ''}`);
 
     const written: TileKey[] = [];
@@ -224,7 +228,8 @@ function main(): void {
     for (const k of written) {
         present.set(keyOf(k), k);
     }
-    fs.writeFileSync(indexPath, encodeTileIndex([...present.values()], leafZoom, leafZoom));
+    const minLeafZoom = Math.min(leafZoom, ...[...present.values()].map(k => k.z));
+    fs.writeFileSync(indexPath, encodeTileIndex([...present.values()], minLeafZoom, leafZoom));
     // Re-read: a stage that ran meanwhile may have written its own block.
     const latest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as TerrainManifestFile;
     latest.buildings = {
@@ -232,7 +237,7 @@ function main(): void {
         indexPath: 'index_buildings.bin',
         encoding: 'PBH1',
         transport: 'gzip',
-        minZoom: leafZoom,
+        minZoom: minLeafZoom,
         maxZoom: leafZoom,
     };
     fs.writeFileSync(manifestPath, `${JSON.stringify(latest, null, 2)}\n`);
