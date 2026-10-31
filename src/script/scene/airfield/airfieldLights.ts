@@ -95,11 +95,11 @@ const HELIPAD_LIGHTS_PER_SIDE = 3;
  * distance they fade out over (metres from the camera, whole to gone), the
  * brighter the farther.
  */
-const STEADY = { sizeM: 1.2, sizePx: 2, maxPx: 6, fadeM: [3000, 8000] as const };
-const BRIGHT = { sizeM: 2, sizePx: 2, maxPx: 8, fadeM: [5000, 12000] as const };
-const FLASH = { sizeM: 4, sizePx: 3, maxPx: 12, fadeM: [8000, 16000] as const };
+const STEADY = { sizeM: 1.2, sizePx: 2, maxPx: 6, fadeM: [3000, 16000] as const };
+const BRIGHT = { sizeM: 2, sizePx: 2, maxPx: 8, fadeM: [5000, 24000] as const };
+const FLASH = { sizeM: 4, sizePx: 3, maxPx: 12, fadeM: [8000, 32000] as const };
 /** Taxiway lights are a fraction of a runway light's intensity: a pixel from afar. */
-const DIM = { sizeM: 0.8, sizePx: 1, maxPx: 4, fadeM: [1500, 4000] as const };
+const DIM = { sizeM: 0.8, sizePx: 1, maxPx: 4, fadeM: [1500, 8000] as const };
 type LightSize = { sizeM: number; sizePx: number; maxPx: number; fadeM: readonly [number, number] };
 
 /** A runway is lit when OSM says so, or when it is a paved runway of some length at a field that is not a club strip. */

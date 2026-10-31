@@ -21,7 +21,7 @@ describe('point vertex program', () => {
 
     it('fades a POINT_FADE light by its distance from the camera, and the fragment uses it', () => {
         assert.match(PointVertProgram, /#ifdef POINT_FADE[\s\S]*varying float vPointFade;/);
-        assert.match(PointVertProgram, /vPointFade = 1\.0 - smoothstep\(uPointFadeM\.x, uPointFadeM\.y, length\(viewPos\.xyz\)\)/);
+        assert.match(PointVertProgram, /vPointFade = 1\.0 - clamp\(\(length\(viewPos\.xyz\) - uPointFadeM\.x\) \/ \(uPointFadeM\.y - uPointFadeM\.x\), 0\.0, 1\.0\)/);
         assert.match(DepthFragProgram, /#ifdef POINT_FADE[\s\S]*varying float vPointFade;/);
         assert.match(DepthFragProgram, /gl_FragColor\.a = vPointFade;/);
     });

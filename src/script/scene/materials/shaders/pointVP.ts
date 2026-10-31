@@ -14,7 +14,8 @@ export const PointVertProgram: string = `
   uniform float uPointSizeM;
   uniform float uPointMaxPx;
 #ifdef POINT_FADE
-  // Whole up to uPointFadeM.x metres from the camera, gone at .y.
+  // Whole up to uPointFadeM.x metres from the camera, then dimming evenly
+  // (linear, not an S-curve) until gone at .y.
   uniform vec2 uPointFadeM;
   varying float vPointFade;
 #endif
@@ -34,7 +35,7 @@ ${LOG_DEPTH_PARS_VERTEX}
     vec4 viewPos = modelViewMatrix * vec4(position, 1.0);
     vec4 pos = projectionMatrix * viewPos;
 #ifdef POINT_FADE
-    vPointFade = 1.0 - smoothstep(uPointFadeM.x, uPointFadeM.y, length(viewPos.xyz));
+    vPointFade = 1.0 - clamp((length(viewPos.xyz) - uPointFadeM.x) / (uPointFadeM.y - uPointFadeM.x), 0.0, 1.0);
 #endif
     gl_PointSize = uPointSizeM > 0.0
       ? clamp(uPointSizeM * projectionMatrix[1][1] * halfHeight / max(pos.w, 1e-3), uPointSizePx, uPointMaxPx)
