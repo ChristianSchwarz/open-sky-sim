@@ -3,6 +3,7 @@ import {
     ColourAdjust, ColourAdjustGroup, ColourTweak, clampColourAdjust,
 } from "../scene/materials/shaders/colourAdjust";
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
+import { AiPersonality, clampAiPersonality } from "../ai/tunable/aiPersonality";
 import { AiPilotModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from "../state/gameDefs";
 import { assertExpr, assertIsDefined } from "../utils/asserts";
 import {
@@ -16,6 +17,7 @@ import { TechProfile } from "./profiles/profile";
 
 export type UnitSystemChangeListener = (unitSystem: UnitSystems) => void;
 export type AiPilotModelChangeListener = (model: AiPilotModels) => void;
+export type AiPersonalityChangeListener = (personality: AiPersonality) => void;
 export type TerrainColourChangeListener = (mode: TerrainColours) => void;
 export type TerrainShadingChangeListener = (mode: TerrainShading) => void;
 export type LanduseBlendChangeListener = (blend: number) => void;
@@ -50,6 +52,7 @@ export class ConfigService {
     readonly flightModels: ConfigSet<FlightModel>;
     readonly unitSystem: UnitSystemSetting;
     readonly aiPilotModels: AiPilotModelSetting;
+    readonly aiPersonality: AiPersonalitySetting;
     readonly terrainColour: TerrainColourSetting;
     readonly terrainShading: TerrainShadingSetting;
     readonly landuseBlend: LanduseBlendSetting;
@@ -93,11 +96,13 @@ export class ConfigService {
         initialBuildings?: boolean,
         initialOpponentsScramble?: boolean,
         initialAircraftSmoothShading?: boolean,
+        initialAiPersonality?: AiPersonality,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
         this.unitSystem = new UnitSystemSetting();
         this.aiPilotModels = new AiPilotModelSetting(initialAiPilotModel);
+        this.aiPersonality = new AiPersonalitySetting(initialAiPersonality);
         this.terrainColour = new TerrainColourSetting(initialTerrainColour);
         this.terrainShading = new TerrainShadingSetting(initialTerrainShading);
         this.landuseBlend = new LanduseBlendSetting(initialLanduseBlend);
@@ -729,6 +734,38 @@ export class AiPilotModelSetting {
     }
 
     removeChangeListener(listener: AiPilotModelChangeListener) {
+        this.listeners.delete(listener);
+    }
+}
+
+/** The TUNABLE pilot model's personality; applies, like the model, on the next opponent spawn. */
+export class AiPersonalitySetting {
+    private active: AiPersonality;
+    private listeners: Set<AiPersonalityChangeListener> = new Set();
+
+    constructor(initialActive?: unknown) {
+        this.active = clampAiPersonality(initialActive);
+    }
+
+    /** A copy: the setting only changes through setActive. */
+    getActive(): AiPersonality {
+        return { ...this.active };
+    }
+
+    setActive(personality: Partial<AiPersonality>) {
+        const next = clampAiPersonality({ ...this.active, ...personality });
+        if ((Object.keys(next) as (keyof AiPersonality)[]).every(k => next[k] === this.active[k])) return;
+        this.active = next;
+        for (const listener of this.listeners.values()) {
+            listener(this.getActive());
+        }
+    }
+
+    addChangeListener(listener: AiPersonalityChangeListener) {
+        this.listeners.add(listener);
+    }
+
+    removeChangeListener(listener: AiPersonalityChangeListener) {
         this.listeners.delete(listener);
     }
 }

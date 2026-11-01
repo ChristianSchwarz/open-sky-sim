@@ -1,3 +1,4 @@
+import { AiPersonality, clampAiPersonality, defaultAiPersonality } from "../ai/tunable/aiPersonality";
 import { KeyboardControlLayoutId } from "../input/devices/keyboardControlDevice";
 import { KeyboardPitchStickMode } from "../input/keyboardLayouts";
 import { ColourAdjust, clampColourAdjust, defaultColourAdjust } from "../scene/materials/shaders/colourAdjust";
@@ -24,6 +25,8 @@ export interface AppSettings {
     keyboardLayout: KeyboardControlLayoutId;
     keyboardPitchStickMode: KeyboardPitchStickMode;
     aiPilotModel: AiPilotModels;
+    /** The TUNABLE pilot model's knobs (aggression, defensiveness, skill, ...). */
+    aiPersonality: AiPersonality;
     /** How baked terrain cover turns into colour on screen. */
     terrainColour: TerrainColours;
     /** Flat per-facet colour, or smooth (Gouraud) interpolation across it. */
@@ -97,6 +100,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     keyboardLayout: KeyboardControlLayoutId.ARROWS,
     keyboardPitchStickMode: KeyboardPitchStickMode.LAYOUT_DEFAULT,
     aiPilotModel: AiPilotModels.CLASSIC,
+    aiPersonality: defaultAiPersonality(),
     terrainColour: TerrainColours.HYBRID,
     terrainShading: TerrainShading.FACETED,
     landuseBlend: LANDUSE_BLEND_DEFAULT,
@@ -147,6 +151,7 @@ export function loadSettings(): AppSettings {
             keyboardLayout: isValidKeyboardLayout(parsed.keyboardLayout) ? parsed.keyboardLayout : DEFAULT_SETTINGS.keyboardLayout,
             keyboardPitchStickMode: isValidPitchStickMode(parsed.keyboardPitchStickMode) ? parsed.keyboardPitchStickMode : DEFAULT_SETTINGS.keyboardPitchStickMode,
             aiPilotModel: isValidAiPilotModel(parsed.aiPilotModel) ? parsed.aiPilotModel : DEFAULT_SETTINGS.aiPilotModel,
+            aiPersonality: clampAiPersonality(parsed.aiPersonality),
             terrainColour: isValidTerrainColour(parsed.terrainColour) ? parsed.terrainColour : DEFAULT_SETTINGS.terrainColour,
             terrainShading: isValidTerrainShading(parsed.terrainShading) ? parsed.terrainShading : DEFAULT_SETTINGS.terrainShading,
             landuseBlend: isValidLanduseBlend(parsed.landuseBlend) ? parsed.landuseBlend : DEFAULT_SETTINGS.landuseBlend,

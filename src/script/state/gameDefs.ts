@@ -39,6 +39,8 @@ export enum AiPilotModels {
     SHAW = 'SHAW',
     AGGRESSIVE = 'AGGRESSIVE',
     ACE = 'ACE',
+    /** Set by an AiPersonality (aggression, defensiveness, skill, ...): see ai/tunable. */
+    TUNABLE = 'TUNABLE',
 }
 
 /**

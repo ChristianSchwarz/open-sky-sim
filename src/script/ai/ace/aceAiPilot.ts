@@ -4,8 +4,9 @@ import { Combatant } from '../../weapons/combatant';
 import { AiFlightPhase, AiPilot, AiPilotOptions } from '../aiPilot';
 import { AiPilotController } from '../aiPilotController';
 import { PilotableAircraft } from '../aircraftControls';
-import { ballisticAimPoint, predictedMissDistance } from '../dogfightGeometry';
-import { FlightControlComputer } from '../shaw/flightControlComputer';
+import { ballisticAimPoint, HEAD_ON_GUN_RANGE, predictedMissDistance } from '../dogfightGeometry';
+import { FIGHT_CORNER_SPEED, FlightControlComputer } from '../shaw/flightControlComputer';
+import { setFlightPathAxes } from '../shaw/shawGeometry';
 import { WorldQuery } from '../worldQuery';
 import { AceTacticalFSM } from './aceTacticalFsm';
 import { AceSnapshot, PostStallRequest } from './aceTypes';
@@ -41,7 +42,7 @@ const TARGET_ACC_EMA = 0.25;
  * still be worth a trigger pull. Tight — this model shoots when the round
  * connects, not to apply pressure.
  */
-const ACCURACY_MARGIN = 1.6;
+const ACCURACY_MARGIN = 1.0;
 
 /**
  * "Ace" AI pilot model: an elite dogfighter built on the same
@@ -107,7 +108,7 @@ export class AceAiPilot implements AiPilotController {
         this.fsm = new AceTacticalFSM({
             gunRange: this.gunRange,
             bulletSpeed: this.bulletSpeed,
-            combatSpeed: options.combatSpeed ?? 200,
+            combatSpeed: Math.max(options.combatSpeed ?? 200, FIGHT_CORNER_SPEED),
             maxSpeed: options.maxSpeed ?? 240,
         });
         this.fcc = new FlightControlComputer(aircraft, world, {
@@ -118,7 +119,7 @@ export class AceAiPilot implements AiPilotController {
             pitchSlew: options.pitchSlew,
         });
 
-        const corner = options.combatSpeed ?? 200;
+        const corner = Math.max(options.combatSpeed ?? 200, FIGHT_CORNER_SPEED);
         this.selfSnap = this.makeSnapshot(corner);
         this.tgtSnap = this.makeSnapshot(corner);
     }
@@ -225,8 +226,12 @@ export class AceAiPilot implements AiPilotController {
             return;
         }
 
-        const preempted = this.fcc.applyCommand(command, delta);
-        this.firing = !preempted && command.fireGuns && this.hasGunSolution();
+        const preempted = this.fcc.applyCommand(command, delta, this.tgtSnap);
+        if (this.fcc.gunPass) {
+            this.lastManeuver = 'GUN_PASS';
+        }
+        // Any shot the nose gives is taken, whatever the maneuver.
+        this.firing = !preempted && this.hasGunSolution(this.fcc.gunPass ? HEAD_ON_GUN_RANGE : this.gunRange);
     }
 
     /** Height above the terrain directly below (m). */
@@ -298,13 +303,13 @@ export class AceAiPilot implements AiPilotController {
      * angular cone this accounts for range, the round inheriting our own
      * velocity, the target's acceleration and the gravity drop.
      */
-    private hasGunSolution(): boolean {
+    private hasGunSolution(maxRange = this.gunRange): boolean {
         const target = this.target;
         if (target === undefined || !target.isAlive()) return false;
 
         const self = this.selfSnap;
         const tgt = this.tgtSnap;
-        if (self.position.distanceTo(tgt.position) > this.gunRange) return false;
+        if (self.position.distanceTo(tgt.position) > maxRange) return false;
 
         const tof = ballisticAimPoint(
             this._aim,
@@ -318,7 +323,7 @@ export class AceAiPilot implements AiPilotController {
             tgt.position, tgt.velocity, tgt.acceleration,
             tof,
         );
-        return miss <= target.getHitRadius() * ACCURACY_MARGIN;
+        return miss <= 1 * target.getHitRadius() * ACCURACY_MARGIN;
     }
 
     private fillSnapshots(delta: number): void {
@@ -330,8 +335,8 @@ export class AceAiPilot implements AiPilotController {
         this._right.copy(RIGHT).applyQuaternion(this._quat);
         this._up.copy(UP).applyQuaternion(this._quat);
         this.selfSnap.forward.copy(this._fwd);
-        this.selfSnap.right.copy(this._right);
-        this.selfSnap.up.copy(this._up);
+        // Flight-path axes, not body axes: see setFlightPathAxes.
+        setFlightPathAxes(this.selfSnap, this._right);
         this.selfSnap.altitude = ac.getAltitude();
         this.selfSnap.airspeed = ac.getAirspeed();
 

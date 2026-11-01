@@ -5,6 +5,7 @@ import { AiPilot, AiPilotOptions } from './aiPilot';
 import { AiPilotController } from './aiPilotController';
 import { PilotableAircraft } from './aircraftControls';
 import { ShawAiPilot } from './shaw/shawAiPilot';
+import { TunableAiPilot } from './tunable/tunableAiPilot';
 import { WorldQuery } from './worldQuery';
 
 /**
@@ -25,6 +26,9 @@ export function createAiPilot(
     }
     if (model === AiPilotModels.ACE) {
         return new AceAiPilot(aircraft, world, options);
+    }
+    if (model === AiPilotModels.TUNABLE) {
+        return new TunableAiPilot(aircraft, world, options);
     }
     return new AiPilot(aircraft, world, options);
 }

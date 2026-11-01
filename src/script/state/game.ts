@@ -5296,6 +5296,8 @@ export class Game {
             alwaysEngage: model === AiPilotModels.CLASSIC,
             skill: AiSkillLevel.ACE,
             model,
+            // TUNABLE-only; the other models ignore it.
+            personality: this.configService.aiPersonality.getActive(),
         };
     }
 

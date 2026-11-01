@@ -1,8 +1,17 @@
 import * as THREE from 'three';
+import { gunLeadDirection } from './gunSolution';
 import { computeTacticalGeometry } from './shawGeometry';
 import {
     AircraftSnapshot, FlightCommand, ManeuverType, TacticalGeometry, TacticalState,
 } from './shawTypes';
+
+/**
+ * Gun permission cone (rad, nose to target). The pilot only pulls the
+ * trigger on a predicted hit; at 8 deg this cone was tighter than the lead
+ * angle of a turning shot and the pilot sat 90 s behind a bandit without
+ * firing.
+ */
+const FIRE_PERMIT_ATA = 20 * Math.PI / 180;
 
 /**
  * Shaw Fighter Combat tactical FSM: Offensive / Neutral / Defensive postures
@@ -18,21 +27,23 @@ export class FighterTacticalFSM {
     private readonly overshootVc: number;
     private readonly combatSpeed: number;
     private readonly maxSpeed: number;
+    private readonly bulletSpeed: number;
 
     private readonly _dir = new THREE.Vector3();
     private readonly _tmp = new THREE.Vector3();
-    private readonly _lead = new THREE.Vector3();
 
     constructor(options: {
         gunRange?: number;
         overshootVc?: number;
         combatSpeed?: number;
         maxSpeed?: number;
+        bulletSpeed?: number;
     } = {}) {
         this.gunMaxRange = options.gunRange ?? 900;
         this.overshootVc = options.overshootVc ?? 80;
         this.combatSpeed = options.combatSpeed ?? 200;
         this.maxSpeed = options.maxSpeed ?? 240;
+        this.bulletSpeed = options.bulletSpeed ?? 1000;
     }
 
     getState(): TacticalState {
@@ -105,9 +116,8 @@ export class FighterTacticalFSM {
         // Guns: lead pursuit.
         else if (geom.range <= this.gunMaxRange) {
             maneuver = 'LEAD_PURSUIT';
-            const tof = geom.range / 800;
-            this._lead.copy(target.position).addScaledVector(target.velocity, tof);
-            this._dir.copy(this._lead).sub(self.position).normalize();
+            gunLeadDirection(this._dir, self, target, this.bulletSpeed);
+            this._dir.normalize();
         }
         // Lag when ATA is large to avoid overshoot.
         else if (geom.ata > 30 * Math.PI / 180) {
@@ -118,7 +128,7 @@ export class FighterTacticalFSM {
         }
 
         this.latchedManeuver = maneuver;
-        const fireGuns = geom.range <= this.gunMaxRange && geom.ata < 8 * Math.PI / 180
+        const fireGuns = geom.range <= this.gunMaxRange && geom.ata < FIRE_PERMIT_ATA
             && (maneuver === 'LEAD_PURSUIT' || maneuver === 'PURE_PURSUIT');
 
         return {
@@ -161,7 +171,7 @@ export class FighterTacticalFSM {
             targetSpeed: throttleSpeed,
             targetGForce: self.maxG * 0.8,
             useAirbrakes: false,
-            fireGuns: geom.range <= this.gunMaxRange && geom.ata < 5 * Math.PI / 180,
+            fireGuns: geom.range <= this.gunMaxRange && geom.ata < FIRE_PERMIT_ATA,
             allowHardTurn: true,
         };
     }

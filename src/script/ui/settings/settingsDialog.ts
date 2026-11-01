@@ -13,6 +13,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatSlideToggleChange, MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatSliderModule } from '@angular/material/slider';
 import { MatTabsModule } from '@angular/material/tabs';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { map } from 'rxjs';
 import { SpawnMode } from '../../config/settingsStorage';
 import { AudioSystem } from '../../audio/audioSystem';
@@ -31,6 +32,9 @@ import {
 } from '../../scene/materials/shaders/colourAdjust';
 import { formatSunTime } from '../../scene/materials/shaders/sun';
 import { clearCameraRouteFromLocation } from '../../state/cameraRoute';
+import {
+    AI_G_LIMIT_MAX, AI_G_LIMIT_MIN, AI_PERSONALITY_PRESETS, AiPersonality,
+} from '../../ai/tunable/aiPersonality';
 import { AiPilotModels, FlightModels, RoadsMode, TerrainColours, TerrainShading, UnitSystems } from '../../state/gameDefs';
 import { PLAY_ORIGIN } from '../../state/worldLayout';
 import {
@@ -375,6 +379,7 @@ const AI_PILOT_MODEL_OPTIONS: Option<AiPilotModels>[] = [
     { value: AiPilotModels.SHAW, label: 'Shaw (Fighter Combat)' },
     { value: AiPilotModels.AGGRESSIVE, label: 'Aggressive (Berserker)' },
     { value: AiPilotModels.ACE, label: 'Ace (vertical fight + post-stall)' },
+    { value: AiPilotModels.TUNABLE, label: 'Tunable (set below)' },
 ];
 
 const UNIT_SYSTEM_OPTIONS: Option<UnitSystems>[] = [
@@ -407,6 +412,51 @@ const DETAIL_OFF_KM = TERRAIN_DETAIL_DISTANCE_MAX_M / 1000;
 /** The tab the player last looked at, so reopening lands back on it. */
 let lastTab: SettingsTab = 'Flight';
 
+/**
+ * The TUNABLE model's sliders; 0..1 knobs show as percent. `tooltip` says
+ * what the knob does at each end, in the numbers personalityTuning applies.
+ */
+const AI_PERSONALITY_SLIDERS: { key: keyof AiPersonality; label: string; tooltip: string; min: number; max: number; step: number; scale: number; unit: string }[] = [
+    {
+        key: 'aggression', label: 'Aggression', min: 0, max: 100, step: 5, scale: 100, unit: '%',
+        tooltip: 'How hard it presses the attack. Low: turns aside at head-on merges instead of shooting, '
+            + 'and breaks off to rebuild speed and height as soon as it falls behind. High: takes every '
+            + 'head-on gun pass (from 35 %), accepts more overshoot, and from 95 % never breaks off.',
+    },
+    {
+        key: 'defensiveness', label: 'Defensiveness', min: 0, max: 100, step: 5, scale: 100, unit: '%',
+        tooltip: 'How early and how hard it defends. Low: reacts only to a bandit close behind it. High: '
+            + 'treats anything pointing at it from the beam back, out to 3.5 km, as a threat, breaks harder '
+            + 'and keeps defending longer. From 40 % it jinks out of your gun solution.',
+    },
+    {
+        key: 'skill', label: 'Skill', min: 0, max: 100, step: 5, scale: 100, unit: '%',
+        tooltip: 'Overall ability, and the main difficulty setting. Raises reaction speed (1.5 s down to '
+            + '0.15 s), aim (4° of error down to none), how much of its g limit it uses (65 % to all), '
+            + 'fight speed, and head-on firing range (1.5 to 2.4 km). From 40 % it turns back level after '
+            + 'a pass and dives for speed before a break; from 50 % it brakes in a fast pass and sees '
+            + 'when it has lost a nose-to-nose race.',
+    },
+    {
+        key: 'energyFighting', label: 'Energy fighting', min: 0, max: 100, step: 5, scale: 100, unit: '%',
+        tooltip: 'Fighting style. Low: turn-and-burn, stays level and cuts inside your turn. High: climbs for '
+            + 'up to 1,200 m of energy advantage before attacking, dives on you at full speed and zooms '
+            + 'away rather than turning with you.',
+    },
+    {
+        key: 'gunDiscipline', label: 'Gun discipline', min: 0, max: 100, step: 5, scale: 100, unit: '%',
+        tooltip: 'When it pulls the trigger. Low: sprays at anything near the nose, out to 1.3 × gun range: '
+            + 'many rounds, few hits. High: fires only when the round is predicted to hit, inside gun '
+            + 'range: far fewer rounds, but it waits for shots a dodging target may never give.',
+    },
+    {
+        key: 'gLimit', label: 'G limit', min: AI_G_LIMIT_MIN, max: AI_G_LIMIT_MAX, step: 0.5, scale: 1, unit: ' g',
+        tooltip: 'The highest load factor it will pull, 3 to 9 g; at low skill it uses only part of it. '
+            + 'The jet gives about 6 g at fight speed, so limits above that matter only when it is faster; '
+            + 'below it, it turns wider than you can.',
+    },
+];
+
 function sliderValue(event: Event): number {
     return parseFloat((event.target as HTMLInputElement).value);
 }
@@ -422,7 +472,7 @@ function sliderValue(event: Event): number {
     changeDetection: ChangeDetectionStrategy.OnPush,
     imports: [
         NgTemplateOutlet, MatAutocompleteModule, MatButtonModule, MatDialogModule, MatFormFieldModule,
-        MatInputModule, MatListModule, MatRadioModule, MatSelectModule, MatSlideToggleModule, MatSliderModule, MatTabsModule, TerrainImporter,
+        MatInputModule, MatListModule, MatRadioModule, MatSelectModule, MatSlideToggleModule, MatSliderModule, MatTabsModule, MatTooltipModule, TerrainImporter,
     ],
     // The page body is bold with a text shadow for legibility over the 3D
     // view; the dialog sits on its own opaque surface and wants neither.
@@ -892,6 +942,30 @@ function sliderValue(event: Event): number {
                             </mat-radio-group>
                         </section>
 
+                        @if (aiPilotModel() === tunableModel) {
+                            <section>
+                                <h3 class="m-0 mb-1 text-base font-medium">Tunable opponent</h3>
+                                <p class="m-0 mb-2 text-sm opacity-70">Applies on the next merge / opponent spawn. Start from a preset, then adjust. Hover a preset or a property for what it does.</p>
+                                <div class="mb-2 flex flex-wrap gap-2">
+                                    @for (preset of aiPersonalityPresets; track preset.id) {
+                                        <button mat-stroked-button type="button" [matTooltip]="preset.description" matTooltipShowDelay="300"
+                                            (click)="applyAiPersonalityPreset(preset.personality)">{{ preset.label }}</button>
+                                    }
+                                </div>
+                                @for (slider of aiPersonalitySliders; track slider.key) {
+                                    <div class="flex items-center gap-4">
+                                        <span class="w-32 cursor-help text-sm underline decoration-dotted underline-offset-4 opacity-70"
+                                            [matTooltip]="slider.tooltip" matTooltipShowDelay="300" tabindex="0">{{ slider.label }}</span>
+                                        <mat-slider class="flex-1" [min]="slider.min" [max]="slider.max" [step]="slider.step">
+                                            <input matSliderThumb [value]="aiPersonalitySliderValue(slider)"
+                                                (input)="setAiPersonalityKnob(slider, $event)">
+                                        </mat-slider>
+                                        <output class="w-16 text-right tabular-nums">{{ aiPersonalitySliderValue(slider) }}{{ slider.unit }}</output>
+                                    </div>
+                                }
+                            </section>
+                        }
+
                         <section>
                             <h3 class="m-0 mb-1 text-base font-medium">Opponents</h3>
                             <p class="m-0 mb-2 text-sm opacity-70">Applies on the next spawn. From another airfield within 40 km, else from another runway of yours.</p>
@@ -1076,6 +1150,9 @@ export class SettingsDialog {
     readonly terrainShadings = TERRAIN_SHADING_OPTIONS;
     readonly flightModels = FLIGHT_MODEL_OPTIONS;
     readonly aiPilotModels = AI_PILOT_MODEL_OPTIONS;
+    readonly tunableModel = AiPilotModels.TUNABLE;
+    readonly aiPersonalityPresets = AI_PERSONALITY_PRESETS;
+    readonly aiPersonalitySliders = AI_PERSONALITY_SLIDERS;
     readonly unitSystems = UNIT_SYSTEM_OPTIONS;
     readonly keyboardLayouts = KEYBOARD_LAYOUT_OPTIONS;
     readonly pitchStickModes = PITCH_STICK_MODE_OPTIONS;
@@ -1095,6 +1172,7 @@ export class SettingsDialog {
     readonly colourAdjust = signal(this.config.colourAdjust.getActive());
     readonly flightModel = signal(this.config.flightModels.getActiveKey());
     readonly aiPilotModel = signal(this.config.aiPilotModels.getActive());
+    readonly aiPersonality = signal(this.config.aiPersonality.getActive());
     readonly unitSystem = signal(this.config.unitSystem.getActive());
     readonly keyboardLayout = signal(this.data.keyboardInput.getKeyboardLayoutId());
     readonly pitchStickMode = signal(this.data.keyboardInput.getKeyboardPitchStickMode());
@@ -1336,6 +1414,25 @@ export class SettingsDialog {
         this.config.aiPilotModels.setActive(model);
         updateSettings({ aiPilotModel: model });
         this.aiPilotModel.set(model);
+    }
+
+    aiPersonalitySliderValue(slider: typeof AI_PERSONALITY_SLIDERS[number]): number {
+        return Math.round(this.aiPersonality()[slider.key] * slider.scale * 10) / 10;
+    }
+
+    setAiPersonalityKnob(slider: typeof AI_PERSONALITY_SLIDERS[number], event: Event) {
+        this.saveAiPersonality({ [slider.key]: sliderValue(event) / slider.scale });
+    }
+
+    applyAiPersonalityPreset(personality: AiPersonality) {
+        this.saveAiPersonality(personality);
+    }
+
+    private saveAiPersonality(change: Partial<AiPersonality>) {
+        this.config.aiPersonality.setActive(change);
+        const personality = this.config.aiPersonality.getActive();
+        updateSettings({ aiPersonality: personality });
+        this.aiPersonality.set(personality);
     }
 
     setUnitSystem(system: UnitSystems) {

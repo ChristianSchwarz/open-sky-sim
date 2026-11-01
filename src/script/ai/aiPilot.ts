@@ -1,13 +1,24 @@
 import * as THREE from 'three';
 import { clamp, FORWARD, RIGHT, UP } from '../utils/math';
 import { AiPilotModels } from '../state/gameDefs';
+import { AiPersonality } from './tunable/aiPersonality';
 import { PilotableAircraft } from './aircraftControls';
 import { AiPilotController } from './aiPilotController';
 import { approachSpeed } from './airfield/airframePerformance';
 import { arcHeading, fromRunwayFrame, lineHeading, runwayFrame, turnRadius } from './airfield/patternGuidance';
 import { Runway, SceneWorldQuery, WorldQuery } from './worldQuery';
 import { Combatant } from '../weapons/combatant';
-import { angleOff, ballisticAimPoint, closureRate, predictedMissDistance, specificEnergyHeight, trackingAngle } from './dogfightGeometry';
+import {
+    angleOff,
+    ballisticAimPoint,
+    closureRate,
+    HEAD_ON_BREAK_S,
+    HEAD_ON_GUN_RANGE,
+    isHeadOnGunPass,
+    predictedMissDistance,
+    specificEnergyHeight,
+    trackingAngle,
+} from './dogfightGeometry';
 
 /**
  * Hierarchical flight phases. Mission logic sets high-level setpoints (heading,
@@ -101,6 +112,8 @@ export interface AiPilotOptions {
      * in-worker pilot is (re)built — typically on opponent spawn.
      */
     model?: AiPilotModels;
+    /** The TUNABLE model's knobs; missing ones take defaultAiPersonality. Other models ignore it. */
+    personality?: Partial<AiPersonality>;
 }
 
 /**
@@ -167,6 +180,8 @@ export enum DogfightMode {
     DEFENSIVE_BREAK,
     /** Disengage on a clear heading to rebuild energy before re-engaging. */
     EXTEND,
+    /** Head-on gun pass: nose on the lead of a bandit flying at us (see {@link isHeadOnGunPass}). */
+    GUN_PASS,
 }
 
 // --- Controller gains / limits -------------------------------------------------
@@ -336,7 +351,7 @@ const MAX_GO_AROUNDS = 2;
  * overspeed cap. At 180 the AI could not follow a merge round (see
  * tools/dogfight_merge.ts).
  */
-const CORNER_SPEED = 230;
+const CORNER_SPEED = 238;
 /** Angle-off above which pursuit bleeds toward corner speed for a tighter turn. */
 const CORNER_SPEED_AO = 35 * Math.PI / 180;
 /** Inside this range (m) and closing, pursuit matches the target's speed instead of overrunning it. */
@@ -439,12 +454,30 @@ const ONE_G_SPEED = 90;
 const TRACK_GAIN = 6;
 const GRAVITY = 9.81;
 const AIM_RATE_EMA = 0.2;
+/**
+ * Damping (s) on the aim error: the proportional term acts on the error this
+ * far ahead. Without it a head-on pass, with almost no line-of-sight rate to
+ * feed forward, rang at 2 Hz between -0.2 and 2.5 g and the nose hunted 1 deg
+ * either side of the lead: 17 m at 1 km, outside the fire gate.
+ */
+const TRACK_DAMP_S = 0.1;
 /** Stick (negative) a tracking pilot may push for a small correction rather than rolling inverted. */
 const TRACK_PUSH_MAX = -0.4;
 /** Below this commanded g (and well over the top) tracking pushes instead of rolling round. */
 const TRACK_PUSH_G = 2.5;
-/** Above this (m AGL, over the hard deck) a hard turn may pull while inverted, for a split-S or a nose-low lift-vector turn. */
-const INVERTED_PULL_AGL = 1200;
+/**
+ * ... and so it does, whatever the g, with the nose this close (rad) to the
+ * aim: rolling over to pull a 2 deg correction let a head-on pass drift 5 deg
+ * off the lead during the roll and lose the shot.
+ */
+const TRACK_PUSH_ANGLE = 10 * Math.PI / 180;
+/**
+ * Above this (m AGL, over the hard deck) a hard turn may pull while inverted,
+ * for a split-S or a nose-low lift-vector turn. At 1200 two pilots that had
+ * rolled over to put the nose on a gun pass below them hung there, inverted at
+ * 0.5 g, unable to pull, and collided; the terrain guard still has the floor.
+ */
+const INVERTED_PULL_AGL = 600;
 
 // --- Gun lead / target prediction ------------------------------------------------
 const TARGET_ACCEL_CAP = 90;                 // ~9 g (m/s^2)
@@ -671,6 +704,8 @@ export class AiPilot implements AiPilotController {
     private readonly aimDir = new THREE.Vector3();
     private readonly liftDir = new THREE.Vector3();
     private readonly prevAimDir = new THREE.Vector3();
+    private readonly prevFwd = new THREE.Vector3();
+    private readonly noseRate = new THREE.Vector3();
     private readonly aimRate = new THREE.Vector3();
     private hasPrevAimDir = false;
     private readonly lpos = new THREE.Vector3();
@@ -1632,13 +1667,15 @@ export class AiPilot implements AiPilotController {
         const theirEnergy = specificEnergyHeight(this.tpos.y, this.tvel.length());
         const energyDeficit = theirEnergy - myEnergy;
 
-        this.updateDogfightMode(delta, range, closure, ao, theirTrackingAngle, myAspectOnTarget, energyDeficit);
+        const gunPass = isHeadOnGunPass(this.pos, this.vel, this.tpos, this.tvel);
+        this.updateDogfightMode(delta, range, closure, ao, theirTrackingAngle, myAspectOnTarget, energyDeficit, gunPass);
 
         switch (this.dogfightMode) {
             case DogfightMode.DEFENSIVE_BREAK: this.doDefensiveBreak(delta); break;
             case DogfightMode.EXTEND: this.doExtend(delta); break;
             case DogfightMode.HIGH_YOYO: this.doHighYoYo(delta, range); break;
             case DogfightMode.LOW_YOYO: this.doLowYoYo(delta, range); break;
+            case DogfightMode.GUN_PASS: this.doGunPass(delta, range); break;
             case DogfightMode.LAG_PURSUE: this.doLagPursue(delta, range, ao, closure); break;
             case DogfightMode.PURSUE: default: this.doPursue(delta, range, ao, closure); break;
         }
@@ -1646,9 +1683,11 @@ export class AiPilot implements AiPilotController {
         // Only PURSUE/LAG_PURSUE actually aim at the target this frame; every
         // other mode is repositioning or evading, so never let a coincidental
         // nose-on-target moment squeeze off a burst.
-        if (this.dogfightMode !== DogfightMode.PURSUE && this.dogfightMode !== DogfightMode.LAG_PURSUE) {
-            this.firing = false;
-        }
+        // Take any shot the nose happens to give, whatever the maneuver: a round
+        // costs nothing but ammunition, and a reversal or a break sweeps the
+        // nose through the bandit often enough to matter.
+        this.computeBallisticAim();
+        this.firing = this.evaluateFireSolution(range, gunPass ? HEAD_ON_GUN_RANGE : this.gunRange);
         this.hadSolution = this.firing;
     }
 
@@ -1660,7 +1699,7 @@ export class AiPilot implements AiPilotController {
      */
     private updateDogfightMode(
         delta: number, range: number, closure: number, ao: number,
-        theirTrackingAngle: number, myAspectOnTarget: number, energyDeficit: number,
+        theirTrackingAngle: number, myAspectOnTarget: number, energyDeficit: number, gunPass: boolean,
     ): void {
         const theirThreatRange = this.gunRange * DEFENSIVE_RANGE_MULT;
         const theirClearRange = this.gunRange * DEFENSIVE_CLEAR_RANGE_MULT;
@@ -1685,6 +1724,14 @@ export class AiPilot implements AiPilotController {
                 this.setDogfightMode(DogfightMode.DEFENSIVE_BREAK);
             }
             return;
+        }
+
+        if (gunPass) {
+            this.setDogfightMode(DogfightMode.GUN_PASS);
+            return;
+        }
+        if (this.dogfightMode === DogfightMode.GUN_PASS) {
+            this.setDogfightMode(DogfightMode.PURSUE);
         }
 
         // Energy-deficit disengage: skipped for an always-engage opponent so it
@@ -1779,8 +1826,8 @@ export class AiPilot implements AiPilotController {
     }
 
     /** Would the current nose direction produce a hit at `range`? */
-    private evaluateFireSolution(range: number): boolean {
-        if (!this.target || range > this.gunRange || range < 1) {
+    private evaluateFireSolution(range: number, maxRange = this.gunRange): boolean {
+        if (!this.target || range > maxRange || range < 1) {
             return false;
         }
         this.bulletVel.copy(this.fwd).multiplyScalar(this.bulletSpeed).add(this.vel);
@@ -1788,7 +1835,11 @@ export class AiPilot implements AiPilotController {
             this.pos, this.bulletVel, this.tpos, this.tvel, this.targetAcc, this.lastTof,
         );
         const allowance = this.target.getHitRadius() * this.skillTuning.missAllowanceMult + FIRE_MISS_SLACK_M;
-        const aggressiveSlack = this.alwaysEngage ? allowance * 1.35 : allowance;
+        // Was x 1.35 (always-engage) and x 1, against a miss that read 25-35
+        // m long (see predictedMissDistance). Solved exactly, the gate had
+        // to tighten to keep the hit rate: 0.7 of the old one gave 52 % hits
+        // and a 19 s median kill on tools/dogfight_merge.ts.
+        const aggressiveSlack = allowance * (this.alwaysEngage ? 0.85 : 0.7);
         return miss <= aggressiveSlack;
     }
 
@@ -1835,19 +1886,27 @@ export class AiPilot implements AiPilotController {
      * seconds, aim far enough aside at the closest point to pass clear. Without
      * this a head-on merge between two lead-pursuing pilots ended in a midair.
      */
-    private deconflictAim(): void {
+    private deconflictAim(lookahead: number, sideOnly: boolean): void {
         this.toPoint.copy(this.tpos).sub(this.pos);
         this.bulletVel.copy(this.tvel).sub(this.vel); // relative velocity (scratch)
         const relSpeedSq = this.bulletVel.lengthSq();
         if (relSpeedSq < 1) return;
         const tc = -this.toPoint.dot(this.bulletVel) / relSpeedSq;
-        if (tc <= 0 || tc > DECONFLICT_LOOKAHEAD_S) return;
+        if (tc <= 0 || tc > lookahead) return;
         // Target relative to us at the closest point; push our aim the other way.
         this.toPoint.addScaledVector(this.bulletVel, tc);
         const miss = this.toPoint.length();
         if (miss >= DECONFLICT_MISS_M) return;
-        if (miss > 1) {
-            this.toPoint.multiplyScalar(-1 / miss);
+        // A gun pass passes beside it, never over or under: there is no time
+        // to roll, and two mirrored passes that missed by a few metres
+        // vertically split up and down and still collided. Anywhere else the
+        // separation already there is kept, vertical or not.
+        if (sideOnly) {
+            this.toPoint.y = 0;
+        }
+        const missSide = this.toPoint.length();
+        if (missSide > 1) {
+            this.toPoint.multiplyScalar(-1 / missSide);
         } else {
             // Dead on: pass the other aircraft on our left, as pilots do.
             this.toPoint.set(Math.cos(this.heading), 0, -Math.sin(this.heading));
@@ -1857,7 +1916,10 @@ export class AiPilot implements AiPilotController {
     }
 
     /** Turn/pitch toward `this.aim`, hold `desiredSpeed`, and fire on a predicted hit. */
-    private steerAtAimAndFire(delta: number, range: number, desiredSpeed: number): void {
+    private steerAtAimAndFire(
+        delta: number, range: number, desiredSpeed: number,
+        deconflictS = DECONFLICT_LOOKAHEAD_S, gunPass = false,
+    ): void {
         this.toPoint.copy(this.aim).sub(this.pos);
         const aimDist = this.toPoint.length();
         if (aimDist < 1e-3) {
@@ -1865,7 +1927,7 @@ export class AiPilot implements AiPilotController {
             return;
         }
         this.aimDir.copy(this.toPoint).divideScalar(aimDist);
-        this.deconflictAim();
+        this.deconflictAim(deconflictS, gunPass);
         this.capAimClimb();
 
         this.commandTrack(delta, desiredSpeed);
@@ -1882,10 +1944,14 @@ export class AiPilot implements AiPilotController {
         if (this.hasPrevAimDir && delta > 1e-4) {
             this.liftDir.copy(this.aimDir).sub(this.prevAimDir).divideScalar(delta);
             this.aimRate.lerp(this.liftDir, AIM_RATE_EMA);
+            this.liftDir.copy(this.fwd).sub(this.prevFwd).divideScalar(delta);
+            this.noseRate.lerp(this.liftDir, AIM_RATE_EMA);
         } else {
             this.aimRate.set(0, 0, 0);
+            this.noseRate.set(0, 0, 0);
         }
         this.prevAimDir.copy(this.aimDir);
+        this.prevFwd.copy(this.fwd);
         this.hasPrevAimDir = true;
 
         const speed = Math.max(1, this.aircraft.getAirspeed());
@@ -1896,15 +1962,20 @@ export class AiPilot implements AiPilotController {
             this.liftDir.copy(this.up); // dead astern: any way round, the way we pull now
         }
         this.liftDir.normalize().multiplyScalar(aimAngle * TRACK_GAIN * speed)
-            .addScaledVector(this.aimRate, speed);
+            .addScaledVector(this.aimRate, speed)
+            .addScaledVector(this.aimRate, TRACK_DAMP_S * TRACK_GAIN * speed)
+            .addScaledVector(this.noseRate, -TRACK_DAMP_S * TRACK_GAIN * speed);
         this.liftDir.y += GRAVITY;
         this.liftDir.addScaledVector(this.fwd, -this.fwd.dot(this.liftDir));
         const liftG = this.liftDir.length() / GRAVITY;
 
-        // Small corrections over the top are pushed, not rolled 180 deg for.
+        // Small corrections over the top are pushed, not rolled 180 deg for,
+        // while upright: inverted, the same rule holds the jet upside down,
+        // pushing, for good.
         let rollErr = Math.atan2(-this.liftDir.dot(this.right), this.liftDir.dot(this.up));
         let wantG = liftG;
-        if (Math.abs(rollErr) > LIFT_ROLL_FIRST + Math.PI / 6 && liftG < TRACK_PUSH_G) {
+        if (this.up.y > 0 && Math.abs(rollErr) > LIFT_ROLL_FIRST + Math.PI / 6
+            && (liftG < TRACK_PUSH_G || aimAngle < TRACK_PUSH_ANGLE)) {
             rollErr = wrapPi(rollErr + Math.PI);
             wantG = -liftG;
         }
@@ -1938,6 +2009,16 @@ export class AiPilot implements AiPilotController {
         } else {
             this.applyPitchImmediate(pull, HARD_TURN_PITCH_MAX);
         }
+    }
+
+    /**
+     * Head-on gun pass: hold the nose on the lead of a bandit flying at us and
+     * shoot, giving way to deconfliction only in the last
+     * {@link HEAD_ON_BREAK_S}. Fast, for the pass and the turn after it.
+     */
+    private doGunPass(delta: number, range: number): void {
+        this.computeBallisticAim();
+        this.steerAtAimAndFire(delta, range, CORNER_SPEED, HEAD_ON_BREAK_S, true);
     }
 
     /** Straight lead-pursuit intercept — the default, common case. */

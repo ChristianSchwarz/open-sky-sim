@@ -123,6 +123,55 @@ export function solveInterceptTime(relPos: THREE.Vector3, relVel: THREE.Vector3,
  * which on a crossing shot is a many-degree aim error. Writes the aim point
  * into `out` and returns the time of flight (s).
  */
+/**
+ * Inside this range (m) a bandit flying at us is shot at. A head-on pass is
+ * the easiest gun shot there is (the target barely crosses the line of
+ * sight) and the commonest one between equal fighters, which meet nose to
+ * nose every turn of a neutral fight; rounds live 2.5 s, so 1.8 km is still
+ * well inside their reach.
+ */
+export const HEAD_ON_GUN_RANGE = 1800;
+/**
+ * A head-on gun pass holds the nose on the lead until this long (s) before
+ * the closest point, then gives way to the usual deconfliction (150 m),
+ * which must clear the pass alone (the player does not dodge). 1.5 s, or 2 s
+ * with a 100 m clearance, collided between AI pilots; this did not in 300
+ * bench fights, against each other or against a target flying straight
+ * through. Collisions here are chaotic (2.15 s had two), so this is a
+ * measured value, not a guarantee.
+ */
+export const HEAD_ON_BREAK_S = 2.0;
+/**
+ * A pilot whose tactics would rather lead-turn (Shaw, Ace) points at a bandit
+ * flying at it from this far (m), with its nose within
+ * {@link HEAD_ON_SETUP_CONE} of it, so it is still pointing when the pass comes
+ * into gun range: lead-turning first, they went into the pass 45+ deg off and
+ * took one to two minutes to kill a target that flew straight through.
+ */
+export const HEAD_ON_SETUP_RANGE = 3000;
+export const HEAD_ON_SETUP_CONE = 90 * Math.PI / 180;
+const HEAD_ON_THEIR_COS = Math.cos(60 * Math.PI / 180);
+const HEAD_ON_MY_CONE = 45 * Math.PI / 180;
+
+/**
+ * Is this a head-on gun pass: the bandit inside `maxRange` (by default
+ * {@link HEAD_ON_GUN_RANGE}), flying within 60 deg of straight at us, and our
+ * own flight path within `myCone` (rad, by default 45 deg) of it?
+ */
+export function isHeadOnGunPass(
+    myPos: THREE.Vector3, myVel: THREE.Vector3, targetPos: THREE.Vector3, targetVel: THREE.Vector3,
+    maxRange = HEAD_ON_GUN_RANGE, myCone = HEAD_ON_MY_CONE,
+): boolean {
+    _los.copy(targetPos).sub(myPos);
+    const range = _los.length();
+    if (range > maxRange || range < 1) {
+        return false;
+    }
+    _los.divideScalar(range);
+    return -targetVel.dot(_los) >= targetVel.length() * HEAD_ON_THEIR_COS
+        && myVel.dot(_los) >= myVel.length() * Math.cos(myCone);
+}
+
 export function ballisticAimPoint(
     out: THREE.Vector3,
     myPos: THREE.Vector3, myVel: THREE.Vector3,
@@ -142,28 +191,55 @@ export function ballisticAimPoint(
 /**
  * Predicted miss distance (m): minimum separation between a round leaving
  * `shooterPos` with world velocity `bulletVel` (dropping under gravity) and a
- * target extrapolated from `targetPos`/`targetVel`/`targetAcc`, sampled in a
- * window around the nominal time of flight `tof`. This is the actual "will
- * this trigger pull connect?" question, unlike a fixed angular cone which is
- * blind to range and to the shooter's velocity contribution to the round.
+ * target extrapolated from `targetPos`/`targetVel`/`targetAcc`, at their
+ * closest point within half to one and a half times the nominal time of
+ * flight `tof`. This is the actual "will this trigger pull connect?"
+ * question, unlike a fixed angular cone which is blind to range and to the
+ * shooter's velocity contribution to the round.
+ *
+ * The closest point is solved for, not sampled: it was the least of nine
+ * samples 5 % of `tof` apart, and a round meets a head-on target at ~1400 m/s,
+ * so the samples straddled it by up to 70 m and a dead-on shot read as a
+ * 25-35 m miss and was never fired.
  */
 export function predictedMissDistance(
     shooterPos: THREE.Vector3, bulletVel: THREE.Vector3,
     targetPos: THREE.Vector3, targetVel: THREE.Vector3, targetAcc: THREE.Vector3,
     tof: number,
 ): number {
-    let best = Infinity;
-    for (let f = 0.8; f <= 1.2001; f += 0.05) {
-        const t = tof * f;
-        _bullet.copy(shooterPos).addScaledVector(bulletVel, t);
-        _bullet.y -= 0.5 * G * t * t;
-        _tgt.copy(targetPos)
-            .addScaledVector(targetVel, t)
-            .addScaledVector(targetAcc, 0.5 * t * t);
-        const d = _bullet.distanceTo(_tgt);
-        if (d < best) {
-            best = d;
-        }
+    // Target relative to the round: d(t) = d0 + dv t + da t^2 / 2.
+    _d0.copy(targetPos).sub(shooterPos);
+    _dv.copy(targetVel).sub(bulletVel);
+    _da.copy(targetAcc);
+    _da.y += G;
+    const lo = 0.5 * tof;
+    const hi = 1.5 * tof;
+    // Start from the closest point of the straight-line part, then Newton on |d|^2.
+    const dvSq = _dv.lengthSq();
+    let t = clampNumber(dvSq > 1e-9 ? -_d0.dot(_dv) / dvSq : tof, lo, hi);
+    for (let i = 0; i < 4; i++) {
+        separationAt(t);
+        const g = _dt.dot(_ddt);
+        const h = _ddt.lengthSq() + _dt.dot(_da);
+        if (h <= 1e-9) break;
+        t = clampNumber(t - g / h, lo, hi);
     }
-    return best;
+    return separationAt(t);
+}
+
+const _d0 = new THREE.Vector3();
+const _dv = new THREE.Vector3();
+const _da = new THREE.Vector3();
+const _dt = new THREE.Vector3();
+const _ddt = new THREE.Vector3();
+
+/** d(t) into `_dt` and d'(t) into `_ddt`, for {@link predictedMissDistance}; returns |d(t)|. */
+function separationAt(t: number): number {
+    _dt.copy(_d0).addScaledVector(_dv, t).addScaledVector(_da, 0.5 * t * t);
+    _ddt.copy(_dv).addScaledVector(_da, t);
+    return _dt.length();
+}
+
+function clampNumber(x: number, lo: number, hi: number): number {
+    return x < lo ? lo : x > hi ? hi : x;
 }

@@ -31,6 +31,8 @@ export interface AircraftSnapshot {
     /** Optimal turn speed (m/s). */
     cornerVelocity: number;
     maxG: number;
+    /** World-frame acceleration (m/s^2) where the pilot estimates it, for the gun lead. */
+    acceleration?: THREE.Vector3;
 }
 
 export interface TacticalGeometry {

@@ -5,9 +5,21 @@ import { AiFlightPhase, AiPilot, AiPilotOptions } from '../aiPilot';
 import { AiPilotController } from '../aiPilotController';
 import { PilotableAircraft } from '../aircraftControls';
 import { WorldQuery } from '../worldQuery';
-import { FlightControlComputer } from '../shaw/flightControlComputer';
+import { HEAD_ON_GUN_RANGE } from '../dogfightGeometry';
+import { FIGHT_CORNER_SPEED, FlightControlComputer } from '../shaw/flightControlComputer';
+import { gunMissDistance, TargetAccelEstimator } from '../shaw/gunSolution';
+import { setFlightPathAxes } from '../shaw/shawGeometry';
 import { AircraftSnapshot } from '../shaw/shawTypes';
 import { AggressiveTacticalFSM } from './aggressiveTacticalFsm';
+
+/**
+ * A trigger pull needs the round predicted to pass within the target's hit
+ * radius times this, plus {@link FIRE_MISS_SLACK_M}: looser than Shaw's 0.85,
+ * snap-shooting for pressure, but no longer spraying at a nose 14 deg off.
+ * Every valid shot is taken, whatever the tactical FSM is flying.
+ */
+const FIRE_MISS_MULT = 1.1;
+const FIRE_MISS_SLACK_M = 2;
 
 /**
  * "Berserker" AI pilot model: a maximally aggressive fighter doctrine built
@@ -26,7 +38,10 @@ export class AggressiveAiPilot implements AiPilotController {
     private phase: AiFlightPhase = AiFlightPhase.NAVIGATE;
     private target: Combatant | undefined;
     private firing = false;
+    private readonly gunRange: number;
     private lastManeuver = 'AGGRESSIVE';
+    private readonly bulletSpeed: number;
+    private readonly targetAccel = new TargetAccelEstimator();
 
     private readonly selfSnap: AircraftSnapshot;
     private readonly tgtSnap: AircraftSnapshot;
@@ -43,9 +58,11 @@ export class AggressiveAiPilot implements AiPilotController {
         options: AiPilotOptions = {},
     ) {
         this.classic = new AiPilot(aircraft, world, options);
+        this.bulletSpeed = options.bulletSpeed ?? 1000;
         this.fsm = new AggressiveTacticalFSM({
-            gunRange: options.gunRange ?? 900,
-            combatSpeed: options.combatSpeed ?? 210,
+            bulletSpeed: this.bulletSpeed,
+            gunRange: (this.gunRange = options.gunRange ?? 900),
+            combatSpeed: Math.max(options.combatSpeed ?? 210, FIGHT_CORNER_SPEED),
             maxSpeed: options.maxSpeed ?? 240,
             overshootVc: 110,
         });
@@ -57,7 +74,7 @@ export class AggressiveAiPilot implements AiPilotController {
             pitchSlew: options.pitchSlew,
         });
 
-        const corner = options.combatSpeed ?? 210;
+        const corner = Math.max(options.combatSpeed ?? 210, FIGHT_CORNER_SPEED);
         this.selfSnap = {
             position: new THREE.Vector3(),
             velocity: new THREE.Vector3(),
@@ -79,6 +96,7 @@ export class AggressiveAiPilot implements AiPilotController {
             airspeed: 0,
             cornerVelocity: corner,
             maxG: 9,
+            acceleration: new THREE.Vector3(),
         };
     }
 
@@ -92,6 +110,7 @@ export class AggressiveAiPilot implements AiPilotController {
     }
 
     setTarget(target: Combatant | undefined): void {
+        if (target !== this.target) this.targetAccel.reset();
         this.target = target;
         this.classic.setTarget(target);
     }
@@ -136,14 +155,23 @@ export class AggressiveAiPilot implements AiPilotController {
             return;
         }
 
-        this.fillSnapshots();
+        this.fillSnapshots(delta);
         const command = this.fsm.update(this.selfSnap, this.tgtSnap, delta);
         this.lastManeuver = command.maneuverName;
-        const preempted = this.fcc.applyCommand(command, delta);
-        this.firing = !preempted && command.fireGuns;
+        const preempted = this.fcc.applyCommand(command, delta, this.tgtSnap);
+        if (this.fcc.gunPass) {
+            this.lastManeuver = 'GUN_PASS';
+        }
+        // Any shot the nose gives is taken, whatever the maneuver: a round
+        // costs nothing but ammunition.
+        const maxRange = this.fcc.gunPass ? HEAD_ON_GUN_RANGE : this.gunRange;
+        this.firing = !preempted
+            && this.selfSnap.position.distanceTo(this.tgtSnap.position) <= maxRange
+            && gunMissDistance(this.selfSnap, this.tgtSnap, this.bulletSpeed)
+                <= 1 * (this.target.getHitRadius() * FIRE_MISS_MULT + FIRE_MISS_SLACK_M);
     }
 
-    private fillSnapshots(): void {
+    private fillSnapshots(delta: number): void {
         const ac = this.aircraft;
         this.selfSnap.position.copy(ac.getPosition());
         this.selfSnap.velocity.copy(ac.getVelocity());
@@ -152,8 +180,8 @@ export class AggressiveAiPilot implements AiPilotController {
         this._right.copy(RIGHT).applyQuaternion(this._quat);
         this._up.copy(UP).applyQuaternion(this._quat);
         this.selfSnap.forward.copy(this._fwd);
-        this.selfSnap.right.copy(this._right);
-        this.selfSnap.up.copy(this._up);
+        // Flight-path axes, not body axes: see setFlightPathAxes.
+        setFlightPathAxes(this.selfSnap, this._right);
         this.selfSnap.altitude = ac.getAltitude();
         this.selfSnap.airspeed = ac.getAirspeed();
 
@@ -163,6 +191,7 @@ export class AggressiveAiPilot implements AiPilotController {
         this.tgtSnap.velocity.copy(this._tvel);
         this.tgtSnap.altitude = this._tpos.y;
         this.tgtSnap.airspeed = this._tvel.length();
+        this.targetAccel.update(this.tgtSnap.acceleration!, this._tvel, delta);
         if (this._tvel.lengthSq() > 1e-6) {
             this.tgtSnap.forward.copy(this._tvel).normalize();
         } else {

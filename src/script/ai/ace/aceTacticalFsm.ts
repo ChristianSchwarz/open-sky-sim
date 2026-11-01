@@ -44,6 +44,10 @@ const SCISSORS_RATE = 1.6;
 
 /** Bandit closing this fast (m/s) means an overshoot is developing. */
 const DEFAULT_OVERSHOOT_VC = 90;
+/** A merge pull into the vertical needs this aspect (rad, from the bandit's tail) ... */
+const VERTICAL_MIN_AOT = 120 * DEG;
+/** ... and this fraction of corner speed: below it the climb only bleeds into a hang. */
+const VERTICAL_MIN_SPEED_FRAC = 0.9;
 /** Lag-pursuit aim point sits this far (m) behind the bandit. */
 const LAG_DISTANCE = 260;
 
@@ -265,11 +269,13 @@ export class AceTacticalFSM {
             maneuver = 'HEAD_ON_SNAPSHOT';
             this.ballisticDirection(self, target, geom);
             fireGuns = true;
-        } else if (geom.range < 1200 && geom.closureRate > 0) {
+        } else if (geom.range < 1200 && geom.closureRate > 0
+            && geom.aot > VERTICAL_MIN_AOT && self.airspeed >= self.cornerVelocity * VERTICAL_MIN_SPEED_FRAC) {
             // The ace answer to a merge is the vertical: pull up through the
             // pass so the fight starts with us on top of the bandit's turn
-            // circle. The aim sits far enough off the nose that the FCC's
-            // hard-turn path takes it as a max-G pull.
+            // circle. Only on a real pass (high aspect) and with fighting
+            // speed in hand: taken on every close high-aspect moment of a
+            // turning fight, at any speed, each one ended hanging at 50 m/s.
             maneuver = 'VERTICAL_REPOSITION';
             this._dir.copy(self.forward).addScaledVector(self.up, 1.6).normalize();
         } else {

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { gunLeadDirection } from '../shaw/gunSolution';
 import { computeTacticalGeometry } from '../shaw/shawGeometry';
 import { AircraftSnapshot, TacticalGeometry } from '../shaw/shawTypes';
 import { AggressiveFlightCommand, AggressiveManeuverType, AggressiveState } from './aggressiveTypes';
@@ -60,15 +61,16 @@ export class AggressiveTacticalFSM {
     private readonly overshootVc: number;
     private readonly combatSpeed: number;
     private readonly maxSpeed: number;
+    private readonly bulletSpeed: number;
 
     private readonly _dir = new THREE.Vector3();
-    private readonly _lead = new THREE.Vector3();
 
     constructor(options: {
         gunRange?: number;
         overshootVc?: number;
         combatSpeed?: number;
         maxSpeed?: number;
+        bulletSpeed?: number;
     } = {}) {
         this.gunMaxRange = options.gunRange ?? 900;
         this.snapShotRange = this.gunMaxRange * 1.2;
@@ -77,6 +79,7 @@ export class AggressiveTacticalFSM {
         this.overshootVc = options.overshootVc ?? 110;
         this.combatSpeed = options.combatSpeed ?? 210;
         this.maxSpeed = options.maxSpeed ?? 240;
+        this.bulletSpeed = options.bulletSpeed ?? 1000;
     }
 
     getState(): AggressiveState {
@@ -161,9 +164,8 @@ export class AggressiveTacticalFSM {
             targetSpeed = this.combatSpeed * 0.9;
             allowHardTurn = false;
         } else {
-            const tof = geom.range / 800;
-            this._lead.copy(target.position).addScaledVector(target.velocity, tof);
-            this._dir.copy(this._lead).sub(self.position).normalize();
+            gunLeadDirection(this._dir, self, target, this.bulletSpeed);
+            this._dir.normalize();
         }
 
         this.latchedManeuver = maneuver;

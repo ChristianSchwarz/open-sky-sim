@@ -6,8 +6,20 @@ import { AiPilotController } from '../aiPilotController';
 import { PilotableAircraft } from '../aircraftControls';
 import { WorldQuery } from '../worldQuery';
 import { FighterTacticalFSM } from './fighterTacticalFsm';
-import { FlightControlComputer } from './flightControlComputer';
+import { HEAD_ON_GUN_RANGE } from '../dogfightGeometry';
+import { FIGHT_CORNER_SPEED, FlightControlComputer } from './flightControlComputer';
+import { gunMissDistance, TargetAccelEstimator } from './gunSolution';
+import { setFlightPathAxes } from './shawGeometry';
 import { AircraftSnapshot } from './shawTypes';
+
+/**
+ * A trigger pull needs the round predicted to pass within the target's hit
+ * radius times this, plus {@link FIRE_MISS_SLACK_M}, as the classic pilot's
+ * (tighter than it was, x 1.35 + 3 m: every valid shot is taken now,
+ * whatever the tactical FSM is flying, and the miss is solved exactly).
+ */
+const FIRE_MISS_MULT = 0.85;
+const FIRE_MISS_SLACK_M = 2;
 
 /**
  * Shaw Fighter Combat AI pilot model. During ENGAGE it runs the doctrinal
@@ -22,7 +34,10 @@ export class ShawAiPilot implements AiPilotController {
     private phase: AiFlightPhase = AiFlightPhase.NAVIGATE;
     private target: Combatant | undefined;
     private firing = false;
+    private readonly gunRange: number;
     private lastManeuver = 'SHAW';
+    private readonly bulletSpeed: number;
+    private readonly targetAccel = new TargetAccelEstimator();
 
     private readonly selfSnap: AircraftSnapshot;
     private readonly tgtSnap: AircraftSnapshot;
@@ -39,9 +54,11 @@ export class ShawAiPilot implements AiPilotController {
         options: AiPilotOptions = {},
     ) {
         this.classic = new AiPilot(aircraft, world, options);
+        this.bulletSpeed = options.bulletSpeed ?? 1000;
         this.fsm = new FighterTacticalFSM({
-            gunRange: options.gunRange ?? 900,
-            combatSpeed: options.combatSpeed ?? 200,
+            bulletSpeed: this.bulletSpeed,
+            gunRange: (this.gunRange = options.gunRange ?? 900),
+            combatSpeed: Math.max(options.combatSpeed ?? 200, FIGHT_CORNER_SPEED),
             maxSpeed: options.maxSpeed ?? 240,
             overshootVc: 80,
         });
@@ -53,7 +70,7 @@ export class ShawAiPilot implements AiPilotController {
             pitchSlew: options.pitchSlew,
         });
 
-        const corner = options.combatSpeed ?? 200;
+        const corner = Math.max(options.combatSpeed ?? 200, FIGHT_CORNER_SPEED);
         this.selfSnap = {
             position: new THREE.Vector3(),
             velocity: new THREE.Vector3(),
@@ -75,6 +92,7 @@ export class ShawAiPilot implements AiPilotController {
             airspeed: 0,
             cornerVelocity: corner,
             maxG: 9,
+            acceleration: new THREE.Vector3(),
         };
     }
 
@@ -88,6 +106,7 @@ export class ShawAiPilot implements AiPilotController {
     }
 
     setTarget(target: Combatant | undefined): void {
+        if (target !== this.target) this.targetAccel.reset();
         this.target = target;
         this.classic.setTarget(target);
     }
@@ -132,14 +151,23 @@ export class ShawAiPilot implements AiPilotController {
             return;
         }
 
-        this.fillSnapshots();
+        this.fillSnapshots(delta);
         const command = this.fsm.update(this.selfSnap, this.tgtSnap, delta);
         this.lastManeuver = command.maneuverName;
-        const preempted = this.fcc.applyCommand(command, delta);
-        this.firing = !preempted && command.fireGuns;
+        const preempted = this.fcc.applyCommand(command, delta, this.tgtSnap);
+        if (this.fcc.gunPass) {
+            this.lastManeuver = 'GUN_PASS';
+        }
+        // Any shot the nose gives is taken, whatever the maneuver: a round
+        // costs nothing but ammunition.
+        const maxRange = this.fcc.gunPass ? HEAD_ON_GUN_RANGE : this.gunRange;
+        this.firing = !preempted
+            && this.selfSnap.position.distanceTo(this.tgtSnap.position) <= maxRange
+            && gunMissDistance(this.selfSnap, this.tgtSnap, this.bulletSpeed)
+                <= 1 * (this.target.getHitRadius() * FIRE_MISS_MULT + FIRE_MISS_SLACK_M);
     }
 
-    private fillSnapshots(): void {
+    private fillSnapshots(delta: number): void {
         const ac = this.aircraft;
         this.selfSnap.position.copy(ac.getPosition());
         this.selfSnap.velocity.copy(ac.getVelocity());
@@ -148,8 +176,8 @@ export class ShawAiPilot implements AiPilotController {
         this._right.copy(RIGHT).applyQuaternion(this._quat);
         this._up.copy(UP).applyQuaternion(this._quat);
         this.selfSnap.forward.copy(this._fwd);
-        this.selfSnap.right.copy(this._right);
-        this.selfSnap.up.copy(this._up);
+        // Flight-path axes, not body axes: see setFlightPathAxes.
+        setFlightPathAxes(this.selfSnap, this._right);
         this.selfSnap.altitude = ac.getAltitude();
         this.selfSnap.airspeed = ac.getAirspeed();
 
@@ -159,6 +187,7 @@ export class ShawAiPilot implements AiPilotController {
         this.tgtSnap.velocity.copy(this._tvel);
         this.tgtSnap.altitude = this._tpos.y;
         this.tgtSnap.airspeed = this._tvel.length();
+        this.targetAccel.update(this.tgtSnap.acceleration!, this._tvel, delta);
         if (this._tvel.lengthSq() > 1e-6) {
             this.tgtSnap.forward.copy(this._tvel).normalize();
         } else {

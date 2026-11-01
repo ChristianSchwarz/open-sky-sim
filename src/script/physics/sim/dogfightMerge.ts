@@ -98,6 +98,8 @@ export interface MergeSideResult {
     defensiveS: number;
     /** First time it fired, if it did. */
     firstShotAt?: number;
+    /** First time it hit, if it did. */
+    firstHitAt?: number;
     minAltitude: number;
     minSpeed: number;
     /** Seconds spent below 90 m/s (slow, near the stall). */
@@ -127,6 +129,11 @@ export interface MergeTraceSample {
     blueSpeed: number;
     redSpeed: number;
     range: number;
+    /** Attitudes (x, y, z, w), for a replay that shows bank. */
+    blueQuat: [number, number, number, number];
+    redQuat: [number, number, number, number];
+    blueFiring: boolean;
+    redFiring: boolean;
 }
 
 export interface MergeRunOptions {
@@ -135,6 +142,20 @@ export interface MergeRunOptions {
     dt?: number;
     /** Record a trace sample every this many seconds (0 = off). */
     traceEvery?: number;
+    /** Seed for the gun spread (Math.random, for the run only); 1 by default, so a fight repeats exactly. */
+    seed?: number;
+}
+
+/** mulberry32. */
+function seededRandom(seed: number): () => number {
+    let s = seed >>> 0;
+    return () => {
+        s = (s + 0x6d2b79f5) >>> 0;
+        let t = s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
 }
 
 /** The game's opponent pilot options (game.ts opponentPilotOptions). */
@@ -155,7 +176,7 @@ function sideOptions(side: MergeSide): AiPilotOptions {
 type SimAircraftView = {
     health: number;
     firing: boolean;
-    model: { isCrashed(): boolean; position: THREE.Vector3; velocityVector: THREE.Vector3 };
+    model: { isCrashed(): boolean; position: THREE.Vector3; quaternion: THREE.Quaternion; velocityVector: THREE.Vector3 };
     pilot?: { getManeuverLabel(): string };
 };
 
@@ -172,6 +193,11 @@ function headingQuat(heading: number): [number, number, number, number] {
     return [q.x, q.y, q.z, q.w];
 }
 
+function quatOf(q: THREE.Quaternion): [number, number, number, number] {
+    const r = (x: number) => Math.round(x * 1000) / 1000;
+    return [r(q.x), r(q.y), r(q.z), r(q.w)];
+}
+
 /** Angle (rad) between `dir` and the line from `from` to `to`. */
 function angleTo(dir: THREE.Vector3, from: THREE.Vector3, to: THREE.Vector3, tmp: THREE.Vector3): number {
     tmp.copy(to).sub(from);
@@ -179,8 +205,49 @@ function angleTo(dir: THREE.Vector3, from: THREE.Vector3, to: THREE.Vector3, tmp
     return d > 1e-6 ? Math.acos(THREE.MathUtils.clamp(tmp.dot(dir) / d, -1, 1)) : 0;
 }
 
+/**
+ * A pilot that holds the heading, height and speed it started at and never
+ * dodges or shoots: a stand-in for a player flying straight through the
+ * merge, so a pass has to be cleared by the AI alone.
+ */
+export function straightPilot(ac: PilotableAircraft): AiPilotController {
+    let holdY: number | undefined;
+    let holdV: number | undefined;
+    let throttle = 0.6;
+    return {
+        update(delta: number) {
+            holdY ??= ac.getPosition().y;
+            holdV ??= ac.getAirspeed();
+            throttle = Math.max(0, Math.min(1, throttle + (holdV - ac.getAirspeed()) * 0.05 * delta));
+            const v = ac.getVelocity();
+            ac.setLandingGearDeployed(false);
+            ac.setFlapsExtended(false);
+            ac.setRoll(0);
+            ac.setYaw(0);
+            ac.setPitch(Math.max(-0.3, Math.min(0.3, (holdY - ac.getPosition().y) * 0.002 - v.y * 0.01)));
+            ac.setThrottle(throttle);
+        },
+        setPhase() { /* always straight */ },
+        setTarget() { /* never fights */ },
+        setFormationLead() { /* alone */ },
+        getPhase: () => AiFlightPhase.ENGAGE,
+        get isFiring() { return false; },
+        getManeuverLabel: () => 'STRAIGHT',
+    };
+}
+
 /** Fly one merge to a kill, a crash, or the time cap. */
 export function runMerge(setup: MergeSetup, blue: MergeSide, red: MergeSide, opts: MergeRunOptions = {}): MergeResult {
+    const random = Math.random;
+    Math.random = seededRandom(opts.seed ?? 1);
+    try {
+        return flyMerge(setup, blue, red, opts);
+    } finally {
+        Math.random = random;
+    }
+}
+
+function flyMerge(setup: MergeSetup, blue: MergeSide, red: MergeSide, opts: MergeRunOptions): MergeResult {
     const seconds = opts.seconds ?? 180;
     const dt = opts.dt ?? 1 / 60;
     const sim = new CombatSim();
@@ -243,7 +310,10 @@ export function runMerge(setup: MergeSetup, blue: MergeSide, red: MergeSide, opt
         for (const h of internals.hits) {
             const shooter = h.targetId === MERGE_BLUE ? 'red' : h.targetId === MERGE_RED ? 'blue' : undefined;
             if (!shooter) continue;
-            if (h.impactSpeed === undefined) res[shooter].hitsScored++;
+            if (h.impactSpeed === undefined) {
+                res[shooter].hitsScored++;
+                res[shooter].firstHitAt ??= t;
+            }
             else midair.add(h.targetId);
         }
         for (const [me, other] of [['blue', 'red'], ['red', 'blue']] as const) {
@@ -286,6 +356,10 @@ export function runMerge(setup: MergeSetup, blue: MergeSide, red: MergeSide, opt
                 blueSpeed: Math.round(a.blue.model.velocityVector.length()),
                 redSpeed: Math.round(a.red.model.velocityVector.length()),
                 range: Math.round(bp.distanceTo(rp)),
+                blueQuat: quatOf(a.blue.model.quaternion),
+                redQuat: quatOf(a.red.model.quaternion),
+                blueFiring: a.blue.firing && !lost(a.blue),
+                redFiring: a.red.firing && !lost(a.red),
             });
         }
         let done = false;
