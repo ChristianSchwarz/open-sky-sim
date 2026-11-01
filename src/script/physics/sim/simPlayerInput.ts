@@ -5,7 +5,8 @@ import { FcsPitchLimiter } from '../fm2/fcs';
 import { Fm2AircraftConfig } from '../fm2/fm2AircraftConfig';
 import {
     PITCH_STICK_AFT_UNITS, PITCH_STICK_BASE_UNIT_RATE, PITCH_STICK_FWD_UNITS,
-    PITCH_STICK_MAX_UNIT_RATE, PITCH_STICK_UNIT_ACCEL, THROTTLE_RATE,
+    PITCH_STICK_MAX_UNIT_RATE, PITCH_STICK_UNIT_ACCEL, ROLL_STICK_ACCEL,
+    ROLL_STICK_BASE_RATE, ROLL_STICK_MAX_RATE, THROTTLE_RATE,
 } from '../../defs';
 import {
     getKeyboardLayout, KeyboardControlAction, KeyboardControlLayout,
@@ -62,6 +63,7 @@ export class SimPlayerInput {
     private wKeyDown = false;
     private pitchHoldSeconds = 0;
     private pitchUnitAccum = 0;
+    private rollHoldSeconds = 0;
     private keysDown = new Set<string>();
 
     private pitch = 0;
@@ -299,14 +301,24 @@ export class SimPlayerInput {
                 case Stick.POSITIVE_ENDED:
                 case Stick.NEGATIVE_ENDED:
                     this.rollState = Stick.IDLE;
+                    this.rollHoldSeconds = 0;
                     this.roll = 0;
                     break;
                 case Stick.NEGATIVE:
-                    this.roll = -1;
+                case Stick.POSITIVE: {
+                    // The stick travels toward full throw, faster the longer
+                    // the key is held, instead of jumping straight to ±1.
+                    this.rollHoldSeconds += delta;
+                    const target = this.rollState === Stick.POSITIVE ? 1 : -1;
+                    const rate = Math.min(
+                        ROLL_STICK_MAX_RATE,
+                        ROLL_STICK_BASE_RATE + ROLL_STICK_ACCEL * this.rollHoldSeconds,
+                    );
+                    this.roll = target > 0
+                        ? Math.min(target, this.roll + rate * delta)
+                        : Math.max(target, this.roll - rate * delta);
                     break;
-                case Stick.POSITIVE:
-                    this.roll = 1;
-                    break;
+                }
             }
         }
 
@@ -349,10 +361,10 @@ export class SimPlayerInput {
                 this.latchPitch(Stick.NEGATIVE);
                 break;
             case this.layout[KeyboardControlAction.ROLL_POS]:
-                this.rollState = Stick.POSITIVE;
+                this.latchRoll(Stick.POSITIVE);
                 break;
             case this.layout[KeyboardControlAction.ROLL_NEG]:
-                this.rollState = Stick.NEGATIVE;
+                this.latchRoll(Stick.NEGATIVE);
                 break;
             case this.layout[KeyboardControlAction.YAW_POS]:
                 this.yawState = Stick.POSITIVE;
@@ -395,14 +407,14 @@ export class SimPlayerInput {
                 break;
             case this.layout[KeyboardControlAction.ROLL_POS]:
                 if (this.isActionKeyHeld(KeyboardControlAction.ROLL_NEG)) {
-                    this.rollState = Stick.NEGATIVE;
+                    this.latchRoll(Stick.NEGATIVE);
                 } else if (this.rollState === Stick.POSITIVE) {
                     this.rollState = Stick.POSITIVE_ENDED;
                 }
                 break;
             case this.layout[KeyboardControlAction.ROLL_NEG]:
                 if (this.isActionKeyHeld(KeyboardControlAction.ROLL_POS)) {
-                    this.rollState = Stick.POSITIVE;
+                    this.latchRoll(Stick.POSITIVE);
                 } else if (this.rollState === Stick.NEGATIVE) {
                     this.rollState = Stick.NEGATIVE_ENDED;
                 }
@@ -583,11 +595,20 @@ export class SimPlayerInput {
         return Object.values(this.layout).includes(key);
     }
 
+    private latchRoll(state: Stick): void {
+        // A fresh press, or a flip to the other side, ramps from the base rate again.
+        if (state !== this.rollState) {
+            this.rollHoldSeconds = 0;
+        }
+        this.rollState = state;
+    }
+
     private clearSticks(): void {
         this.pitchState = Stick.IDLE;
         this.pitchHoldSeconds = 0;
         this.pitchUnitAccum = 0;
         this.rollState = Stick.IDLE;
+        this.rollHoldSeconds = 0;
         this.yawState = Stick.IDLE;
         this.throttleState = Stick.IDLE;
         this.wKeyDown = false;

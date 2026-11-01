@@ -90,3 +90,23 @@ test('the autopilot key switches the autopilot off again; nothing else gets thro
     input.keyDown('a', false, flying);
     assert.equal(toggles, 1);
 });
+
+test('held roll key ramps the stick to full throw, neutral on release', () => {
+    const input = arrowsInput(KeyboardPitchStickMode.LAYOUT_DEFAULT);
+    input.keyDown('arrowright', false, sink);
+    const first = input.tick(0.016, sink).roll;
+    assert.ok(first > 0 && first < 0.05, `first tick ${first}`);
+    let roll = first;
+    for (let i = 0; i < 10; i++) {
+        const next = input.tick(0.016, sink).roll;
+        assert.ok(next > roll, 'stick keeps moving while held');
+        roll = next;
+    }
+    assert.ok(roll < 1, 'not at full throw after a sixth of a second');
+    for (let i = 0; i < 60; i++) {
+        roll = input.tick(0.016, sink).roll;
+    }
+    assert.equal(roll, 1);
+    input.keyUp('arrowright', sink);
+    assert.equal(input.tick(0.016, sink).roll, 0);
+});

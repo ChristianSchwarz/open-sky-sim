@@ -51,3 +51,9 @@ export const PITCH_STICK_BASE_UNIT_RATE = 10;
 export const PITCH_STICK_MAX_UNIT_RATE = 80;
 /** Arrows-layout pitch hold: stick-units/s² added to the step rate over hold time. */
 export const PITCH_STICK_UNIT_ACCEL = 120;
+/** Keyboard roll hold: starting stick travel per second (fraction of full throw). */
+export const ROLL_STICK_BASE_RATE = 0.5;
+/** Keyboard roll hold: maximum stick travel per second while held. */
+export const ROLL_STICK_MAX_RATE = 24;
+/** Keyboard roll hold: travel/s² added to the rate over hold time (full throw in ~0.27 s). */
+export const ROLL_STICK_ACCEL = 24;
