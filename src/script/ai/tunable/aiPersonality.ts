@@ -55,7 +55,6 @@ export function defaultAiPersonality(): AiPersonality {
     return { aggression: 0.6, defensiveness: 0.5, skill: 0.7, energyFighting: 0.3, gunDiscipline: 0.7, gLimit: 9 };
 }
 
-/** Starting points for the sliders, each a recognisable kind of opponent. */
 /**
  * Starting points for the sliders, each a recognisable kind of opponent.
  * `description` is the settings tooltip; its results are from the merge
