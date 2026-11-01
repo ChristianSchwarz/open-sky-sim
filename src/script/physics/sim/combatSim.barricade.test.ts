@@ -209,4 +209,20 @@ describe('CombatSim barricade', () => {
         assert.ok(ac(sim).model.position.z < BARRICADE_LOCAL_Z, 'never reached the net');
         assert.equal(ac(sim).barricadeState, BarricadeEngagement.NONE);
     });
+    it('keeps the deck under the webbing when the world is replaced (a respawn)', () => {
+        const sim = new CombatSim();
+        sim.setWorld(serializeWorld([], [], [], [], [flatDeck()]));
+        sim.setBarricades([rig(true)]);
+        // The ship moved and the world was sent again, the way a respawn does it: the
+        // world, then the rig and the mesh at the ship's new place.
+        const moved = { ...flatDeck(), originX: 500 };
+        sim.setWorld(serializeWorld([], [], [], [], [moved]));
+        sim.setBarricades([{ ...rig(true), originX: 500 }]);
+        sim.setCarrierMeshOrigins([{ originX: 500, originY: 0, originZ: 0 }]);
+        const web = (sim as unknown as { barricadeWebs: { deck: { heightAt(x: number, z: number): number } }[] }).barricadeWebs[0];
+        // Across the span and down the run-out, the deck, not "no deck here".
+        for (const [x, z] of [[BARRICADE_MID_X, BARRICADE_LOCAL_Z], [BARRICADE_MID_X + 7, BARRICADE_LOCAL_Z - 90], [BARRICADE_MID_X - 15, BARRICADE_LOCAL_Z - 40]]) {
+            assert.ok(Math.abs(web.deck.heightAt(x, z) - BARRICADE_DECK_Y) < 0.01, `deck at ${x}, ${z}: ${web.deck.heightAt(x, z)}`);
+        }
+    });
 });

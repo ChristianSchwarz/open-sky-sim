@@ -27,7 +27,7 @@ const DECK_BAND_UP_M = 1;
 /** Below this, no floor (over the side, m below the reference). */
 const NO_FLOOR = -1e9;
 
-/** World height under (x, z), or 0 / NaN where there is no surface. */
+/** World height under (x, z), or -Infinity / NaN where there is no surface. */
 export type WorldHeight = (worldX: number, worldZ: number) => number;
 
 /** The barricade's frame: carrier-local to world. */
@@ -64,6 +64,17 @@ export class WebDeck {
         return (a * (1 - tx) + b * tx) * (1 - tz) + (c * (1 - tx) + d * tx) * tz;
     }
 
+    /**
+     * Drop every sample: the height function now answers for another world
+     * (the sim's is replaced on a respawn or re-base), so what was sampled
+     * through the old one need not hold. The reference, which the rig was
+     * built on, stays.
+     */
+    forget(): void {
+        this.h.fill(NaN);
+        this.next = 0;
+    }
+
     /** Sample up to `cells` more of the grid ahead of need (idle frames); true once all are. */
     fill(cells: number): boolean {
         const n = this.h.length;
@@ -97,7 +108,7 @@ export class WebDeck {
         const f = this.frame();
         const p = this.p.set(x, BARRICADE_DECK_Y, z).applyQuaternion(f.quaternion).add(f.origin);
         const wy = this.height(p.x, p.z);
-        if (!(wy > 0)) return undefined;
+        if (!Number.isFinite(wy)) return undefined;
         // Back into the frame: the local height of the world point straight above (x, z) at wy.
         // The frame is level to within the ship's trim; the world vertical is the local one.
         const local = this.p.set(p.x, wy, p.z).sub(f.origin).applyQuaternion(_inv.copy(f.quaternion).invert());

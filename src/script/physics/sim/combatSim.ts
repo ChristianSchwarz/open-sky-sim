@@ -700,7 +700,6 @@ export class CombatSim implements ProjectileSink {
     /** Per carrier, the rigid-body webbing while it is rigged, and the ship pose it is in. */
     private barricadeWebs: (BarricadeWeb | undefined)[] = [];
     private barricadeDecks: (WebDeck | undefined)[] = [];
-    private barricadeDeckWorld: unknown;
     /** Which aircraft each web last stepped with, for its snapshot. */
     private barricadeWebHeld: (string | undefined)[] = [];
     private barricadeFrames: { origin: THREE.Vector3; quaternion: THREE.Quaternion; inverse: THREE.Quaternion }[] = [];
@@ -782,6 +781,8 @@ export class CombatSim implements ProjectileSink {
             world, (x, z) => this.heightField.heightAtWorld(x, z),
         );
         this.arrestorFields = deserializeArrestorCables(world);
+        // Deck samples taken through the old world need not hold in this one.
+        for (const deck of this.barricadeDecks) deck?.forget();
         for (const colliders of this.pendingColliders) {
             applyStaticColliders(this.world, colliders);
         }
@@ -892,14 +893,11 @@ export class CombatSim implements ProjectileSink {
             const quaternion = new THREE.Quaternion().fromArray(b.quaternion);
             return { origin: new THREE.Vector3(b.originX, b.originY, b.originZ), quaternion, inverse: quaternion.clone().invert() };
         });
-        // The carrier's deck under each barricade (its mesh, as the gear meets it), kept while the world is.
-        if (this.barricadeDeckWorld !== this.world) {
-            this.barricadeDecks = [];
-            this.barricadeDeckWorld = this.world;
-        }
-        const world = this.world;
+        // The carrier's deck under each barricade (its mesh, as the gear meets it), sampled through
+        // the world as it is now: a web keeps its deck past setWorld, and a deck held to the world it
+        // was made with asked a mesh no longer moved with the ship, missed, and left the net no floor.
         this.barricadeDecks = barricades.map((_b, i) => this.barricadeDecks[i]
-            ?? (world ? new WebDeck((x, z) => world.carrierHeightAt(x, z), () => this.barricadeFrames[i]) : undefined));
+            ?? (this.world ? new WebDeck((x, z) => this.world?.carrierHeightAt(x, z) ?? NaN, () => this.barricadeFrames[i]) : undefined));
         this.barricadeWebs = barricades.map((b, i) => {
             const web = this.barricadeWebs[i];
             if (!(b.webbing ?? b.armed)) return undefined;
