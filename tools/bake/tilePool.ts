@@ -656,7 +656,19 @@ export class TilePool<R> {
             return;
         }
         if (head.error !== undefined) {
-            this.complete(lease.idx, { error: `${head.error} (on ${sat.name})` });
+            // The satellite's own trouble fails a tile as well as the tile's
+            // (EPERM on its job folder, Nord Kap 2026-10-31): it goes where an
+            // overdue tile goes, and fails only after MAX_OVERRUNS tries.
+            const o = this.run.overdue.get(lease.idx) ?? { n: 0, sats: new Set<string>() };
+            o.n++;
+            o.sats.add(sat.id);
+            this.run.overdue.set(lease.idx, o);
+            if (o.n >= MAX_OVERRUNS) {
+                this.complete(lease.idx, { error: `${head.error} (on ${sat.name})` });
+            } else {
+                console.warn(`\nwarning: ${keyOf(lease.job.key)} failed on ${sat.name} (${head.error}); it goes back in the queue`);
+                this.requeue(lease.idx);
+            }
             return;
         }
         let result: R;
