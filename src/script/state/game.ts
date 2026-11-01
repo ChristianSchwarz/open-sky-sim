@@ -152,8 +152,8 @@ import { SimAircraftSpawn, SimFlightModelKind, SimGunConfig, SimHitEvent } from 
 import { PLAYER_SIM_ID, WINGMAN_SIM_ID, aiSimId } from '../physics/sim/simIds';
 import { AiPilotModels, TerrainShading } from './gameDefs';
 import {
-    DEFAULT_TERRAIN_URL, SPACE_SKY_ALTITUDE_M, TerrainEntity, cameraFarForAltitudeM,
-    isTerrainWireframe, loadTerrainManifest, setTerrainWireframe,
+    SPACE_SKY_ALTITUDE_M, TerrainEntity, cameraFarForAltitudeM,
+    isTerrainWireframe, loadTerrainManifest, setTerrainWireframe, terrainManifestUrl,
 } from '../terrain';
 import {
     isAircraftWireframe, setAircraftWireframe, isVisibleMeshesOnly, setVisibleMeshesOnly,
@@ -5600,7 +5600,8 @@ export class Game {
     }
 
     private async setupScene(spawn: SpawnMode) {
-        const manifest = await loadTerrainManifest(DEFAULT_TERRAIN_URL, setBootProgress);
+        const terrainUrl = terrainManifestUrl(loadSettings().terrainTree);
+        const manifest = await loadTerrainManifest(terrainUrl, setBootProgress);
         // Which baked area this session flies in, and therefore where the ENU
         // origin sits. Home keeps PLAY_ORIGIN exactly and gets the authored
         // scenery; anywhere else is terrain only, rebased onto its own centre
@@ -5710,7 +5711,7 @@ export class Game {
         setBootProgress(35, 'Loading terrain...');
         this.planetTerrain = new TerrainEntity({
             manifest,
-            manifestUrl: DEFAULT_TERRAIN_URL,
+            manifestUrl: terrainUrl,
             materials: this.materials,
             enuOrigin: this.playArea.origin,
             terrainColour: this.configService.terrainColour,
@@ -5727,7 +5728,7 @@ export class Game {
             treeDensity: this.configService.treeDensity,
         });
         this.planetTerrain.setRenderScale(this.hdMainScale);
-        await this.planetTerrain.load(DEFAULT_TERRAIN_URL);
+        await this.planetTerrain.load(terrainUrl);
         this.planetTerrain.setLodCamera(this.playerCamera.main);
         this.scene.add(this.planetTerrain);
         const center = this.spawnCenterEnu(spawn);

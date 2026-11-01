@@ -228,18 +228,30 @@ export interface TerrainManifest {
 /** Injected by webpack from TERRAIN_URL; undefined under tsx and in tests. */
 declare const __TERRAIN_URL__: string | undefined;
 
+export const DEFAULT_TERRAIN_URL: string =
+    (typeof __TERRAIN_URL__ !== 'undefined' && __TERRAIN_URL__) || 'assets/terrain/manifest.json';
+
+/** A bare folder beside assets/terrain, never a path. */
+const TERRAIN_TREE_NAME = /^terrain-[a-z0-9-]+$/;
+
 /**
- * `?terrain=terrain-z12` loads another baked tree beside assets/terrain, the
- * same area baked another way (a capped leafZoom against full depth), to
- * compare the two from one camera link. A bare folder name only.
+ * Manifest of the baked tree to load. Other trees sit beside assets/terrain
+ * as `terrain-<name>` folders, the same areas baked another way (a capped
+ * leafZoom against full depth). `tree` is the Settings pick ('' for the
+ * default); `?terrain=terrain-z12` on the page out-ranks it, so a camera link
+ * can name the tree it was taken in.
  */
-function terrainTreeFromPage(): string | undefined {
-    const name = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('terrain') : null;
-    return name !== null && /^terrain-[a-z0-9-]+$/.test(name) ? `assets/${name}/manifest.json` : undefined;
+export function terrainManifestUrl(tree = ''): string {
+    const name = terrainTreeName(tree);
+    return name !== '' ? `assets/${name}/manifest.json` : DEFAULT_TERRAIN_URL;
 }
 
-export const DEFAULT_TERRAIN_URL: string = terrainTreeFromPage()
-    ?? ((typeof __TERRAIN_URL__ !== 'undefined' && __TERRAIN_URL__) || 'assets/terrain/manifest.json');
+/** The tree terrainManifestUrl loads for this pick: a folder name, or '' for the default. */
+export function terrainTreeName(tree = ''): string {
+    const page = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('terrain') : null;
+    const name = page !== null && TERRAIN_TREE_NAME.test(page) ? page : tree;
+    return TERRAIN_TREE_NAME.test(name) ? name : '';
+}
 
 export async function loadTerrainManifest(
     url: string = DEFAULT_TERRAIN_URL,

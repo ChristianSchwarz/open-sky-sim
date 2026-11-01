@@ -43,7 +43,7 @@ import {
     TERRAIN_DETAIL_DISTANCE_MAX_M, TERRAIN_DETAIL_DISTANCE_MIN_M, TERRAIN_TRIANGLE_BUDGET_MAX,
     TERRAIN_TRIANGLE_BUDGET_MIN, TERRAIN_VISIBLE_ZOOM_MAX, TERRAIN_VISIBLE_ZOOM_MIN,
 } from '../../terrain/lod';
-import { DEFAULT_TERRAIN_URL, loadTerrainManifest } from '../../terrain/manifest';
+import { loadTerrainManifest, terrainManifestUrl, terrainTreeName } from '../../terrain/manifest';
 import { homeArea, terrainAreas } from '../../terrain/playArea';
 import { TerrainImporter } from './terrain/terrainImporter';
 
@@ -169,6 +169,13 @@ const LICENCE_URLS: Record<string, string> = {
 };
 
 const BAVARIA_CREDIT = 'Datenquelle: Bayerische Vermessungsverwaltung – www.geodaten.bayern.de';
+
+/** One baked tree, as /api/terrain-trees lists it; `name` '' is assets/terrain. */
+interface TerrainTree {
+    name: string;
+    maxZoom: number;
+    areas: { name: string; leafZoom: number }[];
+}
 
 /**
  * Every dataset the terrain bake reads, grouped by what it feeds. The sources
@@ -886,6 +893,31 @@ function sliderValue(event: Event): number {
                             </section>
                         }
 
+                        @if (trees().length > 1) {
+                            <section>
+                                <h3 class="m-0 mb-1 text-base font-medium">Terrain tree</h3>
+                                <p class="m-0 mb-2 text-sm opacity-70">
+                                    Which bake of the terrain to load: the same areas baked to different
+                                    finest levels, to compare detail against size. Each names the areas it
+                                    stops short of full detail. Changing this reloads the sim.
+                                </p>
+                                <div class="flex flex-wrap items-center gap-4">
+                                    <div class="min-w-40 flex-1">
+                                        <mat-form-field class="w-full" subscriptSizing="dynamic">
+                                            <mat-label>Terrain tree</mat-label>
+                                            <mat-select [value]="tree()" (selectionChange)="tree.set($event.value)">
+                                                @for (option of treeOptions(); track option.value) {
+                                                    <mat-option [value]="option.value">{{ option.label }}</mat-option>
+                                                }
+                                            </mat-select>
+                                        </mat-form-field>
+                                    </div>
+                                    <button mat-flat-button type="button"
+                                        [disabled]="tree() === initialTree" (click)="loadTree()">Load</button>
+                                </div>
+                            </section>
+                        }
+
                         @if (terrainImport) {
                             <section>
                                 <h3 class="m-0 mb-1 text-base font-medium">Import terrain</h3>
@@ -1232,6 +1264,16 @@ export class SettingsDialog {
     /** Set once the manifest has answered, so "nothing to choose" never flashes up while loading. */
     readonly areasLoaded = signal(false);
 
+    /** The baked trees the dev server finds; the published game has one and lists none. */
+    readonly trees = signal<TerrainTree[]>([]);
+    readonly initialTree = terrainTreeName(loadSettings().terrainTree);
+    readonly tree = signal(this.initialTree);
+    readonly treeOptions = computed(() => this.trees().map(tree => {
+        const capped = tree.areas.filter(a => a.leafZoom < tree.maxZoom).map(a => `${a.name} z${a.leafZoom}`);
+        const levels = capped.length > 0 ? `${capped.join(', ')}, rest z${tree.maxZoom}` : `all z${tree.maxZoom}`;
+        return { value: tree.name, label: `${tree.name || 'terrain'} (${levels})` };
+    }));
+
     readonly systemsHelp = SYSTEMS_HELP;
     readonly spawnHelp = SPAWN_HELP;
     readonly viewsHelp = VIEWS_HELP;
@@ -1257,6 +1299,7 @@ export class SettingsDialog {
 
     constructor() {
         this.loadAreas();
+        this.loadTrees();
 
         // The device keeps a single status listener, and nothing else uses it,
         // so the dialog takes it while open and hands back a no-op on close.
@@ -1517,6 +1560,18 @@ export class SettingsDialog {
         window.location.reload();
     }
 
+    /** Reloads for the same reason flyToArea does: the tree is picked once, on boot. */
+    loadTree() {
+        updateSettings({ terrainTree: this.tree() });
+        // A ?terrain= left in the URL would out-rank the pick on reload. Cut
+        // out by hand: URLSearchParams would re-encode the ?@lat,lon camera.
+        const search = window.location.search.replace(/([?&])terrain=[^&]*&?/, '$1').replace(/[?&]$/, '');
+        if (search !== window.location.search) {
+            window.history.replaceState(window.history.state, '', `${window.location.pathname}${search}${window.location.hash}`);
+        }
+        window.location.reload();
+    }
+
     /** Only the axes the device actually has are listed. */
     private readJoystick(): { name: string; axes: HelpEntry[] } | undefined {
         const device = this.data.joystickInput;
@@ -1544,7 +1599,7 @@ export class SettingsDialog {
      * two there is nothing to choose between, and the section stays hidden.
      */
     private loadAreas() {
-        loadTerrainManifest(DEFAULT_TERRAIN_URL).then(manifest => {
+        loadTerrainManifest(terrainManifestUrl(loadSettings().terrainTree)).then(manifest => {
             const areas = terrainAreas(manifest);
             const home = homeArea(areas, PLAY_ORIGIN);
             const saved = loadSettings().terrainArea;
@@ -1560,5 +1615,18 @@ export class SettingsDialog {
         }).catch(() => {
             // No manifest, no picker: the section is simply not shown.
         }).finally(() => this.areasLoaded.set(true));
+    }
+
+    /** Only the dev server lists the trees beside assets/terrain. */
+    private loadTrees() {
+        if (!this.terrainImport) {
+            return;
+        }
+        fetch('/api/terrain-trees')
+            .then(res => (res.ok ? res.json() as Promise<{ trees: TerrainTree[] }> : { trees: [] }))
+            .then(({ trees }) => this.trees.set(trees))
+            .catch(() => {
+                // No list, no picker.
+            });
     }
 }

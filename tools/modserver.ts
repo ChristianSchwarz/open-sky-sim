@@ -1024,6 +1024,7 @@ app.post('/api/delete-area', express.json(), startDelete);
 app.post('/api/merge-areas', express.json(), mergeAreas);
 app.get('/api/import-area/:id', importStream);
 app.get('/api/terrain-bootstrap', terrainBootstrapHandler);
+app.get('/api/terrain-trees', terrainTreesHandler);
 ensureTerrain();
 
 app.get('/api/health', (_req: Request, res: Response) => {
@@ -1241,6 +1242,31 @@ const TERRAIN_MOUNTS: ReadonlyArray<readonly [string, string]> = [
         .filter(name => /^terrain-[a-z0-9-]+$/.test(name))
         .map(name => [`/assets/${name}`, path.join(PROJECT_ROOT, 'assets', name)] as const),
 ];
+/**
+ * The baked trees Settings can switch between: assets/terrain ('') and every
+ * terrain-* folder beside it that holds a manifest, each with the finest level
+ * of every area, so the picker can say which tree carries what.
+ */
+function terrainTreesHandler(_req: Request, res: Response): void {
+    const trees = [''].concat(fs.readdirSync(path.join(PROJECT_ROOT, 'assets'))
+        .filter(name => /^terrain-[a-z0-9-]+$/.test(name)))
+        .flatMap(name => {
+            const file = path.join(PROJECT_ROOT, 'assets', name || 'terrain', 'manifest.json');
+            if (!fs.existsSync(file)) return [];
+            const manifest = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+                mesh?: { maxZoom?: number };
+                areas?: { name: string; leafZoom?: number }[];
+            };
+            const maxZoom = manifest.mesh?.maxZoom ?? 12;
+            return [{
+                name,
+                maxZoom,
+                areas: (manifest.areas ?? []).map(a => ({ name: a.name, leafZoom: a.leafZoom ?? maxZoom })),
+            }];
+        });
+    res.json({ trees });
+}
+
 for (const [mount, dir] of TERRAIN_MOUNTS) {
     app.use(mount, express.static(dir, {
         fallthrough: false,

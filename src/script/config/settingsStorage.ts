@@ -56,6 +56,13 @@ export interface AppSettings {
      */
     terrainArea: string;
     /**
+     * Baked terrain tree to load: '' for assets/terrain, or the name of a
+     * folder beside it ("terrain-z12"), the same areas baked another way. A
+     * name whose folder is gone fails the boot, so the dialog only offers the
+     * trees the dev server finds.
+     */
+    terrainTree: string;
+    /**
      * Metres out to which terrain keeps full detail; past it the far field
      * coarsens faster. `null` is the top of the slider, meaning no falloff.
      *
@@ -110,6 +117,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     spawnMode: 'headon',
     daytime: DEFAULT_SUN_HOURS,
     terrainArea: '',
+    terrainTree: '',
     terrainDetailDistanceM: TERRAIN_DETAIL_DISTANCE_DEFAULT_M,
     landuseReach: LEAF_REFINE_DISTANCE_SCALE,
     visibleZoom: TERRAIN_VISIBLE_ZOOM_MAX,
@@ -163,6 +171,7 @@ export function loadSettings(): AppSettings {
             daytime: isValidDaytime(parsed.daytime) ? parsed.daytime : DEFAULT_SETTINGS.daytime,
             terrainArea: typeof parsed.terrainArea === 'string'
                 ? parsed.terrainArea : DEFAULT_SETTINGS.terrainArea,
+            terrainTree: isValidTerrainTree(parsed.terrainTree) ? parsed.terrainTree : DEFAULT_SETTINGS.terrainTree,
             // null is the top of the slider and a real value, so it cannot be
             // told from "absent" by falsiness alone.
             terrainDetailDistanceM: parsed.terrainDetailDistanceM === null
@@ -205,6 +214,11 @@ export function updateSettings(partial: Partial<AppSettings>): AppSettings {
     const next = { ...loadSettings(), ...partial };
     saveSettings(next);
     return next;
+}
+
+/** '' or a bare `terrain-<name>` folder name; never a path. */
+export function isValidTerrainTree(value: unknown): value is string {
+    return value === '' || (typeof value === 'string' && /^terrain-[a-z0-9-]+$/.test(value));
 }
 
 function isValidRoadsMode(value: unknown): value is RoadsMode {
