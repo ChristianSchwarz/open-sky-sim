@@ -8,6 +8,7 @@ dist
 # Baked terrain pyramid — build product, regenerate with `npm run bake:planet`
 /assets/planet/
 /assets/terrain/
+/assets/terrain-*/
 
 # Fetched cover sources — regenerate with `tools/fetch_cover_sources.py`
 /data/cover/

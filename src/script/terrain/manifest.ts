@@ -228,8 +228,18 @@ export interface TerrainManifest {
 /** Injected by webpack from TERRAIN_URL; undefined under tsx and in tests. */
 declare const __TERRAIN_URL__: string | undefined;
 
-export const DEFAULT_TERRAIN_URL: string =
-    (typeof __TERRAIN_URL__ !== 'undefined' && __TERRAIN_URL__) || 'assets/terrain/manifest.json';
+/**
+ * `?terrain=terrain-z12` loads another baked tree beside assets/terrain, the
+ * same area baked another way (a capped leafZoom against full depth), to
+ * compare the two from one camera link. A bare folder name only.
+ */
+function terrainTreeFromPage(): string | undefined {
+    const name = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('terrain') : null;
+    return name !== null && /^terrain-[a-z0-9-]+$/.test(name) ? `assets/${name}/manifest.json` : undefined;
+}
+
+export const DEFAULT_TERRAIN_URL: string = terrainTreeFromPage()
+    ?? ((typeof __TERRAIN_URL__ !== 'undefined' && __TERRAIN_URL__) || 'assets/terrain/manifest.json');
 
 export async function loadTerrainManifest(
     url: string = DEFAULT_TERRAIN_URL,

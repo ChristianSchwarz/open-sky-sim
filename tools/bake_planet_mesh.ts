@@ -36,6 +36,8 @@
  *     --satellite-port N  their HTTP port (default 47811)
  *     --no-discovery   do not answer the satellites' broadcast (they are given
  *                      the address; leaves the port to another bake)
+ *     --full-depth     mesh every area to maxZoom, its leafZoom cap ignored, and
+ *                      record none (a z12 tree to compare a capped area against)
  */
 
 import { Box, inBoxes, readBboxes, unionOf } from './bake/bboxes';
@@ -97,6 +99,7 @@ interface Args {
     jobs?: number;
     /** Run the worker from its .ts source under tsx instead of the esbuild bundle. */
     noBundle: boolean;
+    fullDepth?: boolean;
     /** Also hand tiles to satellite machines (tools/bake/tilePool.ts), on this HTTP port. */
     satellitePort?: number;
     noDiscovery?: boolean;
@@ -152,6 +155,7 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--bbox') a.bbox = parseBbox(next());
         else if (k === '--jobs') a.jobs = Number(next());
         else if (k === '--no-bundle') a.noBundle = true;
+        else if (k === '--full-depth') a.fullDepth = true;
         else if (k === '--satellites') a.satellitePort ??= DEFAULT_SATELLITE_PORT;
         else if (k === '--satellite-port') a.satellitePort = Number(next());
         else if (k === '--no-discovery') a.noDiscovery = true;
@@ -559,6 +563,10 @@ async function main(): Promise<void> {
         process.exit(1);
     }
     const src = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (args.fullDepth) {
+        // Every later stage reads its leaves off the areas this tree records.
+        src.areas = src.areas?.map(({ leafZoom: _, ...area }: { leafZoom?: number }) => area);
+    }
     const maxZoom = Math.min(args.maxZoom ?? src.maxZoom, src.maxZoom);
     const basis = makeEnuBasis(PLAY_ORIGIN.lat, PLAY_ORIGIN.lon, PLAY_ORIGIN.height);
     // One airbase pad per baked area, so every area has somewhere flat to put

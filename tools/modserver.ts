@@ -1236,6 +1236,10 @@ const TERRAIN_DIR = path.join(PROJECT_ROOT, 'assets', 'terrain');
 const TERRAIN_MOUNTS: ReadonlyArray<readonly [string, string]> = [
     ['/assets/terrain', TERRAIN_DIR],   // baked .ptm meshes (bake output)
     ['/assets/planet', PLANET_DIR],     // .pdm heights (bake input)
+    // Other baked trees to compare against, loaded with ?terrain=terrain-<name>.
+    ...fs.readdirSync(path.join(PROJECT_ROOT, 'assets'))
+        .filter(name => /^terrain-[a-z0-9-]+$/.test(name))
+        .map(name => [`/assets/${name}`, path.join(PROJECT_ROOT, 'assets', name)] as const),
 ];
 for (const [mount, dir] of TERRAIN_MOUNTS) {
     app.use(mount, express.static(dir, {
