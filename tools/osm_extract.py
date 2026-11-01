@@ -185,6 +185,7 @@ def plan_sources(
     bbox: Tuple[float, float, float, float],
     near: Sequence[Tuple[dict, object]],
     local: Sequence[Source],
+    local_only: bool = False,
 ) -> List[Source]:
     """The files that together cover `bbox`, on disk first.
 
@@ -197,7 +198,8 @@ def plan_sources(
     remainder: for Erz that is Germany on disk plus the Czech Republic, not
     Europe, and not seven kraje - scoring coverage per square degree picked
     Prague and then the kraj "with Praha" around it. Raises LookupError when
-    no region reaches the bbox.
+    no region reaches the bbox. With `local_only`, only files on disk are
+    candidates, and the answer is [] unless they cover the bbox between them.
     """
     west, south, east, north = bbox
     target = box(west, south, east, north)
@@ -224,7 +226,7 @@ def plan_sources(
         return min((c for g, c in gains if g >= top - 0.01 * need_area), key=lambda c: c.size)
 
     uncovered = need
-    for candidates in (list(local), below_continent, continents):
+    for candidates in ((list(local),) if local_only else (list(local), below_continent, continents)):
         while uncovered.area > enough:
             gains = [(uncovered.intersection(c.geom).area, c) for c in candidates if c not in chosen]
             gains = [(g, c) for g, c in gains if g > enough]
@@ -232,6 +234,8 @@ def plan_sources(
                 break
             chosen.append(pick(gains))
             uncovered = uncovered.difference(chosen[-1].geom)
+    if uncovered.area > enough and local_only:
+        return []
     if uncovered.area > enough:
         print(f'warning: {100 * uncovered.area / need_area:.1f}% of the bbox is in no extract; '
               'it will have no OSM data')
@@ -327,6 +331,11 @@ def ensure_extract(
         else:
             paths.append(ensure_region_downloaded(source.region))
             _record_coverage(source.region)
+    return _clip_into(paths, bbox, out_path)
+
+
+def _clip_into(paths: Sequence[str], bbox: Tuple[float, float, float, float], out_path: str) -> str:
+    """Clips each of `paths` to `bbox` and merges the clips into `out_path`."""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     if len(paths) == 1:
         clip_pbf(paths[0], out_path, bbox)
@@ -399,6 +408,53 @@ def clip_covering(bbox: Tuple[float, float, float, float], out_path: str) -> Opt
         if best is None or size < best[0]:
             best = (size, path)
     return best[1] if best else None
+
+
+def _js_number(v: float) -> str:
+    """`v` as JavaScript's String(v) writes it - `13` not `13.0` - so a clip
+    made here has the name areaImport.ts's extractPathFor gives the same box."""
+    text = repr(float(v))
+    return text[:-2] if text.endswith('.0') else text
+
+
+def clip_path_for(bbox: Tuple[float, float, float, float]) -> str:
+    return os.path.join(CLIPS_DIR, '_'.join(_js_number(v) for v in bbox) + '.osm.pbf')
+
+
+def local_extract_for(bbox: Tuple[float, float, float, float]) -> Optional[str]:
+    """A local `.osm.pbf` holding all of `bbox`, made from files on disk only, or None.
+
+    For a bake run without `--pbf` (osm_pbf.resolve_pbf): an earlier clip
+    whose own bbox covers this one is read as it is; otherwise the box is
+    clipped from the planet, or from Geofabrik regions already downloaded
+    when they cover it between them. Never downloads anything - with no
+    local file covering the box the caller falls back to Overpass.
+    """
+    out_path = clip_path_for(bbox)
+    if os.path.exists(out_path):
+        return out_path
+    covering = clip_covering(bbox, out_path)
+    if covering:
+        return covering
+    planet = find_planet()
+    if planet:
+        print(f'clipping {os.path.basename(out_path)} from {planet}')
+        return _clip_into([planet], bbox, out_path)
+    # The regions' polygons come from the index; without a cached copy no
+    # downloaded region can be told to cover the box, and fetching one is
+    # not "local".
+    if not os.path.exists(INDEX_CACHE):
+        return None
+    with open(INDEX_CACHE, 'r', encoding='utf-8') as fh:
+        index = json.load(fh)
+    near = regions_near(index, bbox)
+    if not near:
+        return None
+    sources = plan_sources(bbox, near, local_sources(near, out_path), local_only=True)
+    if not sources:
+        return None
+    print(f'clipping {os.path.basename(out_path)} from ' + ', '.join(s.label for s in sources))
+    return _clip_into([s.path for s in sources], bbox, out_path)
 
 
 def local_sources(near: Sequence[Tuple[dict, object]], out_path: str) -> List[Source]:

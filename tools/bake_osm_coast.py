@@ -88,7 +88,7 @@ from osm_common import (
     tile_range_for_bounds,
     ways_map as _ways_map,
 )
-from osm_pbf import pbf_elements, pbf_elements_groups, pbf_available
+from osm_pbf import pbf_elements, pbf_elements_groups, pbf_available, resolve_pbf
 
 try:
     from rasterio.features import rasterize
@@ -2706,6 +2706,8 @@ def bake(args: argparse.Namespace) -> int:
     # The DEM stage ran before this one, so its pyramid says which fetch
     # cells hold no land at all; the water and landuse queries skip those.
     skip_sea = sea_cell_skipper(out_dir, manifest.get('seaLevel', 0.0))
+    if not args.land_shp:
+        args.pbf = resolve_pbf(args.pbf, bbox, args.overpass)
     if getattr(args, 'fetch_only', False):
         # The importer runs this alongside the DEM fetch to warm the cache;
         # the real bake later finds every cell cached. Nothing is written.
@@ -2970,7 +2972,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument('--manifest', help='planet manifest.json (default: {out}/manifest.json)')
     parser.add_argument('--out', default='assets/planet', help='planet asset directory')
     parser.add_argument('--bbox', help='west,south,east,north degrees (default: manifest coverage)')
-    parser.add_argument('--pbf', help='regional OSM PBF for osmcoastline')
+    parser.add_argument('--pbf', help='local .osm.pbf to read (default: an extract covering the bbox '
+                                       'found or clipped from the local planet/clips, else Overpass)')
+    parser.add_argument('--overpass', action='store_true',
+                        help='fetch from the live Overpass mirrors even when a local extract covers the bbox')
     parser.add_argument('--land-shp', help='pre-built land polygons shapefile (osmcoastline output)')
     parser.add_argument('--allow-tiny-land', action='store_true',
                         help='accept a bbox that really is almost all water')

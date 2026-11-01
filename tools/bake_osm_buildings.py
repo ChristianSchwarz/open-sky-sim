@@ -41,7 +41,7 @@ except ImportError:
     print('error: shapely is required (pip install shapely)', file=sys.stderr)
     raise
 
-from osm_pbf import pbf_elements_groups
+from osm_pbf import pbf_elements_groups, resolve_pbf
 from osm_common import (
     OVERPASS_OUT,
     Bounds,
@@ -478,6 +478,7 @@ def bake(args: argparse.Namespace) -> int:
         print(f'updated {manifest_path} (buildings coverage)')
         return 0
 
+    args.pbf = resolve_pbf(args.pbf, bbox, args.overpass)
     if args.pbf:
         print(f'reading OSM buildings from {args.pbf}', flush=True)
         data = pbf_elements_groups(args.pbf, bbox, [('buildings', building_tag_predicate)],
@@ -538,7 +539,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument('--manifest', help='planet manifest.json (default: {out}/manifest.json)')
     parser.add_argument('--out', default='assets/planet', help='planet asset directory')
     parser.add_argument('--bbox', help='west,south,east,north degrees (default: manifest coverage)')
-    parser.add_argument('--pbf', help='read buildings from this local .osm.pbf instead of Overpass')
+    parser.add_argument('--pbf', help='read buildings from this local .osm.pbf (default: an extract covering '
+                                       'the bbox found or clipped from the local planet/clips, else Overpass)')
+    parser.add_argument('--overpass', action='store_true',
+                        help='fetch from the live Overpass mirrors even when a local extract covers the bbox')
     parser.add_argument('--cell-zoom', type=int, default=BUILDING_CELL_ZOOM,
                         help=f'Overpass cell grid zoom (default {BUILDING_CELL_ZOOM})')
     parser.add_argument('--refresh-osm', action='store_true', help='ignore cached answers and re-fetch')

@@ -26,6 +26,7 @@ import gzip
 import hashlib
 import os
 import pickle
+import sys
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from osm_common import Bounds
@@ -49,6 +50,30 @@ PBF_CACHE_DIR = os.path.join('data', 'osm-cache', 'pbf')
 
 def pbf_available() -> bool:
     return osmium is not None
+
+
+def resolve_pbf(explicit: Optional[str], bbox: Bounds, live: bool = False) -> Optional[str]:
+    """The `.osm.pbf` a bake reads for `bbox`: local data before Overpass, always.
+
+    `explicit` (the bake's `--pbf`) wins. Otherwise a local extract that
+    covers the box is found or clipped from files on disk
+    (osm_extract.local_extract_for: an earlier clip, the planet, downloaded
+    Geofabrik regions). None - fetch from Overpass - only with `live` (the
+    bake's `--overpass`), without osmium, or when nothing on disk covers it.
+    """
+    if explicit or live:
+        return explicit
+    if not pbf_available():
+        print('warning: osmium is not installed (pip install osmium), so the local OSM '
+              'extracts cannot be read - fetching from Overpass', file=sys.stderr)
+        return None
+    from osm_extract import local_extract_for
+    path = local_extract_for((bbox.west, bbox.south, bbox.east, bbox.north))
+    if path:
+        print(f'reading OSM from the local extract {path} (--overpass fetches live instead)', flush=True)
+    else:
+        print('no local OSM extract covers this box - fetching from Overpass', flush=True)
+    return path
 
 
 def _tags_dict(obj) -> dict:

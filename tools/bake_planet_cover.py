@@ -872,8 +872,12 @@ def main() -> None:
                          '(opt-in; requires shapely and either --bbox or --only)')
     ap.add_argument('--refresh-osm', action='store_true',
                     help='bypass the Overpass cache for --osm-landuse')
-    ap.add_argument('--pbf', help='read --osm-landuse polygons from this local .osm.pbf '
-                                   'instead of Overpass (pip install osmium)')
+    ap.add_argument('--pbf', help='read --osm-landuse polygons from this local .osm.pbf (default: an '
+                                   'extract covering the bbox found or clipped from the local planet/clips, '
+                                   'else Overpass; pip install osmium)')
+    ap.add_argument('--overpass', action='store_true',
+                    help='with --osm-landuse: fetch from the live Overpass mirrors even when a local '
+                         'extract covers the bbox')
     ap.add_argument('--leaves-only', action='store_true',
                     help='bake the finest tiles only, no ancestors (a bake satellite\'s chunk)')
     ap.add_argument('--ancestors-only', action='store_true',
@@ -974,8 +978,10 @@ def main() -> None:
         # --only has no such mixture (it's whatever specific tiles were
         # named), so union_bounds() over exactly those is correct there.
         fetch_bbox = parse_bbox(args.bbox) if args.bbox else union_bounds(tiles)
+        from osm_common import Bounds
+        from osm_pbf import resolve_pbf
+        args.pbf = resolve_pbf(args.pbf, Bounds(*fetch_bbox), args.overpass)
         if args.pbf:
-            from osm_common import Bounds
             from osm_landuse import landuse_tag_predicate
             from osm_pbf import pbf_elements
             print(f'reading OSM landuse for {len(tiles)} tiles from {args.pbf}...')

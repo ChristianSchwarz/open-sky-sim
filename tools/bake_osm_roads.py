@@ -50,7 +50,7 @@ except ImportError:
     print('error: shapely is required (pip install shapely)', file=sys.stderr)
     raise
 
-from osm_pbf import pbf_elements_groups
+from osm_pbf import pbf_elements_groups, resolve_pbf
 
 from osm_common import (
     CLASS_BYTE, ROAD_CLASSES, road_class_byte,
@@ -827,6 +827,7 @@ def bake(args: argparse.Namespace) -> int:
             mark_roads_coverage(manifest_path, bbox, min_zoom, max_zoom)
         return 0
 
+    args.pbf = resolve_pbf(args.pbf, bbox, args.overpass)
     if args.rails_only:
         return bake_rails_only(args, manifest_path, manifest, out_dir, bbox, min_zoom, max_zoom, started)
 
@@ -997,8 +998,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument('--manifest', help='planet manifest.json (default: {out}/manifest.json)')
     parser.add_argument('--out', default='assets/planet', help='planet asset directory')
     parser.add_argument('--bbox', help='west,south,east,north degrees (default: manifest coverage)')
-    parser.add_argument('--pbf', help='read roads from this local .osm.pbf instead of Overpass '
-                                       '(pip install osmium)')
+    parser.add_argument('--pbf', help='read roads from this local .osm.pbf (default: an extract covering '
+                                       'the bbox found or clipped from the local planet/clips, else '
+                                       'Overpass; pip install osmium)')
+    parser.add_argument('--overpass', action='store_true',
+                        help='fetch from the live Overpass mirrors even when a local extract covers the bbox')
     parser.add_argument('--min-zoom', type=int, default=DEFAULT_MIN_ZOOM,
                         help=f'coarsest level that carries roads (default {DEFAULT_MIN_ZOOM})')
     parser.add_argument('--refresh-osm', action='store_true',

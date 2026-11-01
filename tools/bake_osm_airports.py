@@ -77,7 +77,7 @@ from osm_common import (
     tile_bounds,
     ways_map,
 )
-from osm_pbf import pbf_elements_groups
+from osm_pbf import pbf_elements_groups, resolve_pbf
 import airfield_grade as AG
 
 
@@ -2494,7 +2494,7 @@ def bake(args: argparse.Namespace) -> int:
         # box needs is not there yet, so every cell is asked for.
         for name, bounds in targets:
             print(f'\narea {name}: fetching')
-            overpass_airports(bounds, args.refresh_osm, pbf=args.pbf)
+            overpass_airports(bounds, args.refresh_osm, pbf=resolve_pbf(args.pbf, bounds, args.overpass))
         print(f'fetched in {time.time() - started:.0f}s; nothing baked (--fetch-only)')
         return 0
 
@@ -2533,7 +2533,8 @@ def bake(args: argparse.Namespace) -> int:
         print(f'\narea {name}  lon [{bounds.west:.4f}, {bounds.east:.4f}] '
               f'lat [{bounds.south:.4f}, {bounds.north:.4f}]')
         try:
-            data = overpass_airports(bounds, args.refresh_osm, progress, prefix, skip_sea, pbf=args.pbf)
+            data = overpass_airports(bounds, args.refresh_osm, progress, prefix, skip_sea,
+                                     pbf=resolve_pbf(args.pbf, bounds, args.overpass))
         except Exception as err:
             # One area's fetch failing must not cost the areas after it. The
             # merge is per-bbox, so a skipped area simply keeps whatever it had
@@ -2658,8 +2659,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument('--manifest', help='planet manifest.json (default: {out}/manifest.json)')
     parser.add_argument('--out', default='assets/planet', help='planet asset directory')
     parser.add_argument('--bbox', help='west,south,east,north degrees (default: every baked area)')
-    parser.add_argument('--pbf', help='read airfields from this local .osm.pbf instead of Overpass '
-                                       '(pip install osmium)')
+    parser.add_argument('--pbf', help='read airfields from this local .osm.pbf (default: an extract covering '
+                                       'each area found or clipped from the local planet/clips, else '
+                                       'Overpass; pip install osmium)')
+    parser.add_argument('--overpass', action='store_true',
+                        help='fetch from the live Overpass mirrors even when a local extract covers the area')
     parser.add_argument('--per-area', type=int, default=DEFAULT_PER_AREA,
                         help='airfields kept per area, best first (default: unlimited)')
     parser.add_argument('--fetch-only', action='store_true',
