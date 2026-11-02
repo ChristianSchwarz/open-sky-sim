@@ -110,3 +110,40 @@ test('held roll key ramps the stick to full throw, neutral on release', () => {
     input.keyUp('arrowright', sink);
     assert.equal(input.tick(0.016, sink).roll, 0);
 });
+
+test('touch axes fly the stick while active and hand back to the keys when released', () => {
+    const input = arrowsInput(KeyboardPitchStickMode.HOLD);
+    input.setTouchAxes(0.5, -0.25, 0.1, 0.8, true);
+    const touched = input.tick(0.016, sink);
+    assert.equal(touched.pitch, 0.5);
+    assert.equal(touched.roll, -0.25);
+    assert.equal(touched.yaw, 0.1);
+    assert.equal(touched.throttle, 0.8);
+    input.setTouchAxes(0, 0, 0, 0, false);
+    input.keyDown('arrowdown', false, sink);
+    assert.equal(input.tick(0.016, sink).pitch, 1);
+});
+
+test('a connected gamepad wins over the touch axes', () => {
+    const input = new SimPlayerInput();
+    input.setTouchAxes(0.5, 0.5, 0, 0.8, true);
+    input.setGamepadAxes(-0.3, 0, 0, 0.2, true);
+    const out = input.tick(0.016, sink);
+    assert.equal(out.pitch, -0.3);
+    assert.equal(out.throttle, 0.2);
+    input.setGamepadAxes(0, 0, 0, 0, false);
+    assert.equal(input.tick(0.016, sink).pitch, 0.5);
+});
+
+test('brakes held through a touchdown engage on contact under analog input', () => {
+    const input = new SimPlayerInput();
+    let onGround = false;
+    const landing: SimPlayerInputSink = { ...sink, isOnGround: () => onGround };
+    input.setTouchAxes(0, 0, 0, 0.3, true);
+    input.keyDown('w', false, landing);
+    assert.equal(input.tick(0.016, landing).wheelBrakesApplied, false);
+    onGround = true;
+    assert.equal(input.tick(0.016, landing).wheelBrakesApplied, true);
+    input.keyUp('w', landing);
+    assert.equal(input.tick(0.016, landing).wheelBrakesApplied, false);
+});

@@ -84,6 +84,11 @@ export class SimPlayerInput {
     private gamepadRoll = NaN;
     private gamepadYaw = NaN;
     private gamepadThrottle = NaN;
+    /** On-screen touch axes, or NaN while no touch control is held. */
+    private touchPitch = NaN;
+    private touchRoll = NaN;
+    private touchYaw = NaN;
+    private touchThrottle = NaN;
 
     setKeyboardLayout(layoutId: KeyboardControlLayoutId): void {
         this.layoutId = layoutId;
@@ -119,6 +124,20 @@ export class SimPlayerInput {
         this.gamepadRoll = roll;
         this.gamepadYaw = yaw;
         this.gamepadThrottle = throttle;
+    }
+
+    setTouchAxes(pitch: number, roll: number, yaw: number, throttle: number, active: boolean): void {
+        if (!active) {
+            this.touchPitch = NaN;
+            this.touchRoll = NaN;
+            this.touchYaw = NaN;
+            this.touchThrottle = NaN;
+            return;
+        }
+        this.touchPitch = pitch;
+        this.touchRoll = roll;
+        this.touchYaw = yaw;
+        this.touchThrottle = throttle;
     }
 
     blur(): void {
@@ -198,8 +217,14 @@ export class SimPlayerInput {
             return this.neutralInputs(false, sink);
         }
 
+        // Brakes held through a touchdown engage on contact, whichever
+        // device is flying the stick.
+        this.tickWheelBrakes(sink);
+        // A real gamepad wins over the on-screen controls, which win over keys.
         if (Number.isFinite(this.gamepadPitch)) {
-            this.applyGamepad();
+            this.applyAxes(this.gamepadPitch, this.gamepadRoll, this.gamepadYaw, this.gamepadThrottle);
+        } else if (Number.isFinite(this.touchPitch)) {
+            this.applyAxes(this.touchPitch, this.touchRoll, this.touchYaw, this.touchThrottle);
         } else {
             this.tickKeyboardSticks(delta, sink);
         }
@@ -239,17 +264,17 @@ export class SimPlayerInput {
         out.autopilot = control === 'ai';
     }
 
-    private applyGamepad(): void {
-        this.pitch = clamp(this.gamepadPitch, -1, 1);
-        this.roll = clamp(this.gamepadRoll, -1, 1);
-        this.yaw = clamp(this.gamepadYaw, -1, 1);
-        this.throttle = clamp(this.gamepadThrottle, 0, 1);
+    private applyAxes(pitch: number, roll: number, yaw: number, throttle: number): void {
+        this.pitch = clamp(pitch, -1, 1);
+        this.roll = clamp(roll, -1, 1);
+        this.yaw = clamp(yaw, -1, 1);
+        this.throttle = clamp(throttle, 0, 1);
         this.pitchStickUnits = this.pitch >= 0
             ? this.pitch * PITCH_STICK_AFT_UNITS
             : this.pitch * PITCH_STICK_FWD_UNITS;
     }
 
-    private tickKeyboardSticks(delta: number, sink: SimPlayerInputSink): void {
+    private tickWheelBrakes(sink: SimPlayerInputSink): void {
         if (this.wKeyDown && this.canApplyWheelBrakes(sink)) {
             if (!this.wheelBrakeHeld) {
                 this.engageWheelBrakes();
@@ -260,7 +285,9 @@ export class SimPlayerInput {
                 this.restoreLayoutActionForKey('w');
             }
         }
+    }
 
+    private tickKeyboardSticks(delta: number, sink: SimPlayerInputSink): void {
         if (this.pitchState !== Stick.IDLE && !this.usesSteppedPitchStick()) {
             switch (this.pitchState) {
                 case Stick.POSITIVE_ENDED:

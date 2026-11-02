@@ -19,11 +19,15 @@ const STORAGE_KEY = 'retroflightsim.settings';
 /** Spawn menu start modes (approach / runway / merge / carrier / highAlt / space). */
 export type SpawnMode = 'approach' | 'runway' | 'headon' | 'carrier' | 'carrierBarricade' | 'carrierTakeoff' | 'highAlt' | 'space' | 'closeWing';
 
+/** On-screen touch flight controls: shown on touch screens, always, or never. */
+export type TouchControlsMode = 'auto' | 'on' | 'off';
+
 export interface AppSettings {
     techProfile: string;
     flightModel: string;
     keyboardLayout: KeyboardControlLayoutId;
     keyboardPitchStickMode: KeyboardPitchStickMode;
+    touchControls: TouchControlsMode;
     aiPilotModel: AiPilotModels;
     /** The TUNABLE pilot model's knobs (aggression, defensiveness, skill, ...). */
     aiPersonality: AiPersonality;
@@ -106,6 +110,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     flightModel: FlightModels.FM2,
     keyboardLayout: KeyboardControlLayoutId.ARROWS,
     keyboardPitchStickMode: KeyboardPitchStickMode.LAYOUT_DEFAULT,
+    touchControls: 'auto',
     aiPilotModel: AiPilotModels.CLASSIC,
     aiPersonality: defaultAiPersonality(),
     terrainColour: TerrainColours.HYBRID,
@@ -158,6 +163,8 @@ export function loadSettings(): AppSettings {
             flightModel: isValidFlightModel(parsed.flightModel) ? parsed.flightModel : DEFAULT_SETTINGS.flightModel,
             keyboardLayout: isValidKeyboardLayout(parsed.keyboardLayout) ? parsed.keyboardLayout : DEFAULT_SETTINGS.keyboardLayout,
             keyboardPitchStickMode: isValidPitchStickMode(parsed.keyboardPitchStickMode) ? parsed.keyboardPitchStickMode : DEFAULT_SETTINGS.keyboardPitchStickMode,
+            touchControls: parsed.touchControls === 'on' || parsed.touchControls === 'off'
+                ? parsed.touchControls : DEFAULT_SETTINGS.touchControls,
             aiPilotModel: isValidAiPilotModel(parsed.aiPilotModel) ? parsed.aiPilotModel : DEFAULT_SETTINGS.aiPilotModel,
             aiPersonality: clampAiPersonality(parsed.aiPersonality),
             terrainColour: isValidTerrainColour(parsed.terrainColour) ? parsed.terrainColour : DEFAULT_SETTINGS.terrainColour,

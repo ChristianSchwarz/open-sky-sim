@@ -1,0 +1,467 @@
+import { KernelTask } from "../../core/kernel";
+import { CombatSimClient } from "../../physics/sim/combatSimClient";
+import { SimProxyFlightModel } from "../../physics/model/simProxyFlightModel";
+import { PLAYER_SIM_ID } from "../../physics/sim/simIds";
+import { PlayerEntity } from "../../scene/entities/player";
+import { clamp, equals } from "../../utils/math";
+import type { TouchControlsMode } from "../../config/settingsStorage";
+
+/** Stick throw in CSS pixels from centre to full deflection. */
+const STICK_RADIUS_PX = 64;
+/** Share of the throw around centre that reads as zero; a thumb has no detent. */
+const STICK_DEAD_ZONE = 0.06;
+/** Cubic share of the response curve: fine near centre, full throw at the edge. */
+const STICK_EXPO = 0.4;
+
+/** What the game must answer for the overlay; Game implements it. */
+export interface TouchControlHost {
+    isFlying(): boolean;
+    cycleTouchView(): void;
+}
+
+interface HoldButton {
+    label: string;
+    key: string;
+    hold: boolean;
+}
+
+const BUTTONS: HoldButton[] = [
+    { label: 'FIRE', key: ' ', hold: true },
+    { label: 'BRAKE', key: 'w', hold: true },
+    { label: 'GEAR', key: 'g', hold: false },
+    { label: 'FLAPS', key: 'f', hold: false },
+    { label: 'AIRBRK', key: 'b', hold: false },
+    { label: 'HOOK', key: 'h', hold: false },
+    { label: 'AP', key: 'a', hold: false },
+    { label: 'TGT', key: 't', hold: false },
+];
+
+/**
+ * On-screen flight controls for touch screens: a stick that springs back
+ * under the left thumb, a throttle that stays where it is left and a rudder
+ * strip on the right, and buttons for the aircraft's keys.
+ *
+ * The analog controls post their own axes to the worker (a real gamepad still
+ * wins over them, and they over the keyboard); the buttons press the same keys
+ * the keyboard does, so every key handler sees them unchanged. Built on Pointer
+ * Events, so a mouse drives it as well as a finger.
+ */
+export class TouchControlDevice implements KernelTask {
+
+    private readonly root: HTMLDivElement;
+    private readonly stickBase: HTMLDivElement;
+    private readonly stickKnob: HTMLDivElement;
+    private readonly throttleFill: HTMLDivElement;
+    private readonly throttleTrack: HTMLDivElement;
+    private readonly rudderKnob: HTMLDivElement;
+    private readonly rudderTrack: HTMLDivElement;
+
+    private mode: TouchControlsMode = 'auto';
+    private readonly coarsePointer = window.matchMedia('(pointer: coarse)');
+    private visible = false;
+
+    /** Whether the analog controls have been taken since the last spawn or pause. */
+    private active = false;
+    private stickPointer: number | undefined;
+    private stickOriginX = 0;
+    private stickOriginY = 0;
+    private throttlePointer: number | undefined;
+    private rudderPointer: number | undefined;
+    /** Lets go of every held button, for blur and for hiding the overlay mid-press. */
+    private readonly heldReleases: (() => void)[] = [];
+
+    private pitch = 0;
+    private roll = 0;
+    private yaw = 0;
+    private throttle = 0;
+
+    private lastPitch = NaN;
+    private lastRoll = NaN;
+    private lastYaw = NaN;
+    private lastThrottle = NaN;
+    private lastPostedActive = false;
+
+    constructor(
+        private readonly combatSim: CombatSimClient,
+        private readonly player: PlayerEntity,
+        private readonly host: TouchControlHost,
+        private readonly simId: string = PLAYER_SIM_ID,
+        private readonly isWorkerControlled: () => boolean = () =>
+            player.getFlightModel() instanceof SimProxyFlightModel,
+    ) {
+        this.root = div('position:fixed;inset:0;z-index:1;pointer-events:none;display:none;'
+            + 'user-select:none;-webkit-user-select:none;font:600 12px/1 sans-serif;color:white');
+
+        // The stick zone is the lower left; the stick appears where the thumb lands.
+        const stickZone = div('position:absolute;left:0;bottom:0;width:45%;height:65%;'
+            + 'pointer-events:auto;touch-action:none');
+        this.stickBase = div('position:absolute;display:none;'
+            + `width:${STICK_RADIUS_PX * 2}px;height:${STICK_RADIUS_PX * 2}px;`
+            + `margin:-${STICK_RADIUS_PX}px 0 0 -${STICK_RADIUS_PX}px;border-radius:50%;`
+            + 'border:2px solid rgba(255,255,255,0.5);background:rgba(0,0,0,0.2)');
+        this.stickKnob = div('position:absolute;left:50%;top:50%;width:48px;height:48px;'
+            + 'margin:-24px 0 0 -24px;border-radius:50%;background:rgba(255,255,255,0.6)');
+        this.stickBase.appendChild(this.stickKnob);
+        stickZone.appendChild(this.stickBase);
+        const stickHint = div('position:absolute;left:24px;bottom:24px;opacity:0.5', 'STICK');
+        stickZone.appendChild(stickHint);
+        this.root.appendChild(stickZone);
+        this.bindStick(stickZone);
+
+        // Throttle: a vertical track against the right edge, full power at the top.
+        this.throttleTrack = div('position:absolute;right:16px;bottom:72px;width:52px;height:40%;'
+            + 'border:2px solid rgba(255,255,255,0.5);border-radius:8px;background:rgba(0,0,0,0.25);'
+            + 'pointer-events:auto;touch-action:none;overflow:hidden');
+        this.throttleFill = div('position:absolute;left:0;right:0;bottom:0;height:0;'
+            + 'background:rgba(255,255,255,0.45)');
+        this.throttleTrack.appendChild(this.throttleFill);
+        this.throttleTrack.appendChild(div('position:absolute;left:0;right:0;top:6px;text-align:center', 'THR'));
+        this.root.appendChild(this.throttleTrack);
+        this.bindThrottle();
+
+        // Rudder: a horizontal strip under the throttle that springs back.
+        this.rudderTrack = div('position:absolute;right:16px;bottom:16px;width:200px;height:44px;'
+            + 'border:2px solid rgba(255,255,255,0.5);border-radius:22px;background:rgba(0,0,0,0.25);'
+            + 'pointer-events:auto;touch-action:none');
+        this.rudderKnob = div('position:absolute;left:50%;top:50%;width:36px;height:36px;'
+            + 'margin:-18px 0 0 -18px;border-radius:50%;background:rgba(255,255,255,0.6)');
+        this.rudderTrack.appendChild(this.rudderKnob);
+        this.root.appendChild(this.rudderTrack);
+        this.bindRudder();
+
+        // Buttons: a low block left of the throttle, kept short for a phone held sideways.
+        const buttons = div('position:absolute;right:80px;bottom:72px;display:grid;'
+            + 'grid-template-columns:repeat(5,52px);gap:6px;pointer-events:auto;touch-action:none');
+        for (const button of BUTTONS) {
+            buttons.appendChild(this.makeKeyButton(button));
+        }
+        const view = button('VIEW');
+        view.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            this.host.cycleTouchView();
+        });
+        buttons.appendChild(view);
+        if (document.fullscreenEnabled) {
+            const full = button('FULL');
+            full.addEventListener('pointerdown', event => {
+                event.preventDefault();
+                void toggleFullscreen();
+            });
+            buttons.appendChild(full);
+        }
+        this.root.appendChild(buttons);
+
+        document.body.appendChild(this.root);
+        this.coarsePointer.addEventListener('change', () => this.updateVisibility());
+        window.addEventListener('blur', () => this.releaseAll());
+    }
+
+    setMode(mode: TouchControlsMode): void {
+        this.mode = mode;
+        this.updateVisibility();
+    }
+
+    getMode(): TouchControlsMode {
+        return this.mode;
+    }
+
+    update(_delta: number): void {
+        this.updateVisibility();
+        if (!this.visible || !this.player.controlsEnabled || this.player.isAutopilotEnabled
+            || this.player.isCrashed) {
+            // Next time the controls are taken the throttle starts from the aircraft's.
+            this.deactivate();
+            return;
+        }
+        if (!this.active) {
+            this.throttle = clamp(this.player.throttleUnit, 0, 1);
+            this.drawThrottle();
+            return;
+        }
+        this.post();
+    }
+
+    private updateVisibility(): void {
+        const wanted = this.mode === 'on'
+            || (this.mode === 'auto' && this.coarsePointer.matches);
+        const visible = wanted && this.host.isFlying();
+        if (visible === this.visible) {
+            return;
+        }
+        this.visible = visible;
+        this.root.style.display = visible ? 'block' : 'none';
+        if (!visible) {
+            this.releaseAll();
+        }
+    }
+
+    private activate(): void {
+        if (this.active) {
+            return;
+        }
+        this.active = true;
+        this.throttle = clamp(this.player.throttleUnit, 0, 1);
+        this.drawThrottle();
+    }
+
+    private deactivate(): void {
+        this.active = false;
+        this.pitch = 0;
+        this.roll = 0;
+        this.yaw = 0;
+        if (this.lastPostedActive && this.isWorkerControlled()) {
+            this.combatSim.postTouchAxes(this.simId, 0, 0, 0, 0, false);
+        }
+        this.lastPostedActive = false;
+        this.lastPitch = NaN;
+        this.lastRoll = NaN;
+        this.lastYaw = NaN;
+        this.lastThrottle = NaN;
+    }
+
+    private post(): void {
+        if (this.lastPostedActive
+            && equals(this.pitch, this.lastPitch)
+            && equals(this.roll, this.lastRoll)
+            && equals(this.yaw, this.lastYaw)
+            && equals(this.throttle, this.lastThrottle)) {
+            return;
+        }
+        this.lastPitch = this.pitch;
+        this.lastRoll = this.roll;
+        this.lastYaw = this.yaw;
+        this.lastThrottle = this.throttle;
+        this.lastPostedActive = true;
+        if (this.isWorkerControlled()) {
+            this.combatSim.postTouchAxes(this.simId, this.pitch, this.roll, this.yaw, this.throttle, true);
+        } else {
+            this.player.setPitch(this.pitch);
+            this.player.setRoll(this.roll);
+            this.player.setYaw(this.yaw);
+            this.player.setThrottle(this.throttle);
+        }
+    }
+
+    private bindStick(zone: HTMLElement): void {
+        zone.addEventListener('pointerdown', event => {
+            if (this.stickPointer !== undefined) {
+                return;
+            }
+            event.preventDefault();
+            capture(zone, event.pointerId);
+            this.stickPointer = event.pointerId;
+            const rect = zone.getBoundingClientRect();
+            this.stickOriginX = event.clientX;
+            this.stickOriginY = event.clientY;
+            this.stickBase.style.left = `${event.clientX - rect.left}px`;
+            this.stickBase.style.top = `${event.clientY - rect.top}px`;
+            this.stickBase.style.display = 'block';
+            this.activate();
+            this.moveStick(event);
+        });
+        zone.addEventListener('pointermove', event => {
+            if (event.pointerId === this.stickPointer) {
+                this.moveStick(event);
+            }
+        });
+        const end = (event: PointerEvent) => {
+            if (event.pointerId === this.stickPointer) {
+                this.releaseStick();
+            }
+        };
+        zone.addEventListener('pointerup', end);
+        zone.addEventListener('pointercancel', end);
+    }
+
+    private moveStick(event: PointerEvent): void {
+        let dx = (event.clientX - this.stickOriginX) / STICK_RADIUS_PX;
+        let dy = (event.clientY - this.stickOriginY) / STICK_RADIUS_PX;
+        const length = Math.hypot(dx, dy);
+        if (length > 1) {
+            dx /= length;
+            dy /= length;
+        }
+        this.stickKnob.style.transform = `translate(${dx * STICK_RADIUS_PX}px,${dy * STICK_RADIUS_PX}px)`;
+        // Thumb toward you is stick back, nose up, as on a gamepad.
+        this.pitch = shapeAxis(dy);
+        this.roll = shapeAxis(dx);
+    }
+
+    private releaseStick(): void {
+        this.stickPointer = undefined;
+        this.stickBase.style.display = 'none';
+        this.stickKnob.style.transform = '';
+        this.pitch = 0;
+        this.roll = 0;
+    }
+
+    private bindThrottle(): void {
+        const track = this.throttleTrack;
+        const set = (event: PointerEvent) => {
+            const rect = track.getBoundingClientRect();
+            this.throttle = clamp((rect.bottom - event.clientY) / rect.height, 0, 1);
+            this.drawThrottle();
+        };
+        track.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            capture(track, event.pointerId);
+            this.throttlePointer = event.pointerId;
+            this.activate();
+            set(event);
+        });
+        track.addEventListener('pointermove', event => {
+            if (event.pointerId === this.throttlePointer) {
+                set(event);
+            }
+        });
+        const end = (event: PointerEvent) => {
+            if (event.pointerId === this.throttlePointer) {
+                this.throttlePointer = undefined;
+            }
+        };
+        track.addEventListener('pointerup', end);
+        track.addEventListener('pointercancel', end);
+    }
+
+    private drawThrottle(): void {
+        this.throttleFill.style.height = `${Math.round(this.throttle * 100)}%`;
+    }
+
+    private bindRudder(): void {
+        const track = this.rudderTrack;
+        const set = (event: PointerEvent) => {
+            const rect = track.getBoundingClientRect();
+            const x = clamp((event.clientX - rect.left) / rect.width * 2 - 1, -1, 1);
+            this.rudderKnob.style.transform = `translateX(${x * (rect.width / 2 - 22)}px)`;
+            this.yaw = shapeAxis(x);
+        };
+        track.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            capture(track, event.pointerId);
+            this.rudderPointer = event.pointerId;
+            this.activate();
+            set(event);
+        });
+        track.addEventListener('pointermove', event => {
+            if (event.pointerId === this.rudderPointer) {
+                set(event);
+            }
+        });
+        const end = (event: PointerEvent) => {
+            if (event.pointerId === this.rudderPointer) {
+                this.releaseRudder();
+            }
+        };
+        track.addEventListener('pointerup', end);
+        track.addEventListener('pointercancel', end);
+    }
+
+    private releaseRudder(): void {
+        this.rudderPointer = undefined;
+        this.rudderKnob.style.transform = '';
+        this.yaw = 0;
+    }
+
+    private makeKeyButton(spec: HoldButton): HTMLDivElement {
+        const element = button(spec.label);
+        let held = false;
+        const release = () => {
+            if (!held) {
+                return;
+            }
+            held = false;
+            element.style.background = BUTTON_BACKGROUND;
+            pressKey('keyup', spec.key);
+        };
+        element.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            if (spec.hold) {
+                capture(element, event.pointerId);
+                held = true;
+                element.style.background = BUTTON_PRESSED;
+                pressKey('keydown', spec.key);
+            } else {
+                pressKey('keydown', spec.key);
+                pressKey('keypress', spec.key);
+                pressKey('keyup', spec.key);
+            }
+        });
+        element.addEventListener('pointerup', release);
+        element.addEventListener('pointercancel', release);
+        this.heldReleases.push(release);
+        return element;
+    }
+
+    private releaseAll(): void {
+        if (this.stickPointer !== undefined) {
+            this.releaseStick();
+        }
+        if (this.rudderPointer !== undefined) {
+            this.releaseRudder();
+        }
+        this.throttlePointer = undefined;
+        for (const release of this.heldReleases) {
+            release();
+        }
+    }
+}
+
+const BUTTON_BACKGROUND = 'rgba(0,0,0,0.35)';
+const BUTTON_PRESSED = 'rgba(255,255,255,0.45)';
+
+function div(cssText: string, text?: string): HTMLDivElement {
+    const element = document.createElement('div');
+    element.style.cssText = cssText;
+    if (text !== undefined) {
+        element.textContent = text;
+    }
+    return element;
+}
+
+function button(label: string): HTMLDivElement {
+    return div('width:52px;height:36px;font-size:11px;display:flex;align-items:center;justify-content:center;'
+        + `border:2px solid rgba(255,255,255,0.5);border-radius:8px;background:${BUTTON_BACKGROUND}`, label);
+}
+
+/** Keeps a drag on its control when the finger slides off it. */
+function capture(element: HTMLElement, pointerId: number): void {
+    try {
+        element.setPointerCapture(pointerId);
+    } catch {
+        // A pointer that is no longer down cannot be captured; the drag still works inside.
+    }
+}
+
+/** Dead zone, then a cubic blend, so small thumb movements fly smoothly. */
+export function shapeAxis(value: number): number {
+    const magnitude = Math.abs(value);
+    if (magnitude <= STICK_DEAD_ZONE) {
+        return 0;
+    }
+    const x = Math.min(1, (magnitude - STICK_DEAD_ZONE) / (1 - STICK_DEAD_ZONE));
+    return Math.sign(value) * (STICK_EXPO * x * x * x + (1 - STICK_EXPO) * x);
+}
+
+/**
+ * Presses a key as the keyboard would, on the document where every key
+ * handler listens, so the buttons behave exactly like their keys.
+ */
+function pressKey(type: 'keydown' | 'keypress' | 'keyup', key: string): void {
+    const code = key === ' ' ? 'Space' : `Key${key.toUpperCase()}`;
+    document.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true }));
+}
+
+async function toggleFullscreen(): Promise<void> {
+    try {
+        if (document.fullscreenElement) {
+            await document.exitFullscreen();
+            return;
+        }
+        await document.documentElement.requestFullscreen();
+        // Android locks to landscape in fullscreen; iOS and desktops refuse, which is fine.
+        const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+        await orientation.lock?.('landscape').catch(() => undefined);
+    } catch {
+        // Fullscreen is a convenience; the controls work without it.
+    }
+}

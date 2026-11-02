@@ -338,6 +338,10 @@ export class CombatSimClient {
         this.post({ type: 'gamepadAxes', id, pitch, roll, yaw, throttle, connected });
     }
 
+    postTouchAxes(id: string, pitch: number, roll: number, yaw: number, throttle: number, active: boolean): void {
+        this.post({ type: 'touchAxes', id, pitch, roll, yaw, throttle, active });
+    }
+
     postInputBlur(id: string): void {
         this.post({ type: 'inputBlur', id });
     }

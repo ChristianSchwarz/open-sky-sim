@@ -9,6 +9,7 @@ import { Kernel } from './core/kernel';
 import { HD_FPS_CAP, H_RES, V_RES } from './defs';
 import { JoystickControlDevice } from './input/devices/joystickControlDevice';
 import { KeyboardControlDevice } from './input/devices/keyboardControlDevice';
+import { TouchControlDevice } from './input/devices/touchControlDevice';
 import { setBootProgress } from './osd/bootProgress';
 import { setupOSD } from './osd/osdPanel';
 import { CombatSimClient } from './physics/sim/combatSimClient';
@@ -33,7 +34,7 @@ import { ModelManager } from './scene/models/models';
 import { Game, GameRenderTask, GameUpdateTask } from './state/game';
 import { FlightModels, TechProfiles } from './state/gameDefs';
 import { DETAIL_DISTANCE_OFF } from './terrain/lod';
-async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, JoystickControlDevice, Game, AudioSystem]> {
+async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, JoystickControlDevice, TouchControlDevice, Game, AudioSystem]> {
     const settings = loadSettings();
     // Single authoritative combat sim worker. The player's FM2/DEBUG models are
     // render-side proxies bound to it (id PLAYER_SIM_ID). AI opponents register
@@ -124,6 +125,14 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
         PLAYER_SIM_ID,
         () => config.flightModels.getActive() instanceof SimProxyFlightModel,
     );
+    const touchInput = new TouchControlDevice(
+        combatSim,
+        game.getPlayer(),
+        game,
+        PLAYER_SIM_ID,
+        () => config.flightModels.getActive() instanceof SimProxyFlightModel,
+    );
+    touchInput.setMode(settings.touchControls);
 
     const kernel = new Kernel();
     const combatSimUsesShared = combatSim.usesSharedState();
@@ -136,19 +145,20 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
     kernel.addUpdateTask(materials);
     kernel.addUpdateTask(keyboardInput);
     kernel.addUpdateTask(joystickInput);
+    kernel.addUpdateTask(touchInput);
     kernel.addUpdateTask(new GameUpdateTask(game));
     kernel.addRenderTask(new GameRenderTask(game));
 
     config.techProfiles.addChangeListener(profile => kernel.setTargetFPS(targetFpsFor(profile)));
 
-    return [kernel, config, keyboardInput, joystickInput, game, audio];
+    return [kernel, config, keyboardInput, joystickInput, touchInput, game, audio];
 }
 
 window.addEventListener("load", () => {
     setBootProgress(0, 'Loading...');
-    void setup().then(([kernel, config, keyboardInput, joystickInput, game, audio]) => {
+    void setup().then(([kernel, config, keyboardInput, joystickInput, touchInput, game, audio]) => {
         kernel.start();
-        setupOSD(config, keyboardInput, joystickInput, audio);
+        setupOSD(config, keyboardInput, joystickInput, touchInput, audio);
         void game.holdUntilStreamed();
     }).catch((err) => {
         setBootProgress(100, `Load failed: ${err instanceof Error ? err.message : String(err)}`);

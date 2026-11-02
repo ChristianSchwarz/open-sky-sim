@@ -1060,6 +1060,10 @@ export class CombatSim implements ProjectileSink {
         this.playerInputs.get(id)?.setGamepadAxes(pitch, roll, yaw, throttle, connected);
     }
 
+    touchAxes(id: string, pitch: number, roll: number, yaw: number, throttle: number, active: boolean): void {
+        this.playerInputs.get(id)?.setTouchAxes(pitch, roll, yaw, throttle, active);
+    }
+
     inputBlur(id: string): void {
         this.playerInputs.get(id)?.blur();
     }

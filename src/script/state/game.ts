@@ -3185,6 +3185,27 @@ export class Game {
         return this.player;
     }
 
+    /** True while the player is flying: not the menu, map, replay or free camera. */
+    isFlying(): boolean {
+        return this.state === GameState.PLAYER && !this.mapView && !this.replaying;
+    }
+
+    /** The touch controls' view button: cockpit, then behind, then chase. */
+    cycleTouchView(): void {
+        if (!this.isFlying()) {
+            return;
+        }
+        this.resetOrbit();
+        if (this.view === PlayerViewState.COCKPIT_FRONT) {
+            restoreMainCameraParameters(this.playerCamera.main);
+            this.setExteriorView(PlayerViewState.EXTERIOR_BEHIND);
+        } else if (this.view === PlayerViewState.EXTERIOR_BEHIND) {
+            this.setChaseView();
+        } else {
+            this.setCockpitFrontView();
+        }
+    }
+
     private resetOrbit() {
         this.viewYaw = 0;
         this.viewPitch = 0;

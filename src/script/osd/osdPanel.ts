@@ -3,14 +3,15 @@ import { ConfigService } from "../config/configService";
 import { loadSettings, updateSettings } from "../config/settingsStorage";
 import { JoystickControlDevice } from "../input/devices/joystickControlDevice";
 import { KeyboardControlDevice } from "../input/devices/keyboardControlDevice";
+import { TouchControlDevice } from "../input/devices/touchControlDevice";
 import { registerSettingsDialog, toggleSettingsDialog } from "../ui/settings/settingsLauncher";
 import { assertIsDefined } from "../utils/asserts";
 
 
-export function setupOSD(config: ConfigService, keyboardInput: KeyboardControlDevice, joystickInput: JoystickControlDevice, audio: AudioSystem) {
+export function setupOSD(config: ConfigService, keyboardInput: KeyboardControlDevice, joystickInput: JoystickControlDevice, touchInput: TouchControlDevice, audio: AudioSystem) {
     audio.setMasterVolume(loadSettings().volume);
     persistSettingChanges(config);
-    setupSettingsButton(config, keyboardInput, joystickInput, audio);
+    setupSettingsButton(config, keyboardInput, joystickInput, touchInput, audio);
 }
 
 /**
@@ -30,14 +31,14 @@ function persistSettingChanges(config: ConfigService) {
     });
 }
 
-function setupSettingsButton(config: ConfigService, keyboardInput: KeyboardControlDevice, joystickInput: JoystickControlDevice, audio: AudioSystem) {
+function setupSettingsButton(config: ConfigService, keyboardInput: KeyboardControlDevice, joystickInput: JoystickControlDevice, touchInput: TouchControlDevice, audio: AudioSystem) {
     const settingsButton = document.getElementById('settings-button');
     assertIsDefined(settingsButton);
 
     // The dialog can also be opened by F9, so the button's state follows the
     // dialog rather than its own clicks.
     registerSettingsDialog(
-        { config, keyboardInput, joystickInput, audio },
+        { config, keyboardInput, joystickInput, touchInput, audio },
         open => settingsButton.classList.toggle('active', open),
     );
     settingsButton.addEventListener('click', () => void toggleSettingsDialog());

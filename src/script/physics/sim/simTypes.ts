@@ -198,6 +198,7 @@ export type SimToWorkerMessage =
     | { type: 'setKeyboardLayout'; layoutId: KeyboardControlLayoutId }
     | { type: 'setKeyboardPitchStickMode'; mode: KeyboardPitchStickMode }
     | { type: 'gamepadAxes'; id: string; pitch: number; roll: number; yaw: number; throttle: number; connected: boolean }
+    | { type: 'touchAxes'; id: string; pitch: number; roll: number; yaw: number; throttle: number; active: boolean }
     | { type: 'inputBlur'; id: string }
     | { type: 'setInputEnabled'; id: string; enabled: boolean }
     | { type: 'setForceVectorsRequested'; id: string; want: boolean };

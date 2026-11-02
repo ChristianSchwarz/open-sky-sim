@@ -15,11 +15,12 @@ import { MatSliderModule } from '@angular/material/slider';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { map } from 'rxjs';
-import { SpawnMode } from '../../config/settingsStorage';
+import { SpawnMode, TouchControlsMode } from '../../config/settingsStorage';
 import { AudioSystem } from '../../audio/audioSystem';
 import { ConfigService, RENDER_SCALES } from '../../config/configService';
 import { loadSettings, updateSettings } from '../../config/settingsStorage';
 import { JoystickControlDevice } from '../../input/devices/joystickControlDevice';
+import { TouchControlDevice } from '../../input/devices/touchControlDevice';
 import {
     KeyboardControlAction, KeyboardControlDevice, KeyboardControlLayoutId, KeyboardControlLayouts,
     KeyboardPitchStickMode,
@@ -64,6 +65,7 @@ export interface SettingsDialogData {
     config: ConfigService;
     keyboardInput: KeyboardControlDevice;
     joystickInput: JoystickControlDevice;
+    touchInput: TouchControlDevice;
     audio: AudioSystem;
     /** The aircraft, livery and airfield choices and spawn actions the Flight tab shows. */
     spawnMenu: SpawnPanel;
@@ -405,6 +407,12 @@ const KEYBOARD_LAYOUT_OPTIONS: Option<KeyboardControlLayoutId>[] = [
 const PITCH_STICK_MODE_OPTIONS: Option<KeyboardPitchStickMode>[] = [
     { value: KeyboardPitchStickMode.LAYOUT_DEFAULT, label: 'Layout default' },
     { value: KeyboardPitchStickMode.HOLD, label: 'Hold: full while pressed' },
+];
+
+const TOUCH_CONTROLS_OPTIONS: Option<TouchControlsMode>[] = [
+    { value: 'auto', label: 'On touch screens' },
+    { value: 'on', label: 'Always' },
+    { value: 'off', label: 'Off' },
 ];
 
 /**
@@ -1049,6 +1057,16 @@ function sliderValue(event: Event): number {
                                 }
                             </mat-radio-group>
                         </section>
+
+                        <section>
+                            <h3 class="m-0 mb-2 text-base font-medium">Touch controls</h3>
+                            <mat-radio-group class="grid grid-cols-1 sm:grid-cols-3"
+                                [value]="touchControls()" (change)="setTouchControls($event.value)">
+                                @for (option of touchControlsModes; track option.value) {
+                                    <mat-radio-button [value]="option.value">{{ option.label }}</mat-radio-button>
+                                }
+                            </mat-radio-group>
+                        </section>
                     </div>
                 }
 
@@ -1188,6 +1206,7 @@ export class SettingsDialog {
     readonly unitSystems = UNIT_SYSTEM_OPTIONS;
     readonly keyboardLayouts = KEYBOARD_LAYOUT_OPTIONS;
     readonly pitchStickModes = PITCH_STICK_MODE_OPTIONS;
+    readonly touchControlsModes = TOUCH_CONTROLS_OPTIONS;
 
     readonly detailMinKm = TERRAIN_DETAIL_DISTANCE_MIN_M / 1000;
     readonly detailMaxKm = DETAIL_OFF_KM + 2;
@@ -1208,6 +1227,7 @@ export class SettingsDialog {
     readonly unitSystem = signal(this.config.unitSystem.getActive());
     readonly keyboardLayout = signal(this.data.keyboardInput.getKeyboardLayoutId());
     readonly pitchStickMode = signal(this.data.keyboardInput.getKeyboardPitchStickMode());
+    readonly touchControls = signal(this.data.touchInput.getMode());
     readonly volume = signal(Math.round(loadSettings().volume * 100));
 
     readonly daytime = signal(this.config.daytime.getActive());
@@ -1500,6 +1520,12 @@ export class SettingsDialog {
         this.data.keyboardInput.setKeyboardPitchStickMode(mode);
         updateSettings({ keyboardPitchStickMode: mode });
         this.pitchStickMode.set(mode);
+    }
+
+    setTouchControls(mode: TouchControlsMode) {
+        this.data.touchInput.setMode(mode);
+        updateSettings({ touchControls: mode });
+        this.touchControls.set(mode);
     }
 
     onSearchInput(query: string) {

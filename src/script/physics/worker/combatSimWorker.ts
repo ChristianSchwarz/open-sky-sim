@@ -156,6 +156,9 @@ function handleMessage(data: SimToWorkerMessage): void {
         case 'gamepadAxes':
             sim.gamepadAxes(data.id, data.pitch, data.roll, data.yaw, data.throttle, data.connected);
             break;
+        case 'touchAxes':
+            sim.touchAxes(data.id, data.pitch, data.roll, data.yaw, data.throttle, data.active);
+            break;
         case 'inputBlur':
             sim.inputBlur(data.id);
             break;
