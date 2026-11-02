@@ -92,8 +92,9 @@ export class TouchControlDevice implements KernelTask {
         this.root = div('position:fixed;inset:0;z-index:1;pointer-events:none;display:none;'
             + 'user-select:none;-webkit-user-select:none;font:600 12px/1 sans-serif;color:white');
 
-        // The stick zone is the lower left; the stick appears where the thumb lands.
-        const stickZone = div('position:absolute;left:0;bottom:0;width:45%;height:65%;'
+        // The stick zone is the left side, lifted off the bottom edge where a thumb
+        // held sideways does not reach; the stick appears where the thumb lands.
+        const stickZone = div('position:absolute;left:0;bottom:20%;width:45%;height:65%;'
             + 'pointer-events:auto;touch-action:none');
         this.stickBase = div('position:absolute;display:none;'
             + `width:${STICK_RADIUS_PX * 2}px;height:${STICK_RADIUS_PX * 2}px;`
@@ -103,7 +104,7 @@ export class TouchControlDevice implements KernelTask {
             + 'margin:-24px 0 0 -24px;border-radius:50%;background:rgba(255,255,255,0.6)');
         this.stickBase.appendChild(this.stickKnob);
         stickZone.appendChild(this.stickBase);
-        const stickHint = div('position:absolute;left:24px;bottom:24px;opacity:0.5', 'STICK');
+        const stickHint = div('position:absolute;left:24px;top:50%;opacity:0.5', 'STICK');
         stickZone.appendChild(stickHint);
         this.root.appendChild(stickZone);
         this.bindStick(stickZone);
@@ -154,6 +155,24 @@ export class TouchControlDevice implements KernelTask {
         document.body.appendChild(this.root);
         this.coarsePointer.addEventListener('change', () => this.updateVisibility());
         window.addEventListener('blur', () => this.releaseAll());
+        this.enterFullscreenOnFirstTouch();
+    }
+
+    /**
+     * Fullscreen from the start on touch screens. Browsers only allow it from a user
+     * gesture, so the first tap anywhere enters it; leaving it later is the player's call.
+     */
+    private enterFullscreenOnFirstTouch(): void {
+        if (!document.fullscreenEnabled) {
+            return;
+        }
+        const onTap = () => {
+            document.removeEventListener('pointerup', onTap, true);
+            if (this.wanted() && !document.fullscreenElement) {
+                void toggleFullscreen();
+            }
+        };
+        document.addEventListener('pointerup', onTap, true);
     }
 
     setMode(mode: TouchControlsMode): void {
@@ -182,9 +201,7 @@ export class TouchControlDevice implements KernelTask {
     }
 
     private updateVisibility(): void {
-        const wanted = this.mode === 'on'
-            || (this.mode === 'auto' && this.coarsePointer.matches);
-        const visible = wanted && this.host.isFlying();
+        const visible = this.wanted() && this.host.isFlying();
         if (visible === this.visible) {
             return;
         }
@@ -193,6 +210,10 @@ export class TouchControlDevice implements KernelTask {
         if (!visible) {
             this.releaseAll();
         }
+    }
+
+    private wanted(): boolean {
+        return this.mode === 'on' || (this.mode === 'auto' && this.coarsePointer.matches);
     }
 
     private activate(): void {
