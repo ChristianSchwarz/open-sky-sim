@@ -16,6 +16,14 @@ import { RENDER_SCALES } from "./configService";
 
 const STORAGE_KEY = 'retroflightsim.settings';
 
+/**
+ * Settings JSON a build ships as the first-run choice (webpack's
+ * DEFAULT_SETTINGS, see tools/deploy-pages.mjs --settings); read as if it had
+ * been saved, so a bad or stale field falls back like any other.
+ */
+declare const __DEFAULT_SETTINGS__: string | undefined;
+const BUILD_DEFAULTS = typeof __DEFAULT_SETTINGS__ === 'string' ? __DEFAULT_SETTINGS__ : '';
+
 /** Spawn menu start modes (approach / runway / merge / carrier / highAlt / space). */
 export type SpawnMode = 'approach' | 'runway' | 'headon' | 'carrier' | 'carrierBarricade' | 'carrierTakeoff' | 'highAlt' | 'space' | 'closeWing';
 
@@ -152,7 +160,7 @@ const SPAWN_MODES = new Set<SpawnMode>([
 
 export function loadSettings(): AppSettings {
     try {
-        const raw = localStorage.getItem(STORAGE_KEY);
+        const raw = localStorage.getItem(STORAGE_KEY) || BUILD_DEFAULTS;
         if (!raw) {
             return { ...DEFAULT_SETTINGS };
         }

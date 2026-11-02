@@ -87,7 +87,11 @@ module.exports = (_env, argv) => ({
         new MiniCssExtractPlugin({ filename: 'bundle.css' }),
         // TERRAIN_URL=https://host/v1/manifest.json points the game at terrain
         // hosted elsewhere; see doc/terrain-hosting.md. Unset keeps assets/terrain.
-        new webpack.DefinePlugin({ __TERRAIN_URL__: JSON.stringify(process.env.TERRAIN_URL || '') }),
+        // DEFAULT_SETTINGS is settings JSON used until the player saves their own.
+        new webpack.DefinePlugin({
+            __TERRAIN_URL__: JSON.stringify(process.env.TERRAIN_URL || ''),
+            __DEFAULT_SETTINGS__: JSON.stringify(process.env.DEFAULT_SETTINGS || ''),
+        }),
         new CopyPlugin({
             patterns: [
                 {
@@ -109,8 +113,10 @@ module.exports = (_env, argv) => ({
                 // production build copies it into dist/ (see the note above).
                 // The planet's colour map from orbit, tiled (tools/prep_earth_tiles.py).
                 { from: 'assets/earth', to: 'assets/earth', noErrorOnMissing: true },
+                // TERRAIN_DIR ships another tree under the same URL, e.g. one
+                // area cut out by tools/extract_area_tree.py.
                 ...(argv && argv.mode === 'production' && !process.env.TERRAIN_URL
-                    ? [{ from: 'assets/terrain', to: 'assets/terrain', noErrorOnMissing: true }]
+                    ? [{ from: process.env.TERRAIN_DIR || 'assets/terrain', to: 'assets/terrain', noErrorOnMissing: true }]
                     : []),
             ]
         })

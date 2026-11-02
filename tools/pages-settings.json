@@ -1,0 +1,41 @@
+{
+    "aiPersonality": {
+        "aggression": 0.6,
+        "defensiveness": 0.5,
+        "energyFighting": 0.3,
+        "gLimit": 9,
+        "gunDiscipline": 0.7,
+        "skill": 0.7
+    },
+    "aiPilotModel": "CLASSIC",
+    "aircraftSmoothShading": false,
+    "buildings": true,
+    "colourAdjust": {
+        "sky": { "brightness": 1, "hue": 0, "saturation": 1 },
+        "terrain": { "brightness": 1, "hue": 0, "saturation": 1 },
+        "trees": { "brightness": 1, "hue": 0, "saturation": 1 },
+        "water": { "brightness": 1, "hue": 0, "saturation": 1 }
+    },
+    "daytime": 14,
+    "farTileTextures": true,
+    "flightModel": "FM2",
+    "foveation": { "outerScale": 0, "size": 0.5 },
+    "keyboardLayout": 4,
+    "keyboardPitchStickMode": 0,
+    "landuseBlend": 0.5,
+    "landuseReach": 1.5,
+    "landuseRevealPx": 6,
+    "opponentsScramble": false,
+    "renderScale": 1,
+    "roads": "ALL",
+    "spawnMode": "carrierBarricade",
+    "supersampling": true,
+    "techProfile": "HD",
+    "terrainColour": "LANDCOVER",
+    "terrainDetailDistanceM": 12000,
+    "terrainShading": "FACETED",
+    "terrainTriangleBudget": 1300000,
+    "treeDensity": 1,
+    "visibleZoom": 12,
+    "volume": 0.7
+}
