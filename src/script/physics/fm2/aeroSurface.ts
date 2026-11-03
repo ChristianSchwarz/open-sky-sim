@@ -14,7 +14,7 @@
  * yaw aerodynamic damping all appear automatically from the geometry.
  */
 import * as THREE from 'three';
-import { clamp } from '../../utils/math';
+import { clamp, wrapPi } from '../../utils/math';
 import { SurfaceGeometry } from './fm2Constants';
 
 export interface SurfaceInput {
@@ -140,7 +140,10 @@ export class AeroSurface {
             this.aoaSepLagged = effectiveAoa;
             this.sepLagInitialized = true;
         } else {
-            this.aoaSepLagged += (effectiveAoa - this.aoaSepLagged) * (1 - Math.exp(-input.dt / tau));
+            // The short way round: a tail slide flips atan2's AoA from +pi to
+            // -pi, and lagging through 0 read as attached flow for a moment.
+            this.aoaSepLagged = wrapPi(this.aoaSepLagged
+                + wrapPi(effectiveAoa - this.aoaSepLagged) * (1 - Math.exp(-input.dt / tau)));
         }
 
         const stall = this.geom.stallAoaRad - input.stallShiftRad;

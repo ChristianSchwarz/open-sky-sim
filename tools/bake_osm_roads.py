@@ -592,8 +592,9 @@ def rvr_path(out_dir: str, z: int, x: int, y: int) -> str:
 def write_rvr(out_dir: str, z: int, x: int, y: int, blob: bytes) -> int:
     path = rvr_path(out_dir, z, x, y)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'wb') as fh:
-        fh.write(blob)
+    # Atomic: a bake cut short mid-write would leave a truncated tile, which
+    # keep_leaf_roads reads as broken and rewrites with its track only.
+    replace_file(path, blob)
     return len(blob)
 
 

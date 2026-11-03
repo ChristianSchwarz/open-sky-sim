@@ -344,7 +344,8 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.buildPilot(options, world, true);
     }
 
-    applySpawn(spawn: SimAircraftSpawn): void {
+    /** Forget every wire, net and deck the aircraft was caught by or parked on. */
+    clearDeckEngagement(): void {
         this.arrestorLatch = -1;
         this.arrestorFieldIndex = -1;
         this.arrestorSnagAlong = 0;
@@ -358,6 +359,10 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.barricadeFieldIndex = -1;
         this.barricadeWebCoupled = false;
         this.barricadeLocalValid = false;
+    }
+
+    applySpawn(spawn: SimAircraftSpawn): void {
+        this.clearDeckEngagement();
         this.model.position = this.tmp.fromArray(spawn.position);
         this.model.quaternion = new THREE.Quaternion().fromArray(spawn.quaternion);
         if (spawn.velocity) {
@@ -1144,13 +1149,9 @@ export class CombatSim implements ProjectileSink {
         const a = this.aircraft.get(id);
         if (!a) return;
         this.rebuildIfModelChanged(a, model);
-        a.arrestorLatch = -1;
-        a.arrestorFieldIndex = -1;
-        a.arrestorSnagAlong = 0;
-        a.arrestorHeld = false;
-        a.carrierDeckSticky = false;
-        a.carrierParkLocalValid = false;
-        a.hasPrevHook = false;
+        // As a spawn does: a reset out of the barricade's net must leave it,
+        // or the next step still holds the aircraft against the ship.
+        a.clearDeckEngagement();
         a.model.reset();
         a.model.position = position;
         a.model.quaternion = quaternion;

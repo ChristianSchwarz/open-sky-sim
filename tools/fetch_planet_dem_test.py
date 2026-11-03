@@ -572,9 +572,12 @@ class NoLandExitTest(unittest.TestCase):
 
     BBOX = '--bbox=14.7216796875,54.4921875,14.8095703125,54.755859375'
 
-    def _main(self, fill, all_missing=False):
+    def _main(self, fill, all_missing=False, one_failed=False):
         # fill None: no square could be read - all of them 404s if all_missing.
-        def mosaic(out, transform, urls, step_deg, jobs, cache_dir, absent=None):
+        # one_failed: the others were read, one timed out.
+        def mosaic(out, transform, urls, step_deg, jobs, cache_dir, absent=None, failed=None):
+            if one_failed and failed is not None:
+                failed.append(urls[0])
             if fill is None:
                 if all_missing and absent is not None:
                     absent.extend(urls)
@@ -600,6 +603,11 @@ class NoLandExitTest(unittest.TestCase):
     def test_unreadable_squares_still_fail(self):
         code, _ = self._main(None)
         self.assertEqual(code, 1)
+
+    def test_one_unreadable_square_fails_the_run(self):
+        code, write = self._main(12.0, one_failed=True)
+        self.assertEqual(code, 1)
+        write.assert_not_called()
 
     def test_land_is_written(self):
         code, write = self._main(12.0)

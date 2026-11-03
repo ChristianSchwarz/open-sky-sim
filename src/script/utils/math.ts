@@ -22,6 +22,11 @@ export function clamp(n: number, min: number, max: number): number {
     return Math.max(min, Math.min(n, max));
 }
 
+/** `a` wrapped to [-pi, pi]. */
+export function wrapPi(a: number): number {
+    return a - 2 * Math.PI * Math.round(a / (2 * Math.PI));
+}
+
 export function lerp(t: number, n0: number, n1: number): number {
     return n0 + t * (n1 - n0);
 }

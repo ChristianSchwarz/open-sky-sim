@@ -678,12 +678,14 @@ export class TerrainEntity implements Entity {
         try {
             const TILES_PER_BURST = 5;
             const YIELD_MS = 16;
-            const entries = this.meshStore.peekAll();
+            // The uploaded tiles, not the mesh store's: a drawn tile is never
+            // asked for again once uploaded, so the store ages it out while it
+            // is still on screen. Its meshes keep the scatter source for this.
+            const entries = [...this.streamer.values()]
+                .filter(m => m.treesRequested && !m.disposed && m.treeSource !== undefined);
             for (let i = 0; i < entries.length; i += TILES_PER_BURST) {
-                const burst = entries.slice(i, i + TILES_PER_BURST).map(({ id, value: tile }) => {
-                    const meshes = this.streamer.get(id);
-                    return meshes && meshes.treesRequested && !meshes.disposed ? this.attachTrees(meshes.treeSource ?? tile, meshes, materials) : undefined;
-                });
+                const burst = entries.slice(i, i + TILES_PER_BURST)
+                    .map(meshes => this.attachTrees(meshes.treeSource!, meshes, materials));
                 await Promise.all(burst);
                 await new Promise(r => setTimeout(r, YIELD_MS));
             }

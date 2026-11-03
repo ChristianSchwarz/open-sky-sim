@@ -4418,9 +4418,43 @@ export class Game {
                     this.setCockpitFrontView();
                 }
                 break;
+            case PlayerViewState.CHASE:
+            case PlayerViewState.FLY_BY:
+            case PlayerViewState.TOWER:
+            case PlayerViewState.CARRIER_OVER_STERN:
+                restoreMainCameraParameters(this.playerCamera.main);
+                this.setExteriorView(view);
+                break;
+            case PlayerViewState.AI_CHASE:
+                if (this.aiOpponent?.enabled && this.cameraUpdaters.has(view)) {
+                    restoreMainCameraParameters(this.playerCamera.main);
+                    this.setExteriorView(view);
+                } else {
+                    this.setCockpitFrontView();
+                }
+                break;
+            case PlayerViewState.CRASHED:
+                this.leaveShowcaseIfActive();
+                restoreMainCameraParameters(this.playerCamera.main);
+                this.view = view;
+                this.cameraUpdater = this.getCameraUpdater(view);
+                break;
             default:
                 this.setCockpitFrontView();
                 break;
+        }
+        // The crash turned the cockpit and the exterior layers off, whatever
+        // view carried on through it (transitionFromPlayerToCrashed), and it
+        // runs only once: coming back from the map or the showcase must not
+        // switch a live cockpit back on over the wreck.
+        if (this.player.isCrashed) {
+            this.player.exteriorView = true;
+            for (let i = 0; i < this.cockpitEntities.length; i++) {
+                this.cockpitEntities[i].enabled = false;
+            }
+            for (let i = 0; i < this.exteriorEntities.length; i++) {
+                this.exteriorEntities[i].enabled = false;
+            }
         }
     }
 

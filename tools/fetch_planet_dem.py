@@ -548,6 +548,7 @@ def mosaic_into(
     cache_dir: Optional[str] = DEM_CACHE_DIR,
     fetch: Callable[..., FetchResult] = fetch_square,
     absent: Optional[List[str]] = None,
+    failed: Optional[List[str]] = None,
 ) -> int:
     """Reproject each square onto the target grid, first real height wins.
 
@@ -555,7 +556,8 @@ def mosaic_into(
     filled mask is here to report coverage and to notice a square that came
     back entirely void. A square the archive does not have (HTTP 404 - the
     FABDEM archive simply has no file for an all-ocean square) is appended to
-    `absent` when given. Up to `jobs` squares are fetched at once; the merge
+    `absent` when given; one that failed for any other reason (a timeout, a
+    server error, a corrupt cache file) to `failed`. Up to `jobs` squares are fetched at once; the merge
     itself walks the results in the order the squares were given, so the
     output does not depend on which fetch finished first.
     """
@@ -571,8 +573,11 @@ def mosaic_into(
         for i, (name, win, block, err) in enumerate(results):
             if err is not None:
                 print(f'  [{i + 1}/{total}] skipped {name}: {err}', flush=True)
-                if absent is not None and is_absent_error(err):
-                    absent.append(name)
+                if is_absent_error(err):
+                    if absent is not None:
+                        absent.append(name)
+                elif failed is not None:
+                    failed.append(name)
                 continue
             if win is None:
                 print(f'  [{i + 1}/{total}] {name} lies outside the grid', flush=True)
@@ -741,8 +746,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     t_mosaic = time.perf_counter()
     absent: List[str] = []
+    failed: List[str] = []
     used = mosaic_into(out, transform, urls, step_deg, jobs=args.jobs, cache_dir=cache_dir,
-                       absent=absent)
+                       absent=absent, failed=failed)
     print(f'mosaic    {time.perf_counter() - t_mosaic:.1f} s')
     if used == 0 and urls and len(absent) == len(urls):
         # Every square answered "no such file": FABDEM has no index of its
@@ -752,6 +758,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return EXIT_NO_LAND
     if used == 0:
         print('error: no DEM squares could be read', file=sys.stderr)
+        return 1
+    if failed:
+        # A square that exists but could not be read would bake as a void
+        # (sea, holes) inside the area: fail so the import is re-run instead.
+        print(f'error: {len(failed)} DEM square(s) could not be read: {", ".join(failed)}',
+              file=sys.stderr)
         return 1
 
     real = out != NODATA

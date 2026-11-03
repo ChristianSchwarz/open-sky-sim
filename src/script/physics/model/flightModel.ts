@@ -178,6 +178,8 @@ export abstract class FlightModel {
         this.commandedRudder = 0;
         this.accelWorld.set(0, 0, 0);
         this.deltaRemainder = 0;
+        this.pendingHardLanding = 0;
+        this.hardLandingCooldownS = 0;
         this.syncPreviousState();
     }
 

@@ -25,7 +25,7 @@
  * Sensor and command conventions are NASA: α, β, p, q, r; stabilator and
  * flaperon trailing edge down positive; rudder positive = nose right.
  */
-import { clamp } from '../../utils/math';
+import { clamp, wrapPi } from '../../utils/math';
 import { CHANNEL_INDEX } from './fm3Airframe';
 
 const DEG = Math.PI / 180;
@@ -181,7 +181,8 @@ export class Fm3Fcs {
 
         if (dt > 0 && this.hasPrev) {
             const b = 1 - Math.exp(-dt / RATE_FILTER_TAU_S);
-            this.alphaRate += ((alpha - this.prevAlpha) / dt - this.alphaRate) * b;
+            // Wrapped, as aeroModel.advance does: reverse flow crosses +/-pi.
+            this.alphaRate += (wrapPi(alpha - this.prevAlpha) / dt - this.alphaRate) * b;
             this.nzRate += ((input.nz - this.prevNz) / dt - this.nzRate) * b;
         }
         this.prevAlpha = alpha;

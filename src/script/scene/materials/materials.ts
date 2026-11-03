@@ -900,14 +900,16 @@ export class SceneMaterialManager implements KernelTask {
             u.color.value.copy(this.colorCache.getColor(PaletteColor(palette, c)));
             u.colorSecondary.value.copy(this.colorCache.getColor(PaletteColorShade(palette, c)));
             this.applyWaterTweak(c, u);
-        } else if (palette.light) {
+        } else {
             // A raw colour opted out of the palette, so the blend above
             // never reaches it: a mod's camo used to stay at noon
             // brightness against a midnight landscape, lit or not. The
             // uniforms are linear light, which is what the factor is in,
-            // so it multiplies straight in with no round trip.
+            // so it multiplies straight in with no round trip. A palette
+            // with no light (the showcase's) is full light, not "leave the
+            // last palette's dimming in place".
             const raw = this.colorCache.getColor(d.rawColor);
-            const light = palette.light;
+            const light = palette.light ?? [1, 1, 1];
             u.color.value.setRGB(raw.r * light[0], raw.g * light[1], raw.b * light[2]);
             u.colorSecondary.value.copy(u.color.value);
         }

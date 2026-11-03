@@ -608,8 +608,9 @@ def bake_tile(
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f'{y}.plc')
     blob = encode_plc(size, flags, classes, colors)
-    with open(out_path, 'wb') as fh:
-        fh.write(blob)
+    # Atomic: a truncated .plc makes decode_plc, and the ancestor build, raise.
+    from osm_common import replace_file
+    replace_file(out_path, blob)
     return len(blob), bool(covered.any()), paved_nodes, osm_nodes
 
 
@@ -698,8 +699,8 @@ def build_ancestor_tile(src_dir: str, out_root: str, pz: int, px: int, py: int) 
     out_dir = os.path.join(out_root, str(pz), str(px))
     os.makedirs(out_dir, exist_ok=True)
     blob = encode_plc(size, flags, classes, colors)
-    with open(os.path.join(out_dir, f'{py}.plc'), 'wb') as fh:
-        fh.write(blob)
+    from osm_common import replace_file
+    replace_file(os.path.join(out_dir, f'{py}.plc'), blob)
     return len(blob), flags
 
 
