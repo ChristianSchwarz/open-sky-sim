@@ -150,6 +150,14 @@ for (const a of areas) {
         if (step.args.some(x => MEASURE_ONCE.test(x))) {
             continue;
         }
+        // A stage that takes one box (`--bbox=...`, gathering capped leaves)
+        // runs once per box; it is a no-op where no area is capped.
+        const eq = step.args.findIndex(x => x.startsWith('--bbox='));
+        if (eq >= 0) {
+            all.forEach((box, n) => run(`${key}: ${step.label}, block ${n + 1}/${all.length}`, step.cmd,
+                [...step.args.slice(0, eq), `--bbox=${box.join(',')}`, ...step.args.slice(eq + 1)]));
+            continue;
+        }
         // The union only made the steps; each stage takes the boxes themselves.
         const i = step.args.indexOf('--bbox');
         if (i < 0 || step.args.some(x => x.startsWith('--bbox='))) {

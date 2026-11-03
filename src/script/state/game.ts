@@ -2434,10 +2434,14 @@ export class Game {
         if (this.state !== GameState.PLAYER || this.menuPaused || this.recorder.length < 2) {
             return;
         }
+        // Leave the showcase first: it pauses the sim, which the replay would
+        // otherwise read as the flight's own pause and restore on exit.
+        if (this.view === PlayerViewState.SHOWCASE) {
+            this.exitShowcaseView();
+        }
         this.replaying = true;
         this.replayWasPaused = !this.player.controlsEnabled;
         this.player.setSimulationPaused(true);
-        this.leaveShowcaseIfActive();
         this.resetOrbit();
         this.replayPlayer.start();
         if (this.view === PlayerViewState.COCKPIT_FRONT) {
@@ -2925,6 +2929,11 @@ export class Game {
         if (this.wingman?.isAlive()) {
             focus.push({ x: this.wingman.position.x, z: this.wingman.position.z });
         }
+        for (const ai of this.missionAircraft) {
+            if (ai.enabled && ai.isAlive()) {
+                focus.push({ x: ai.position.x, z: ai.position.z });
+            }
+        }
         this.heightSender.update(focus, SIM_TERRAIN_MIRROR_RADIUS_M);
     }
 
@@ -3381,7 +3390,8 @@ export class Game {
         if (this.wingman && this.wingman.simId === targetId && this.wingman.enabled) {
             return this.aiDamageSmokePose(this.wingman);
         }
-        return undefined;
+        const mission = this.missionAircraft.find(a => a.simId === targetId && a.enabled);
+        return mission ? this.aiDamageSmokePose(mission) : undefined;
     }
 
     private aiDamageSmokePose(ai: AiAircraftEntity): { position: THREE.Vector3; quaternion: THREE.Quaternion; velocity: THREE.Vector3; isAlive: boolean; isCrashed: boolean } {
@@ -3865,6 +3875,8 @@ export class Game {
         if (this.mapView) {
             return;
         }
+        // A replay's branch of update() returns before the map camera is placed.
+        this.stopReplay();
         this.leaveShowcaseIfActive();
         this.mapReturn = { state: this.state, view: this.view, route: this.cameraRoute };
         // A spawn's hold still running would keep update(), and so the map, still.
@@ -4122,6 +4134,9 @@ export class Game {
                 this.scene.add(ai);
                 this.missionAircraft.push(ai);
             }
+            // loadAircraft's config swap clears the sim's collision mesh, and a
+            // new slot never had a barricade hull: push both, as for the player.
+            this.pushAircraftMeshes(simId, def);
             this.combatSim.setRoute(simId, route);
             if (pose.airborne) {
                 this.combatSim.setPhase(simId, AiFlightPhase.WAYPOINT);
@@ -4595,12 +4610,17 @@ export class Game {
             this.player.noteGroundImpact(severity, at);
             return;
         }
-        const ai = this.aiOpponents.find(a => a.simId === hit.targetId)
-            ?? (this.wingman?.simId === hit.targetId ? this.wingman : undefined);
-        ai?.noteGroundImpact(severity, at);
+        this.aiBySimId(hit.targetId)?.noteGroundImpact(severity, at);
     }
 
     private readonly _survivableHit = new THREE.Vector3();
+
+    /** The AI aircraft (opponent, wingman or mission flight) with this sim id. */
+    private aiBySimId(id: string): AiAircraftEntity | undefined {
+        return this.aiOpponents.find(a => a.simId === id)
+            ?? (this.wingman?.simId === id ? this.wingman : undefined)
+            ?? this.missionAircraft.find(a => a.simId === id);
+    }
 
     /** What a point on the ground is, for the colour of the dust thrown up from it. */
     private surfaceKindAt(x: number, z: number): 'dirt' | 'water' | 'concrete' {
@@ -4838,6 +4858,7 @@ export class Game {
         this.applySelectedAircraft();
         this.state = GameState.PLAYER;
         this.stopReplay();
+        this.clearExteriorEnemyLock();
         this.recorder.clear();
         const seedMode: SpawnMode = at !== undefined ? 'approach' : spawn;
         const center = at !== undefined ? this.locationSpawnPosition(at) : this.spawnCenterEnu(spawn);
@@ -5134,8 +5155,7 @@ export class Game {
         this.wreckField.onDamage = (e) => {
             const entity = e.id === PLAYER_SIM_ID
                 ? this.player
-                : (this.aiOpponents.find(a => a.simId === e.id)
-                    ?? (this.wingman?.simId === e.id ? this.wingman : undefined));
+                : this.aiBySimId(e.id);
             if (!entity) {
                 return;
             }

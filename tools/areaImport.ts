@@ -1444,7 +1444,9 @@ export function ensureTerrain(): void {
             // and they only add to a pyramid that has been baked with data.
             // Gathering capped leaves takes every capped area without one.
             const gather = (s: Step) => s.args[0] === 'tools/gather_capped_leaves.py';
-            const steps = meshSteps([]).filter(s => s.cmd === process.execPath || gather(s))
+            // py_leaf_pool runs on node too, but is one of the measuring stages.
+            const measuring = (s: Step) => s.args.some(a => a.endsWith('py_leaf_pool.ts'));
+            const steps = meshSteps([]).filter(s => (s.cmd === process.execPath && !measuring(s)) || gather(s))
                 .map(s => ({ ...s, args: s.args.slice(0, gather(s) ? 1 : 3) }));
             job.stepCount = steps.length;
             for (let i = 0; i < steps.length; i++) {

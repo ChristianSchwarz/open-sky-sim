@@ -57,6 +57,12 @@ console.log(`rebake_box: satellites ${satellites ? 'on' : 'off (SATELLITES=0)'}`
 for (const step of meshSteps(box, satellites)) {
     console.log(`\n== ${step.label}`);
     const r = spawnSync(step.cmd, step.args, { stdio: 'inherit' });
+    // A partial exit (a lidar or LoD2 server unreachable) wrote its outputs,
+    // as the importer treats it: go on to the stages after it.
+    if (step.partialCode !== undefined && r.status === step.partialCode) {
+        console.warn(`rebake_box: "${step.label}" finished partially (exit ${r.status}); going on`);
+        continue;
+    }
     if (r.status !== 0) {
         console.error(`rebake_box: "${step.label}" failed (exit ${r.status ?? r.signal}); stopping`);
         process.exit(1);

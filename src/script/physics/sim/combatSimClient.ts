@@ -59,7 +59,6 @@ export class CombatSimClient {
 
     private projectiles: Float32Array<ArrayBufferLike> = new Float32Array(0);
     private projectileCount = 0;
-    private pendingHits: SimHitEvent[] = [];
     private maneuverLabels: Record<string, string> = EMPTY_MANEUVER_LABELS;
     /** Fired on the main thread whenever a snapshot carries new hits (debris / SFX). */
     onHits: ((hits: SimHitEvent[]) => void) | undefined;
@@ -429,9 +428,6 @@ export class CombatSimClient {
         if (hits.length === 0) {
             return;
         }
-        for (let i = 0; i < hits.length; i++) {
-            this.pendingHits.push(hits[i]);
-        }
         this.onHits?.(hits);
     }
 
@@ -455,15 +451,5 @@ export class CombatSimClient {
     /** Number of live projectiles in {@link getProjectileBuffer}. */
     getProjectileCount(): number {
         return this.projectileCount;
-    }
-
-    /** Drain hit events accumulated since the last call (for SFX / feedback). */
-    drainHits(): SimHitEvent[] {
-        if (this.pendingHits.length === 0) {
-            return this.pendingHits;
-        }
-        const hits = this.pendingHits;
-        this.pendingHits = [];
-        return hits;
     }
 }

@@ -6,12 +6,18 @@ export class AudioClip {
     private _rate = 1.0;
     private _gain = 1.0;
     private started = false;
+    /** Wanted audible: play() may come before the buffer has decoded. */
+    private playing = false;
 
     constructor(url: string, private context: AudioContext, resources: AudioResourceManager, private loop: boolean, private destination: AudioNode) {
         resources.load(url, resource => {
             this.audioSource = new AudioBufferSourceNode(context, { buffer: resource.getBuffer(), loop, playbackRate: this._rate });
             this.gainNode = new GainNode(context, { gain: this._gain });
-            this.audioSource.connect(this.gainNode).connect(this.destination);
+            this.audioSource.connect(this.gainNode);
+            if (this.playing) {
+                this.playing = false;
+                this.play();
+            }
         });
     }
 
@@ -30,15 +36,25 @@ export class AudioClip {
     }
 
     play() {
+        if (this.playing) {
+            return;
+        }
+        this.playing = true;
+        if (!this.audioSource || !this.gainNode) {
+            return; // started by the load callback
+        }
         if (!this.started) {
             this.started = true;
-            this.audioSource?.start();
-        } else {
-            this.gainNode?.connect(this.destination);
+            this.audioSource.start();
         }
+        this.gainNode.connect(this.destination);
     }
 
     stop() {
+        if (!this.playing) {
+            return;
+        }
+        this.playing = false;
         this.gainNode?.disconnect(this.destination);
     }
 }

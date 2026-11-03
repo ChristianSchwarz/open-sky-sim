@@ -63,9 +63,10 @@ export interface Mission {
 
 /** The file name a mission is saved under: its name, slugged. */
 export function missionId(name: string): string {
-    // Accents come off rather than splitting the word: Zürich is zurich.
+    // Accents come off rather than splitting the word: Zürich is zurich. Cut
+    // before trimming dashes, so a cut on a separator cannot end in one.
     return name.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '').slice(0, 40);
+        .slice(0, 40).replace(/^-+|-+$/g, '');
 }
 
 export const MISSION_ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;

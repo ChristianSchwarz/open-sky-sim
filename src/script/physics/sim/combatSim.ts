@@ -1234,6 +1234,9 @@ export class CombatSim implements ProjectileSink {
         if (!a) return;
         a.model.setThrottle(throttle);
         a.model.syncEffectiveThrottle();
+        // The player's keyboard throttle is commanded every step from its
+        // input; `reset` zeroed it, so an airborne spawn would spool down.
+        this.playerInputs.get(id)?.syncThrottle(throttle);
     }
 
     snapPhysicsState(id: string): void {
