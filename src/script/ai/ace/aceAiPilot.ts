@@ -6,6 +6,7 @@ import { AiPilotController } from '../aiPilotController';
 import { PilotableAircraft } from '../aircraftControls';
 import { ballisticAimPoint, HEAD_ON_GUN_RANGE, predictedMissDistance } from '../dogfightGeometry';
 import { FIGHT_CORNER_SPEED, FlightControlComputer } from '../shaw/flightControlComputer';
+import { TargetAccelEstimator } from '../shaw/gunSolution';
 import { setFlightPathAxes } from '../shaw/shawGeometry';
 import { WorldQuery } from '../worldQuery';
 import { AceTacticalFSM } from './aceTacticalFsm';
@@ -33,9 +34,6 @@ const KULBIT_SPEED_RANGE: readonly [number, number] = [110, 270];
 
 /** Roll gain used to hold wings level through a post-stall maneuver. */
 const PSM_ROLL_KP = 2.2;
-
-/** Smoothing on the finite-difference target-acceleration estimate. */
-const TARGET_ACC_EMA = 0.25;
 
 /**
  * How far outside the target's hit radius the ballistic solution may miss and
@@ -82,14 +80,12 @@ export class AceAiPilot implements AiPilotController {
     private psmElapsed = 0;
     private psmCooldown = 0;
 
-    private hasPrevTargetVel = false;
-    private readonly prevTargetVel = new THREE.Vector3();
+    private readonly targetAccel = new TargetAccelEstimator();
 
     private readonly selfSnap: AceSnapshot;
     private readonly tgtSnap: AceSnapshot;
     private readonly _tpos = new THREE.Vector3();
     private readonly _tvel = new THREE.Vector3();
-    private readonly _acc = new THREE.Vector3();
     private readonly _fwd = new THREE.Vector3();
     private readonly _right = new THREE.Vector3();
     private readonly _up = new THREE.Vector3();
@@ -153,7 +149,7 @@ export class AceAiPilot implements AiPilotController {
             // The acceleration estimate is a finite difference on one target's
             // velocity; carrying it across a target swap would inject a bogus
             // spike into the next gun solution.
-            this.hasPrevTargetVel = false;
+            this.targetAccel.reset();
         }
         this.target = target;
         this.classic.setTarget(target);
@@ -351,14 +347,7 @@ export class AceAiPilot implements AiPilotController {
         // extrapolates the bandit through its turn rather than along a straight
         // line, which is the difference between tracking a hard-turning target
         // and shooting behind it.
-        if (this.hasPrevTargetVel && delta > 1e-4) {
-            this._acc.copy(this._tvel).sub(this.prevTargetVel).divideScalar(delta);
-            this.tgtSnap.acceleration.lerp(this._acc, TARGET_ACC_EMA);
-        } else {
-            this.tgtSnap.acceleration.set(0, 0, 0);
-        }
-        this.prevTargetVel.copy(this._tvel);
-        this.hasPrevTargetVel = true;
+        this.targetAccel.update(this.tgtSnap.acceleration, this._tvel, delta);
 
         if (this._tvel.lengthSq() > 1e-6) {
             this.tgtSnap.forward.copy(this._tvel).normalize();

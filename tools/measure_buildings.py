@@ -64,6 +64,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import http.client
 import io
 import math
 import os
@@ -173,7 +174,8 @@ def http_get(url: str, timeout: float = 120.0, tries: int = 4) -> Optional[bytes
                 return None
             if attempt == tries - 1:
                 raise
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
+        # IncompleteRead (http.client.HTTPException) is a body cut off mid-transfer.
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
             if attempt == tries - 1:
                 raise
         time.sleep(2 * (attempt + 1))

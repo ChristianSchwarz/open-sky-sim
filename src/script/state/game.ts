@@ -5288,7 +5288,8 @@ export class Game {
 
         this.cameraUpdaters.set(
             PlayerViewState.AI_CHASE,
-            new AiExteriorCameraUpdater(this.player, this.playerCamera.main, this.aiOpponent!));
+            new AiExteriorCameraUpdater(this.player, this.playerCamera.main, this.aiOpponent!,
+                ExteriorViewHeading.BACK, (x, z) => this.groundHeightAt(x, z)));
     }
 
     /** Current player transform as a combat-sim spawn descriptor. */

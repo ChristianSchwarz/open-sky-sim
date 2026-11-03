@@ -74,6 +74,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import http.client
 import math
 import os
 import struct
@@ -371,12 +372,11 @@ class Dgm1:
         self.mem: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
 
     def download(self, ix: int, iy: int) -> bytes:
-        """The tile's GeoTIFF; raises where there is none."""
-        import urllib.request
-        req = urllib.request.Request(f'https://download1.bayernwolke.de/a/dgm/dgm1/{ix}_{iy}.tif',
-                                     headers={'User-Agent': USER_AGENT})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            return r.read()
+        """The tile's GeoTIFF; FileNotFoundError where there is none."""
+        data = http_get(f'https://download1.bayernwolke.de/a/dgm/dgm1/{ix}_{iy}.tif', timeout=120)
+        if data is None:
+            raise FileNotFoundError(f'no DGM1 tile {ix}_{iy}')
+        return data
 
     def grid(self, ix: int, iy: int) -> Optional[np.ndarray]:
         key = (ix, iy)
@@ -387,7 +387,7 @@ class Dgm1:
             os.makedirs(self.cache_dir, exist_ok=True)
             try:
                 data = self.download(ix, iy)
-            except Exception:  # noqa: BLE001 - no tile there
+            except FileNotFoundError:  # no tile there; a network failure fails the leaf
                 self.mem[key] = None
                 return None
             tmp = f'{path}.{os.getpid()}.part'
@@ -429,7 +429,8 @@ def zip_member(data: bytes, suffix: str) -> bytes:
 
 
 def http_get(url: str, timeout: float = 300) -> Optional[bytes]:
-    """The body, or None for a missing file (4xx) or after the retries."""
+    """The body, or None for a missing file (4xx). Raises once the retries run
+    out, so a network outage fails the leaf instead of caching a .none marker."""
     import urllib.error
     import urllib.request
     for attempt in range(4):
@@ -440,8 +441,12 @@ def http_get(url: str, timeout: float = 300) -> Optional[bytes]:
         except urllib.error.HTTPError as ex:
             if 400 <= ex.code < 500 and ex.code not in (408, 429):
                 return None
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
-            pass
+            if attempt == 3:
+                raise
+        # IncompleteRead (http.client.HTTPException) is a body cut off mid-transfer.
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
+            if attempt == 3:
+                raise
         time.sleep(3 * (attempt + 1))
     return None
 

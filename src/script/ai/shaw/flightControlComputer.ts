@@ -277,7 +277,7 @@ export class FlightControlComputer {
     }
 
     private commandBank(desiredBank: number): void {
-        const rollCmd = clamp((desiredBank - this.bank) * ROLL_KP, -1, 1);
+        const rollCmd = clamp(wrapPi(desiredBank - this.bank) * ROLL_KP, -1, 1);
         this.aircraft.setRoll(rollCmd);
     }
 

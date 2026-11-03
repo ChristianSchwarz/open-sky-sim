@@ -63,6 +63,7 @@ import { LIDAR_STORE_DIR } from './bake/lidarStore';
 import { LAND_SIMPLIFY_M } from './bake/simplifyLand';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 import { GB_PER_WORKER, localJobs } from './bake/localJobs';
+import { writeManifestBlock } from './bake/manifestBlock';
 import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'gradeTileWorker.ts');
@@ -306,7 +307,7 @@ async function main(): Promise<void> {
     const minZoom: number = manifest.roads.minZoom;
     fs.writeFileSync(indexPath, encodeTileIndex([...present.values()], minZoom, leafZoom));
     manifest.beds = { path: '{z}/{x}/{y}.pbd', indexPath: 'index_beds.bin', encoding: 'PBD1', transport: 'gzip', minZoom, maxZoom: leafZoom };
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeManifestBlock(manifestPath, 'beds', manifest.beds);
 
     // --- summary ----------------------------------------------------------------
     const byZ = new Map<number, { n: number; graded: number; already: number; added: number; walls: number; over: number; before: number; after: number; ms: number; beds: number; bedsW: number }>();

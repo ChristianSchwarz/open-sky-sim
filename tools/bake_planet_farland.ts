@@ -40,6 +40,7 @@ import { FAR_LAND_EXT, FarLandConfig, FarLandResult } from './bake/farLandTile';
 import { tileFile } from './bake/railBedInputs';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 import { GB_PER_WORKER, localJobs } from './bake/localJobs';
+import { writeManifestBlock } from './bake/manifestBlock';
 import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'farLandWorker.ts');
@@ -193,7 +194,7 @@ async function main(): Promise<void> {
         path: `{z}/{x}/{y}${FAR_LAND_EXT}`, indexPath: INDEX_FILE, encoding: 'PFL1', transport: 'gzip',
         zoom: leafZoom, levelsM: args.levelsM,
     };
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeManifestBlock(manifestPath, 'farLand', manifest.farLand);
 
     let written = 0, nearTris = 0, coarseTris = 0, bytes = 0, noSaving = 0;
     const firstLevel = args.levelsM.map(() => 0);

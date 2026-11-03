@@ -110,6 +110,7 @@ import { decodeRvr } from './bake/rvr';
 import { LonLatBounds } from './bake/shoreline';
 import { tileSurface } from './bake/tileSurface';
 import { LIDAR_STORE_DIR, LidarStore } from './bake/lidarStore';
+import { writeManifestBlock } from './bake/manifestBlock';
 import { BED_TIERS, bedTierOf } from '../src/script/terrain/railBed';
 import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
@@ -1564,7 +1565,7 @@ function main(): void {
         minZoom: minLeafZoom,
         maxZoom: leafZoom,
     };
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeManifestBlock(manifestPath, 'bridges', manifest.bridges);
 
     console.log(`crossings    ${furniture.crossings} level crossings, ${furniture.sides} approaches furnished, ${furniture.tris} triangles`);
     console.log(`spans        ${stat.spans}  (planned ${stat.planned}, ${stat.rail} of them rail, tunnels skipped ${stat.tunnels})`);

@@ -4,7 +4,7 @@ import { FORWARD, UP } from '../../utils/math';
 import { CameraUpdater } from "./cameraUpdater";
 
 /** Height the locked camera keeps over the ground (m). */
-const LOCK_GROUND_CLEARANCE_M = 3;
+export const LOCK_GROUND_CLEARANCE_M = 3;
 
 export enum ExteriorViewHeading {
     FRONT,

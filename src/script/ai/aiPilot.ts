@@ -972,7 +972,7 @@ export class AiPilot implements AiPilotController {
 
     /** Roll toward a desired bank. Proportional on the rate-commanded roll axis. */
     private commandBank(desiredBank: number): number {
-        const rollCmd = clamp((desiredBank - this.bank) * ROLL_KP, -1, 1);
+        const rollCmd = clamp(wrapPi(desiredBank - this.bank) * ROLL_KP, -1, 1);
         this.aircraft.setRoll(rollCmd);
         return rollCmd;
     }

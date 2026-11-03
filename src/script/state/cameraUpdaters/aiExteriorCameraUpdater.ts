@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { PlayerEntity } from '../../scene/entities/player';
 import { FORWARD, UP } from '../../utils/math';
 import { CameraUpdater } from './cameraUpdater';
-import { ExteriorViewHeading } from './exteriorFrontBehindCameraUpdater';
+import { ExteriorViewHeading, LOCK_GROUND_CLEARANCE_M } from './exteriorFrontBehindCameraUpdater';
 
 
 /** Anything that can be chased by an exterior camera. */
@@ -33,6 +33,7 @@ export class AiExteriorCameraUpdater extends CameraUpdater {
         camera: THREE.PerspectiveCamera,
         private orbitSubject: ChaseTarget,
         private heading: ExteriorViewHeading = ExteriorViewHeading.BACK,
+        private readonly groundHeightAt: (x: number, z: number) => number = () => -Infinity,
     ) {
         super(actor, camera);
     }
@@ -60,6 +61,11 @@ export class AiExteriorCameraUpdater extends CameraUpdater {
             .copy(subjectPos)
             .addScaledVector(this._v, EXTERIOR_CHASE_DISTANCE_M)
             .addScaledVector(UP, EXTERIOR_CHASE_HEIGHT_M);
+        // The player well above puts the line underground: stay over it.
+        const floor = this.groundHeightAt(this.camera.position.x, this.camera.position.z) + LOCK_GROUND_CLEARANCE_M;
+        if (this.camera.position.y < floor) {
+            this.camera.position.y = floor;
+        }
         this.camera.lookAt(subjectPos);
     }
 }

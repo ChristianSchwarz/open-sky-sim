@@ -1143,21 +1143,27 @@ class DemSampler:
 
     def _tile(self, x: int, y: int) -> Optional[np.ndarray]:
         key = (x, y)
-        if key not in self._cache:
-            if len(self._cache) >= DEM_CACHE_TILES:
-                self._cache.clear()
-            path = os.path.join(self.out_dir, str(self.zoom), str(x), f'{y}.pdm')
-            grid: Optional[np.ndarray] = None
-            if self._indexed is not None and key in self._indexed and not os.path.isfile(path):
-                raise MissingInput(f'planet/{self.zoom}/{x}/{y}.pdm')
-            if os.path.isfile(path):
-                try:
-                    with open(path, 'rb') as fh:
-                        grid = decode_pdm(fh.read())
-                except Exception:
-                    grid = None
+        if key in self._cache:
+            # Least recently used first out (dicts keep insertion order).
+            # Clearing the whole cache at the cap made a bake sweeping a strip
+            # wider than the cap re-read every tile, as LandMask once did.
+            grid = self._cache.pop(key)
             self._cache[key] = grid
-        return self._cache[key]
+            return grid
+        if len(self._cache) >= DEM_CACHE_TILES:
+            del self._cache[next(iter(self._cache))]
+        path = os.path.join(self.out_dir, str(self.zoom), str(x), f'{y}.pdm')
+        grid = None
+        if self._indexed is not None and key in self._indexed and not os.path.isfile(path):
+            raise MissingInput(f'planet/{self.zoom}/{x}/{y}.pdm')
+        if os.path.isfile(path):
+            try:
+                with open(path, 'rb') as fh:
+                    grid = decode_pdm(fh.read())
+            except Exception:
+                grid = None
+        self._cache[key] = grid
+        return grid
 
     def sample(self, lon: float, lat: float) -> float:
         """Height at lon/lat, or NaN where the pyramid holds no data."""

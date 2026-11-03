@@ -36,6 +36,7 @@ import { boundsOf } from './bake/coverTex';
 import { drapeRoads } from './bake/drapeRoads';
 import { decodeRvr } from './bake/rvr';
 import { LonLatBounds } from './bake/shoreline';
+import { writeManifestBlock } from './bake/manifestBlock';
 import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
 /**
@@ -224,7 +225,7 @@ function main(): void {
         minZoom,
         maxZoom: leafZoom,
     };
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeManifestBlock(manifestPath, 'roads', manifest.roads);
 
     const mb = (n: number) => (n / 1048576).toFixed(1);
     console.log('  level  tiles   runs  strokes dropped   tris/tile   gz MB');

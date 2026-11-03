@@ -57,6 +57,7 @@ import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leaf
 import { TexLeafConfig, TexLeafResult } from './bake/texLeaf';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 import { GB_PER_WORKER, localJobs } from './bake/localJobs';
+import { writeManifestBlock } from './bake/manifestBlock';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'texLeafWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'texLeafWorker.cjs');
@@ -523,7 +524,7 @@ async function main(): Promise<void> {
         maxZoom,
         ...(hasLeaves ? { leafZoom } : {}),
     };
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeManifestBlock(manifestPath, 'texture', manifest.texture);
 
     const mb = (n: number) => (n / 1048576).toFixed(1);
     console.log('  level  texels  tiles   raw MB    gz MB');

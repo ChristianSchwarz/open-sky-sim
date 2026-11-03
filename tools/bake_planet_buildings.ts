@@ -37,6 +37,7 @@ import { boundsOf } from './bake/coverTex';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import { LonLatBounds } from './bake/shoreline';
 import { tileSurface } from './bake/tileSurface';
+import { writeManifestBlock } from './bake/manifestBlock';
 import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 
 interface Args {
@@ -259,17 +260,14 @@ function main(): void {
     }
     const minLeafZoom = Math.min(leafZoom, ...[...present.values()].map(k => k.z));
     fs.writeFileSync(indexPath, encodeTileIndex([...present.values()], minLeafZoom, leafZoom));
-    // Re-read: a stage that ran meanwhile may have written its own block.
-    const latest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as TerrainManifestFile;
-    latest.buildings = {
+    writeManifestBlock(manifestPath, 'buildings', {
         path: '{z}/{x}/{y}.pbh',
         indexPath: 'index_buildings.bin',
         encoding: 'PBH1',
         transport: 'gzip',
         minZoom: minLeafZoom,
         maxZoom: leafZoom,
-    };
-    fs.writeFileSync(manifestPath, `${JSON.stringify(latest, null, 2)}\n`);
+    });
 
     const pct = (n: number) => (kept ? (n / kept * 100).toFixed(0) : '0') + '%';
     console.log(`  ${written.length} tiles, ${kept}/${read} buildings, ${(gzBytes / 1048576).toFixed(2)} MB gz, `

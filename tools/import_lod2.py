@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import http.client
 import io
 import math
 import os
@@ -202,7 +203,8 @@ def to_utm(lons: Sequence[float], lats: Sequence[float], crs: str = 'EPSG:25832'
 # --- LoD2 tiles ---------------------------------------------------------------
 
 def http_get(url: str) -> Optional[bytes]:
-    """The body, or None for a missing file (4xx) or after the retries."""
+    """The body, or None for a missing file (4xx). Raises once the retries run
+    out, so a network outage fails the leaf instead of reading as no tile."""
     for attempt in range(4):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
@@ -211,8 +213,12 @@ def http_get(url: str) -> Optional[bytes]:
         except urllib.error.HTTPError as ex:
             if 400 <= ex.code < 500 and ex.code not in (408, 429):
                 return None
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
-            pass
+            if attempt == 3:
+                raise
+        # IncompleteRead (http.client.HTTPException) is a body cut off mid-transfer.
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
+            if attempt == 3:
+                raise
         time.sleep(3 * (attempt + 1))
     return None
 
