@@ -20,7 +20,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { unzipSync } from 'fflate';
 import {
-    areasHandler, ensureTerrain, importStream, mergeAreas, osmExtractsHandler, osmTile, startDelete,
+    areasHandler, ensureTerrain, importStream, killAllJobs, mergeAreas, osmExtractsHandler, osmTile, startDelete,
     startImport, terrainBootstrapHandler,
 } from './areaImport';
 import { deleteMissionHandler, getMissionHandler, missionsHandler, saveMissionHandler } from './missions';
@@ -1295,6 +1295,16 @@ app.use(express.static(DIST_DIR, {
         }
     },
 }));
+
+// A stopped server takes its import's tools with it: they kept baking into the
+// pyramid with nobody left to watch them, beside whatever started next. The
+// signals only end the process; the kill itself is in the exit hook, which
+// every way out passes (killTree is synchronous for it). SIGHUP: the console
+// window closed, on Windows.
+process.on('exit', killAllJobs);
+for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
+    process.on(sig, () => process.exit(code));
+}
 
 app.listen(PORT, () => {
     console.log(`retroflightsim dev server running at http://localhost:${PORT}`);

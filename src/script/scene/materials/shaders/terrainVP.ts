@@ -39,6 +39,8 @@ export const TerrainVertProgram: string = `
   uniform vec3 uSunAmbient;
   uniform vec3 uSunDirect;
   uniform vec3 uSunTint;
+  // 1 with the sun up, 0 at night: the rim light goes out with the sun.
+  uniform float uRimFade;
 
 ${TERRAIN_COVER_PARS}
   /**
@@ -180,7 +182,7 @@ ${HAZE_PARS_VERTEX}
     vec3 toCamera = normalize(-worldPos.xyz);
     float backlit = max(-dot(toCamera, uSunDir), 0.0);
     float fresnel = pow(1.0 - max(dot(worldNormal, toCamera), 0.0), RIM_POWER);
-    vLight += uSunTint * (fresnel * backlit * (1.0 - ndl) * RIM_STRENGTH);
+    vLight += uSunTint * (fresnel * backlit * (1.0 - ndl) * RIM_STRENGTH) * uRimFade;
 
     vec4 pos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     if (shadingType != 3) {

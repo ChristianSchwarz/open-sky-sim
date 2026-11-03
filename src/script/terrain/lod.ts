@@ -336,6 +336,21 @@ export const FRUSTUM_CULL_MARGIN_TAN = Math.tan(FRUSTUM_CULL_MARGIN_RAD);
 /** Mesh cache ceiling in bytes. Tiles are evicted least-recently-drawn first. */
 export const MESH_CACHE_BYTES = 256 * 1024 * 1024;
 
+/**
+ * Budget for uploaded tiles (TileMeshes.bytes: land, water, far land, roads,
+ * bridges, buildings, textures). Only idle tiles are released to meet it -
+ * see TileStreamer.evictIdle - so this bounds the cache of tiles nobody is
+ * drawing, not the view: a view that alone needs more keeps all of it.
+ */
+export const UPLOADED_TILE_BYTES = 384 * 1024 * 1024;
+
+/**
+ * Reconcile passes (RECONCILE_INTERVAL_MS each, so about 5 s) an uploaded
+ * tile must go undrawn before it may be released. Long enough that a turn
+ * and back, or a leaf dissolve, does not re-upload what it just dropped.
+ */
+export const UPLOADED_TILE_IDLE_GENERATIONS = 50;
+
 /** Geometric horizon distance (m) for a spherical Earth of radius `radiusM`. */
 function geometricHorizonDistanceM(altitudeM: number, radiusM: number = WGS84_A): number {
     const h = Math.max(0, altitudeM);

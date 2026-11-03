@@ -25,6 +25,15 @@ import {
 const EMPTY_FORCE_VECTORS: ForceVectorSample[] = [];
 const EMPTY_MANEUVER_LABELS: Record<string, string> = {};
 
+/**
+ * A step with no reply for this long (main thread running all the while)
+ * means the worker is gone or wedged. Generous: a world upload queued ahead
+ * of a step can take seconds on a slow machine.
+ */
+const WORKER_STALL_MS = 30_000;
+/** A gap between ticks longer than this is the main thread stalling, not the worker. */
+const MAIN_THREAD_GAP_MS = 1_000;
+
 /** A render-side proxy the client mirrors authoritative aircraft state onto. */
 export interface SimAircraftProxy {
     readonly simId: string;
@@ -62,6 +71,19 @@ export class CombatSimClient {
     private maneuverLabels: Record<string, string> = EMPTY_MANEUVER_LABELS;
     /** Fired on the main thread whenever a snapshot carries new hits (debris / SFX). */
     onHits: ((hits: SimHitEvent[]) => void) | undefined;
+    /**
+     * Fired once if the worker dies (failed to load, or stopped answering):
+     * nothing will move again until the page is reloaded. index.ts shows it
+     * on the boot overlay, as it does a failed boot.
+     */
+    onFatal: ((message: string) => void) | undefined;
+    /** Why the worker is dead; once set, no more steps are sent. */
+    private fatal: string | undefined;
+    /** Whether any message has come back: an error before one is a worker that never ran. */
+    private everAnswered = false;
+    /** performance.now() when the step in flight was sent, and of the last tick. */
+    private stepSentAt = 0;
+    private lastTickAt = 0;
 
     constructor() {
         this.worker = new Worker(new URL('../worker/combatSimWorker.ts', import.meta.url));
@@ -71,6 +93,7 @@ export class CombatSimClient {
             this.post({ type: 'attachSharedState', buffer: this.shared.buffer });
         }
         this.worker.onmessage = (event: MessageEvent<WorkerToSimMessage>) => {
+            this.everAnswered = true;
             const data = event.data;
             if (data.type === 'state') {
                 this.barricadeWeb = data.web;
@@ -98,7 +121,50 @@ export class CombatSimClient {
         };
         this.worker.onerror = (event) => {
             console.error('[combatSimWorker] worker error', event.message, event.filename, event.lineno);
+            // Logged here; without this the browser logs it a second time.
+            event.preventDefault();
+            if (!this.everAnswered) {
+                // Never answered: the script did not load or threw at the top level.
+                this.fail(`the physics worker did not start (${event.message || 'script error'})`);
+                return;
+            }
+            // An uncaught error past start-up leaves the worker running, but the
+            // step it was on never replies: stop waiting for it.
+            this.releaseStep();
         };
+        this.worker.onmessageerror = (event) => {
+            // A reply that could not be deserialized: the step it answered is lost.
+            console.error('[combatSimWorker] unreadable message from the worker', event.data);
+            this.releaseStep();
+        };
+    }
+
+    /** Whether the worker died (see {@link onFatal}); the sim is frozen for good. */
+    isDead(): boolean {
+        return this.fatal !== undefined;
+    }
+
+    /** Stop waiting for the step in flight, and send the next one. */
+    private releaseStep(): void {
+        this.busy = false;
+        if (this.shared) {
+            setSharedBusy(this.shared, false);
+        }
+        this.flush();
+    }
+
+    private fail(reason: string): void {
+        if (this.fatal !== undefined) {
+            return;
+        }
+        this.fatal = reason;
+        console.error(`[combatSimWorker] ${reason}; the flight is frozen until the page is reloaded.`);
+        this.busy = false;
+        if (this.shared) {
+            setSharedBusy(this.shared, false);
+        }
+        this.worker.terminate();
+        this.onFatal?.(reason);
     }
 
     /** True when pose is mirrored via SharedArrayBuffer (HD can run uncapped). */
@@ -107,6 +173,9 @@ export class CombatSimClient {
     }
 
     private post(message: SimToWorkerMessage): void {
+        if (this.fatal !== undefined) {
+            return;
+        }
         this.worker.postMessage(message);
     }
 
@@ -158,6 +227,9 @@ export class CombatSimClient {
 
     /** Add/drop mirrored DEM tiles; height buffers are transferred, not copied. */
     postHeightTiles(update: HeightTileUpdate): void {
+        if (this.fatal !== undefined) {
+            return;
+        }
         this.worker.postMessage(
             { type: 'heightTiles', update },
             update.add.map(t => t.heights.buffer as ArrayBuffer),
@@ -179,6 +251,9 @@ export class CombatSimClient {
      * then; `transfer` hands its buffers over (only for one not kept here).
      */
     setBarricadeAirframe(id: string, airframe: AirframeCollider | null, hull = false, transfer = false): void {
+        if (this.fatal !== undefined) {
+            return;
+        }
         this.worker.postMessage({ type: 'setBarricadeAirframe', id, airframe, hull } satisfies SimToWorkerMessage,
             airframe && transfer ? airframeBuffers(airframe) : []);
     }
@@ -363,8 +438,23 @@ export class CombatSimClient {
         // Pull pose from SAB before flush so a delayed onmessage cannot freeze the aircraft.
         this.pullSharedPose();
         this.syncBusyFromShared();
+        this.watchForStall();
         this.pendingDelta += delta;
         this.flush();
+    }
+
+    /** A step unanswered for WORKER_STALL_MS of main-thread time: the worker is dead or wedged. */
+    private watchForStall(): void {
+        const now = performance.now();
+        if (now - this.lastTickAt > MAIN_THREAD_GAP_MS) {
+            // The page was hidden or the main thread stalled: the reply may be
+            // queued behind this very tick, so the clock starts again.
+            this.stepSentAt = now;
+        }
+        this.lastTickAt = now;
+        if (this.busy && this.fatal === undefined && now - this.stepSentAt > WORKER_STALL_MS) {
+            this.fail(`the physics worker stopped answering (no reply for ${WORKER_STALL_MS / 1000} s)`);
+        }
     }
 
     private syncBusyFromShared(): void {
@@ -397,7 +487,7 @@ export class CombatSimClient {
         if (this.shared) {
             this.busy = isSharedBusy(this.shared);
         }
-        if (this.busy || this.pendingDelta <= 0 || this.proxies.size === 0) {
+        if (this.fatal !== undefined || this.busy || this.pendingDelta <= 0 || this.proxies.size === 0) {
             return;
         }
         const inputs: Record<string, SimControlInputs> = {};
@@ -418,6 +508,7 @@ export class CombatSimClient {
         const delta = Math.min(this.pendingDelta, MAX_STEP_DELTA);
         this.pendingDelta = 0;
         this.busy = true;
+        this.stepSentAt = performance.now();
         if (this.shared) {
             setSharedBusy(this.shared, true);
         }

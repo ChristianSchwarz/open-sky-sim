@@ -302,12 +302,50 @@ function closestOnTriangle(
         _cpX = bx + (cx - bx) * w; _cpY = by + (cy - by) * w; _cpZ = bz + (cz - bz) * w;
         return;
     }
-    const denom = 1 / (va + vb + vc);
+    // va + vb + vc = |ab x ac|^2: (near) zero for a degenerate, collinear or
+    // collapsed triangle, where the face solve would divide by zero. Its closest
+    // point is then on one of its edges.
+    const sum = va + vb + vc;
+    const abLenSq = abx * abx + aby * aby + abz * abz;
+    const acLenSq = acx * acx + acy * acy + acz * acz;
+    if (!(sum > DEGENERATE_REL_EPS * abLenSq * acLenSq)) {
+        closestOnDegenerateTriangle(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz);
+        return;
+    }
+    const denom = 1 / sum;
     const v = vb * denom;
     const w = vc * denom;
     _cpX = ax + abx * v + acx * w;
     _cpY = ay + aby * v + acy * w;
     _cpZ = az + abz * v + acz * w;
+}
+
+/** Relative |ab x ac|^2 below which a triangle counts as degenerate. */
+const DEGENERATE_REL_EPS = 1e-12;
+
+/** Closest point to `p` on any of the three edges of a degenerate triangle, into `_cp*`. */
+function closestOnDegenerateTriangle(
+    px: number, py: number, pz: number,
+    ax: number, ay: number, az: number,
+    bx: number, by: number, bz: number,
+    cx: number, cy: number, cz: number,
+): void {
+    let bestX = ax, bestY = ay, bestZ = az;
+    let bestD = Infinity;
+    const edge = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void => {
+        const ex = x1 - x0, ey = y1 - y0, ez = z1 - z0;
+        const lenSq = ex * ex + ey * ey + ez * ez;
+        let t = lenSq > 0 ? ((px - x0) * ex + (py - y0) * ey + (pz - z0) * ez) / lenSq : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const qx = x0 + ex * t, qy = y0 + ey * t, qz = z0 + ez * t;
+        const dx = px - qx, dy = py - qy, dz = pz - qz;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d < bestD) { bestD = d; bestX = qx; bestY = qy; bestZ = qz; }
+    };
+    edge(ax, ay, az, bx, by, bz);
+    edge(bx, by, bz, cx, cy, cz);
+    edge(cx, cy, cz, ax, ay, az);
+    _cpX = bestX; _cpY = bestY; _cpZ = bestZ;
 }
 
 /** Unit face normal of triangle `t`, written into `out`. */

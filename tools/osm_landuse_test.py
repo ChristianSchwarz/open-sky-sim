@@ -126,6 +126,27 @@ class AssembleLandusePolygonsTest(unittest.TestCase):
             self.assertTrue(poly.is_valid)
             self.assertGreater(poly.area, 0)
 
+    def test_a_way_that_repairs_into_several_parts_keeps_them_all(self):
+        # A figure eight: two unit squares touching at (1, 1), one ring round
+        # both. Invalid; buffer(0) makes it a MultiPolygon, which used to be
+        # dropped whole.
+        coords = [(0, 0), (1, 0), (1, 1), (2, 1), (2, 2), (1, 2), (1, 1), (0, 1)]
+        nodes = {100 + i: c for i, c in enumerate(coords)}
+        ids = list(nodes) + [100]
+        ids[6] = 102  # the touching corner is the same node both times
+        del nodes[106]
+        elements = [{'type': 'way', 'id': 1, 'nodes': ids, 'tags': {'landuse': 'farmland'}}]
+        for nid, (lon, lat) in nodes.items():
+            elements.append({'type': 'node', 'id': nid, 'lon': lon, 'lat': lat})
+
+        polys, classes = assemble_landuse_polygons({'elements': elements})
+
+        self.assertEqual(len(polys), 2)
+        self.assertEqual(classes, [CLS_CROP, CLS_CROP])
+        self.assertAlmostEqual(sum(p.area for p in polys), 2.0)
+        for poly in polys:
+            self.assertTrue(poly.is_valid)
+
 
 class StampLanduseClassesTest(unittest.TestCase):
     BOUNDS = (0.0, 0.0, 1.0, 1.0)
@@ -148,7 +169,9 @@ class StampLanduseClassesTest(unittest.TestCase):
         mid = self.SIZE // 2
         self.assertEqual(grid[mid, mid], CLS_BUILT)
         # Inside the big square but outside the small one.
-        near_edge = int(0.15 / (1.0 / (self.SIZE - 1)))
+        # Node 3, at 0.15 (int() of the float quotient gave node 2, on the
+        # big square's edge at 0.1, once the stamp sampled the nodes).
+        near_edge = round(0.15 / (1.0 / (self.SIZE - 1)))
         self.assertEqual(grid[near_edge, near_edge], CLS_TREE)
         # Outside both squares, untouched.
         self.assertEqual(grid[0, 0], CLS_GRASS)

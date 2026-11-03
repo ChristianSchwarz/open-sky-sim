@@ -5,6 +5,7 @@ import { PLAYER_SIM_ID } from "../../physics/sim/simIds";
 import { PlayerEntity } from "../../scene/entities/player";
 import { clamp, equals } from "../../utils/math";
 import type { TouchControlsMode } from "../../config/settingsStorage";
+import { AUTOPILOT_KEY, WHEEL_BRAKE_ONLY_KEY } from "../keyboardLayouts";
 
 /** Stick throw in CSS pixels from centre to full deflection. */
 const STICK_RADIUS_PX = 64;
@@ -19,20 +20,23 @@ export interface TouchControlHost {
     cycleTouchView(): void;
 }
 
-interface HoldButton {
+export interface HoldButton {
     label: string;
     key: string;
     hold: boolean;
 }
 
-const BUTTONS: HoldButton[] = [
+// None of these may be a stick key in any layout (keyboardLayouts.test.ts):
+// a button press is a key press, and the worker runs the layout keys on it too.
+// So BRAKE presses the brake-only key, not the keyboard's 'w'.
+export const TOUCH_BUTTONS: readonly HoldButton[] = [
     { label: 'FIRE', key: ' ', hold: true },
-    { label: 'BRAKE', key: 'w', hold: true },
+    { label: 'BRAKE', key: WHEEL_BRAKE_ONLY_KEY, hold: true },
     { label: 'GEAR', key: 'g', hold: false },
     { label: 'FLAPS', key: 'f', hold: false },
     { label: 'AIRBRK', key: 'b', hold: false },
     { label: 'HOOK', key: 'h', hold: false },
-    { label: 'AP', key: 'a', hold: false },
+    { label: 'AP', key: AUTOPILOT_KEY, hold: false },
     { label: 'TGT', key: 't', hold: false },
 ];
 
@@ -43,7 +47,8 @@ const BUTTONS: HoldButton[] = [
  *
  * The analog controls post their own axes to the worker (a real gamepad still
  * wins over them, and they over the keyboard); the buttons press the same keys
- * the keyboard does, so every key handler sees them unchanged. Built on Pointer
+ * the keyboard does, so every key handler sees them unchanged, except BRAKE,
+ * whose key brakes without the stick key that shares 'w'. Built on Pointer
  * Events, so a mouse drives it as well as a finger.
  */
 export class TouchControlDevice implements KernelTask {
@@ -133,7 +138,7 @@ export class TouchControlDevice implements KernelTask {
         // Buttons: a low block left of the throttle, kept short for a phone held sideways.
         const buttons = div('position:absolute;right:80px;bottom:72px;display:grid;'
             + 'grid-template-columns:repeat(5,52px);gap:6px;pointer-events:auto;touch-action:none');
-        for (const button of BUTTONS) {
+        for (const button of TOUCH_BUTTONS) {
             buttons.appendChild(this.makeKeyButton(button));
         }
         const view = button('VIEW');
@@ -468,7 +473,8 @@ export function shapeAxis(value: number): number {
  * handler listens, so the buttons behave exactly like their keys.
  */
 function pressKey(type: 'keydown' | 'keypress' | 'keyup', key: string): void {
-    const code = key === ' ' ? 'Space' : `Key${key.toUpperCase()}`;
+    // A key no keyboard has (the brake-only one) has no physical code either.
+    const code = key === ' ' ? 'Space' : key.length === 1 ? `Key${key.toUpperCase()}` : '';
     document.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true }));
 }
 

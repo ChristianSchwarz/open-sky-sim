@@ -1,5 +1,8 @@
 import { computed, signal } from '@angular/core';
-import { Flight, FlightEndpoint, MAX_ALT_M, MAX_FLIGHTS, MAX_SPEED_MPS, MISSION_VERSION, Mission, Waypoint, validateMission } from './flightPlan';
+import {
+    Flight, FlightEndpoint, MAX_ALT_M, MAX_FLIGHTS, MAX_SPEED_MPS, MISSION_VERSION, Mission, Waypoint,
+    initialBearingDeg, normalizeHeadingDeg, validateMission,
+} from './flightPlan';
 import * as store from './missionStore';
 import { missionUrl } from '../state/appRoute';
 import { UnitSystems } from '../state/gameDefs';
@@ -104,8 +107,10 @@ export class MissionEditor {
 
     /** Replace the mission with `fn` applied to a copy, so every change is a new value for the signals. */
     private edit(fn: (m: Mission) => void): void {
-        const m = structuredClone(this.mission());
+        const before = this.mission();
+        const m = structuredClone(before);
         fn(m);
+        headAlongFirstLegs(before, m);
         this.mission.set(m);
     }
 
@@ -175,7 +180,12 @@ export class MissionEditor {
         this.edit(m => {
             const s = m.flights[i].start;
             if (s.kind === 'air') {
-                Object.assign(s, clampFlight(patch));
+                const p = clampFlight(patch);
+                // Not a number at all is left alone for validation to report.
+                if (p.headingDeg !== undefined && Number.isFinite(p.headingDeg)) {
+                    p.headingDeg = normalizeHeadingDeg(p.headingDeg);
+                }
+                Object.assign(s, p);
             }
         });
     }
@@ -388,6 +398,40 @@ export class MissionEditor {
             location.href = missionUrl(id);
         }
     }
+}
+
+/**
+ * An air start faces down its first leg. Whenever an edit changes a flight's
+ * first leg (its start or first waypoint placed, moved, added or removed),
+ * its heading becomes the bearing from the start to the first waypoint; a
+ * heading typed in afterwards stands until the leg changes again. Edits that
+ * add or remove a flight shift the others' indices and change no leg, so
+ * they are left alone.
+ */
+export function headAlongFirstLegs(before: Mission, after: Mission): void {
+    if (before.flights.length !== after.flights.length) {
+        return;
+    }
+    const same = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) =>
+        a.lat === b.lat && a.lon === b.lon;
+    after.flights.forEach((f, i) => {
+        const s = f.start;
+        const w = f.waypoints[0];
+        if (s.kind !== 'air' || !w || same(s, w)) {
+            return;
+        }
+        const old = before.flights[i];
+        const oldW = old?.waypoints[0];
+        if (old && old.start.kind === 'air' && oldW && same(old.start, s) && same(oldW, w)) {
+            return;
+        }
+        s.headingDeg = initialBearingDeg(s, w);
+    });
+}
+
+/** A number field's text as a number: NaN when empty or not a number (Number('') would be 0), for validation to report. */
+export function parseTypedNumber(text: string): number {
+    return text.trim() === '' ? NaN : Number(text);
 }
 
 /** Altitude and speed held to what {@link validateMission} accepts, so a typed value cannot make the mission unsaveable. */

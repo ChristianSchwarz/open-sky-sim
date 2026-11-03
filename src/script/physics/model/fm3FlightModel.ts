@@ -72,6 +72,8 @@ export class Fm3FlightModel extends FlightModel {
 
     // Scratch.
     private readonly vb = new Float64Array(3);
+    /** Air velocity in the integration frame: the aero sees vel - wind, the gear sees vel. */
+    private readonly windWorld = new Float64Array(3);
     private readonly fAero = new Float64Array(3);
     private readonly mAero = new Float64Array(3);
     private readonly tmp = new Float64Array(3);
@@ -116,7 +118,8 @@ export class Fm3FlightModel extends FlightModel {
 
         this.wrench = (pos, vel, quat, omega, stage, force, moment) => {
             const vb = this.vb;
-            rotateWorldToBody(quat, vel[0], vel[1], vel[2], vb);
+            const wind = this.windWorld;
+            rotateWorldToBody(quat, vel[0] - wind[0], vel[1] - wind[1], vel[2] - wind[2], vb);
             const fa = this.fAero;
             const ma = this.mAero;
             this.aero.evaluate(vb[0], vb[1], vb[2], omega[0], omega[1], omega[2], this.env, fa, ma, stage === 0);
@@ -195,6 +198,17 @@ export class Fm3FlightModel extends FlightModel {
         const w = this.rb.omega;
         this.aero.settle(vb[0], vb[1], vb[2], w[0], w[1], w[2], this.env);
         this.fcs.trimTo(0, this.fcsInput);
+    }
+
+    /** Air velocity in the integration frame (see {@link windWorld}); pass null for still air. */
+    setWindWorld(wind: THREE.Vector3 | null): void {
+        if (wind) {
+            this.windWorld[0] = wind.x;
+            this.windWorld[1] = wind.y;
+            this.windWorld[2] = wind.z;
+        } else {
+            this.windWorld.fill(0);
+        }
     }
 
     clearAngularVelocity(): void {
@@ -298,7 +312,8 @@ export class Fm3FlightModel extends FlightModel {
     /** Air data and body rates from the current rigid-body state into the FCS input. */
     private readSensors(): void {
         const vb = this.vb;
-        rotateWorldToBody(this.rb.quat, this.rb.vel[0], this.rb.vel[1], this.rb.vel[2], vb);
+        const wind = this.windWorld;
+        rotateWorldToBody(this.rb.quat, this.rb.vel[0] - wind[0], this.rb.vel[1] - wind[1], this.rb.vel[2] - wind[2], vb);
         const speed = Math.sqrt(vb[0] * vb[0] + vb[1] * vb[1] + vb[2] * vb[2]);
         const input = this.fcsInput;
         let alpha: number;
@@ -492,7 +507,8 @@ export class Fm3FlightModel extends FlightModel {
 
     getForceVectorSnapshot(): ForceVectorSample[] {
         const vb = this.vb;
-        rotateWorldToBody(this.rb.quat, this.rb.vel[0], this.rb.vel[1], this.rb.vel[2], vb);
+        const wind = this.windWorld;
+        rotateWorldToBody(this.rb.quat, this.rb.vel[0] - wind[0], this.rb.vel[1] - wind[1], this.rb.vel[2] - wind[2], vb);
         const samples = this.aero.forceVectorSnapshot(vb[0], vb[1], vb[2]);
         samples.push({
             part: 'engine', kind: 'thrust', origin: [this.nozzle[0], this.nozzle[1], this.nozzle[2]],

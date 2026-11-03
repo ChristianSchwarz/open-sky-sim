@@ -21,6 +21,9 @@ export interface GunConfig {
     spread?: number;
 }
 
+/** Cooldown left (s) that still counts as ready. */
+const COOLDOWN_EPS_S = 1e-9;
+
 /**
  * A boresight cannon. When the trigger is pulled and the gun is off cooldown it
  * emits a round into a {@link ProjectileSink}, inheriting the shooter's velocity
@@ -64,19 +67,25 @@ export class Gun {
      * was emitted this call.
      */
     tryFire(position: THREE.Vector3, quaternion: THREE.Quaternion, shooterVelocity: THREE.Vector3): boolean {
-        if (this.cooldown > 0 || this.ammo <= 0) {
+        // A hair of slack: three 1/60 s steps leave 1/20 s as 7e-18, not 0.
+        if (this.cooldown > COOLDOWN_EPS_S || this.ammo <= 0) {
             return false;
         }
-        this.cooldown = 1 / this.config.roundsPerSecond;
+        // Carry the overshoot: resetting to the full interval would round the
+        // cyclic rate down to a whole number of sim steps (20 rps -> 15 at 60 Hz).
+        this.cooldown += 1 / this.config.roundsPerSecond;
         this.ammo -= 1;
 
         this.muzzleWorld.copy(this.config.muzzleOffset).applyQuaternion(quaternion).add(position);
-        this.fwd.set(0, 0, 1).applyQuaternion(quaternion);
+        // Dispersion round the barrel, in the body frame: jittering world x/y
+        // after the rotation left almost none sideways when flying east or west.
+        this.fwd.set(0, 0, 1);
         if (this.config.spread) {
-            this.fwd.x += (Math.random() - 0.5) * 2 * this.config.spread;
-            this.fwd.y += (Math.random() - 0.5) * 2 * this.config.spread;
+            this.fwd.x = (Math.random() - 0.5) * 2 * this.config.spread;
+            this.fwd.y = (Math.random() - 0.5) * 2 * this.config.spread;
             this.fwd.normalize();
         }
+        this.fwd.applyQuaternion(quaternion);
         this.velWorld.copy(this.fwd).multiplyScalar(this.config.muzzleVelocity).add(shooterVelocity);
         this.sink.spawnProjectile(this.muzzleWorld, this.velWorld, this.faction, this.config.damage);
         return true;

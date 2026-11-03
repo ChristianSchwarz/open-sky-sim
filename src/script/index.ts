@@ -10,7 +10,7 @@ import { HD_FPS_CAP, H_RES, V_RES } from './defs';
 import { JoystickControlDevice } from './input/devices/joystickControlDevice';
 import { KeyboardControlDevice } from './input/devices/keyboardControlDevice';
 import { TouchControlDevice } from './input/devices/touchControlDevice';
-import { setBootProgress } from './osd/bootProgress';
+import { setBootProgress, setBootStreaming } from './osd/bootProgress';
 import { setupOSD } from './osd/osdPanel';
 import { CombatSimClient } from './physics/sim/combatSimClient';
 import { SimProxyFlightModel } from './physics/model/simProxyFlightModel';
@@ -40,6 +40,8 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
     // render-side proxies bound to it (id PLAYER_SIM_ID). AI opponents register
     // with the same client (see Game.setupCombat).
     const combatSim = new CombatSimClient();
+    // A dead physics worker freezes the flight for good: say so over the frozen view.
+    combatSim.onFatal = reason => setBootStreaming(100, `Physics stopped: ${reason}. Reload the page.`);
     const config = new ConfigService(
         { [TechProfiles.HD]: HDProfile },
         {
@@ -109,6 +111,7 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
     config.techProfiles.notifyActive();
     config.flightModels.notifyActive();
     config.daytime.notifyActive();
+    config.unitSystem.setActive(settings.unitSystem);
     await game.setup();
 
     const keyboardInput = new KeyboardControlDevice(

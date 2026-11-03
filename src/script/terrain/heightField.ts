@@ -25,7 +25,7 @@ import { FlattenPad } from './flattenPad';
 import { HeightSampler, HeightTier } from './heightSampler';
 import { RailBedField } from './railBedField';
 import { TerrainManifest } from './manifest';
-import { LonLatBounds, TileKey } from './tiling';
+import { LonLatBounds, TileKey, parseTileKey, tileKeyString } from './tiling';
 import { TileIndex } from './tileIndex';
 import { TileStore } from './tileStore';
 
@@ -55,6 +55,15 @@ export class HeightField {
      * terrain as tiles get their beds, mirrored to the sim worker.
      */
     readonly railBeds = new RailBedField();
+    /**
+     * Fine tiles the physics mirror covers (retainFine), pinned in the store.
+     * Queries read the store with peek, which leaves recency alone, so
+     * without the pin the LRU would age out exactly the tiles under the
+     * aircraft: the worker keeps its own copies, but every height read on
+     * this thread there - AI, spawns, the camera - would drop to the coarse
+     * tier.
+     */
+    private retained = new Set<string>();
 
     constructor(opts: HeightFieldOptions) {
         this.manifest = opts.manifest;
@@ -147,8 +156,33 @@ export class HeightField {
     /** Ensure the fine tier covers a lon/lat box. Await before relying on it. */
     async ensureLoaded(bounds: LonLatBounds): Promise<void> {
         await Promise.all(this.fineTileIds(bounds).map(
-            id => this.store.request(id, Number.MAX_SAFE_INTEGER),
+            id => this.store.request(id, Number.MAX_SAFE_INTEGER).then(tile => {
+                // Arrived after the mirror asked to keep it: pin it now, or
+                // it could be evicted before the next retainFine.
+                if (tile && this.retained.has(tileKeyString(id))) {
+                    this.store.setPinned(id, true);
+                }
+            }),
         ));
+    }
+
+    /**
+     * Keep exactly these fine tiles (and the coarse tier) from eviction: the
+     * physics mirror's current set, replaced on every call. Tiles not loaded
+     * yet are pinned as they arrive through ensureLoaded.
+     */
+    retainFine(ids: Iterable<TileKey>): void {
+        const next = new Set<string>();
+        for (const id of ids) {
+            next.add(tileKeyString(id));
+            this.store.setPinned(id, true);
+        }
+        for (const key of this.retained) {
+            if (!next.has(key) && !this.coarse.has(key)) {
+                this.store.setPinned(parseTileKey(key), false);
+            }
+        }
+        this.retained = next;
     }
 
     /** Ensure the fine tier covers a radius (m) around a scene point. */

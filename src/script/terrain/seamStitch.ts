@@ -449,6 +449,30 @@ function applyStitch(
     return changed;
 }
 
+/**
+ * Put a tile's border back where it was baked and forget its stitch state,
+ * as it is released. Its land positions are the decoded tile's own arrays,
+ * and the mesh store may still hold that tile: rebuilt from it after an
+ * eviction, the land would otherwise come back with the old stitch baked in,
+ * which the new state would then take for the baked border (and the far
+ * land's fingerprint would no longer match it).
+ */
+export function restoreBakedBorder(tile: StitchableTile): void {
+    const state = tile.seam;
+    const border = tile.border;
+    const g = tile.landGeometryFaceted;
+    if (state && border && g) {
+        const pos = positionsOf(g).array as Int16Array;
+        for (let i = 0; i < border.vertices.length; i++) {
+            const v = borderEntryIndex(border.vertices[i]);
+            pos[v * 3] = state.orig[i * 3];
+            pos[v * 3 + 1] = state.orig[i * 3 + 1];
+            pos[v * 3 + 2] = state.orig[i * 3 + 2];
+        }
+    }
+    tile.seam = undefined;
+}
+
 /** Drops a tile's T-junction fill, freeing its buffers. */
 export function disposeSeamFill(tile: StitchableTile): void {
     if (tile.seamFill) {

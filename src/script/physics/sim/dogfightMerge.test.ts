@@ -23,8 +23,12 @@ describe('Dogfight merge: classic pilot', () => {
         assert.ok(r.blue.slowS < 20, `${r.blue.slowS.toFixed(0)} s under 90 m/s`);
     });
 
-    it('shoots down Shaw from the game\'s head-on merge', () => {
-        const r = runMerge(GAME_HEADON, { model: AiPilotModels.CLASSIC }, { model: AiPilotModels.SHAW });
+    // Pinned on the 600 m offset merge: since the gun fires its full cyclic
+    // rate (20 rps, was 15), both pilots' head-on gun passes kill, and the
+    // game's head-on merge ends with both shot down.
+    it('shoots down Shaw from the 600 m offset merge', () => {
+        const setup = MERGE_SETUPS.find(s => s.name === 'offset 600 m')!;
+        const r = runMerge(setup, { model: AiPilotModels.CLASSIC }, { model: AiPilotModels.SHAW });
         assert.equal(r.winner, 'blue', `blue ${JSON.stringify(r.blue)} red ${JSON.stringify(r.red)}`);
         assert.equal(r.red.shotDown, true);
     });

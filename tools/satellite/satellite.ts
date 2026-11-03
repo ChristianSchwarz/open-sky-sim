@@ -43,6 +43,7 @@ import { Worker } from 'node:worker_threads';
 import { Tui, InfoRow, formatBytes, formatDuration } from './tui';
 import { ensureRuntime } from './pyRuntime';
 import { isJobPath } from './jobPaths';
+import { killChildTrees } from '../bake/killTree.mjs';
 
 declare const __SAT_TOKEN__: string | undefined;
 declare const __SAT_COMPUTE__: string | undefined;
@@ -717,6 +718,16 @@ const HELP = [
 
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2));
+    // The Python a compute thread started (a chunk's coast bake, pyChunk.ts; a
+    // leaf stage's PyServe) is this process's child, and its pool's workers are
+    // that Python's: F10 (and Ctrl+C, which is F10) left them baking on with
+    // nobody to take their result. The threads' own code is out of reach here,
+    // so every child tree of the process goes, on any way out; the signals
+    // (the window closed, a kill) only end the process.
+    process.on('exit', killChildTrees);
+    for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
+        process.on(sig, () => process.exit(code));
+    }
     const code = await computeCode();
     // The tile code's Python stages find this machine's cache, interpreter and thread
     // count here (tools/bake/pyLeaf.ts, pyChunk.ts: a chunk job takes every thread).

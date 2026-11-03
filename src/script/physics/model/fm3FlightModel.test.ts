@@ -169,3 +169,29 @@ describe('FM3 flight model', () => {
         assert.equal(model.nanGuardTrips, 0);
     });
 });
+
+describe('Fm3FlightModel wind', () => {
+    it('aero sees velocity through the air: a wind equal to the motion is still air', () => {
+        // Moving at 150 m/s in still air vs. sitting still in a 150 m/s headwind
+        // (the carrier-deck frame): the aerodynamic forces must match.
+        const moving = new Fm3FlightModel();
+        airborne(moving, 3000, 150, 0.5);
+        const still = new Fm3FlightModel();
+        airborne(still, 3000, 0, 0.5);
+        still.setWindWorld(new THREE.Vector3(0, 0, -150));
+        // Settle its lags and trim again, now in the wind, as the moving one was.
+        still.syncEffectiveThrottle();
+        still.snapPhysicsState();
+        moving.update(1 / 120);
+        still.update(1 / 120);
+        const dvMoving = moving.velocityVector.clone().sub(new THREE.Vector3(0, 0, 150));
+        const dvStill = still.velocityVector.clone();
+        assert.ok(dvMoving.distanceTo(dvStill) < 1e-6,
+            `dv differs: ${dvMoving.toArray()} vs ${dvStill.toArray()}`);
+        // Cleared again, the parked one sees no airspeed and falls.
+        still.setWindWorld(null);
+        airborne(still, 3000, 0, 0.5);
+        still.update(1 / 120);
+        assert.ok(still.velocityVector.y < -9 / 120, `vy ${still.velocityVector.y}`);
+    });
+});

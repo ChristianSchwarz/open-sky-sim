@@ -684,6 +684,55 @@ describe('FM2 flight model — comprehensive behavior', () => {
             `stall flag did not clear in fast level flight: ${model.getStallStatus().toFixed(2)}`);
     });
 
+    it('aero sees velocity through the air: a wind equal to the motion is still air', () => {
+        // Moving at 150 m/s in still air vs. sitting still in a 150 m/s headwind
+        // (the carrier-deck frame): the aerodynamic forces must match.
+        const moving = new Fm2FlightModel();
+        airborne(moving, 3000, 150, 0.5);
+        const still = new Fm2FlightModel();
+        airborne(still, 3000, 0, 0.5);
+        still.velocityVector = new THREE.Vector3(0, 0, 0);
+        still.setWindWorld(new THREE.Vector3(0, 0, -150));
+        moving.update(1 / 120);
+        still.update(1 / 120);
+        // Same change of velocity over the step (the moving one started at +150 z).
+        const dvMoving = moving.velocityVector.clone().sub(new THREE.Vector3(0, 0, 150));
+        const dvStill = still.velocityVector.clone();
+        assert.ok(dvMoving.distanceTo(dvStill) < 1e-6,
+            `dv differs: ${dvMoving.toArray()} vs ${dvStill.toArray()}`);
+        assert.ok(Math.abs(moving.getAngleOfAttack() - still.getAngleOfAttack()) < 1e-9);
+        // Cleared again, the parked one sees no airspeed and falls.
+        still.setWindWorld(null);
+        airborne(still, 3000, 0, 0.5);
+        still.update(1 / 120);
+        assert.ok(still.velocityVector.y < -9 / 120, `vy ${still.velocityVector.y}`);
+    });
+
+    it('judges the low-speed stall warning by height above the ground, not altitude', () => {
+        // A 2,000 m plateau: just off the ground there, far below minimum flying
+        // speed, but altitude says 2 km. Then 30 m below sea level over a Dead Sea
+        // floor at -400 m: 370 m up, but negative altitude.
+        const flat = (h: number) => ({
+            groundHeightAt: () => h,
+            isLand: () => true,
+            obstacles: () => [],
+            runway: () => RUNWAY,
+            runways: () => [RUNWAY],
+            nearestRunway: () => RUNWAY,
+        });
+        const model = new Fm2FlightModel();
+        model.setWorldQuery(flat(2000));
+        airborne(model, 2000 + PLANE_DISTANCE_TO_GROUND + 3, 20, 0);
+        model.update(1 / 120);
+        assert.ok(model.getStallStatus() < 0,
+            `speed stall fired just off a high field: ${model.getStallStatus()}`);
+
+        model.setWorldQuery(flat(-400));
+        airborne(model, -30, 20, 0);
+        model.update(1 / 120);
+        assert.ok(model.getStallStatus() > 0, 'no speed stall 370 m above a below-sea-level floor');
+    });
+
     it('stays finite and within a sane envelope through an aggressive mixed-input sequence', () => {
         const model = new Fm2FlightModel();
         airborne(model, 5000, 230, 0.8);

@@ -41,7 +41,7 @@ function manifest(): TerrainManifest {
  * Tiles carrying steep relief: ridges and barrancos a few samples apart, which
  * is what a lattice coarser than the DEM smooths into phantom ground.
  */
-function makeStore() {
+function makeStore(maxBytes = 50_000_000) {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: RequestInfo | URL) => {
         const key = String(input).replace('b/', '').replace('.pdm', '');
@@ -70,14 +70,14 @@ function makeStore() {
         url: (id) => `b/${tileKeyString(id)}.pdm`,
         decode: (buf) => decodePdm(buf),
         sizeOf: (t) => t.heights.byteLength,
-        maxBytes: 50_000_000,
+        maxBytes,
         retryBackoffMs: 1,
     });
     return { store, restore: () => { globalThis.fetch = originalFetch; } };
 }
 
-async function makeMirror() {
-    const { store, restore } = makeStore();
+async function makeMirror(maxBytes?: number) {
+    const { store, restore } = makeStore(maxBytes);
     const m = manifest();
     const field = new HeightField({
         manifest: m, store, basis: makeEnuBasis(ORIGIN.lat, ORIGIN.lon, 0),
@@ -97,10 +97,47 @@ async function makeMirror() {
         sent.push(u);
         mirror.applyTiles(u);
     });
-    return { field, mirror, sender, sent, restore };
+    return { field, mirror, sender, sent, restore, store };
 }
 
 describe('height field mirror', () => {
+
+    it('keeps the fine tiles under the focus resident while the store evicts', async () => {
+        const tileBytes = TILE_SIZE * TILE_SIZE * 4;
+        const { field, sender, store, restore } = await makeMirror(12 * tileBytes);
+        try {
+            const under = field.fineTileIdsAroundWorld(0, 0, 3000);
+            await field.ensureLoadedAroundWorld(0, 0, 3000);
+            sender.update([{ x: 0, z: 0 }], 3000);
+            assert.ok(under.every(id => field.peekFine(id)), 'loaded and mirrored');
+
+            // Stream plenty more fine tiles through, a generation each, the
+            // way reconcile advances it: far past the budget.
+            const elsewhere = (i: number): TileKey => ({ z: QUERY_ZOOM, x: under[0].x + 20 + i, y: under[0].y });
+            for (let i = 0; i < 30; i++) {
+                store.nextGeneration();
+                await store.request(elsewhere(i), 1);
+            }
+            assert.ok(store.stats.evicted > 0, 'the store did evict');
+            for (const id of under) {
+                assert.ok(field.peekFine(id), `${tileKeyString(id)} under the aircraft was kept`);
+            }
+
+            // The aircraft moves on: the old tiles are fair game again.
+            await field.ensureLoadedAroundWorld(400_000, 0, 3000);
+            sender.update([{ x: 400_000, z: 0 }], 3000);
+            for (let i = 30; i < 60; i++) {
+                store.nextGeneration();
+                await store.request(elsewhere(i), 1);
+            }
+            assert.ok(under.every(id => !field.peekFine(id)), 'released once out of focus');
+            for (const id of field.fineTileIdsAroundWorld(400_000, 0, 3000)) {
+                assert.ok(field.peekFine(id), `${tileKeyString(id)} under the new focus was kept`);
+            }
+        } finally {
+            restore();
+        }
+    });
 
     it('reproduces the render thread\'s ground height exactly', async () => {
         const { field, mirror, sender, restore } = await makeMirror();

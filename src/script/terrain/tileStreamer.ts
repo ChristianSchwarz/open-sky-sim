@@ -43,6 +43,11 @@ export interface StreamerStats {
     uploaded: number;
     uploadMs: number;
     prefetched: number;
+    /** Uploaded tiles held right now, and their bytes (see TileStreamerOptions.sizeOf). */
+    resident: number;
+    residentBytes: number;
+    /** Uploaded tiles released by evictIdle so far. */
+    evicted: number;
 }
 
 export function scoreWant(want: TileWant, parentResident: boolean): number {
@@ -58,6 +63,19 @@ export interface TileStreamerOptions<T, G> {
     upload: (id: TileKey, value: T) => G;
     /** Release a previously uploaded object. */
     release?: (id: TileKey, gpu: G) => void;
+    /** Bytes an uploaded object holds, for {@link maxBytes}. Without it nothing is ever evicted. */
+    sizeOf?: (gpu: G) => number;
+    /**
+     * Budget for uploaded tiles. Past it evictIdle releases idle ones, least
+     * recently used first; tiles in use are never released, so this bounds
+     * the idle cache rather than what is drawn. Default: unbounded.
+     */
+    maxBytes?: number;
+    /**
+     * Generations (nextGeneration calls) a tile must go unused before
+     * evictIdle may release it. Default 1: anything not used this generation.
+     */
+    idleGenerations?: number;
     uploadBudgetMs?: number;
     now?: () => number;
 }
@@ -79,6 +97,16 @@ export class TileStreamer<T, G> {
     private residentVersion = 0;
     private uploadMs = 0;
     private prefetched = 0;
+    /**
+     * Use clock for the uploaded tiles. The store's own LRU cannot stand in
+     * for it: a tile is never requested again once uploaded, so the store
+     * ages out exactly the tiles that are on screen. Recency here comes from
+     * what the caller says it drew (markUsed).
+     */
+    private generation = 0;
+    /** Generation each uploaded tile was last used in, by key. */
+    private readonly lastUsed = new Map<string, number>();
+    private evictedCount = 0;
 
     constructor(private readonly opts: TileStreamerOptions<T, G>) { }
 
@@ -88,6 +116,9 @@ export class TileStreamer<T, G> {
             uploaded: this.uploaded,
             uploadMs: this.uploadMs,
             prefetched: this.prefetched,
+            resident: this.gpu.size,
+            residentBytes: this.residentBytes(),
+            evicted: this.evictedCount,
         };
     }
 
@@ -201,6 +232,7 @@ export class TileStreamer<T, G> {
                 continue;
             }
             this.gpu.set(key, this.opts.upload(entry.id, entry.value));
+            this.lastUsed.set(key, this.generation);
             this.residentVersion++;
             done++;
         }
@@ -209,13 +241,87 @@ export class TileStreamer<T, G> {
         return done;
     }
 
-    /** Drop an uploaded tile (called when the store evicts its source). */
+    /** Advance the use clock; call once per reconcile pass, before marking what it draws. */
+    nextGeneration(): number {
+        return ++this.generation;
+    }
+
+    /**
+     * Mark an uploaded tile as in use this generation: drawn, or about to be
+     * (a parent the budget may fold into, a child waiting on its siblings).
+     * A tile that is not uploaded is ignored.
+     */
+    markUsed(id: TileKey): void {
+        const key = tileKeyString(id);
+        if (this.lastUsed.has(key)) {
+            this.lastUsed.set(key, this.generation);
+        }
+    }
+
+    /** Bytes the uploaded tiles hold now; 0 without sizeOf. */
+    residentBytes(): number {
+        const sizeOf = this.opts.sizeOf;
+        if (!sizeOf) {
+            return 0;
+        }
+        let total = 0;
+        for (const g of this.gpu.values()) {
+            total += sizeOf(g);
+        }
+        return total;
+    }
+
+    /**
+     * Release idle uploaded tiles while the uploaded set is over its byte
+     * budget, least recently used first. Idle means unused for at least
+     * `idleGenerations` generations and not pinned; nothing else is ever
+     * released, however far over budget. A released tile is simply no
+     * longer resident: wanted again, it is requested and rebuilt like any
+     * other. Returns how many were released.
+     */
+    evictIdle(): number {
+        const sizeOf = this.opts.sizeOf;
+        const maxBytes = this.opts.maxBytes ?? Infinity;
+        if (!sizeOf || maxBytes === Infinity) {
+            return 0;
+        }
+        let total = 0;
+        const idle: Array<{ key: string; used: number; bytes: number }> = [];
+        const before = this.generation - (this.opts.idleGenerations ?? 1);
+        for (const [key, g] of this.gpu) {
+            const bytes = sizeOf(g);
+            total += bytes;
+            const used = this.lastUsed.get(key) ?? this.generation;
+            if (used <= before && !this.pinnedKeys.has(key)) {
+                idle.push({ key, used, bytes });
+            }
+        }
+        if (total <= maxBytes || idle.length === 0) {
+            return 0;
+        }
+        // Oldest first; among equally old, the biggest frees the most.
+        idle.sort((a, b) => a.used - b.used || b.bytes - a.bytes);
+        let n = 0;
+        for (const e of idle) {
+            if (total <= maxBytes) {
+                break;
+            }
+            this.evict(e.key);
+            total -= e.bytes;
+            n++;
+        }
+        this.evictedCount += n;
+        return n;
+    }
+
+    /** Drop an uploaded tile and release what it holds. */
     evict(key: string): void {
         const g = this.gpu.get(key);
         if (g === undefined) {
             return;
         }
         this.gpu.delete(key);
+        this.lastUsed.delete(key);
         this.residentVersion++;
         const [z, x, y] = key.split('/').map(Number);
         this.opts.release?.({ z, x, y }, g);

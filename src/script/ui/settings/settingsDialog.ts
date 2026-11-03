@@ -102,6 +102,7 @@ const SYSTEMS_HELP: HelpEntry[] = [
     { keys: ['T'], action: 'Select target' },
     { keys: ['I'], action: 'Target night view' },
     { keys: ['H'], action: 'Tailhook' },
+    { keys: ['P'], action: 'Autopilot (takes off, flies home, lands)' },
     { keys: ['U'], action: 'Cycle HUD focus' },
     { keys: ['Shift+F9'], action: 'Import or delete terrain areas (opens the World tab)' },
     { keys: ['Shift+F10'], action: 'Import aircraft mod (.zip)' },
@@ -1500,6 +1501,7 @@ export class SettingsDialog {
 
     setUnitSystem(system: UnitSystems) {
         this.config.unitSystem.setActive(system);
+        updateSettings({ unitSystem: system });
         this.unitSystem.set(system);
     }
 

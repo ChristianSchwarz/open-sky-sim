@@ -5,7 +5,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
 import { FlightControl, FlightEndpoint, MAX_ALT_M, MAX_FLIGHTS, MAX_SPEED_MPS } from '../../mission/flightPlan';
-import { MissionEditor, RunwayEnd, SELECTED_COLOUR, altitudeUnit, speedUnit } from '../../mission/missionEditor';
+import { MissionEditor, RunwayEnd, SELECTED_COLOUR, altitudeUnit, parseTypedNumber, speedUnit } from '../../mission/missionEditor';
 
 /**
  * The waypoint editor (F12 map's left pane), two levels under a breadcrumb:
@@ -154,6 +154,11 @@ import { MissionEditor, RunwayEnd, SELECTED_COLOUR, altitudeUnit, speedUnit } fr
                             <input matInput type="number" [value]="toSpd(f.start.speedMps)"
                                 (change)="e.updateAirStart(i, { speedMps: num($event) * spd().si })">
                         </mat-form-field>
+                        <mat-form-field subscriptSizing="dynamic">
+                            <mat-label>Heading °</mat-label>
+                            <input matInput type="number" min="0" max="359" [value]="round(f.start.headingDeg)"
+                                (change)="e.updateAirStart(i, { headingDeg: num($event) })">
+                        </mat-form-field>
                     </div>
                 }
             </fieldset>
@@ -260,6 +265,7 @@ export class MissionPanel {
         const what = ({
             altM: () => `altitude 0-${this.toAlt(MAX_ALT_M)} ${this.alt().label}`,
             speedMps: () => `speed ${this.toSpd(1)}-${this.toSpd(MAX_SPEED_MPS)} ${this.spd().label}`,
+            headingDeg: () => 'heading 0-360°',
         } as Record<string, () => string>)[m[4]]?.() ?? `${m[4]} ${m[5]}`;
         return `${f?.name ?? `Flight ${Number(m[1]) + 1}`}, ${point}: ${what}`;
     }
@@ -339,7 +345,12 @@ export class MissionPanel {
         return (e.target as HTMLInputElement).value;
     }
 
+    round(v: number): number {
+        return Math.round(v);
+    }
+
+    /** The typed number; NaN for an empty or invalid field, which validation then reports. */
     num(e: Event): number {
-        return Number((e.target as HTMLInputElement).value) || 0;
+        return parseTypedNumber((e.target as HTMLInputElement).value);
     }
 }

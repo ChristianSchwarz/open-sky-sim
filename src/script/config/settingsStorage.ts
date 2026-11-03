@@ -3,7 +3,7 @@ import { KeyboardControlLayoutId } from "../input/devices/keyboardControlDevice"
 import { KeyboardPitchStickMode } from "../input/keyboardLayouts";
 import { ColourAdjust, clampColourAdjust, defaultColourAdjust } from "../scene/materials/shaders/colourAdjust";
 import { DEFAULT_SUN_HOURS } from "../scene/materials/shaders/sun";
-import { AiPilotModels, FlightModels, RoadsMode, TechProfiles, TerrainColours, TerrainShading } from "../state/gameDefs";
+import { AiPilotModels, FlightModels, RoadsMode, TechProfiles, TerrainColours, TerrainShading, UnitSystems } from "../state/gameDefs";
 import {
     LANDUSE_REVEAL_MIN_PX, LANDUSE_REVEAL_MIN_PX_MAX, LANDUSE_REVEAL_MIN_PX_MIN,
     LEAF_REFINE_DISTANCE_SCALE, LEAF_REFINE_DISTANCE_SCALE_MAX, LEAF_REFINE_DISTANCE_SCALE_MIN,
@@ -35,6 +35,8 @@ export interface AppSettings {
     flightModel: string;
     keyboardLayout: KeyboardControlLayoutId;
     keyboardPitchStickMode: KeyboardPitchStickMode;
+    /** Metric or imperial units on the HUD and in the dialogs. */
+    unitSystem: UnitSystems;
     touchControls: TouchControlsMode;
     aiPilotModel: AiPilotModels;
     /** The TUNABLE pilot model's knobs (aggression, defensiveness, skill, ...). */
@@ -118,6 +120,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     flightModel: FlightModels.FM2,
     keyboardLayout: KeyboardControlLayoutId.ARROWS,
     keyboardPitchStickMode: KeyboardPitchStickMode.LAYOUT_DEFAULT,
+    unitSystem: UnitSystems.METRIC,
     touchControls: 'auto',
     aiPilotModel: AiPilotModels.CLASSIC,
     aiPersonality: defaultAiPersonality(),
@@ -150,6 +153,7 @@ const TECH_PROFILES = new Set<string>(Object.values(TechProfiles));
 const FLIGHT_MODELS = new Set<string>(Object.values(FlightModels));
 const KEYBOARD_LAYOUTS = new Set<number>(Object.values(KeyboardControlLayoutId).filter(v => typeof v === 'number') as number[]);
 const PITCH_STICK_MODES = new Set<number>(Object.values(KeyboardPitchStickMode).filter(v => typeof v === 'number') as number[]);
+const UNIT_SYSTEMS = new Set<string>(Object.values(UnitSystems));
 const AI_PILOT_MODELS = new Set<string>(Object.values(AiPilotModels));
 const TERRAIN_COLOURS = new Set<string>(Object.values(TerrainColours));
 const TERRAIN_SHADING_VALUES = new Set<string>(Object.values(TerrainShading));
@@ -171,6 +175,7 @@ export function loadSettings(): AppSettings {
             flightModel: isValidFlightModel(parsed.flightModel) ? parsed.flightModel : DEFAULT_SETTINGS.flightModel,
             keyboardLayout: isValidKeyboardLayout(parsed.keyboardLayout) ? parsed.keyboardLayout : DEFAULT_SETTINGS.keyboardLayout,
             keyboardPitchStickMode: isValidPitchStickMode(parsed.keyboardPitchStickMode) ? parsed.keyboardPitchStickMode : DEFAULT_SETTINGS.keyboardPitchStickMode,
+            unitSystem: isValidUnitSystem(parsed.unitSystem) ? parsed.unitSystem : DEFAULT_SETTINGS.unitSystem,
             touchControls: parsed.touchControls === 'on' || parsed.touchControls === 'off'
                 ? parsed.touchControls : DEFAULT_SETTINGS.touchControls,
             aiPilotModel: isValidAiPilotModel(parsed.aiPilotModel) ? parsed.aiPilotModel : DEFAULT_SETTINGS.aiPilotModel,
@@ -254,6 +259,10 @@ function isValidKeyboardLayout(value: unknown): value is KeyboardControlLayoutId
 
 function isValidPitchStickMode(value: unknown): value is KeyboardPitchStickMode {
     return typeof value === 'number' && PITCH_STICK_MODES.has(value);
+}
+
+function isValidUnitSystem(value: unknown): value is UnitSystems {
+    return typeof value === 'string' && UNIT_SYSTEMS.has(value);
 }
 
 function isValidAiPilotModel(value: unknown): value is AiPilotModels {

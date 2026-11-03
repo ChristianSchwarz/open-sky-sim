@@ -216,6 +216,23 @@ def tile_bounds(z: int, x: int, y: int) -> Bounds:
     return Bounds(west, north - span, west + span, north)
 
 
+def node_pixel_bounds(west: float, south: float, east: float, north: float,
+                      rows: int, cols: Optional[int] = None) -> Tuple[float, float, float, float]:
+    """The box whose rows x cols pixel centres are the nodes of a grid over the given one.
+
+    A tile's nodes sit on its edges, node i at i/(n-1) of the span (the DEM's
+    sample_grid, the .pdm). rasterio's from_bounds over the tile's own box
+    puts its pixel centres at (i+0.5)/n instead: half a cell off at the
+    edges, so two neighbouring tiles' shared edge nodes were sampled at two
+    different points. Grown by half a node spacing each way, the pixel
+    centres land on the nodes. `cols` defaults to `rows`.
+    """
+    cols = rows if cols is None else cols
+    hx = (east - west) / max(1, cols - 1) / 2
+    hy = (north - south) / max(1, rows - 1) / 2
+    return (west - hx, south - hy, east + hx, north + hy)
+
+
 def tile_range_for_bounds(z: int, b: Bounds) -> Tuple[int, int, int, int]:
     span = 180.0 / (1 << z)
     nx, ny = (1 << (z + 1)), (1 << z)

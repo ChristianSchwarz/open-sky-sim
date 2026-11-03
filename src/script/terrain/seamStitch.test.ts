@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import * as THREE from 'three';
 import { PTM_SIDE_E, PTM_SIDE_N, PTM_SIDE_S, PTM_SIDE_W, packBorderEntry } from './ptm';
-import { StitchableTile, masterOf, masterParam, stitchSeams } from './seamStitch';
+import { StitchableTile, masterOf, masterParam, restoreBakedBorder, stitchSeams } from './seamStitch';
 import { TileKey, tileKeyString } from './tiling';
 
 /**
@@ -144,6 +144,27 @@ describe('stitchSeams', () => {
         stitchSeams([{ id: M_ID, tile: m }, { id: T_ID, tile: t }]);
         stitchSeams([{ id: T_ID, tile: t }]);
         assert.deepEqual(heights(t), [2, 7, 12, -23]);
+    });
+
+    it('released, a stitched tile hands its land back as baked, and stitches afresh when rebuilt', () => {
+        // The land is the decoded tile's own arrays, and the mesh store may
+        // still hold that tile when the tile is evicted and built again.
+        const m = coarse();
+        const t = fine();
+        stitchSeams([{ id: M_ID, tile: m }, { id: T_ID, tile: t }]);
+        assert.deepEqual(heights(t), [0, 5, 10, -25]);
+        const positions = t.landGeometryFaceted!.getAttribute('position').array as Int16Array;
+        restoreBakedBorder(t);
+        assert.deepEqual(heights(t), [2, 7, 12, -23]);
+        assert.equal(t.seam, undefined);
+
+        // Rebuilt over the same arrays: the baked border is what it starts from.
+        const again = fine();
+        again.landGeometryFaceted!.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        stitchSeams([{ id: M_ID, tile: m }, { id: T_ID, tile: again }]);
+        assert.deepEqual(heights(again), [0, 5, 10, -25]);
+        stitchSeams([{ id: T_ID, tile: again }]);
+        assert.deepEqual(heights(again), [2, 7, 12, -23], 'its idea of baked is the bake');
     });
 
     it('chains: a tile follows a master that has itself moved', () => {

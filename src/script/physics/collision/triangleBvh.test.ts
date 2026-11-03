@@ -348,6 +348,31 @@ describe('BVH closest point', () => {
         assert.ok(Math.abs(out.distSq - 3) < 1e-6);
     });
 
+    it('stays on a degenerate (collapsed or near-collinear) triangle', () => {
+        // Seeded near-collinear sliver and collapsed triangles, where the face
+        // solve's |ab x ac|^2 denominator is ~0: the answer must stay on the triangle.
+        let seed = 12345;
+        const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+        const out = bvhClosest();
+        for (let n = 0; n < 2000; n++) {
+            const t = rnd() * 2, e = (rnd() - 0.5) * 1e-9;
+            const soup = n % 3 === 0
+                ? [0, 0, 0, 0, 0, 0, 0, 0, 0] // fully collapsed to a point
+                : [0, 0, 0, 2, 0, 0, t, e, e * 0.5];
+            const bvh = buildTriangleBvh(soup);
+            const px = rnd() * 4 - 1, py = rnd() * 2 - 1, pz = rnd() * 2 - 1;
+            assert.equal(bvhClosestPoint(bvh, px, py, pz, 100, out), true);
+            assert.ok(Number.isFinite(out.x) && Number.isFinite(out.y) && Number.isFinite(out.z));
+            // The answer lies on the triangle, so inside its bounding box...
+            const maxX = n % 3 === 0 ? 0 : 2;
+            assert.ok(out.x >= -1e-6 && out.x <= maxX + 1e-6, `x ${out.x}`);
+            assert.ok(Math.abs(out.y) < 1e-6 && Math.abs(out.z) < 1e-6);
+            // ...and is no farther than the nearest vertex.
+            const vd = Math.min(px * px + py * py + pz * pz, n % 3 === 0 ? Infinity : (px - 2) ** 2 + py * py + pz * pz);
+            assert.ok(out.distSq <= vd + 1e-9);
+        }
+    });
+
     it('reports zero distance for a point on the surface', () => {
         const bvh = buildTriangleBvh(boxSoup([-1, -1, -1], [1, 1, 1]));
         const out = bvhClosest();

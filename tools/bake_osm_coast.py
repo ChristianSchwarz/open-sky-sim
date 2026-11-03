@@ -70,6 +70,7 @@ from osm_common import (
     Bounds,
     glue_negative_bbox,
     load_manifest,
+    node_pixel_bounds,
     replace_file,
     update_manifest,
     merge_elements,
@@ -1555,8 +1556,11 @@ def rasterize_tile(land_prep, land_geom, b: Bounds, n: int) -> bytearray:
         # so this must not fall through to the point tests below.
         return bytearray(bytes([WATER]) * (n * n))
     if HAS_RASTERIO:
-        # rasterio row 0 = north; matches PDM node ordering.
-        transform = transform_from_bounds(b.west, b.south, b.east, b.north, n, n)
+        # rasterio row 0 = north; matches PDM node ordering. Pixel centres on
+        # the nodes, edge nodes included (node_pixel_bounds), as the point
+        # test below samples them; the block path's clip is padded by a cell
+        # for exactly this, so no centre sits on a clip edge.
+        transform = transform_from_bounds(*node_pixel_bounds(b.west, b.south, b.east, b.north, n), n, n)
         geoms = land_geom.geoms if isinstance(land_geom, MultiPolygon) else [land_geom]
         shapes = [(g, LAND) for g in geoms if not g.is_empty]
         grid = rasterize(

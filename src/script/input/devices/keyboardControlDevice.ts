@@ -15,6 +15,7 @@ import {
     KeyboardControlLayout,
     KeyboardControlLayoutId,
     KeyboardPitchStickMode,
+    WHEEL_BRAKE_ONLY_KEY,
     getKeyboardLayout,
 } from "../keyboardLayouts";
 
@@ -47,6 +48,8 @@ export class KeyboardControlDevice implements KernelTask {
     private throttleState: Stick = Stick.IDLE;
     private wheelBrakeHeld = false;
     private wKeyDown = false;
+    /** The touch BRAKE button (WHEEL_BRAKE_ONLY_KEY): brakes, and no stick key with them. */
+    private brakeOnlyDown = false;
 
     private layout: KeyboardControlLayout = getKeyboardLayout(KeyboardControlLayoutId.ARROWS);
     private layoutId: KeyboardControlLayoutId = KeyboardControlLayoutId.ARROWS;
@@ -159,6 +162,7 @@ export class KeyboardControlDevice implements KernelTask {
             this.yawState = Stick.IDLE;
             this.throttleState = Stick.IDLE;
             this.wKeyDown = false;
+            this.brakeOnlyDown = false;
             this.releaseWheelBrakes();
         });
     }
@@ -168,11 +172,16 @@ export class KeyboardControlDevice implements KernelTask {
         if (!this.player.controlsEnabled || this.player.isAutopilotEnabled) {
             return;
         }
-        if (this.wKeyDown && this.canApplyWheelBrakes()) {
+        if ((this.wKeyDown || this.brakeOnlyDown) && this.canApplyWheelBrakes()) {
             if (!this.wheelBrakeHeld) {
-                this.engageWheelBrakes();
+                if (this.wKeyDown) {
+                    this.engageWheelBrakes();
+                } else {
+                    this.wheelBrakeHeld = true;
+                    this.player.setWheelBrakes(true);
+                }
             }
-        } else if (this.wheelBrakeHeld && !(this.wKeyDown && this.canApplyWheelBrakes())) {
+        } else if (this.wheelBrakeHeld) {
             this.releaseWheelBrakes();
             if (this.wKeyDown) {
                 this.restoreLayoutActionForKey('w');
@@ -376,6 +385,15 @@ export class KeyboardControlDevice implements KernelTask {
     }
 
     private handleWheelBrakeKeyDown(key: string): boolean {
+        if (key === WHEEL_BRAKE_ONLY_KEY) {
+            // Always consumed: in the air it only arms the brakes for touchdown.
+            this.brakeOnlyDown = true;
+            if (this.canApplyWheelBrakes()) {
+                this.wheelBrakeHeld = true;
+                this.player.setWheelBrakes(true);
+            }
+            return true;
+        }
         if (key !== 'w' || !this.canApplyWheelBrakes()) {
             return false;
         }
@@ -385,6 +403,13 @@ export class KeyboardControlDevice implements KernelTask {
     }
 
     private handleWheelBrakeKeyUp(key: string): boolean {
+        if (key === WHEEL_BRAKE_ONLY_KEY) {
+            this.brakeOnlyDown = false;
+            if (this.wheelBrakeHeld && !this.wKeyDown) {
+                this.releaseWheelBrakes();
+            }
+            return true;
+        }
         if (key !== 'w') {
             return false;
         }

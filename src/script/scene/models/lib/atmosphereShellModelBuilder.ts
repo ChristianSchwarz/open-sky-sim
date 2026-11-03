@@ -5,6 +5,7 @@ import { HAZE_PARS_FRAGMENT, HAZE_UNIFORMS } from '../../materials/shaders/haze'
 import { SCENE_DEPTH_PARS_FRAGMENT, SCENE_DEPTH_SKY_CUT, SCENE_DEPTH_UNIFORMS } from '../../materials/shaders/sceneDepth';
 import { WGS84_A, WGS84_B } from '../../../terrain/geodesy';
 import { Model, ModelLibBuilder } from '../models';
+import { updateUniforms } from '../../utils';
 
 /**
  * The atmosphere seen from outside: a full-screen pass over the finished scene.
@@ -77,8 +78,12 @@ const VERTEX_PROGRAM = `
 const FRAGMENT_PROGRAM = `
   precision highp float;
 
+  // The camera of this draw, set per draw (onBeforeRender): its world
+  // rotation, its inverse projection (which carries any view offset, as a
+  // fovea's does) and the viewport, in gl_FragCoord pixels, it is drawn into.
   uniform mat3 uCamRot;
-  uniform vec2 uTanHalfFov;
+  uniform mat4 uProjInv;
+  uniform vec4 uViewport;
   /** Ellipsoid centre minus camera, scene axes, metres. */
   uniform vec3 uCentre;
   /** Unit polar axis in scene axes. */
@@ -255,8 +260,9 @@ ${EARTH_MAP_PARS_FRAGMENT}
     if (uWeight <= 0.0 && uLowFill < 0.5) {
       discard;
     }
-    vec2 ndc = gl_FragCoord.xy / uSceneDepthSize * 2.0 - 1.0;
-    vec3 viewDir = normalize(vec3(ndc * uTanHalfFov, -1.0));
+    vec2 ndc = (gl_FragCoord.xy - uViewport.xy) / uViewport.zw * 2.0 - 1.0;
+    vec4 nearPoint = uProjInv * vec4(ndc, -1.0, 1.0);
+    vec3 viewDir = normalize(nearPoint.xyz / nearPoint.w);
     vec3 dir = uCamRot * viewDir;
 
     vec3 o = toSphere(-uCentre);
@@ -428,7 +434,9 @@ ${EARTH_MAP_PARS_FRAGMENT}
       float glint = pow(max(dot(nrm, normalize(sun + toEye)), 0.0), 4000.0) * 60.0;
 
       // The pixel's footprint on the ground picks the map's filtering.
-      float pixel = 2.0 * uTanHalfFov.y / uSceneDepthSize.y;
+      // Pixel height in tangent units: the inverse projection's [1][1] is the
+      // tangent of half this draw's vertical extent.
+      float pixel = 2.0 * uProjInv[1][1] / uViewport.w;
       float incidence = max(abs(dot(nrm, toEye)), 0.02);
       vec3 albedo = earthAlbedo(hitLatLon, tEnd * pixel / sqrt(incidence));
       // The map's oceans are near black with a blue cast; they take the
@@ -484,10 +492,16 @@ ${EARTH_MAP_PARS_FRAGMENT}
   }
 `;
 
-/** Written once per frame by the game; shared by reference with the material. */
+/**
+ * Written once per frame by the game; shared by reference with the material.
+ * The camera's (uCamRot, uProjInv, uViewport) are set per draw instead, by
+ * {@link setShellCamera}: one frame draws the shell for the main view, its
+ * fovea and the weapons-target MFD, each through a camera of its own.
+ */
 export const ATMOSPHERE_SHELL_UNIFORMS = {
     uCamRot: { value: new THREE.Matrix3() },
-    uTanHalfFov: { value: new THREE.Vector2(1, 1) },
+    uProjInv: { value: new THREE.Matrix4() },
+    uViewport: { value: new THREE.Vector4(0, 0, 1, 1) },
     uCentre: { value: new THREE.Vector3() },
     uAxis: { value: new THREE.Vector3(0, 1, 0) },
     uSun: { value: new THREE.Vector3(0, 1, 0) },
@@ -509,6 +523,24 @@ export const ATMOSPHERE_SHELL_UNIFORMS = {
     uAreaCount: { value: 0 },
 };
 
+
+const _rotation = new THREE.Matrix4();
+
+/**
+ * The ray uniforms from the camera and viewport of the draw under way, so
+ * every pass the shell is drawn in sees the sky through its own camera.
+ */
+function setShellCamera(this: THREE.Object3D, renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera,
+    geometry: THREE.BufferGeometry, material: THREE.Material, group: THREE.Group): void {
+    updateUniforms.call(this as THREE.Mesh, renderer, scene, camera, geometry, material, group);
+    const u = ATMOSPHERE_SHELL_UNIFORMS;
+    u.uCamRot.value.setFromMatrix4(_rotation.extractRotation(camera.matrixWorld));
+    u.uProjInv.value.copy(camera.projectionMatrixInverse);
+    renderer.getCurrentViewport(u.uViewport.value);
+    (material as THREE.ShaderMaterial).uniformsNeedUpdate = true;
+}
+// Survives ModelManager's per-entity clone (see cloneObj).
+(setShellCamera as { keepOnClone?: boolean }).keepOnClone = true;
 
 export class AtmosphereShellModelLibBuilder implements ModelLibBuilder {
 
@@ -538,6 +570,7 @@ export class AtmosphereShellModelLibBuilder implements ModelLibBuilder {
         const mesh = new THREE.Mesh(geometry, material);
         mesh.name = 'atmosphereShell';
         mesh.frustumCulled = false;
+        mesh.onBeforeRender = setShellCamera;
         mesh.renderOrder = 0;
         return {
             lod: [{ flats: [], volumes: [mesh] }],

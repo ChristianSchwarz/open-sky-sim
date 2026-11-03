@@ -43,7 +43,7 @@ except ImportError:
     raise
 
 from osm_common import (
-    Bounds, OVERPASS_OUT, merge_elements, nodes_map, overpass_fetch, overpass_fetch_cells,
+    Bounds, OVERPASS_OUT, merge_elements, node_pixel_bounds, nodes_map, overpass_fetch, overpass_fetch_cells,
     overpass_fetch_groups, relation_polygons, ways_map,
 )
 
@@ -275,17 +275,26 @@ def _class_for_tags(tags: dict) -> Optional[int]:
     return None
 
 
-def _polygon_from_way(way: dict, nodes: Dict[int, Tuple[float, float]]) -> Optional[Polygon]:
+def _polygons_from_way(way: dict, nodes: Dict[int, Tuple[float, float]]) -> List[Polygon]:
+    """A closed way's area: one polygon, or several when repairing it splits it.
+
+    A self-touching ring (a figure eight, a field mapped round both sides of
+    a lane) repairs with buffer(0) into a MultiPolygon. Every part is kept,
+    as relation_polygons and bake_osm_airports.py keep them; the whole shape
+    used to be thrown away, and its land use with it.
+    """
     coords = [nodes[nid] for nid in way.get('nodes', []) if nid in nodes]
     if len(coords) < 4 or coords[0] != coords[-1]:
-        return None
+        return []
     try:
         poly = Polygon(coords)
     except Exception:
-        return None
-    if not poly.is_valid:
-        poly = poly.buffer(0)
-    return poly if isinstance(poly, Polygon) and not poly.is_empty else None
+        return []
+    if poly.is_valid:
+        return [] if poly.is_empty else [poly]
+    fixed = poly.buffer(0)
+    parts = [fixed] if isinstance(fixed, Polygon) else list(getattr(fixed, 'geoms', []))
+    return [g for g in parts if isinstance(g, Polygon) and not g.is_empty]
 
 
 def assemble_landuse_polygons(
@@ -323,8 +332,7 @@ def assemble_landuse_polygons(
         cls = _class_for_tags(way.get('tags') or {})
         if cls is None:
             continue
-        poly = _polygon_from_way(way, nodes)
-        if poly is not None:
+        for poly in _polygons_from_way(way, nodes):
             polys.append(poly)
             classes.append(cls)
 
@@ -373,7 +381,9 @@ def stamp_landuse_classes(
     """
     if len(polys) == 0:
         return 0
-    west, south, east, north = bounds
+    # `classes` is a node grid, nodes on the tile's edges: the pixels whose
+    # centres are those nodes reach half a node past them (node_pixel_bounds).
+    west, south, east, north = node_pixel_bounds(*bounds, size)
     idxs = tree.query(box(west, south, east, north))
     if len(idxs) == 0:
         return 0

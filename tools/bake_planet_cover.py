@@ -552,13 +552,18 @@ def bake_tile(
     pad = halo * ((north - south) / (size - 1))
     read_bounds = (west - pad, south - pad, east + pad, north + pad)
     read_size = size + 2 * halo
+    # Both reads below are onto node grids (the halo one too: read_size nodes
+    # at the tile's own spacing), so each source pixel centre must be a node,
+    # edge nodes included: read_onto over the grid's own box put them half a
+    # cell inside it, and two neighbouring tiles' shared edge read two points.
+    from osm_common import node_pixel_bounds
 
     # Classes. Mode resampling, because averaging category codes invents
     # categories that are not there - halfway between built-up and bare is not
     # "somewhat built-up", it is a different class entirely.
     classes = np.zeros((read_size, read_size), dtype=np.uint8)
     for src_lc in landcover:
-        got = src_lc.read_onto(read_bounds, read_size, Resampling.mode)
+        got = src_lc.read_onto(node_pixel_bounds(*read_bounds, read_size), read_size, Resampling.mode)
         if got is None:
             continue
         fresh = (classes == CLS_UNKNOWN) & (got[0] != 0)
@@ -583,7 +588,7 @@ def bake_tile(
     colors = np.zeros((size, size, 3), dtype=np.uint8)
     covered = np.zeros((size, size), dtype=bool)
     for src_img in imagery:
-        got = src_img.read_onto(bounds, size, Resampling.average)
+        got = src_img.read_onto(node_pixel_bounds(*bounds, size), size, Resampling.average)
         if got is None:
             continue
         fresh = (~covered) & np.any(got != 0, axis=0)

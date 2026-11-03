@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { SIM_SHARED_MAX_AIRCRAFT } from '../physics/sim/simSharedState';
-import { Flight, MAX_FLIGHTS, MISSION_ID_RE, Mission, missionId, validateMission } from './flightPlan';
+import {
+    Flight, MAX_FLIGHTS, MISSION_ID_RE, Mission, initialBearingDeg, missionId, normalizeHeadingDeg, validateMission,
+} from './flightPlan';
 
 function flight(over: Partial<Flight> = {}): Flight {
     return {
@@ -74,5 +76,22 @@ describe('missionId', () => {
         assert.equal(missionId('../../etc/passwd'), 'etc-passwd');
         assert.match(missionId('Island hop'), MISSION_ID_RE);
         assert.equal(missionId('!!!'), '');
+    });
+});
+
+describe('initialBearingDeg', () => {
+    it('reads the compass: north 0, east 90, south 180, west 270', () => {
+        const at = { lat: 47, lon: 11 };
+        assert.ok(Math.abs(initialBearingDeg(at, { lat: 48, lon: 11 })) < 1e-9);
+        assert.ok(Math.abs(initialBearingDeg(at, { lat: 47, lon: 11.01 }) - 90) < 0.01);
+        assert.ok(Math.abs(initialBearingDeg(at, { lat: 46, lon: 11 }) - 180) < 1e-9);
+        assert.ok(Math.abs(initialBearingDeg(at, { lat: 47, lon: 10.99 }) - 270) < 0.01);
+    });
+
+    it('folds headings into 0 up to 360', () => {
+        assert.equal(normalizeHeadingDeg(-90), 270);
+        assert.equal(normalizeHeadingDeg(360), 0);
+        assert.equal(normalizeHeadingDeg(725), 5);
+        assert.ok(Object.is(normalizeHeadingDeg(-0), 0));
     });
 });

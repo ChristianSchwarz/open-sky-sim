@@ -3,13 +3,13 @@ import { CombatSimClient } from "../../physics/sim/combatSimClient";
 import { SimProxyFlightModel } from "../../physics/model/simProxyFlightModel";
 import { PLAYER_SIM_ID } from "../../physics/sim/simIds";
 import { PlayerEntity } from "../../scene/entities/player";
-import { clamp, equals } from "../../utils/math";
+import { equals } from "../../utils/math";
+import { GamepadAxisReader } from "../gamepadAxes";
 
-
-const AXIS_ROLL = 0;
-const AXIS_PITCH = 1;
-const AXIS_THROTTLE = 2;
-const AXIS_YAW = 3;
+/** Same value, NaN (an untaken throttle) included. */
+function sameAxis(a: number, b: number): boolean {
+    return Number.isNaN(a) ? Number.isNaN(b) : equals(a, b);
+}
 
 export type JoystickStatusListener = (connected: boolean) => void;
 
@@ -27,6 +27,10 @@ export class JoystickControlDevice implements KernelTask {
     private lastThrottle: number = 0;
     /** Last connected flag posted to the worker; avoids per-frame disconnect spam. */
     private lastPostedConnected = false;
+    /** Dead zone, idle detection and the throttle's rest position (see gamepadAxes.ts). */
+    private readonly reader = new GamepadAxisReader();
+    /** Non-worker path: whether the pad's sticks are on the player's controls right now. */
+    private legacyApplied = false;
 
     constructor(
         private readonly combatSim: CombatSimClient,
@@ -54,28 +58,19 @@ export class JoystickControlDevice implements KernelTask {
                 this.postGamepadDisconnected();
                 return;
             }
-            let pitch = 0;
-            let roll = 0;
-            let yaw = 0;
-            let throttle = 0;
-            if (this.axisCount > AXIS_YAW) {
-                yaw = clamp(gamepad.axes[AXIS_YAW], -1, 1);
-            }
-            if (this.axisCount > AXIS_THROTTLE) {
-                throttle = clamp((gamepad.axes[AXIS_THROTTLE] * -1 + 1) * 0.5, 0, 1);
-            }
-            if (this.axisCount > AXIS_PITCH) {
-                pitch = clamp(gamepad.axes[AXIS_PITCH], -1, 1);
-            }
-            if (this.axisCount > AXIS_ROLL) {
-                roll = clamp(gamepad.axes[AXIS_ROLL], -1, 1);
+            const { pitch, roll, yaw, throttle, active } = this.read(gamepad);
+            if (!active) {
+                // An idle pad lets the keyboard (and touch) fly: the worker
+                // takes a connected pad over both.
+                this.postGamepadDisconnected();
+                return;
             }
             if (
                 !this.lastPostedConnected
-                || !equals(pitch, this.lastPitch)
-                || !equals(roll, this.lastRoll)
-                || !equals(yaw, this.lastYaw)
-                || !equals(throttle, this.lastThrottle)
+                || !sameAxis(pitch, this.lastPitch)
+                || !sameAxis(roll, this.lastRoll)
+                || !sameAxis(yaw, this.lastYaw)
+                || !sameAxis(throttle, this.lastThrottle)
             ) {
                 this.lastPitch = pitch;
                 this.lastRoll = roll;
@@ -87,39 +82,59 @@ export class JoystickControlDevice implements KernelTask {
             return;
         }
 
-        if (!this.connected) return;
+        if (!this.connected) {
+            this.releaseLegacySticks();
+            return;
+        }
 
         const gamepad = navigator.getGamepads()[this.index];
-        if (!gamepad) return;
+        if (!gamepad) {
+            this.releaseLegacySticks();
+            return;
+        }
 
-        if (this.axisCount > AXIS_YAW) {
-            const yaw = clamp(gamepad.axes[AXIS_YAW], -1, 1);
-            if (!equals(yaw, this.lastYaw)) {
-                this.lastYaw = yaw;
-                this.player.setYaw(yaw);
-            }
+        const { pitch, roll, yaw, throttle, active } = this.read(gamepad);
+        if (!active) {
+            // Idle: centre what the pad last applied once, then leave the keys be.
+            this.releaseLegacySticks();
+            return;
         }
-        if (this.axisCount > AXIS_THROTTLE) {
-            const throttle = clamp((gamepad.axes[AXIS_THROTTLE] * -1 + 1) * 0.5, 0, 1);
-            if (!equals(throttle, this.lastThrottle)) {
-                this.lastThrottle = throttle;
-                this.player.setThrottle(throttle);
-            }
+        if (!this.legacyApplied || !equals(yaw, this.lastYaw)) {
+            this.lastYaw = yaw;
+            this.player.setYaw(yaw);
         }
-        if (this.axisCount > AXIS_PITCH) {
-            const pitch = clamp(gamepad.axes[AXIS_PITCH], -1, 1);
-            if (!equals(pitch, this.lastPitch)) {
-                this.lastPitch = pitch;
-                this.player.setPitch(pitch);
-            }
+        if (Number.isFinite(throttle) && !equals(throttle, this.lastThrottle)) {
+            this.lastThrottle = throttle;
+            this.player.setThrottle(throttle);
         }
-        if (this.axisCount > AXIS_ROLL) {
-            const roll = clamp(gamepad.axes[AXIS_ROLL], -1, 1);
-            if (!equals(roll, this.lastRoll)) {
-                this.lastRoll = roll;
-                this.player.setRoll(roll);
-            }
+        if (!this.legacyApplied || !equals(pitch, this.lastPitch)) {
+            this.lastPitch = pitch;
+            this.player.setPitch(pitch);
         }
+        if (!this.legacyApplied || !equals(roll, this.lastRoll)) {
+            this.lastRoll = roll;
+            this.player.setRoll(roll);
+        }
+        this.legacyApplied = true;
+    }
+
+    private read(gamepad: Gamepad) {
+        return this.reader.read(gamepad.axes, gamepad.buttons.some(b => b.pressed));
+    }
+
+    /** Non-worker path: centre the sticks the pad was holding (idle or unplugged); the throttle stays. */
+    private releaseLegacySticks(): void {
+        const applied = this.legacyApplied;
+        this.legacyApplied = false;
+        if (!applied || this.isWorkerControlled()) {
+            return;
+        }
+        this.lastPitch = 0;
+        this.lastRoll = 0;
+        this.lastYaw = 0;
+        this.player.setPitch(0);
+        this.player.setRoll(0);
+        this.player.setYaw(0);
     }
 
     private postGamepadDisconnected(): void {
@@ -152,13 +167,15 @@ export class JoystickControlDevice implements KernelTask {
 
     private setupEvents() {
         window.addEventListener("gamepadconnected", event => {
-            this.connected = true;
-            this.id = event.gamepad.id;
-            this.index = event.gamepad.index;
-            this.axisCount = event.gamepad.axes.length;
-            this.listener(true);
+            this.use(event.gamepad);
         });
-        window.addEventListener("gamepaddisconnected", () => {
+        window.addEventListener("gamepaddisconnected", event => {
+            // Another pad going away leaves the one flying alone.
+            if (!this.connected || event.gamepad.index !== this.index) {
+                return;
+            }
+            this.postGamepadDisconnected();
+            this.releaseLegacySticks();
             this.connected = false;
             this.id = '';
             this.index = 0;
@@ -167,8 +184,29 @@ export class JoystickControlDevice implements KernelTask {
             this.lastRoll = 0;
             this.lastYaw = 0;
             this.lastThrottle = 0;
-            this.listener(false);
-            this.postGamepadDisconnected();
+            this.reader.reset();
+            // Fly on with a pad still plugged in, if there is one.
+            const other = [...navigator.getGamepads()]
+                .find(g => g && g.connected && g.index !== event.gamepad.index);
+            if (other) {
+                this.use(other);
+            } else {
+                this.listener(false);
+            }
         });
+    }
+
+    private use(gamepad: Gamepad): void {
+        if (this.connected && gamepad.index !== this.index) {
+            // Handing over from the old pad: its sticks must not stay applied.
+            this.postGamepadDisconnected();
+            this.releaseLegacySticks();
+        }
+        this.connected = true;
+        this.id = gamepad.id;
+        this.index = gamepad.index;
+        this.axisCount = gamepad.axes.length;
+        this.reader.reset();
+        this.listener(true);
     }
 }

@@ -17,6 +17,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ChildProcess, spawn } from 'child_process';
 import { MISSIONS_DIR } from './missions';
+import { SPAWN_GROUP, killTree } from './bake/killTree.mjs';
 
 const PROJECT_ROOT = path.dirname(__dirname);
 const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
@@ -557,7 +558,7 @@ function runStep(job: Job, s: Step, index: number): Promise<Exclude<StepOutcome,
         line(job, `\n[${index + 1}/${job.stepCount}] ${label}`);
         line(job, `$ ${cmd} ${args.join(' ')}`);
         const startedAt = Date.now();
-        const child = track(job, spawn(cmd, args, { cwd: PROJECT_ROOT }));
+        const child = track(job, spawn(cmd, args, { cwd: PROJECT_ROOT, ...SPAWN_GROUP }));
         let tail = '';
         const feed = (d: Buffer) => {
             // Split on a bare carriage return as well as a newline. The mesh
@@ -615,7 +616,7 @@ function runLaneStep(job: Job, s: Step): Promise<void> {
     return new Promise((resolve, reject) => {
         line(job, `[${s.label}] $ ${s.cmd} ${s.args.join(' ')}`, true);
         const startedAt = Date.now();
-        const child = track(job, spawn(s.cmd, s.args, { cwd: PROJECT_ROOT }));
+        const child = track(job, spawn(s.cmd, s.args, { cwd: PROJECT_ROOT, ...SPAWN_GROUP }));
         let tail = '';
         const feed = (d: Buffer) => {
             const split = splitStream(tail, d.toString());
@@ -1191,10 +1192,9 @@ async function runImport(job: Job): Promise<void> {
         }
     } catch (err) {
         // Whatever else is still running would only write into an import
-        // that has already failed.
-        for (const child of job.children ?? []) {
-            child.kill();
-        }
+        // that has already failed. The whole tree: a pool step's Python
+        // children outlived a kill of the pool's own node process.
+        killJobChildren(job);
         await lanes.join().catch(() => undefined);
         throw err;
     }
@@ -1228,6 +1228,23 @@ export function deletePlan(name: string, bbox: readonly number[]): Step[] {
     ];
 }
 
+/** End every process tree a job started (killTree.mjs). */
+function killJobChildren(job: Job): void {
+    for (const child of job.children ?? []) {
+        killTree(child);
+    }
+}
+
+/**
+ * End every running job's tools, for the dev server's exit hooks
+ * (modserver.ts): a stopped server otherwise left them baking on.
+ */
+export function killAllJobs(): void {
+    for (const j of jobs.values()) {
+        killJobChildren(j);
+    }
+}
+
 function runningJob(): Job | undefined {
     for (const j of jobs.values()) {
         if (j.state === 'running') {
@@ -1257,6 +1274,8 @@ ${doneLine} (${total} total), with ${job.warnings.length} warning(s):`);
 ${doneLine} (${total} total)`);
         }
     }).catch((err: Error) => {
+        // Nothing of a failed job may run on beside the next one (runningJob).
+        killJobChildren(job);
         job.state = 'failed';
         job.error = err.message;
         line(job, `\nFAILED after ${formatDuration(Date.now() - startedAt)}: ${err.message}`);

@@ -171,6 +171,16 @@ interface ProjectileSlot {
     readonly vel: THREE.Vector3;
 }
 
+/** A flight model that can be told the air's velocity in its integration frame (FM2 today). */
+interface WindCapableModel {
+    setWindWorld(wind: THREE.Vector3 | null): void;
+}
+
+function windCapable(model: SimFlightModel): WindCapableModel | undefined {
+    const m = model as SimFlightModel & Partial<WindCapableModel>;
+    return typeof m.setWindWorld === 'function' ? (m as WindCapableModel) : undefined;
+}
+
 /**
  * One simulated aircraft: a {@link SimFlightModel} (FM2 or FM3) plus its command buffer, an
  * optional in-worker {@link AiPilotController} and gun. Implements {@link PilotableAircraft}
@@ -735,6 +745,8 @@ export class CombatSim implements ProjectileSink {
     private readonly bodyStart = new THREE.Vector3();
     private readonly bodyEnd = new THREE.Vector3();
     private readonly segEnd = new THREE.Vector3();
+    private readonly segStart = new THREE.Vector3();
+    private readonly tmpCarrierWind = new THREE.Vector3();
     private readonly cQuat = new THREE.Quaternion();
     private readonly contactPoint = new THREE.Vector3();
     private readonly contactNormal = new THREE.Vector3();
@@ -1462,7 +1474,7 @@ export class CombatSim implements ProjectileSink {
             slot.prevPos.copy(slot.pos);
             slot.vel.y -= PROJECTILE_GRAVITY * delta;
             slot.pos.addScaledVector(slot.vel, delta);
-            this.checkHit(slot, combatants);
+            this.checkHit(slot, combatants, delta);
         }
     }
 
@@ -1840,13 +1852,20 @@ export class CombatSim implements ProjectileSink {
     /**
      * Run FM2 in the carrier's horizontal frame so gear friction sees deck-relative
      * speed (not ship cruise). Used for taxi / takeoff roll / arrestor pull.
+     *
+     * The air does not move with the ship: in this frame it blows down the deck at
+     * -carrierVel, and a model that takes a wind is given that, so its aero still
+     * sees airspeed (wind over deck on the rollout and at launch), not deck speed.
      */
     private beginCarrierRelativeFrame(a: SimAircraft): boolean {
         if (!this.shouldUseCarrierRelativeFrame(a)) return false;
         const vel = a.model.velocityVector;
         vel.x -= this.carrierVel.x;
         vel.z -= this.carrierVel.z;
-        a.model.snapPhysicsState();
+        // No snapPhysicsState here: FlightModel.update saves the pre-step state
+        // itself, and endCarrierRelativeFrame snaps once the frame is undone.
+        const wind = this.tmpCarrierWind.set(-this.carrierVel.x, 0, -this.carrierVel.z);
+        windCapable(a.model)?.setWindWorld(wind);
         return true;
     }
 
@@ -1858,6 +1877,9 @@ export class CombatSim implements ProjectileSink {
         pos.z += this.carrierVel.z * delta;
         vel.x += this.carrierVel.x;
         vel.z += this.carrierVel.z;
+        windCapable(a.model)?.setWindWorld(null);
+        // The saved pre-step velocity is deck-relative; snap so render
+        // interpolation does not blend frames.
         a.model.snapPhysicsState();
     }
 
@@ -2308,21 +2330,29 @@ export class CombatSim implements ProjectileSink {
         });
     }
 
-    private checkHit(slot: ProjectileSlot, combatants: Combatant[]): void {
-        this.seg.copy(slot.pos).sub(slot.prevPos);
-        const segLenSq = this.seg.lengthSq();
+    /**
+     * Test the round's step against each target in that target's own frame: the
+     * target has already moved this step, so its end-of-step pose is met by the
+     * relative segment [prevPos + v_target*delta, pos], not by the round's world
+     * segment (which a crossing target at closure speed would step clean over).
+     */
+    private checkHit(slot: ProjectileSlot, combatants: Combatant[], delta: number): void {
         this.segEnd.copy(slot.pos);
         for (let i = 0; i < combatants.length; i++) {
             const c = combatants[i];
             if (c.faction === slot.faction || !c.isAlive()) continue;
             c.readPosition(this.cPos);
+            c.readVelocity(this.cVel);
+            this.segStart.copy(slot.prevPos).addScaledVector(this.cVel, delta);
+            this.seg.subVectors(this.segEnd, this.segStart);
+            const segLenSq = this.seg.lengthSq();
 
             let hit = false;
             const simA = c instanceof SimAircraft ? c : undefined;
             if (simA?.collision) {
                 this.cQuat.copy(simA.model.quaternion);
                 hit = segmentHitsCollisionMesh(
-                    slot.prevPos, this.segEnd,
+                    this.segStart, this.segEnd,
                     this.cPos, this.cQuat, simA.collision,
                     this.bodyStart, this.bodyEnd,
                     this.closest,
@@ -2330,7 +2360,7 @@ export class CombatSim implements ProjectileSink {
             } else {
                 const radius = c.getHitRadius();
                 hit = segmentHitsSphere(
-                    slot.prevPos, this.seg, segLenSq,
+                    this.segStart, this.seg, segLenSq,
                     this.cPos, radius,
                     this.closest, this.toCenter,
                 );
@@ -2338,7 +2368,6 @@ export class CombatSim implements ProjectileSink {
             if (!hit) continue;
 
             c.applyDamage(slot.damage);
-            c.readVelocity(this.cVel);
             this.hits.push({
                 position: [this.closest.x, this.closest.y, this.closest.z],
                 velocity: [this.cVel.x, this.cVel.y, this.cVel.z],

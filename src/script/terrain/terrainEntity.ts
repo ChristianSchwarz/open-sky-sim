@@ -39,7 +39,7 @@ import { AirfieldsFile, EMPTY_AIRFIELDS, loadAirfields } from './airfields';
 import { FlattenPad, padFromRecord, padReachM } from './flattenPad';
 import { HeightField, HeightTier } from './heightField';
 import {
-    MESH_CACHE_BYTES, PREFETCH_LOOKAHEAD_S, PREFETCH_MIN_DISTANCE_M, RECONCILE_INTERVAL_MS,
+    MESH_CACHE_BYTES, UPLOADED_TILE_BYTES, UPLOADED_TILE_IDLE_GENERATIONS, PREFETCH_LOOKAHEAD_S, PREFETCH_MIN_DISTANCE_M, RECONCILE_INTERVAL_MS,
     LANDUSE_REVEAL_MIN_PX, LEAF_REFINE_DISTANCE_SCALE, LOD_DEPTH_PUSH_SCALE, LOD_FADE_MS,
     TERRAIN_DETAIL_DISTANCE_DEFAULT_M, TERRAIN_TRIANGLE_BUDGET,
     FRUSTUM_CULL_MARGIN_TAN, adjustDetailScale, terrainViewRangeM, landuseRevealScale,
@@ -67,7 +67,7 @@ import { Airfield } from './airfields';
 import { OceanPatch, buildOceanPatch, disposeOceanPatch, mergeOceanPatches } from './oceanPatch';
 import { PtmTile } from './ptm';
 import { QuadNode, Quadtree } from './quadtree';
-import { seamFillVisibleAt, stitchSeams } from './seamStitch';
+import { restoreBakedBorder, seamFillVisibleAt, stitchSeams } from './seamStitch';
 import { canCarryFill, fillVersionOf, showFill, writeFill } from './seamFillTail';
 import { TileIndex } from './tileIndex';
 import {
@@ -577,6 +577,7 @@ export class TerrainEntity implements Entity {
             for (const old of meshes.trees ?? []) {
                 old.geometry.dispose();
                 (old.material as THREE.Material).dispose();
+                old.dispose();
             }
         }
         meshes.trees = undefined;
@@ -999,7 +1000,16 @@ export class TerrainEntity implements Entity {
                 }
                 return meshes;
             },
+            // Uploaded tiles are released by what is drawn, not by the mesh
+            // store: see markDrawnTiles and TileStreamer.evictIdle.
+            sizeOf: m => m.bytes,
+            maxBytes: UPLOADED_TILE_BYTES,
+            idleGenerations: UPLOADED_TILE_IDLE_GENERATIONS,
             release: (_id, m) => {
+                // First: its land is the cached decoded tile's arrays, and a
+                // rebuild from that cache must start from the baked border.
+                restoreBakedBorder(m);
+                this.smoothPending.delete(m);
                 this.cover.release(m);
                 this.roads.release(m);
                 this.bridges.release(m);
@@ -2048,6 +2058,9 @@ export class TerrainEntity implements Entity {
         this.bridges.nextGeneration();
         this.buildings.nextGeneration();
         this.beds.nextGeneration();
+        this.heightStore.nextGeneration();
+        this.farLand.nextGeneration();
+        this.streamer.nextGeneration();
 
         const r = this.quadtree.update(
             camera,
@@ -2079,6 +2092,8 @@ export class TerrainEntity implements Entity {
         );
         this.edgeFillView.mPerPxPerM = 2 * Math.tan(camera.fov * Math.PI / 360) / this.viewportHeightPx;
         this.syncGroup(camera.position);
+        this.markDrawnTiles();
+        this.streamer.evictIdle();
         publishTerrainStats({ ...this.stats, altitudeM: camera.position.y });
     }
 
@@ -2131,6 +2146,26 @@ export class TerrainEntity implements Entity {
             });
         }
         return out;
+    }
+
+    /**
+     * Mark what this reconcile uses as recent for the streamer's eviction:
+     * every drawn tile, plus the resident tiles next to it in the tree - its
+     * parent (what the budget fold and a zoom-out take over with) and its
+     * children (resident ones waiting on a sibling before they can take
+     * over, which are neither drawn nor wanted meanwhile).
+     */
+    private markDrawnTiles(): void {
+        for (const node of this.drawList) {
+            this.streamer.markUsed(node.id);
+            const parent = parentOf(node.id);
+            if (parent !== undefined) {
+                this.streamer.markUsed(parent);
+            }
+            for (const child of node.children ?? []) {
+                this.streamer.markUsed(child.id);
+            }
+        }
     }
 
     private deepestDrawnZoom(): number {

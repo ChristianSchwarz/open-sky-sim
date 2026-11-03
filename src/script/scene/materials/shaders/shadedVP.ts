@@ -19,6 +19,8 @@ export const ShadedVertProgram: string = `
   uniform vec3 uSunAmbient;
   uniform vec3 uSunDirect;
   uniform vec3 uSunTint;
+  // 1 with the sun up, 0 at night: the rim light goes out with the sun.
+  uniform float uRimFade;
   /**
    * 0 is the standard ramp; 1 deepens the shadow side (less skylight on faces
    * turned from the sun or looking down) and lifts the beam, so a gradient
@@ -132,7 +134,7 @@ ${HAZE_PARS_VERTEX}
     vec3 toCamera = normalize(-worldPos.xyz);
     float backlit = max(-dot(toCamera, uSunDir), 0.0);
     float fresnel = pow(1.0 - max(dot(worldNormal, toCamera), 0.0), RIM_POWER);
-    vLight += uSunTint * (fresnel * backlit * (1.0 - ndl) * RIM_STRENGTH);
+    vLight += uSunTint * (fresnel * backlit * (1.0 - ndl) * RIM_STRENGTH) * uRimFade;
     vec4 pos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     if (shadingType != 3) {
       pos.x = floor(pos.x / pos.w * halfWidth + 0.5) / halfWidth * pos.w;

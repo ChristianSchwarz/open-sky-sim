@@ -83,6 +83,16 @@ export class FarLandTiles {
         return this.store !== undefined && id.z === this.leafZoomAt(id) && (this.index ? this.index.has(id) : true);
     }
 
+    /**
+     * Sidecars nobody drew this generation may be evicted from the byte
+     * budget (FAR_LAND_CACHE_BYTES); call once per reconcile, beside the
+     * other stores. A drawn tile's sidecar is touched in show(), so the ones
+     * on screen stay cached for a rebuild of their tile.
+     */
+    nextGeneration(): void {
+        this.store?.nextGeneration();
+    }
+
     /** Start a frame's budget for welding levels (SMOOTH_BUILD_MS). */
     beginFrame(): void {
         this.smoothDeadline = performance.now() + SMOOTH_BUILD_MS;
@@ -107,6 +117,8 @@ export class FarLandTiles {
         if (maxToleranceM > 0 && far === undefined && this.has(id)) {
             this.request(id, meshes, priority);
         } else if (far !== undefined && far !== 'pending' && far !== 'none') {
+            // Recency only: the levels are built already.
+            this.store?.get(id);
             let pick: FarLandLevel | undefined;
             for (const level of far.levels) {
                 if (level.toleranceM <= maxToleranceM) {

@@ -194,6 +194,11 @@ export interface MirrorSource {
     /** Railway beds to mirror; absent, none are. */
     readonly railBeds?: RailBedField;
     ensureLoadedAroundWorld(x: number, z: number, radiusM: number): Promise<void>;
+    /**
+     * Keep these fine tiles resident (see HeightField.retainFine): the
+     * source's own queries peek, so nothing else marks them as in use.
+     */
+    retainFine?(ids: Iterable<TileKey>): void;
 }
 
 /** A point the fine tier must cover — an aircraft, lead included. */
@@ -281,6 +286,8 @@ export class HeightFieldSender {
                 needed.set(tileKeyString(id), id);
             }
         }
+
+        this.source.retainFine?.(needed.values());
 
         const add: SerializedDemTile[] = [];
         const absent: string[] = [];

@@ -9,8 +9,8 @@ import {
     ROLL_STICK_BASE_RATE, ROLL_STICK_MAX_RATE, THROTTLE_RATE,
 } from '../../defs';
 import {
-    getKeyboardLayout, KeyboardControlAction, KeyboardControlLayout,
-    KeyboardControlLayoutId, KeyboardPitchStickMode,
+    AUTOPILOT_KEY, getKeyboardLayout, KeyboardControlAction, KeyboardControlLayout,
+    KeyboardControlLayoutId, KeyboardPitchStickMode, WHEEL_BRAKE_ONLY_KEY,
 } from '../../input/keyboardLayouts';
 import { clamp } from '../../utils/math';
 import { SimControlInputs, SimControlMode } from './simTypes';
@@ -61,6 +61,10 @@ export class SimPlayerInput {
     private throttleState = Stick.IDLE;
     private wheelBrakeHeld = false;
     private wKeyDown = false;
+    /** The touch BRAKE button (WHEEL_BRAKE_ONLY_KEY): brakes, and no stick key with them. */
+    private brakeOnlyDown = false;
+    /** Whether the last tick flew a gamepad or touch axes, not the keys. */
+    private analogFlying = false;
     private pitchHoldSeconds = 0;
     private pitchUnitAccum = 0;
     private rollHoldSeconds = 0;
@@ -162,7 +166,7 @@ export class SimPlayerInput {
         // The one key the autopilot leaves live is its own: with every key
         // dropped while it flew, it could be switched on but never off.
         if (sink.control === 'ai') {
-            if (key === 'a' && !repeat) {
+            if (key === AUTOPILOT_KEY && !repeat) {
                 sink.toggleAutopilot();
             }
             return;
@@ -221,11 +225,20 @@ export class SimPlayerInput {
         // device is flying the stick.
         this.tickWheelBrakes(sink);
         // A real gamepad wins over the on-screen controls, which win over keys.
+        // (An idle gamepad posts itself disconnected, so the keys get through.)
         if (Number.isFinite(this.gamepadPitch)) {
             this.applyAxes(this.gamepadPitch, this.gamepadRoll, this.gamepadYaw, this.gamepadThrottle);
+            this.analogFlying = true;
         } else if (Number.isFinite(this.touchPitch)) {
             this.applyAxes(this.touchPitch, this.touchRoll, this.touchYaw, this.touchThrottle);
+            this.analogFlying = true;
         } else {
+            if (this.analogFlying) {
+                // The keys only move an axis on a key event: without this the
+                // last analog deflection would stay applied under them.
+                this.analogFlying = false;
+                this.neutraliseIdleKeyAxes();
+            }
             this.tickKeyboardSticks(delta, sink);
         }
 
@@ -264,22 +277,43 @@ export class SimPlayerInput {
         out.autopilot = control === 'ai';
     }
 
+    /** `throttle` NaN leaves the throttle where it is (a gamepad whose throttle axis was never moved). */
     private applyAxes(pitch: number, roll: number, yaw: number, throttle: number): void {
         this.pitch = clamp(pitch, -1, 1);
         this.roll = clamp(roll, -1, 1);
         this.yaw = clamp(yaw, -1, 1);
-        this.throttle = clamp(throttle, 0, 1);
+        if (Number.isFinite(throttle)) {
+            this.throttle = clamp(throttle, 0, 1);
+        }
         this.pitchStickUnits = this.pitch >= 0
             ? this.pitch * PITCH_STICK_AFT_UNITS
             : this.pitch * PITCH_STICK_FWD_UNITS;
     }
 
+    private neutraliseIdleKeyAxes(): void {
+        if (this.pitchState === Stick.IDLE) {
+            this.setPitchDeflection(0);
+        }
+        if (this.rollState === Stick.IDLE) {
+            this.roll = 0;
+        }
+        if (this.yawState === Stick.IDLE) {
+            this.yaw = 0;
+        }
+    }
+
     private tickWheelBrakes(sink: SimPlayerInputSink): void {
-        if (this.wKeyDown && this.canApplyWheelBrakes(sink)) {
+        const held = (this.wKeyDown || this.brakeOnlyDown) && this.canApplyWheelBrakes(sink);
+        if (held) {
             if (!this.wheelBrakeHeld) {
-                this.engageWheelBrakes();
+                if (this.wKeyDown) {
+                    this.engageWheelBrakes();
+                } else {
+                    this.wheelBrakeHeld = true;
+                    this.wheelBrakes = true;
+                }
             }
-        } else if (this.wheelBrakeHeld && !(this.wKeyDown && this.canApplyWheelBrakes(sink))) {
+        } else if (this.wheelBrakeHeld) {
             this.releaseWheelBrakes();
             if (this.wKeyDown) {
                 this.restoreLayoutActionForKey('w');
@@ -494,7 +528,7 @@ export class SimPlayerInput {
             case 'l':
                 this.toggleLimiters();
                 break;
-            case 'a':
+            case AUTOPILOT_KEY:
                 sink.toggleAutopilot();
                 break;
             case '1':
@@ -573,6 +607,15 @@ export class SimPlayerInput {
     }
 
     private handleWheelBrakeKeyDown(key: string, sink: SimPlayerInputSink): boolean {
+        if (key === WHEEL_BRAKE_ONLY_KEY) {
+            // Always consumed: in the air it only arms the brakes for touchdown.
+            this.brakeOnlyDown = true;
+            if (this.canApplyWheelBrakes(sink)) {
+                this.wheelBrakeHeld = true;
+                this.wheelBrakes = true;
+            }
+            return true;
+        }
         if (key !== 'w' || !this.canApplyWheelBrakes(sink)) {
             return false;
         }
@@ -582,6 +625,13 @@ export class SimPlayerInput {
     }
 
     private handleWheelBrakeKeyUp(key: string): boolean {
+        if (key === WHEEL_BRAKE_ONLY_KEY) {
+            this.brakeOnlyDown = false;
+            if (this.wheelBrakeHeld && !this.wKeyDown) {
+                this.releaseWheelBrakes();
+            }
+            return true;
+        }
         if (key !== 'w') {
             return false;
         }
@@ -639,6 +689,7 @@ export class SimPlayerInput {
         this.yawState = Stick.IDLE;
         this.throttleState = Stick.IDLE;
         this.wKeyDown = false;
+        this.brakeOnlyDown = false;
         this.firing = false;
         this.releaseWheelBrakes();
     }

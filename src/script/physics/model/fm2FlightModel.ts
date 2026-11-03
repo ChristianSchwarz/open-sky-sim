@@ -124,6 +124,12 @@ export class Fm2FlightModel extends FlightModel {
 
     // Scratch vectors (avoid per-step allocation in the worker).
     private readonly velBody = new THREE.Vector3();
+    /**
+     * Velocity of the air in the frame the model is integrated in (m/s, world
+     * axes). Zero in still air; the combat sim sets it while it runs the model in
+     * a moving carrier's frame, so the aero sees airspeed, not speed over the deck.
+     */
+    private readonly windWorld = new THREE.Vector3();
     private readonly forceBody = new THREE.Vector3();
     private readonly momentBody = new THREE.Vector3();
     private readonly forceWorld = new THREE.Vector3();
@@ -185,6 +191,12 @@ export class Fm2FlightModel extends FlightModel {
     /** Terrain height + obstacles for gear contact (flat Y=0 when unset). */
     setWorldQuery(world: WorldQuery | undefined): void {
         this.world = world;
+    }
+
+    /** Air velocity in the integration frame (see {@link windWorld}); pass null for still air. */
+    setWindWorld(wind: THREE.Vector3 | null): void {
+        if (wind) this.windWorld.copy(wind);
+        else this.windWorld.set(0, 0, 0);
     }
 
     /** Solid ground Y under a world XZ (hills + flat datum). */
@@ -370,7 +382,7 @@ export class Fm2FlightModel extends FlightModel {
 
         // Body-frame velocity through the air.
         this.invOrient.copy(this.rb.orientation).invert();
-        this.velBody.copy(this.rb.velocityWorld).applyQuaternion(this.invOrient);
+        this.velBody.copy(this.rb.velocityWorld).sub(this.windWorld).applyQuaternion(this.invOrient);
         const speed = this.velBody.length();
 
         // Aircraft angle of attack (in the body X-plane) and sideslip.
@@ -495,7 +507,7 @@ export class Fm2FlightModel extends FlightModel {
         this.resolveGearTerrainPenetration();
         this.clampParkedGroundSpeed();
 
-        this.updateStallState(speed, aoa, altitude);
+        this.updateStallState(speed, aoa);
         this.handleGroundState();
     }
 
@@ -829,12 +841,15 @@ export class Fm2FlightModel extends FlightModel {
         return Math.asin(clamp(this._fwd.y, -1, 1));
     }
 
-    private updateStallState(speed: number, aoa: number, altitude: number): void {
+    private updateStallState(speed: number, aoa: number): void {
         if (this.landed) { this.stall = -1; return; }
         const stallAoa = this.config.envelope.stallAoaRad;
         const minFlyingSpeed = this.config.envelope.minFlyingSpeedMps;
         const aoaStall = speed > 5 ? clamp((Math.abs(aoa) - stallAoa * 0.85) / (stallAoa * 0.3), 0, 1) : 0;
-        const speedStall = altitude > PLANE_DISTANCE_TO_GROUND + 5
+        // Height above the ground under the aircraft, not the ellipsoid altitude:
+        // that never fires below sea level and fires right after liftoff on a high field.
+        const agl = this.obj.position.y - this.groundHeightAt(this.obj.position.x, this.obj.position.z);
+        const speedStall = agl > PLANE_DISTANCE_TO_GROUND + 5
             ? clamp((minFlyingSpeed - speed) / minFlyingSpeed, 0, 1) : 0;
         const level = Math.max(aoaStall, speedStall);
         this.stall = level > 0 ? level : -1;

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PITCH_STICK_AFT_UNITS } from '../../defs';
-import { KeyboardControlLayoutId, KeyboardPitchStickMode } from '../../input/keyboardLayouts';
+import {
+    AUTOPILOT_KEY, KeyboardControlLayoutId, KeyboardPitchStickMode, WHEEL_BRAKE_ONLY_KEY,
+} from '../../input/keyboardLayouts';
 import { FcsPitchLimiter } from '../fm2/fcs';
 import { SimPlayerInput, SimPlayerInputSink } from './simPlayerInput';
 
@@ -84,10 +86,10 @@ test('the autopilot key switches the autopilot off again; nothing else gets thro
         toggleGear: () => { gear++; },
     };
     input.keyDown('g', false, flying);
-    input.keyDown('a', true, flying);
+    input.keyDown(AUTOPILOT_KEY, true, flying);
     assert.equal(gear, 0, 'gear key acted while the autopilot flew');
     assert.equal(toggles, 0, 'a held-key repeat toggled the autopilot');
-    input.keyDown('a', false, flying);
+    input.keyDown(AUTOPILOT_KEY, false, flying);
     assert.equal(toggles, 1);
 });
 
@@ -146,4 +148,51 @@ test('brakes held through a touchdown engage on contact under analog input', () 
     assert.equal(input.tick(0.016, landing).wheelBrakesApplied, true);
     input.keyUp('w', landing);
     assert.equal(input.tick(0.016, landing).wheelBrakesApplied, false);
+});
+
+test('rolling left on QWERTY leaves the autopilot alone; its own key toggles it', () => {
+    const input = new SimPlayerInput();
+    input.setKeyboardLayout(KeyboardControlLayoutId.QWERTY);
+    let toggles = 0;
+    const flying: SimPlayerInputSink = { ...sink, toggleAutopilot: () => { toggles++; } };
+    input.keyDown('a', false, flying);
+    assert.ok(input.tick(0.016, flying).roll < 0, 'a rolls left');
+    assert.equal(toggles, 0, 'rolling left engaged the autopilot');
+    input.keyUp('a', flying);
+    input.keyDown(AUTOPILOT_KEY, false, flying);
+    assert.equal(toggles, 1);
+});
+
+test('the brake-only key brakes on the ground and never pushes the nose over', () => {
+    const input = new SimPlayerInput();
+    input.setKeyboardLayout(KeyboardControlLayoutId.QWERTY);
+    input.setKeyboardPitchStickMode(KeyboardPitchStickMode.HOLD);
+    let onGround = false;
+    const s: SimPlayerInputSink = { ...sink, isOnGround: () => onGround };
+    input.keyDown(WHEEL_BRAKE_ONLY_KEY, false, s);
+    const air = input.tick(0.016, s);
+    assert.equal(air.pitch, 0, 'brake button pitched the nose down in the air');
+    assert.equal(air.wheelBrakesApplied, false);
+    onGround = true;
+    const ground = input.tick(0.016, s);
+    assert.equal(ground.wheelBrakesApplied, true, 'held through touchdown, the brakes engage');
+    assert.equal(ground.pitch, 0);
+    input.keyUp(WHEEL_BRAKE_ONLY_KEY, s);
+    assert.equal(input.tick(0.016, s).wheelBrakesApplied, false);
+});
+
+test('the keys take over from a released gamepad at neutral, and an untaken throttle stays put', () => {
+    const input = new SimPlayerInput();
+    input.setKeyboardLayout(KeyboardControlLayoutId.QWERTY);
+    input.syncThrottle(0.4);
+    input.setGamepadAxes(0.7, -0.6, 0.3, NaN, true);
+    const pad = input.tick(0.016, sink);
+    assert.equal(pad.pitch, 0.7);
+    assert.equal(pad.throttle, 0.4, 'a NaN throttle took the throttle');
+    input.setGamepadAxes(0, 0, 0, 0, false);
+    const keys = input.tick(0.016, sink);
+    assert.equal(keys.pitch, 0);
+    assert.equal(keys.roll, 0);
+    assert.equal(keys.yaw, 0);
+    assert.equal(keys.throttle, 0.4);
 });

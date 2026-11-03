@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { TileKey } from '../../src/script/terrain/tiling';
 import { RemoteConfig } from './remoteTiles';
-import { satelliteToken, SATELLITE_PROTOCOL, TilePool } from './tilePool';
+import { PoolOptions, satelliteToken, SATELLITE_PROTOCOL, TilePool } from './tilePool';
 
 const tiles: TileKey[] = Array.from({ length: 8 }, (_, i) => ({ z: 12, x: i, y: 0 }));
 const keyStr = (k: TileKey) => `${k.z}/${k.x}/${k.y}`;
@@ -23,7 +23,7 @@ parentPort.on('message', m => {
     return file;
 }
 
-function pool(port: number, localJobs: number): TilePool<string> {
+function pool(port: number, localJobs: number, more: Partial<PoolOptions> = {}): TilePool<string> {
     return new TilePool<string>({
         local: { file: localJobs > 0 ? localWorker() : '', execArgv: [], jobs: localJobs },
         cfg: {} as RemoteConfig,
@@ -34,15 +34,18 @@ function pool(port: number, localJobs: number): TilePool<string> {
         label: () => '',
         t0: Date.now(),
         overdueFloorMs: 400,
+        ...more,
     });
 }
 
 /**
  * A satellite with `threads` lease loops. A thread whose tile `hangs` keeps
- * heartbeating it and stops (its tile code hung); any other tile is answered
- * at once, after `delayMs`, with its key.
+ * heartbeating it and stops (its tile code hung) - or, with `hangMs`, answers
+ * it after that long and goes on (a chunk's script that ran on after the bake
+ * took the chunk back); any other tile is answered at once, after `delayMs`,
+ * with its key. `leases` says when each job came and when it ended here.
  */
-async function fakeSatellite(port: number, name: string, threads: number, hangs: (k: TileKey) => boolean, delayMs = 0) {
+async function fakeSatellite(port: number, name: string, threads: number, hangs: (k: TileKey) => boolean, delayMs = 0, hangMs?: number) {
     const base = `http://127.0.0.1:${port}`;
     const headers = { 'x-sat-token': satelliteToken(), 'x-sat-id': name };
     const stop = new AbortController();
@@ -50,6 +53,7 @@ async function fakeSatellite(port: number, name: string, threads: number, hangs:
     const { sha } = await (await call('/sat/code')).json() as { sha: string };
     await call('/sat/hello', { method: 'POST', body: JSON.stringify({ name, threads, protocol: SATELLITE_PROTOCOL, codeSha: sha }) });
     const leased: string[] = [];
+    const leases: Array<{ key: string; at: number; end?: number }> = [];
     const active = new Set<number>();
     const beat = setInterval(() => {
         call('/sat/heartbeat', { method: 'POST', body: JSON.stringify([...active]) }).catch(() => undefined);
@@ -65,12 +69,16 @@ async function fakeSatellite(port: number, name: string, threads: number, hangs:
             }
             const job = await res.json() as { id: number; key: TileKey };
             leased.push(keyStr(job.key));
-            if (hangs(job.key)) {
+            const entry: { key: string; at: number; end?: number } = { key: keyStr(job.key), at: Date.now() };
+            leases.push(entry);
+            const hung = hangs(job.key);
+            if (hung && hangMs === undefined) {
                 active.add(job.id);
                 return;
             }
             active.add(job.id);
-            await new Promise(r => setTimeout(r, delayMs));
+            await new Promise(r => setTimeout(r, hung ? hangMs : delayMs));
+            entry.end = Date.now();
             const head = Buffer.from(JSON.stringify({ result: keyStr(job.key), outputs: [] }));
             const len = Buffer.alloc(4);
             len.writeUInt32LE(head.length);
@@ -83,6 +91,7 @@ async function fakeSatellite(port: number, name: string, threads: number, hangs:
     await new Promise(r => setTimeout(r, 200));
     return {
         leased,
+        leases,
         async close() {
             clearInterval(beat);
             stop.abort();
@@ -137,6 +146,36 @@ test('a tile that overruns on every try fails the pass instead of looping', asyn
         assert.deepEqual(r.results.slice(1), tiles.slice(1).map(keyStr));
         // The only satellite there is: it got the tile again, three times in all.
         assert.equal(sat.leased.filter(k => k === '12/0/0').length, 3);
+    } finally {
+        await sat.close();
+        await p.close();
+    }
+});
+
+test('a satellite chunk is taken back before the pass has five measures, and its place stays taken until it ends there', async () => {
+    // A chunk stage: one job per satellite. Its first job hangs past the
+    // limit (400 ms: fewer than five measures, so the fallback), then ends
+    // (its script killed at last) at 1.5 s.
+    const p = pool(47894, 0, { perSatellite: 1, overdueFloorMs: 100, overdueFallbackMs: 400 });
+    await p.start();
+    let first = true;
+    const sat = await fakeSatellite(47894, 'one', 2, () => {
+        const h = first;
+        first = false;
+        return h;
+    }, 0, 1500);
+    try {
+        const r = await p.runPass(tiles.slice(0, 3), 1);
+        assert.deepEqual(r.errors, []);
+        assert.deepEqual(r.results, tiles.slice(0, 3).map(keyStr));
+        const [hung, ...rest] = sat.leases;
+        // Taken back (it was handed out again) though it never stopped heartbeating...
+        assert.equal(sat.leased.filter(k => k === hung.key).length, 2);
+        // ...and no second job reached the satellite while the first still ran there.
+        assert.ok(rest.length > 0);
+        for (const l of rest) {
+            assert.ok(l.at >= hung.end!, `${l.key} was handed out ${hung.end! - l.at} ms before the hung job ended`);
+        }
     } finally {
         await sat.close();
         await p.close();

@@ -13,11 +13,15 @@ import { GAME_HEADON, MERGE_SETUPS, MergeSide, runMerge, straightPilot } from '.
  */
 const setup = (name: string) => MERGE_SETUPS.find(s => s.name === name)!;
 
-/** One kill per model the bench shows it scoring (runs are seeded, so they repeat). */
+/**
+ * One kill per model the bench shows it scoring (runs are seeded, so they repeat).
+ * Since the gun fires its full cyclic rate, symmetric head-on gun passes often
+ * end with both shot down (Shaw head-on and Ace low against Classic now do).
+ */
 const KILLS: { model: AiPilotModels; red: AiPilotModels; setup: string }[] = [
-    { model: AiPilotModels.SHAW, red: AiPilotModels.CLASSIC, setup: 'head-on' },
+    { model: AiPilotModels.SHAW, red: AiPilotModels.CLASSIC, setup: 'low' },
     { model: AiPilotModels.AGGRESSIVE, red: AiPilotModels.CLASSIC, setup: 'head-on' },
-    { model: AiPilotModels.ACE, red: AiPilotModels.CLASSIC, setup: 'low' },
+    { model: AiPilotModels.ACE, red: AiPilotModels.CLASSIC, setup: 'head-on' },
 ];
 
 for (const { model, red, setup: killSetup } of KILLS) {

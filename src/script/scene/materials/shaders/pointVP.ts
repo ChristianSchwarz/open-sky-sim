@@ -14,6 +14,10 @@ export const PointVertProgram: string = `
   uniform float uPointSizePx;
   uniform float uPointSizeM;
   uniform float uPointMaxPx;
+  // Texels of the bound target per screen pixel (targetTexelScale), so the
+  // pixel clamps stay screen pixels under supersampling, a render scale and
+  // in the fovea. Set lazily per draw; 0 (never set) counts as 1.
+  uniform float uTexelScale;
 #ifdef POINT_FADE
   // Whole up to uPointFadeM.x metres from the camera, then dimming evenly
   // (linear, not an S-curve) until gone at .y.
@@ -40,8 +44,10 @@ ${HAZE_PARS_VERTEX}
 #ifdef POINT_FADE
     vPointFade = 1.0 - clamp((length(viewPos.xyz) - uPointFadeM.x) / (uPointFadeM.y - uPointFadeM.x), 0.0, 1.0);
 #endif
+    float texelScale = uTexelScale > 0.0 ? uTexelScale : 1.0;
     gl_PointSize = uPointSizeM > 0.0
-      ? clamp(uPointSizeM * projectionMatrix[1][1] * halfHeight / max(pos.w, 1e-3), uPointSizePx, uPointMaxPx)
+      ? clamp(uPointSizeM * projectionMatrix[1][1] * halfHeight / max(pos.w, 1e-3),
+          uPointSizePx * texelScale, uPointMaxPx * texelScale)
       : uPointSizePx;
     if (shadingType != 3) {
       pos.x = floor(pos.x / pos.w * halfWidth + 0.5) / halfWidth * pos.w;

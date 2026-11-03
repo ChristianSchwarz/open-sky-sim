@@ -26,6 +26,7 @@ import * as path from 'node:path';
 import { stableScripts } from './pyLeaf';
 import { satelliteCaEnv } from './pyServe';
 import { decodeTileIndex } from './index';
+import { killTree } from './killTree.mjs';
 import { TileKey } from '../../src/script/terrain/tiling';
 
 export type ChunkStage = 'coast' | 'roads' | 'buildings' | 'cover';
@@ -166,20 +167,54 @@ function stageArgs(stage: ChunkStage, planet: string, bbox: string, pbf: string,
     }
 }
 
-/** Run one script to its end; its output's tail, or an error carrying it. */
-function runScript(python: string, isolated: boolean, script: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
+/**
+ * How long one chunk job's scripts may run in all before they are killed,
+ * RFS_CHUNK_TIMEOUT_MIN (default 240 minutes). PyServe's 30 minutes
+ * (RFS_PY_TIMEOUT_MIN) is for one leaf; a chunk is hundreds of leaves - a
+ * Nord Kap coast chunk took tens of minutes on a satellite, a DACH one more,
+ * and a stage's local run (chunk_pool.ts) has fewer threads than a satellite.
+ * Four hours is several times the longest seen: what it catches is a script
+ * that hung, which otherwise held the chunk (and its satellite) for ever.
+ * The tile pool's own limit for a job without measures (tilePool.ts
+ * OVERDUE_FALLBACK_MS) is set above this, so a satellite's script times out
+ * here, and says so, before the bake takes the job back.
+ */
+export function chunkTimeoutMs(): number {
+    const min = Number(process.env.RFS_CHUNK_TIMEOUT_MIN);
+    return (Number.isFinite(min) && min > 0 ? min : 240) * 60_000;
+}
+
+/**
+ * Run one script to its end, or until `deadline` (epoch ms), when it is killed
+ * with everything it started (its multiprocessing pool); its output's tail,
+ * or an error carrying it.
+ */
+export function runScript(python: string, isolated: boolean, script: string, args: string[], cwd: string, env: NodeJS.ProcessEnv,
+    deadline = Infinity): Promise<string> {
     return new Promise((resolve, reject) => {
         const flags = [...(isolated ? ['-E', '-s'] : []), '-u', '-X', 'utf8'];
         const child = spawn(python, [...flags, script, ...args], { cwd, env: { ...process.env, ...env }, windowsHide: true });
         let tail = '';
+        let timedOut = false;
         const keep = (d: Buffer) => {
             tail = (tail + d.toString('utf8')).slice(-6000);
         };
+        const timer = Number.isFinite(deadline) ? setTimeout(() => {
+            timedOut = true;
+            killTree(child);
+        }, Math.max(0, deadline - Date.now())) : undefined;
         child.stdout.on('data', keep);
         child.stderr.on('data', keep);
-        child.on('error', reject);
+        child.on('error', err => {
+            clearTimeout(timer);
+            reject(err);
+        });
         child.on('close', code => {
-            if (code === 0) {
+            clearTimeout(timer);
+            if (timedOut) {
+                reject(new Error(`${path.basename(script)} still running at the chunk's time limit `
+                    + `(RFS_CHUNK_TIMEOUT_MIN ${chunkTimeoutMs() / 60_000} min), killed: ${tail.slice(-1500)}`));
+            } else if (code === 0) {
                 resolve(tail);
             } else {
                 reject(new Error(`${path.basename(script)} exited ${code}: ${tail.slice(-1500)}`));
@@ -216,8 +251,9 @@ export async function pyChunk(cfg: PyChunkConfig, k: TileKey, jobDir: string): P
     const jobs = onSatellite ? Number(process.env.RFS_SAT_THREADS ?? os.cpus().length - 1) : cfg.localJobs;
     const env: NodeJS.ProcessEnv = { PYTHONIOENCODING: 'utf-8', ...(onSatellite ? { RFS_STRICT_INPUTS: '1', ...satelliteCaEnv() } : {}) };
     let tail = '';
+    const deadline = t0 + chunkTimeoutMs();
     for (const [script, ...args] of stageArgs(cfg.stage, planet, bbox, pbf, coverDir, Math.max(1, jobs))) {
-        tail = await runScript(python, process.env.RFS_SAT_PYTHON !== undefined, path.resolve(scripts, script), args, cwd, env);
+        tail = await runScript(python, process.env.RFS_SAT_PYTHON !== undefined, path.resolve(scripts, script), args, cwd, env, deadline);
     }
     return { key: `chunk ${k.x}`, seconds: (Date.now() - t0) / 1000, tail: tail.slice(-600) };
 }

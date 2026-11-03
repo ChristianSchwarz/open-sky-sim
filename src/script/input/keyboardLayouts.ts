@@ -88,6 +88,33 @@ export function getKeyboardLayout(layoutId: KeyboardControlLayoutId): KeyboardCo
     return KeyboardControlLayouts.get(layoutId) ?? QwertyKeyboardControlLayout;
 }
 
+/**
+ * Toggles the autopilot. Kept off every layout's flight keys: the worker
+ * runs the layout keys and the action keys on the same press, so an
+ * autopilot key that is also a stick key would engage it mid-manoeuvre.
+ */
+export const AUTOPILOT_KEY = 'p';
+
+/**
+ * Wheel brakes only, never a stick key: what the touch BRAKE button presses.
+ * The keyboard's own brake key ('w') is pitch-down in the air on QWERTY and
+ * QWERTZ (throttle-up on AZERTY); a finger on BRAKE must not push the nose over.
+ * Not a key any keyboard produces, so it reaches only the brake handlers.
+ */
+export const WHEEL_BRAKE_ONLY_KEY = 'wheelbrake';
+
+/**
+ * Every key the cockpit takes outside the stick layouts (the worker's action
+ * keys, the player's and the game's keypress keys). A layout key that is one
+ * of these does two things at once; see keyboardLayouts.test.ts. The brake
+ * key 'w' is left out: it shares a stick key on purpose, brakes on the
+ * ground and the layout's action in the air.
+ */
+export const COCKPIT_ACTION_KEYS: readonly string[] = [
+    ' ', 'f', 'g', 'b', 'h', 'l', AUTOPILOT_KEY, '1', '2', '3',
+    't', 'i', 'u', 'k', '4', 'n', 'v', 'm',
+];
+
 /** How pitch keys map to stick deflection. */
 export enum KeyboardPitchStickMode {
     /** Arrows layout: latched stepped stick; letter layouts: full deflection while held. */

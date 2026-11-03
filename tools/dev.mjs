@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { scheduleBuild } from './autoBuild.mjs';
+import { SPAWN_GROUP, killTree } from './bake/killTree.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -15,7 +16,9 @@ function runCommand(command, args) {
             cwd: PROJECT_ROOT,
             stdio: 'inherit',
             shell: process.platform === 'win32',
+            ...SPAWN_GROUP,
         });
+        children.push(child);
         child.on('error', reject);
         child.on('close', (code) => {
             if (code === 0) {
@@ -33,6 +36,7 @@ function spawnChild(command, args, env = process.env) {
         stdio: 'inherit',
         shell: process.platform === 'win32',
         env,
+        ...SPAWN_GROUP,
     });
     children.push(child);
     return child;
@@ -51,16 +55,26 @@ function watchDirectory(dirPath) {
     });
 }
 
+// Each child's whole tree: on Windows a child is the cmd.exe of `shell: true`,
+// and kill() ended only that, leaving webpack and the dev server (and an
+// import it was running) behind. The kill is in the exit hook, which every
+// way out passes; the signals only end the process.
+process.on('exit', () => {
+    for (const child of children) {
+        if (child.exitCode === null && child.signalCode === null) {
+            killTree(child);
+        }
+    }
+});
+
 function shutdown() {
     console.log('\n[dev] shutting down...');
-    for (const child of children) {
-        child.kill();
-    }
     process.exit(0);
 }
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+process.on('SIGHUP', shutdown);
 
 // A blank checkout: node packages first (everything below runs through them),
 // then the Python ones the terrain bake needs - the dev server bakes missing

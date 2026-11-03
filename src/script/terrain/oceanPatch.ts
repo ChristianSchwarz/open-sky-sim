@@ -187,13 +187,22 @@ export function disposeOceanPatch(p: OceanPatch): void {
 /**
  * Several patches drawn as one mesh, for the edge fill beside one tile: each
  * was a draw of its own, ~20 % of a frame's draws along a border (2026-10-28).
- * All carry the same attributes and the one land group; positions move into
- * the first patch's frame. The patches themselves are left as they are.
+ * All carry the same attributes and the one land group; positions (and
+ * normals) move into the first patch's frame - its whole transform, not just
+ * its position: a re-base turns every patch it carries (FrameShift.object),
+ * while one built after it has no turn at all, so patches merged together
+ * need not share an orientation. The patches themselves are left as they are.
  */
 export function mergeOceanPatches(patches: OceanPatch[]): THREE.Group {
     const meshes = patches.map(p => p.group.children[0] as THREE.Mesh);
     const first = meshes[0];
-    const base = patches[0].group.position;
+    const transformOf = (g: THREE.Object3D) => new THREE.Matrix4().compose(g.position, g.quaternion, g.scale);
+    const base = patches[0].group;
+    const toBase = transformOf(base).invert();
+    // Each patch's local frame into the first one's, for points and for normals.
+    const rel = patches.map(p => transformOf(p.group).premultiply(toBase));
+    const relNormal = rel.map(m => new THREE.Matrix3().getNormalMatrix(m));
+    const v = new THREE.Vector3();
     let vertices = 0;
     let indexCount = 0;
     for (const m of meshes) {
@@ -208,19 +217,30 @@ export function mergeOceanPatches(patches: OceanPatch[]): THREE.Group {
             new (n: number) => Float32Array | Uint8Array;
         const out = new ctor(vertices * size);
         let o = 0;
+        const isPosition = name === 'position';
+        const isNormal = name === 'normal';
         for (let k = 0; k < meshes.length; k++) {
             const a = meshes[k].geometry.getAttribute(name);
-            const shift = name === 'position' ? patches[k].group.position.clone().sub(base) : undefined;
+            if ((isPosition || isNormal) && size === 3) {
+                for (let i = 0; i < a.count; i++) {
+                    v.fromBufferAttribute(a, i);
+                    if (isPosition) {
+                        v.applyMatrix4(rel[k]);
+                    } else {
+                        v.applyMatrix3(relNormal[k]).normalize();
+                    }
+                    out[o++] = v.x;
+                    out[o++] = v.y;
+                    out[o++] = v.z;
+                }
+                continue;
+            }
             for (let i = 0; i < a.count; i++) {
                 for (let c = 0; c < size; c++) {
                     // Raw components: normalized attributes keep their bytes.
-                    let v = a instanceof THREE.InterleavedBufferAttribute
+                    out[o++] = a instanceof THREE.InterleavedBufferAttribute
                         ? a.data.array[i * a.data.stride + a.offset + c]
                         : a.array[i * size + c];
-                    if (shift) {
-                        v += c === 0 ? shift.x : c === 1 ? shift.y : shift.z;
-                    }
-                    out[o++] = v;
                 }
             }
         }
@@ -245,7 +265,9 @@ export function mergeOceanPatches(patches: OceanPatch[]): THREE.Group {
     mesh.onBeforeRender = first.onBeforeRender;
     const group = new THREE.Group();
     group.name = `oceans:${patches[0].group.name}`;
-    group.position.copy(base);
+    group.position.copy(base.position);
+    group.quaternion.copy(base.quaternion);
+    group.scale.copy(base.scale);
     group.add(mesh);
     group.updateMatrix();
     group.matrixAutoUpdate = false;

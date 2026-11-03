@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import * as THREE from 'three';
-import { makeEnuBasis } from './geodesy';
+import { FrameShift, makeEnuBasis } from './geodesy';
 import { buildOceanPatch, mergeOceanPatches } from './oceanPatch';
 
 describe('mergeOceanPatches', () => {
@@ -62,6 +62,49 @@ describe('mergeOceanPatches', () => {
                 assert.equal(merged.getX(o), a.getX(i));
             }
             assert.equal(merged.normalized, a.normalized);
+        }
+    });
+
+    /** Every vertex (and normal) of a group's mesh in the scene frame, through its whole transform. */
+    function sceneVertices(group: THREE.Group): { points: THREE.Vector3[]; normals: THREE.Vector3[] } {
+        group.updateMatrix();
+        const mesh = group.children[0] as THREE.Mesh;
+        const pos = mesh.geometry.getAttribute('position');
+        const nrm = mesh.geometry.getAttribute('normal');
+        const normalMatrix = new THREE.Matrix3().getNormalMatrix(group.matrix);
+        const points: THREE.Vector3[] = [];
+        const normals: THREE.Vector3[] = [];
+        for (let i = 0; i < pos.count; i++) {
+            points.push(new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(group.matrix));
+            normals.push(new THREE.Vector3().fromBufferAttribute(nrm, i).applyMatrix3(normalMatrix).normalize());
+        }
+        return { points, normals };
+    }
+
+    it('keeps a patch turned by a re-base where it was, merged with one built after', () => {
+        // Built before a 40 km re-base and carried across it (turned), the
+        // other built in the new frame (not turned): the case that left the
+        // carried patch's fill tens of metres off when only positions moved.
+        const from = makeEnuBasis(50.3, 11.8, 0);
+        const to = makeEnuBasis(50.3, 12.36, 0);
+        const shift = FrameShift.between(from, to);
+        const carried = buildOceanPatch(ids[0], from, 0, 0, materials, undefined, lift, 8);
+        shift.object(carried.group);
+        assert.ok(Math.abs(carried.group.quaternion.w) < 1 - 1e-9, 'the re-base turned the patch');
+        const fresh = buildOceanPatch(ids[1], to, 0, 0, materials, undefined, lift, 8);
+
+        for (const order of [[carried, fresh], [fresh, carried]]) {
+            const merged = sceneVertices(mergeOceanPatches(order));
+            const expected = order.map(p => sceneVertices(p.group));
+            let i = 0;
+            for (const e of expected) {
+                for (let k = 0; k < e.points.length; k++, i++) {
+                    const d = merged.points[i].distanceTo(e.points[k]);
+                    assert.ok(d < 0.05, `vertex ${i} is ${d.toFixed(3)} m off`);
+                    assert.ok(merged.normals[i].angleTo(e.normals[k]) < 1e-5, `normal ${i} turned`);
+                }
+            }
+            assert.equal(i, merged.points.length);
         }
     });
 });

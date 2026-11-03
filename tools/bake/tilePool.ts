@@ -26,7 +26,10 @@
  * sooner than OVERDUE_FLOOR_MS), heartbeat or not: a satellite whose tile
  * code hung kept the last 6 of the DACH mesh pass for ever (2026-10-30). An
  * overdue tile goes to the local workers when there are any, else to another
- * satellite, and fails the pass after MAX_OVERRUNS tries.
+ * satellite, and fails the pass after MAX_OVERRUNS tries. Before the pass has
+ * OVERDUE_MIN_SAMPLES measures the limit is OVERDUE_FALLBACK_MS. A job taken
+ * back still runs on its satellite until the satellite's heartbeat stops
+ * listing it, and counts against `perSatellite` till then (see `reclaimed`).
  */
 
 import * as crypto from 'node:crypto';
@@ -55,6 +58,16 @@ const OVERDUE_FACTOR = 5;
 const OVERDUE_FLOOR_MS = 10 * 60_000;
 /** ...and only once this many of the pass's tiles have finished (a chunk stage's jobs take long from the start). */
 const OVERDUE_MIN_SAMPLES = 5;
+/**
+ * Before then, the limit: five hours. A chunk stage has as few jobs as the
+ * import has chunks, so with five or fewer a hung satellite chunk was never
+ * taken back. A chunk's scripts are killed on the satellite after
+ * pyChunk.ts chunkTimeoutMs (four hours) and the job comes back as a failure
+ * on its own; this hour above it covers the job's input transfer and a
+ * satellite whose own node side hung, and leaves a slow but live chunk alone
+ * (chunks differ too much in land for a few measures to say what is slow).
+ */
+const OVERDUE_FALLBACK_MS = 5 * 3600_000;
 /** A tile overdue this many times is an error, not another try. */
 const MAX_OVERRUNS = 3;
 const DISCOVERY_RETRY_MS = 10_000;
@@ -88,6 +101,8 @@ export interface PoolOptions {
     perSatellite?: number;
     /** The least age at which a job is taken back from a satellite that still heartbeats (OVERDUE_FLOOR_MS); the tests shorten it. */
     overdueFloorMs?: number;
+    /** The limit before the pass has OVERDUE_MIN_SAMPLES measures (OVERDUE_FALLBACK_MS); the tests shorten it. */
+    overdueFallbackMs?: number;
 }
 
 interface Lease { idx: number; pass: number; satId: string; start: number; beat: number; job: Job }
@@ -122,6 +137,14 @@ export class TilePool<R> {
     private readonly refused = new Set<string>();
     private readonly sats = new Map<string, Satellite>();
     private readonly leases = new Map<number, Lease>();
+    /**
+     * Jobs taken back as overdue or silent whose satellite may still run them,
+     * by job id: they hold a `perSatellite` place till its heartbeat stops
+     * listing them (or their late result comes, or it says bye). A reclaimed
+     * chunk otherwise freed the place, and the satellite was handed a second
+     * ~10 GB coast bake beside the first.
+     */
+    private readonly reclaimed = new Map<number, string>();
     private readonly waiters: Waiter[] = [];
     private nextJobId = 1;
     private expiry?: NodeJS.Timeout;
@@ -438,6 +461,11 @@ export class TilePool<R> {
                     }
                 }
             }
+            for (const [id, s] of this.reclaimed) {
+                if (s === satId) {
+                    this.reclaimed.delete(id); // it ends its jobs on the way out (satellite.ts quit)
+                }
+            }
             console.log(`\nsatellite ${sat.name} left after ${sat.done} tiles`);
             this.sats.delete(satId);
             res.writeHead(204).end();
@@ -448,6 +476,17 @@ export class TilePool<R> {
                 if (l && l.satId === satId) {
                     l.beat = Date.now();
                 }
+            }
+            // A taken-back job it no longer lists has ended there: its place is free.
+            let freed = false;
+            for (const [id, s] of this.reclaimed) {
+                if (s === satId && !ids.includes(id)) {
+                    this.reclaimed.delete(id);
+                    freed = true;
+                }
+            }
+            if (freed) {
+                this.wakeWaiters();
             }
             res.writeHead(204).end();
         } else if (req.method === 'GET' && url.pathname.startsWith('/sat/blob/')) {
@@ -480,7 +519,7 @@ export class TilePool<R> {
         this.waiters.push(w);
     }
 
-    /** Whether `sat` holds as many jobs as `perSatellite` allows (a chunk stage: one). */
+    /** Whether `sat` holds as many jobs as `perSatellite` allows (a chunk stage: one), counting those taken back but still running there. */
     private atCapacity(sat: Satellite): boolean {
         const cap = this.opts.perSatellite;
         if (cap === undefined) {
@@ -489,6 +528,9 @@ export class TilePool<R> {
         let n = 0;
         for (const l of this.leases.values()) {
             n += l.satId === sat.id ? 1 : 0;
+        }
+        for (const s of this.reclaimed.values()) {
+            n += s === sat.id ? 1 : 0;
         }
         return n >= cap;
     }
@@ -565,14 +607,15 @@ export class TilePool<R> {
         return true;
     }
 
-    /** How long a job may be out before it is taken back though its satellite heartbeats; Infinity until the pass has a measure. */
+    /** How long a job may be out before it is taken back though its satellite heartbeats; OVERDUE_FALLBACK_MS until the pass has its measures. */
     private overdueMs(): number {
+        const floor = this.opts.overdueFloorMs ?? OVERDUE_FLOOR_MS;
         const d = this.run?.durations;
         if (!d || d.length < OVERDUE_MIN_SAMPLES) {
-            return Infinity;
+            return Math.max(floor, this.opts.overdueFallbackMs ?? OVERDUE_FALLBACK_MS);
         }
         const sorted = [...d].sort((a, b) => a - b);
-        return Math.max(this.opts.overdueFloorMs ?? OVERDUE_FLOOR_MS, OVERDUE_FACTOR * sorted[Math.floor(0.95 * (sorted.length - 1))]);
+        return Math.max(floor, OVERDUE_FACTOR * sorted[Math.floor(0.95 * (sorted.length - 1))]);
     }
 
     private expireLeases(): void {
@@ -584,6 +627,7 @@ export class TilePool<R> {
                 continue;
             }
             this.leases.delete(id);
+            this.reclaimed.set(id, l.satId);
             const run = this.run;
             if (!run || run.pass !== l.pass || run.finished[l.idx]) {
                 continue;
@@ -627,6 +671,11 @@ export class TilePool<R> {
     }
 
     private async result(sat: Satellite, jobId: number, body: Buffer): Promise<void> {
+        if (this.reclaimed.get(jobId) === sat.id) {
+            // A taken-back job's late answer: dropped, but its place is free again.
+            this.reclaimed.delete(jobId);
+            this.wakeWaiters();
+        }
         const lease = this.leases.get(jobId);
         if (!lease || lease.satId !== sat.id || !this.run || this.run.pass !== lease.pass || this.run.finished[lease.idx]) {
             return;

@@ -225,7 +225,6 @@ const SHELL_CENTRE = new THREE.Vector3();
 const SHELL_AXIS = new THREE.Vector3();
 const SHELL_REL = new THREE.Vector3();
 const SHELL_STRETCHED = new THREE.Vector3();
-const SHELL_MATRIX = new THREE.Matrix4();
 
 /** Scratch for {@link Game.updateSunEntity}. */
 const SUN_FACING = new THREE.Quaternion();
@@ -3148,10 +3147,9 @@ export class Game {
         u.uSkyWeight.value = THREE.MathUtils.smoothstep(altitude, ATMOSPHERE_SHELL_FADE_IN_M, SHELL_SKY_FULL_M);
         u.uSkyGain.value = THREE.MathUtils.lerp(SHELL_SKY_GAIN, 1,
             THREE.MathUtils.smoothstep(altitude, SHELL_SKY_GAIN_START_M, SHELL_SKY_GAIN_END_M));
-        SHELL_MATRIX.makeRotationFromQuaternion(camera.quaternion);
-        u.uCamRot.value.setFromMatrix4(SHELL_MATRIX);
-        const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
-        u.uTanHalfFov.value.set(tanHalf * camera.aspect, tanHalf);
+        // The view ray (rotation, projection, viewport) is set per draw by the
+        // shell itself: the fovea and the weapons-target MFD draw it through
+        // cameras of their own.
     }
 
     /** Hide the flat sky billboard in space; restore it in atmosphere. */
@@ -5571,7 +5569,7 @@ export class Game {
     }
 
     /**
-     * The player's in-worker autopilot (the `a` key) takes off, flies home and
+     * The player's in-worker autopilot (the `p` key) takes off, flies home and
      * lands; it does not fight. It used to be handed the opponent as a target
      * "for later", which now would turn every autopilot climb-out - and its
      * loiter - into a dogfight flown for the player.

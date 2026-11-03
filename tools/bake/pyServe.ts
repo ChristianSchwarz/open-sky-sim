@@ -11,6 +11,7 @@
 import { ChildProcess, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { killTree } from './killTree.mjs';
 
 export class PyServe {
     private child?: ChildProcess;
@@ -89,7 +90,7 @@ export class PyServe {
             const timer = setTimeout(() => {
                 this.waiting = undefined;
                 this.child = undefined;
-                child.kill();
+                killTree(child); // its own children too: a stage's pool outlived a kill of the script alone
                 reject(new Error(`${path.basename(this.script)} --serve gave no answer in ${Math.round(timeoutMs / 1000)} s`));
             }, timeoutMs);
             this.waiting = {

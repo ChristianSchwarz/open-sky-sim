@@ -71,6 +71,24 @@ export function missionId(name: string): string {
 
 export const MISSION_ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
+/** Initial great-circle bearing from `a` to `b`: degrees clockwise from north, 0 up to 360. */
+export function initialBearingDeg(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+    const rad = Math.PI / 180;
+    const lat1 = a.lat * rad;
+    const lat2 = b.lat * rad;
+    const dLon = (b.lon - a.lon) * rad;
+    const y = Math.sin(dLon) * Math.cos(lat2);
+    const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+    return normalizeHeadingDeg(Math.atan2(y, x) / rad);
+}
+
+/** A compass heading folded into 0 up to 360 (360 itself reads as 0). */
+export function normalizeHeadingDeg(deg: number): number {
+    const h = ((deg % 360) + 360) % 360;
+    // -0 and float dust just under 360 both mean north.
+    return h >= 360 - 1e-9 ? 0 : h + 0;
+}
+
 /** Errors in `m`, empty when it is a mission this build can fly. */
 export function validateMission(m: unknown): string[] {
     const errors: string[] = [];

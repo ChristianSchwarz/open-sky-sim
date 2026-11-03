@@ -573,6 +573,9 @@ export function disposeTileMeshes(m: TileMeshes): void {
     for (const trees of m.trees ?? []) {
         trees.geometry.dispose();
         (trees.material as THREE.Material).dispose();
+        // The per-instance buffers (instanceMatrix and any instanceColor)
+        // are the renderer's to free, and it does on this event only.
+        trees.dispose();
     }
     // A sidecar still in flight must not bind to a released tile.
     m.cover = 'none';

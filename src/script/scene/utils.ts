@@ -36,6 +36,16 @@ function refreshCameraCache(renderer: THREE.WebGLRenderer, camera: THREE.Camera)
     camD = camPos.negate().dot(camDir);
 }
 
+/**
+ * Texels of `target` per screen pixel: its supersample (or render-scale)
+ * factor, which the renderer records on the texture. 1 for the canvas and for
+ * a target the renderer did not make.
+ */
+export function targetTexelScale(target: THREE.RenderTarget | null): number {
+    const scale = target?.texture.userData.texelScale as number | undefined;
+    return scale !== undefined && scale > 0 ? scale : 1;
+}
+
 interface UniformRefreshStamp {
     __uniformFrame?: number;
     __uniformCamera?: THREE.Camera;
@@ -98,6 +108,11 @@ export function updateUniforms(this: THREE.Mesh, renderer: THREE.WebGLRenderer, 
     const target = renderer.getRenderTarget();
     u.halfWidth.value = Math.floor((target?.width || H_RES) * 0.5);
     u.halfHeight.value = Math.floor((target?.height || V_RES) * 0.5);
+    if (data.point) {
+        // Points are sized in screen pixels but drawn in the bound target's
+        // texels: a supersampled target (or a fovea) has more of them per pixel.
+        (u.uTexelScale ??= { value: 1 }).value = targetTexelScale(target);
+    }
 
     m.uniformsNeedUpdate = true;
 }

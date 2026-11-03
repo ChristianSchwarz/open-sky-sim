@@ -248,6 +248,158 @@ describe('TileStreamer', () => {
     });
 });
 
+describe('TileStreamer idle eviction', () => {
+    /** Four uploaded tiles of 100 bytes each, under a 250-byte budget. */
+    async function residentFour(h: ReturnType<typeof makeHarness>, idleGenerations = 2) {
+        const released: string[] = [];
+        const uploads: string[] = [];
+        const s = new TileStreamer<{ n: number }, string>({
+            store: h.store,
+            upload: (id) => {
+                uploads.push(tileKeyString(id));
+                return `gpu:${tileKeyString(id)}`;
+            },
+            release: (id) => released.push(tileKeyString(id)),
+            sizeOf: () => 100,
+            maxBytes: 250,
+            idleGenerations,
+        });
+        const ids = [t(8, 0, 0), t(8, 1, 0), t(8, 2, 0), t(8, 3, 0)];
+        s.setWants(ids.map(id => want({ id })));
+        await new Promise(r => setTimeout(r, 5));
+        s.pumpUploads();
+        assert.equal(s.stats.resident, 4);
+        assert.equal(s.stats.residentBytes, 400);
+        // Resident and drawn: the quadtree stops wanting what it has.
+        s.setWants([]);
+        return { s, ids, released, uploads };
+    }
+
+    it('never releases a tile that is drawn, however far over budget', async () => {
+        const h = makeHarness();
+        try {
+            const { s, ids, released } = await residentFour(h);
+            for (let g = 0; g < 10; g++) {
+                s.nextGeneration();
+                ids.forEach(id => s.markUsed(id));
+                assert.equal(s.evictIdle(), 0);
+            }
+            assert.deepEqual(released, []);
+            assert.equal(s.stats.resident, 4);
+        } finally {
+            h.restore();
+        }
+    });
+
+    it('releases idle tiles past the budget, least recently drawn first, and only down to it', async () => {
+        const h = makeHarness();
+        try {
+            const { s, ids, released } = await residentFour(h);
+            // 8/0/0 last drawn in generation 1, 8/1/0 in 2, the others throughout.
+            for (let g = 1; g <= 6; g++) {
+                s.nextGeneration();
+                if (g <= 1) s.markUsed(ids[0]);
+                if (g <= 2) s.markUsed(ids[1]);
+                s.markUsed(ids[2]);
+                s.markUsed(ids[3]);
+            }
+            assert.equal(s.evictIdle(), 2);
+            assert.deepEqual(released, ['8/0/0', '8/1/0']);
+            assert.equal(s.has(ids[0]), false);
+            assert.equal(s.has(ids[2]), true);
+            assert.equal(s.stats.residentBytes, 200);
+            assert.equal(s.stats.evicted, 2);
+            // Under budget now: nothing more goes, idle or not.
+            s.nextGeneration();
+            s.nextGeneration();
+            s.nextGeneration();
+            assert.equal(s.evictIdle(), 0);
+        } finally {
+            h.restore();
+        }
+    });
+
+    it('waits the idle generations before releasing anything', async () => {
+        const h = makeHarness();
+        try {
+            const { s, released } = await residentFour(h, 3);
+            s.nextGeneration();
+            s.nextGeneration();
+            assert.equal(s.evictIdle(), 0, 'idle two generations, three needed');
+            s.nextGeneration();
+            assert.equal(s.evictIdle(), 2);
+            assert.equal(released.length, 2);
+        } finally {
+            h.restore();
+        }
+    });
+
+    it('never releases a pinned tile', async () => {
+        const h = makeHarness();
+        try {
+            const { s, ids, released } = await residentFour(h);
+            s.setPinnedKeys(ids.slice(0, 3).map(tileKeyString));
+            for (let g = 0; g < 5; g++) {
+                s.nextGeneration();
+            }
+            assert.equal(s.evictIdle(), 1, 'only the one unpinned tile can go');
+            assert.deepEqual(released, ['8/3/0']);
+            for (const id of ids.slice(0, 3)) {
+                assert.ok(s.has(id), `${tileKeyString(id)} is pinned`);
+            }
+        } finally {
+            h.restore();
+        }
+    });
+
+    it('requests and rebuilds a released tile when it is wanted again', async () => {
+        const h = makeHarness();
+        try {
+            const { s, ids, released, uploads } = await residentFour(h);
+            for (let g = 0; g < 3; g++) {
+                s.nextGeneration();
+                ids.slice(1).forEach(id => s.markUsed(id));
+            }
+            assert.equal(s.evictIdle(), 1, 'the one idle tile, though still over budget');
+            assert.deepEqual(released, ['8/0/0']);
+            const versionAfterEvict = s.version;
+            h.requested.length = 0;
+
+            s.setWants([want({ id: ids[0] })]);
+            assert.deepEqual(h.requested.map(r => r.key), ['8/0/0'], 'asked for again');
+            await new Promise(r => setTimeout(r, 5));
+            s.pumpUploads();
+            assert.equal(s.get(ids[0]), 'gpu:8/0/0');
+            assert.equal(uploads.filter(k => k === '8/0/0').length, 2, 'built a second time');
+            assert.ok(s.version > versionAfterEvict);
+            // Fresh: just uploaded counts as used, so it is not the next to go.
+            s.nextGeneration();
+            s.markUsed(ids[2]);
+            s.markUsed(ids[3]);
+            assert.equal(s.evictIdle(), 0, 'one generation idle is not enough');
+        } finally {
+            h.restore();
+        }
+    });
+
+    it('evicts nothing without a size or a budget', async () => {
+        const h = makeHarness();
+        try {
+            await new Promise(r => setTimeout(r, 0));
+            h.streamer.setWants([want({ id: t(8, 5, 5) })]);
+            await new Promise(r => setTimeout(r, 5));
+            h.streamer.pumpUploads();
+            for (let g = 0; g < 5; g++) {
+                h.streamer.nextGeneration();
+            }
+            assert.equal(h.streamer.evictIdle(), 0);
+            assert.ok(h.streamer.has(t(8, 5, 5)));
+        } finally {
+            h.restore();
+        }
+    });
+});
+
 describe('predictive prefetch', () => {
     /**
      * The distinction that matters: in an exterior view the camera orbits the

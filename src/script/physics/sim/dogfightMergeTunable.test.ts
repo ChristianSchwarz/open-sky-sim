@@ -63,6 +63,8 @@ describe('Dogfight merge: TUNABLE knobs', () => {
     it('at full skill it beats every other pilot model', () => {
         // Bench 2026-11-01: 18/3, 18/2, 20/0 and 22/0 of 24 against Classic, Shaw,
         // Aggressive and Ace; before the skill work, 11/12, 5/4, 12/5 and 16/6.
+        // With the gun at its full cyclic rate and moving-target hits (2026-11-03):
+        // 18/4, 15/2, 17/1 and 18/4, more head-on passes now ending in mutual kills.
         for (const model of [AiPilotModels.CLASSIC, AiPilotModels.SHAW, AiPilotModels.AGGRESSIVE, AiPilotModels.ACE]) {
             const r = score(tunable(aiPersonalityPreset('ace')!), { model }, 180);
             assert.ok(r.wins >= 15 && r.losses <= 4, `against ${model}: ${JSON.stringify(r)}`);

@@ -34,7 +34,7 @@ Forked from [Ruben3d RetroFlightSim](https://github.com/ruben3d/retroflightsim/)
 | `F` | Flaps |
 | `B` | Airbrakes |
 | `H` | Tailhook |
-| `A` | Autopilot |
+| `P` | Autopilot (takes off, flies home, lands) |
 | `L` | FCS limiters on/off |
 | `T` | Cycle target |
 | `U` | Cycle HUD focus |

@@ -35,6 +35,16 @@ const SHADOW_MIN_ELEVATION_DEG = 1;
 const SHADOW_MAX_ELEVATION_DEG = 5;
 
 /**
+ * Elevations (degrees) across which the rim light goes out once the sun has
+ * set: fully on at the horizon and above, so no daylit or golden-hour frame
+ * changes, and off by the end of civil twilight. The tint it is drawn in goes
+ * back to neutral white as the palette reaches night, and without this every
+ * grazing edge facing away from the set sun lit up white in the dark.
+ */
+const RIM_FADE_MIN_ELEVATION_DEG = DAY_FACTOR_MIN_ELEVATION_DEG;
+const RIM_FADE_MAX_ELEVATION_DEG = 0;
+
+/**
  * sin() of the shadow cutoff: the smallest divisor a sweep is worked out
  * against. Shared with the volume pass so the shader's floor and the elevation
  * the pass switches off at cannot drift apart - a floor above the cutoff would
@@ -131,6 +141,12 @@ export const SUN_UNIFORMS = {
      * when a backlit subject most needs an edge to separate it from the sky.
      */
     uSunTint: { value: new THREE.Vector3(1, 1, 1) },
+    /**
+     * Weight of the rim light, 1 with the sun up, 0 at night. Kept apart from
+     * uSunTint, which the canopy glint and the clouds' visibility dimming read
+     * as well, so only the rim fades with the set sun.
+     */
+    uRimFade: { value: 1 },
 };
 
 /**
@@ -191,6 +207,11 @@ function dayFactorFor(elevationDeg: number): number {
     return THREE.MathUtils.smoothstep(elevationDeg, DAY_FACTOR_MIN_ELEVATION_DEG, DAY_FACTOR_MAX_ELEVATION_DEG);
 }
 
+/** Weight of the rim light; see {@link RIM_FADE_MIN_ELEVATION_DEG}. Exactly 1 at and above the horizon. */
+export function rimFadeFor(elevationDeg: number): number {
+    return THREE.MathUtils.smoothstep(elevationDeg, RIM_FADE_MIN_ELEVATION_DEG, RIM_FADE_MAX_ELEVATION_DEG);
+}
+
 /** Weight for cast shadows; see {@link SHADOW_MIN_ELEVATION_DEG}. */
 function shadowStrengthFor(elevationDeg: number): number {
     return THREE.MathUtils.smoothstep(elevationDeg, SHADOW_MIN_ELEVATION_DEG, SHADOW_MAX_ELEVATION_DEG);
@@ -225,6 +246,7 @@ export function setSunTime(hours: number): SunState {
         .set(sky.directTint[0], sky.directTint[1], sky.directTint[2])
         .multiplyScalar(direct);
     SUN_UNIFORMS.uSunTint.value.set(sky.directTint[0], sky.directTint[1], sky.directTint[2]);
+    SUN_UNIFORMS.uRimFade.value = rimFadeFor(SUN_STATE.elevationDeg);
 
     return SUN_STATE;
 }

@@ -380,6 +380,7 @@ export class Renderer {
                     : (this.upscaleLinear ? THREE.LinearFilter : THREE.NearestFilter);
             }
             renderTarget.target.setSize(Math.round(width * renderTarget.textureScale), Math.round(height * renderTarget.textureScale));
+            renderTarget.target.texture.userData.texelScale = renderTarget.textureScale;
         } else {
             const canvas = renderTarget.target.image as HTMLCanvasElement;
             canvas.width = width;
@@ -835,6 +836,8 @@ export class Renderer {
                 // (SceneDepthPass).
                 depthTexture: sceneDepthTexture(textureWidth, textureHeight, this.reversedDepth)
             });
+            // Read per draw by what is sized in screen pixels (targetTexelScale).
+            target.texture.userData.texelScale = textureScale;
             const compositorObj = new THREE.Mesh(
                 new THREE.PlaneGeometry(width, height),
                 new THREE.MeshBasicMaterial({ map: target.texture, depthWrite: false })
