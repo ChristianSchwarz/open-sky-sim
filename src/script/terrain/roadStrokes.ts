@@ -52,6 +52,10 @@ export interface RoadMeshes {
     railTop?: THREE.Mesh;
     /** Set by RoadStrokes.showTrackDetail; the two passes above hide when false. */
     trackDetailInReach?: boolean;
+    /** Set by RoadStrokes.setUnder: a parent under its dissolving leaves. */
+    under?: boolean;
+    /** Set by RoadStrokes.showInRange: past the player's roads view range. */
+    beyondRange?: boolean;
     /**
      * Major and minor roads in one draw, at the level both are drawn at:
      * the major triangles first, as their own meshes drew, the minor ones
@@ -639,7 +643,17 @@ export class RoadStrokes {
     setUnder(meshes: TileMeshes, under: boolean): void {
         const roads = meshes.roads;
         if (roads !== undefined && roads !== 'pending' && roads !== 'none') {
-            roads.group.visible = !under;
+            roads.under = under;
+            roads.group.visible = !under && roads.beyondRange !== true;
+        }
+    }
+
+    /** Hide a drawn tile's roads and railways past the player's roads view range. */
+    showInRange(meshes: TileMeshes, inRange: boolean): void {
+        const roads = meshes.roads;
+        if (roads !== undefined && roads !== 'pending' && roads !== 'none' && (roads.beyondRange !== true) !== inRange) {
+            roads.beyondRange = !inRange;
+            roads.group.visible = roads.under !== true && inRange;
         }
     }
 

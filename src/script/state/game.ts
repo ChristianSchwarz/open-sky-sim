@@ -32,7 +32,8 @@ import { earthMap } from '../scene/earthMap';
 import { SPACE_FOG } from '../scene/materials/shaders/spaceFog';
 import { HAZE_UNIFORMS, setScatterSun } from '../scene/materials/shaders/haze';
 import { Model } from '../scene/models/models';
-import { terrainMaxZoomForAltitudeM } from '../terrain/lod';
+import { setTerrainRangeCapM, terrainMaxZoomForAltitudeM } from '../terrain/lod';
+import { viewBandsM, viewLayerM } from '../config/viewRanges';
 import { EDGE_LIFT_FADE_M } from '../terrain/terrainEntity';
 import { Renderer, RenderLayer, RenderTargetType } from "../render/renderer";
 import { SceneCamera } from '../scene/cameras/camera';
@@ -57,7 +58,7 @@ import { openSettingsDialog } from '../ui/settings/settingsLauncher';
 import { FogQuality } from '../config/profiles/profile';
 import { MAP_FOV_DEG, MAP_TRIANGLE_BUDGET, MapView, isMapViewPage, mapViewUrl } from './mapView';
 import { setMapDetailScale, setMapLod } from '../terrain/quadtree';
-import { LEAF_COVER_FROM_M, setCoverUnderlay, setLeafCoverFromM } from '../terrain/coverTextures';
+import { setCoverUnderlay, setLeafCoverFromM } from '../terrain/coverTextures';
 import { setBuildingsAtOnce } from '../terrain/buildingMeshes';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { BarricadeEntity, BarricadeRigPhase } from '../scene/entities/barricadeEntity';
@@ -3085,15 +3086,20 @@ export class Game {
         // The haze integrates its air from this height down each ray.
         HAZE_UNIFORMS.uHazeCameraAlt.value = altitude;
         if (!this.atmosphereShell) {
+            setTerrainRangeCapM(Infinity);
             return;
         }
+        // The player's Blue Marble range: the shell paints the map past it,
+        // and no tile wholly beyond it is drawn. Not in the map view.
+        const mapFromM = this.mapView ? Infinity : viewBandsM(this.configService.viewRanges.getActive()).blueMarbleFromM;
+        setTerrainRangeCapM(mapFromM);
         // The map draws the shell at any height, for the globe map outside
         // the baked areas (uMapMode), and without the air.
         const weight = this.mapView ? 1
             : THREE.MathUtils.smoothstep(altitude, ATMOSPHERE_SHELL_FADE_IN_M, SPACE_SKY_ALTITUDE_M);
         // Below the shell it still paints the map's land past the areas' edges.
         const lowFill = !this.mapView && this.areaList.length > 0;
-        const show = (weight > 0 || lowFill) && this.view !== PlayerViewState.SHOWCASE;
+        const show = (weight > 0 || lowFill || mapFromM < Infinity) && this.view !== PlayerViewState.SHOWCASE;
         SPACE_FOG.scale = show ? 1 - weight : 1;
         this.atmosphereShell.enabled = show;
         if (!show) {
@@ -3138,6 +3144,7 @@ export class Game {
         u.uAreaCount.value = count;
         u.uGlobe.value = THREE.MathUtils.smoothstep(height, GLOBE_MAP_FADE_START_M, GLOBE_MAP_FADE_END_M);
         u.uLowFill.value = lowFill ? 1 : 0;
+        u.uMapFromM.value = mapFromM < Infinity ? mapFromM : -1;
         u.uRampM.value = EDGE_LIFT_FADE_M;
         u.uRampTopM.value = this.planetTerrain.edgeLiftTopM;
         (u.uMapWater.value as THREE.Color).set(PaletteColor(this.palette, PaletteCategory.TERRAIN_WATER));
@@ -3842,7 +3849,7 @@ export class Game {
         setMapLod(false);
         setMapDetailScale(1);
         this.mapDetailScale = 1;
-        setLeafCoverFromM(LEAF_COVER_FROM_M);
+        setLeafCoverFromM(undefined);
         setSunTime(this.configService.daytime.getActive());
         this.refreshDaytimePalette();
         this.updateSunEntity();
@@ -5800,6 +5807,7 @@ export class Game {
             buildings: this.configService.buildings,
             roads: this.configService.roads,
             treeDensity: this.configService.treeDensity,
+            viewRanges: this.configService.viewRanges,
         });
         this.planetTerrain.setRenderScale(this.hdMainScale);
         await this.planetTerrain.load(terrainUrl);
@@ -5942,12 +5950,22 @@ export class Game {
     }
 
     /**
+     * AIRFIELD_STREAM_RADIUS_M, or the player's airfields view range where
+     * that reaches further: a field has to be built to be seen.
+     */
+    private airfieldStreamRadiusM(): number {
+        const range = viewLayerM(this.configService.viewRanges.getActive(), 'airfields');
+        return Number.isFinite(range) ? Math.max(AIRFIELD_STREAM_RADIUS_M, range) : AIRFIELD_STREAM_RADIUS_M;
+    }
+
+    /**
      * Build every not-yet-built airfield within AIRFIELD_STREAM_RADIUS_M of a
      * scene (x, z), nearest first: pavement, buildings, target, and solid
      * buildings (see addBuildingColliders). Runways are solid from boot.
      */
     private async buildAirfieldsNear(x: number, z: number): Promise<void> {
-        const r2 = AIRFIELD_STREAM_RADIUS_M * AIRFIELD_STREAM_RADIUS_M;
+        const radius = this.airfieldStreamRadiusM();
+        const r2 = radius * radius;
         const due = this.areaAirfields
             .filter(a => !this.builtAirfields.has(a.airfield)
                 && (a.x - x) ** 2 + (a.z - z) ** 2 <= r2)
@@ -5997,6 +6015,8 @@ export class Game {
             const entity = new GroundTargetEntity(
                 built.model, undefined, 'Airbase', airfield.icao || airfield.name);
             entity.position.copy(built.origin);
+            // Drawn only within the player's airfields view range; still solid past it.
+            entity.renderRangeM = () => viewLayerM(this.configService.viewRanges.getActive(), 'airfields');
             if (primary !== undefined) {
                 entity.approachRunway = {
                     center: primary.center.clone(),

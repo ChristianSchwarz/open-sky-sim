@@ -64,7 +64,10 @@ const M_PER_DEG_LAT = 111_320;
 /** How far from the camera a leaf's own cover texture replaces its facet colour. */
 export const LEAF_COVER_FROM_M = 3000;
 
-let leafCoverFromM = LEAF_COVER_FROM_M;
+/** Where every cover texture starts to be read: the first thumb of the view-range bands. */
+let coverFromM = LEAF_COVER_FROM_M;
+/** The map mode's own reach for the leaves, over coverFromM while it is open. */
+let leafCoverOverrideM: number | undefined;
 let underlay = false;
 
 /**
@@ -96,8 +99,17 @@ const UNDERLAY_CELLS = 32;
  * put every town under its texture: there it is out of reach, and the facets and
  * the houses (cut by size on screen, not by distance) stay.
  */
-export function setLeafCoverFromM(m: number): void {
-    leafCoverFromM = m;
+export function setLeafCoverFromM(m: number | undefined): void {
+    leafCoverOverrideM = m;
+}
+
+/**
+ * The player's view range: no cover texture, leaf or coarse, is read nearer
+ * than this; the facets show there. Read per draw, like setLeafCoverFromM.
+ * The map mode ignores it for the coarse tiles, whose texture is its picture.
+ */
+export function setCoverFromM(m: number): void {
+    coverFromM = Math.max(0, m);
 }
 
 export interface CoverFrame {
@@ -360,7 +372,10 @@ export class CoverTextures {
             // Read per draw, so setLeafCoverFromM reaches leaves bound before
             // it, and the land discards over no-data only while its sheets show.
             get fromM() {
-                return leaf ? leafCoverFromM : meshes.coverUnderlay?.[0].visible ? -1 : 0;
+                if (leaf) {
+                    return leafCoverOverrideM ?? coverFromM;
+                }
+                return meshes.coverUnderlay?.[0].visible ? -1 : underlay ? 0 : coverFromM;
             },
         };
         land.userData.cover = binding;

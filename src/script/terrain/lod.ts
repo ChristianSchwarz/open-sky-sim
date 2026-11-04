@@ -357,10 +357,23 @@ function geometricHorizonDistanceM(altitudeM: number, radiusM: number = WGS84_A)
     return Math.sqrt(Math.max(0, 2 * radiusM * h + h * h));
 }
 
+/**
+ * Past the player's Blue Marble range the globe map is painted over the
+ * terrain (the atmosphere shell), so no tile is fetched or drawn wholly
+ * beyond it; the margin keeps ground under the map's fade. Infinity is off.
+ */
+let terrainRangeCapM = Infinity;
+const TERRAIN_RANGE_CAP_MARGIN = 1.05;
+
+export function setTerrainRangeCapM(m: number): void {
+    terrainRangeCapM = m;
+}
+
 /** Terrain mesh / QT near-range for this camera altitude (m). */
 export function terrainViewRangeM(altitudeM: number): number {
     const horizon = geometricHorizonDistanceM(altitudeM) * 1.15;
-    return Math.min(TERRAIN_VIEW_RANGE_MAX_M, Math.max(TERRAIN_VIEW_RANGE_M, horizon));
+    const range = Math.min(TERRAIN_VIEW_RANGE_MAX_M, Math.max(TERRAIN_VIEW_RANGE_M, horizon));
+    return Math.min(range, terrainRangeCapM * TERRAIN_RANGE_CAP_MARGIN);
 }
 
 /**

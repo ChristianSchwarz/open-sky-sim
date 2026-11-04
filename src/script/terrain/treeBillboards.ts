@@ -570,11 +570,21 @@ function countUnder(scores: Float32Array, bound: number): number {
  * Without an eye, all of them. `tileGroup` is the tile the mesh belongs to
  * (see nearDistanceInTile).
  */
+let treeRangeM = Infinity;
+
+/** The player's trees view range: a patch whose near edge is further out draws none. Infinity is off. */
+export function setTreeRangeM(m: number): void {
+    treeRangeM = m;
+}
+
 export function treeInstancesToDraw(
     mesh: THREE.InstancedMesh, tileGroup: THREE.Object3D, eye: THREE.Vector3 | undefined, pixelAngle: number,
 ): number {
     const total: number = mesh.userData.treeTotal ?? mesh.count;
     const spacingM: number = mesh.userData.treeSpacingM ?? 0;
+    if (eye !== undefined && treeRangeM < Infinity && nearDistanceInTile(mesh, tileGroup, eye) > treeRangeM) {
+        return 0;
+    }
     if (spacingM <= 0 || eye === undefined) {
         return total;
     }

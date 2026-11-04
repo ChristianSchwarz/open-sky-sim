@@ -23,6 +23,9 @@ export class GroundTargetEntity implements Entity, WeaponsTarget {
      */
     approachRunway: WeaponsTarget['approachRunway'];
 
+    /** Not drawn past this many metres from the camera (an airfield's view range); unset is no limit. */
+    renderRangeM: (() => number) | undefined;
+
     constructor(private model: Model, lodBias: number = DEFAULT_LOD_BIAS,
         private type: string, private location: string) {
 
@@ -95,6 +98,10 @@ export class GroundTargetEntity implements Entity, WeaponsTarget {
     }
 
     render3D(targetWidth: number, targetHeight: number, camera: THREE.Camera, lists: Map<string, THREE.Scene>, palette: Palette): void {
+        const range = this.renderRangeM?.();
+        if (range !== undefined && range < Infinity && camera.position.distanceTo(this.position) > range) {
+            return;
+        }
         this.lodHelper.addToRenderList(
             this.position, this.quaternion, this.scale,
             targetWidth, camera, palette,

@@ -26,7 +26,7 @@ import { attachToRenderList } from '../render/renderList';
 import { getTreeAtlas } from '../scene/textures/treeAtlas';
 import { getStoneAtlas } from '../scene/textures/stoneAtlas';
 import {
-    TREE_DENSITY_MULTIPLIER_DEFAULT, TREE_SCATTER_CLASSES, buildTreeMeshes, orderTreesFor, treeInstancesToDraw, treeReorderWanted, treeSpacingM, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
+    TREE_DENSITY_MULTIPLIER_DEFAULT, TREE_SCATTER_CLASSES, buildTreeMeshes, orderTreesFor, setTreeRangeM, treeInstancesToDraw, treeReorderWanted, treeSpacingM, clampTreeDensityMultiplier, scatterTreeSpecies, treeDensityScaleForDistance,
 } from './treeBillboards';
 import { CLUTTER_ELIGIBLE_CLASSES, buildStoneMeshes, scatterGroundClutter } from './stones';
 import { behindHorizon, sphereInFrustum } from './culling';
@@ -51,7 +51,8 @@ import {
     roadIndexUrl,
     farLandIndexUrl,
 } from './manifest';
-import { CoverBinding, CoverTextures } from './coverTextures';
+import { CoverBinding, CoverTextures, setCoverFromM } from './coverTextures';
+import { ViewRanges, ViewRangesSetting, viewBandsM, viewLayerM } from '../config/viewRanges';
 import { BridgeMeshes } from './bridgeMeshes';
 import { BUILDING_BUILD_MS, BuildingMeshes } from './buildingMeshes';
 import { buildBuildingExclusion } from './buildingExclusion';
@@ -259,6 +260,12 @@ export interface TerrainEntityOptions {
      * just tiles streamed in afterward. Omit and TREE_DENSITY_MULTIPLIER_DEFAULT stays.
      */
     treeDensity?: TreeDensitySetting;
+    /**
+     * Live view ranges: where the cover textures start, past which only the
+     * 256-texel tiles are drawn, and how far roads, buildings and trees
+     * reach. Omit and everything is drawn as far as the LOD takes it.
+     */
+    viewRanges?: ViewRangesSetting;
 }
 
 export interface TerrainStats {
@@ -1103,6 +1110,10 @@ export class TerrainEntity implements Entity {
             this.buildings.setEnabled(opts.buildings.getActive());
             opts.buildings.addChangeListener(on => this.buildings.setEnabled(on));
         }
+        if (opts.viewRanges) {
+            this.applyViewRanges(opts.viewRanges.getActive());
+            opts.viewRanges.addChangeListener(r => this.applyViewRanges(r));
+        }
         if (opts.roads) {
             this.setRoads(opts.roads.getActive());
             opts.roads.addChangeListener(mode => this.setRoads(mode));
@@ -1789,6 +1800,8 @@ export class TerrainEntity implements Entity {
             if (!node.under) {
                 this.buildings.want(meshes, camera.position, this.buildingFrustum);
             }
+            this.roads.showInRange(meshes, nearM <= this.roadsRangeM);
+            this.bridges.showInRange(meshes, nearM <= this.roadsRangeM);
             this.roads.showTrackDetail(meshes, nearM <= reach);
             this.roads.showLevel(meshes, roadLevelFor(nearM * pixelAngle));
             this.bridges.showLevel(meshes, camera.position, pixelAngle);
@@ -1821,6 +1834,24 @@ export class TerrainEntity implements Entity {
     }
 
     private readonly treeSphere = new THREE.Sphere();
+
+    /** The player's view ranges, when the game passed them; see TerrainEntityOptions.viewRanges. */
+    private viewRanges: ViewRanges | undefined;
+    /** Roads, railways and bridges are hidden on drawn tiles whose near edge is past this. */
+    private roadsRangeM = Infinity;
+
+    /** The zoom from which the bake's cover textures are 512 texels (manifest texture.nearZoom). */
+    private get textureNearZoom(): number | undefined {
+        return this.manifest.texture?.nearSize !== undefined ? this.manifest.texture.nearZoom : undefined;
+    }
+
+    private applyViewRanges(r: ViewRanges): void {
+        this.viewRanges = r;
+        setCoverFromM(viewBandsM(r).textureFromM);
+        this.roadsRangeM = viewLayerM(r, 'roads');
+        this.buildings.rangeM = viewLayerM(r, 'buildings');
+        setTreeRangeM(viewLayerM(r, 'trees'));
+    }
 
     /** Draws water, watercourses and road strokes across tiles; see collectBatches. */
     private readonly batcher = new TileBatcher();
@@ -2062,6 +2093,10 @@ export class TerrainEntity implements Entity {
         this.farLand.nextGeneration();
         this.streamer.nextGeneration();
 
+        const bands = this.viewRanges ? viewBandsM(this.viewRanges) : undefined;
+        this.quadtree.coarseBeyond = bands && this.textureNearZoom !== undefined && bands.coarseTextureFromM < Infinity
+            ? { zoom: this.textureNearZoom, fromM: bands.coarseTextureFromM }
+            : undefined;
         const r = this.quadtree.update(
             camera,
             this.viewportHeightPx,

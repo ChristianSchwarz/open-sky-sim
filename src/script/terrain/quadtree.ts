@@ -235,6 +235,15 @@ export class Quadtree {
         return err * leafScale;
     }
 
+    /**
+     * The player's "256 textures from" range: a land node whose near edge is
+     * further than `fromM` does not refine into `zoom` (the bake's nearZoom,
+     * where the textures go from 256 to 512 texels), so the far field is
+     * drawn by the coarser tiles and their textures. Ocean still refines on
+     * its sagitta: that is the planet's shape, not detail. Not in the map.
+     */
+    coarseBeyond: { zoom: number; fromM: number } | undefined;
+
     get nodeCount(): number {
         return this.nodes.size;
     }
@@ -359,8 +368,12 @@ export class Quadtree {
             // ellipsoid's sagitta is its only real shape error.
             // Nothing is baked under an area's leaves: their absent children
             // would read as ocean and the land would refine into open sea.
+            // Past the player's "256 textures" range, land does not refine
+            // into the tiles that carry the 512-texel ones (see coarseBeyond).
+            const coarse = this.coarseBeyond;
+            const bandCapped = !mapLod && coarse !== undefined && node.id.z + 1 >= coarse.zoom && d > coarse.fromM;
             const wouldRefine = node.id.z < zoomCap && (
-                !(mapLod && node.ocean) && shouldRefine(
+                !(mapLod && node.ocean) && !bandCapped && shouldRefine(
                     this.drawErrorM(node, leafScale), d, screenHeightPx, fovYDeg, farScale,
                 )
                 || node.ocean && shouldRefine(

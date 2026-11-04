@@ -55,6 +55,8 @@ export interface BridgeMeshSet {
     bytes: number;
     /** Drawn under its dissolving leaves this pass: hidden, see setUnder. */
     under?: boolean;
+    /** Past the player's roads view range: hidden, see showInRange. */
+    beyondRange?: boolean;
 }
 
 export interface BridgeMeshesOptions {
@@ -414,7 +416,16 @@ export class BridgeMeshes {
     }
 
     private applyMode(set: BridgeMeshSet): void {
-        set.group.visible = this.mode !== RoadsMode.OFF && set.under !== true;
+        set.group.visible = this.mode !== RoadsMode.OFF && set.under !== true && set.beyondRange !== true;
+    }
+
+    /** Hide a drawn tile's bridges past the player's roads view range. */
+    showInRange(meshes: TileMeshes, inRange: boolean): void {
+        const set = meshes.bridges;
+        if (set !== undefined && set !== 'pending' && set !== 'none' && (set.beyondRange !== true) !== inRange) {
+            set.beyondRange = !inRange;
+            this.applyMode(set);
+        }
     }
 
     /**

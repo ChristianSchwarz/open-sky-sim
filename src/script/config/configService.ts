@@ -14,6 +14,7 @@ import {
 import { LANDUSE_BLEND_DEFAULT, clampLanduseBlend } from "../terrain/tones";
 import { TREE_DENSITY_MULTIPLIER_DEFAULT, clampTreeDensityMultiplier } from "../terrain/treeBillboards";
 import { TechProfile } from "./profiles/profile";
+import { ViewRanges, ViewRangesSetting } from "./viewRanges";
 
 export type UnitSystemChangeListener = (unitSystem: UnitSystems) => void;
 export type AiPilotModelChangeListener = (model: AiPilotModels) => void;
@@ -68,6 +69,7 @@ export class ConfigService {
     readonly roads: RoadsSetting;
     readonly renderScale: RenderScaleSetting;
     readonly supersampling: SupersamplingSetting;
+    readonly viewRanges: ViewRangesSetting;
     readonly aircraftSmoothShading: AircraftSmoothShadingSetting;
     readonly daytime: DaytimeSetting;
     readonly colourAdjust: ColourAdjustSetting;
@@ -97,6 +99,7 @@ export class ConfigService {
         initialOpponentsScramble?: boolean,
         initialAircraftSmoothShading?: boolean,
         initialAiPersonality?: AiPersonality,
+        initialViewRanges?: ViewRanges,
     ) {
         this.techProfiles = new ConfigSet(profiles, initialTechProfile);
         this.flightModels = new ConfigSet(flightModels, initialFlightModel);
@@ -117,6 +120,7 @@ export class ConfigService {
         this.roads = new RoadsSetting(initialRoads);
         this.renderScale = new RenderScaleSetting(initialRenderScale);
         this.supersampling = new SupersamplingSetting(initialSupersampling);
+        this.viewRanges = new ViewRangesSetting(initialViewRanges);
         this.aircraftSmoothShading = new AircraftSmoothShadingSetting(initialAircraftSmoothShading);
         this.treeDensity = new TreeDensitySetting(initialTreeDensity);
         this.daytime = new DaytimeSetting(initialDaytime);

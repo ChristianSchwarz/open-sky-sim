@@ -124,6 +124,10 @@ const FRAGMENT_PROGRAM = `
   // area's edge instead of ending in sea. Fogged like the terrain as the air
   // fades out (the scene's fog is scaled by 1 - uWeight the same way).
   uniform float uLowFill;
+  // The player's Blue Marble range (m): past it the map is painted over
+  // whatever the scene drew, at any height, faded in over its last tenth.
+  // Negative is off.
+  uniform float uMapFromM;
   // The fill's ground is flat at sea level past a ramp of uRampM from each
   // area's edge, never higher than uRampTopM on it: anything above that is
   // not ground (a cloud, an aircraft) and keeps its own colour.
@@ -285,7 +289,11 @@ ${EARTH_MAP_PARS_FRAGMENT}
     // Below the shell only the map's land over the fill is drawn: nothing
     // else to do for the sky or for baked terrain.
     if (uWeight <= 0.0 && (!terrain || bakedAreaDepth(latLon(o + d * terrainT)) >= 1.0)) {
-      discard;
+      // Unless the ground there is past the Blue Marble range.
+      bool beyond = uMapFromM >= 0.0 && (terrain ? terrainT > uMapFromM * 0.9 : discGround > 0.0);
+      if (!beyond) {
+        discard;
+      }
     }
 
     // Only once the dome has all but gone: stars do not show through a daylit sky.
@@ -398,7 +406,8 @@ ${EARTH_MAP_PARS_FRAGMENT}
     // No scene there at all - the bare ellipsoid, or a crack between tiles -
     // takes the map almost as soon as the shell is on, as nothing else could
     // show through but the sky behind the ground.
-    float globe = fallback ? max(uGlobe, min(1.0, uWeight * 10.0)) : (terrain ? uGlobe : 0.0);
+    float beyondMap = uMapFromM < 0.0 || !(terrain || fallback) ? 0.0 : smoothstep(uMapFromM * 0.9, uMapFromM, tEnd);
+    float globe = fallback ? max(max(uGlobe, min(1.0, uWeight * 10.0)), beyondMap) : (terrain ? max(uGlobe, beyondMap) : 0.0);
     vec4 globeColour = vec4(0.0);
     bool openSky = false;
     float mapWater = 0.0;
@@ -467,7 +476,7 @@ ${EARTH_MAP_PARS_FRAGMENT}
         float land = mix(uWeight, max(uLowFill, min(1.0, uWeight * 10.0)), fill);
         // Over fill the water is painted as well while the low fill is on:
         // the ground there is drawn as land, with no sea of its own.
-        globe = max(uGlobe, land * (1.0 - water * (1.0 - uLowFill * fill)));
+        globe = max(max(uGlobe, land * (1.0 - water * (1.0 - uLowFill * fill))), beyondMap);
       }
     }
     if (uMapMode > 0.5) {
@@ -517,6 +526,7 @@ export const ATMOSPHERE_SHELL_UNIFORMS = {
     uMapMode: { value: 0 },
     uMapWater: { value: new THREE.Color() },
     uLowFill: { value: 0 },
+    uMapFromM: { value: -1 },
     uRampM: { value: 1 },
     uRampTopM: { value: 0 },
     uAreas: { value: Array.from({ length: SHELL_MAX_AREAS }, () => new THREE.Vector4()) },

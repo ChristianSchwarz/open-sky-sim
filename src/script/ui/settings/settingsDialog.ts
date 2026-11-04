@@ -47,6 +47,8 @@ import {
 import { loadTerrainManifest, terrainManifestUrl, terrainTreeName } from '../../terrain/manifest';
 import { homeArea, terrainAreas } from '../../terrain/playArea';
 import { TerrainImporter } from './terrain/terrainImporter';
+import { MultiRangeSlider } from './multiRangeSlider';
+import { VIEW_BAND_MAX_KM, VIEW_LAYER_MAX_KM, ViewLayer, ViewRanges } from '../../config/viewRanges';
 
 export type SettingsTab = 'Flight' | 'Graphics' | 'Colours' | 'World' | 'Simulation' | 'General' | 'Help' | 'About';
 
@@ -489,6 +491,7 @@ function sliderValue(event: Event): number {
     imports: [
         NgTemplateOutlet, MatAutocompleteModule, MatButtonModule, MatDialogModule, MatFormFieldModule,
         MatInputModule, MatListModule, MatRadioModule, MatSelectModule, MatSlideToggleModule, MatSliderModule, MatTabsModule, MatTooltipModule, TerrainImporter,
+        MultiRangeSlider,
     ],
     // The page body is bold with a text shadow for legibility over the 3D
     // view; the dialog sits on its own opaque surface and wants neither.
@@ -738,6 +741,45 @@ function sliderValue(event: Event): number {
                                 </mat-slider>
                                 <output class="w-16 text-right tabular-nums">{{ triangleBudgetLabel() }}</output>
                             </div>
+                        </section>
+
+                        <section>
+                            <h3 class="m-0 mb-1 text-base font-medium">View ranges</h3>
+                            <p class="m-0 mb-2 text-sm opacity-70">
+                                How the ground is drawn by distance. Nearest the aircraft the terrain
+                                shows its own facets; from the first mark the far textures paint it
+                                at full resolution (512 texels a tile), from the second only the
+                                coarser tiles and their 256-texel textures are drawn, and past the
+                                third the NASA Blue Marble map is painted over the terrain. Rightmost
+                                is off.
+                            </p>
+                            <rfs-multi-range-slider [values]="bandValues()" [max]="bandMaxKm"
+                                [labels]="bandLabels" [segmentClasses]="bandClasses" [format]="bandFormat"
+                                (valuesChange)="setViewBands($event)" />
+                            <div class="mb-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
+                                @for (item of bandLegend(); track item.label) {
+                                    <div class="flex min-w-0 items-center gap-2">
+                                        <span class="size-3 shrink-0 rounded-sm" [class]="item.cls"></span>
+                                        <span class="truncate">{{ item.label }}</span>
+                                        <output class="ml-auto tabular-nums opacity-70">{{ item.value }}</output>
+                                    </div>
+                                }
+                            </div>
+                            <p class="m-0 mb-1 text-sm opacity-70">
+                                How far out roads (with railways and bridges), buildings, airfields and
+                                trees are drawn. Airfields further than 50 km are built only when this
+                                reaches past it. Rightmost is no limit.
+                            </p>
+                            @for (layer of viewLayers; track layer.key) {
+                                <div class="flex items-center gap-4">
+                                    <span class="w-20 text-sm">{{ layer.label }}</span>
+                                    <mat-slider class="flex-1" [min]="0" [max]="layer.max" [step]="1">
+                                        <input matSliderThumb [value]="viewLayerKm(layer.key)"
+                                            (input)="setViewLayer(layer.key, $event)">
+                                    </mat-slider>
+                                    <output class="w-20 text-right tabular-nums">{{ viewLayerLabel(layer.key) }}</output>
+                                </div>
+                            }
                         </section>
 
                         <section>
@@ -1262,6 +1304,45 @@ export class SettingsDialog {
     readonly triangleBudget = signal(this.config.triangleBudget.getActive());
 
     readonly farTileTextures = signal(this.config.farTileTextures.getActive());
+
+    readonly viewRanges = signal(this.config.viewRanges.getActive());
+    readonly bandMaxKm = VIEW_BAND_MAX_KM;
+    readonly bandLabels = ['Far textures from', '256 textures from', 'Blue Marble from'];
+    /** Facets, 512 textures, 256 textures, Blue Marble. */
+    readonly bandClasses = [
+        'bg-[var(--mat-sys-outline-variant)]', 'bg-[var(--mat-sys-primary)]',
+        'bg-[var(--mat-sys-tertiary)]', 'bg-sky-700',
+    ];
+    readonly bandFormat = (km: number) => km >= VIEW_BAND_MAX_KM ? 'Off' : `${km} km`;
+    readonly bandValues = computed(() => {
+        const r = this.viewRanges();
+        return [r.textureFromKm, r.coarseTextureFromKm, r.blueMarbleFromKm];
+    });
+    readonly bandLegend = computed(() => {
+        const [a, b, c] = this.bandValues();
+        // The first mark has no "off": at the end of the track it is just far.
+        return [
+            { label: 'Facets', value: `< ${a} km`, cls: this.bandClasses[0] },
+            { label: '512 tex', value: `${a} km`, cls: this.bandClasses[1] },
+            { label: '256 tex', value: this.bandFormat(b), cls: this.bandClasses[2] },
+            { label: 'Blue Marble', value: this.bandFormat(c), cls: this.bandClasses[3] },
+        ];
+    });
+    readonly viewLayers: { key: ViewLayer; label: string; max: number }[] = [
+        { key: 'roads', label: 'Roads', max: VIEW_LAYER_MAX_KM.roads },
+        { key: 'buildings', label: 'Buildings', max: VIEW_LAYER_MAX_KM.buildings },
+        { key: 'airfields', label: 'Airfields', max: VIEW_LAYER_MAX_KM.airfields },
+        { key: 'trees', label: 'Trees', max: VIEW_LAYER_MAX_KM.trees },
+    ];
+
+    viewLayerKm(layer: ViewLayer): number {
+        return this.viewRanges()[`${layer}Km`];
+    }
+
+    viewLayerLabel(layer: ViewLayer): string {
+        const km = this.viewLayerKm(layer);
+        return km >= VIEW_LAYER_MAX_KM[layer] ? 'No limit' : `${km} km`;
+    }
     readonly opponentsScramble = signal(this.config.opponentsScramble.getActive());
     readonly buildings = signal(this.config.buildings.getActive());
     readonly roadsOptions = ROADS_OPTIONS;
@@ -1416,6 +1497,23 @@ export class SettingsDialog {
         this.config.aircraftSmoothShading.setActive(event.checked);
         updateSettings({ aircraftSmoothShading: event.checked });
         this.aircraftSmoothShading.set(event.checked);
+    }
+
+    setViewBands(values: number[]) {
+        this.updateViewRanges({
+            textureFromKm: values[0], coarseTextureFromKm: values[1], blueMarbleFromKm: values[2],
+        });
+    }
+
+    setViewLayer(layer: ViewLayer, event: Event) {
+        this.updateViewRanges({ [`${layer}Km`]: sliderValue(event) });
+    }
+
+    private updateViewRanges(partial: Partial<ViewRanges>) {
+        this.config.viewRanges.setActive({ ...this.config.viewRanges.getActive(), ...partial });
+        const r = this.config.viewRanges.getActive();
+        updateSettings({ viewRanges: r });
+        this.viewRanges.set(r);
     }
 
     setTriangleBudget(event: Event) {

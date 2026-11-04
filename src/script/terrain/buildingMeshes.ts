@@ -284,6 +284,9 @@ export class BuildingMeshes {
         return this.store !== undefined;
     }
 
+    /** The player's buildings view range (m): patches whose near edge is further out draw nothing. */
+    rangeM = Infinity;
+
     /** The Buildings setting: off hides what is attached and stops new fetches and builds. */
     setEnabled(on: boolean): void {
         this.on = on;
@@ -544,7 +547,7 @@ export class BuildingMeshes {
         const total = (px: number) => {
             let sum = 0;
             for (const { patch, nearM, inView } of this.frame) {
-                if (inView) {
+                if (inView && nearM <= this.rangeM) {
                     sum += trianglesFor(patch, px * nearM * pixelAngle);
                 }
             }
@@ -578,7 +581,7 @@ export class BuildingMeshes {
         this.lastFrameMs = now;
         for (const { patch, nearM, inView } of this.frame) {
             // Out of view it still grows, so turning to it shows no fade-in.
-            const want = countAtLeast(patch.prominence, px * nearM * pixelAngle);
+            const want = nearM > this.rangeM ? 0 : countAtLeast(patch.prominence, px * nearM * pixelAngle);
             // Shrinking is at once, so the budget holds; growing is one by one.
             if (want <= patch.count || atOnce) {
                 patch.count = want;
