@@ -9,7 +9,7 @@ import {
     ROLL_STICK_BASE_RATE, ROLL_STICK_MAX_RATE, THROTTLE_RATE,
 } from '../../defs';
 import {
-    AUTOPILOT_KEY, getKeyboardLayout, KeyboardControlAction, KeyboardControlLayout,
+    getKeyboardLayout, isAutopilotKey, KeyboardControlAction, KeyboardControlLayout,
     KeyboardControlLayoutId, KeyboardPitchStickMode, WHEEL_BRAKE_ONLY_KEY,
 } from '../../input/keyboardLayouts';
 import { clamp } from '../../utils/math';
@@ -166,7 +166,7 @@ export class SimPlayerInput {
         // The one key the autopilot leaves live is its own: with every key
         // dropped while it flew, it could be switched on but never off.
         if (sink.control === 'ai') {
-            if (key === AUTOPILOT_KEY && !repeat) {
+            if (isAutopilotKey(key, this.layoutId) && !repeat) {
                 sink.toggleAutopilot();
             }
             return;
@@ -512,6 +512,10 @@ export class SimPlayerInput {
     }
 
     private handleActionKeyDown(key: string, sink: SimPlayerInputSink): void {
+        if (isAutopilotKey(key, this.layoutId)) {
+            sink.toggleAutopilot();
+            return;
+        }
         switch (key) {
             case 'f':
                 sink.toggleFlaps();
@@ -527,9 +531,6 @@ export class SimPlayerInput {
                 break;
             case 'l':
                 this.toggleLimiters();
-                break;
-            case AUTOPILOT_KEY:
-                sink.toggleAutopilot();
                 break;
             case '1':
                 this.pitchLimiterMode = FcsPitchLimiter.SOFT;

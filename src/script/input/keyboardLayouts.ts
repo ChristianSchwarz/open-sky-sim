@@ -96,6 +96,19 @@ export function getKeyboardLayout(layoutId: KeyboardControlLayoutId): KeyboardCo
 export const AUTOPILOT_KEY = 'p';
 
 /**
+ * Also toggles the autopilot in the Arrows layout, where the stick is on the
+ * arrow keys and 'a' is free. The letter layouts fly with 'a' (roll left;
+ * yaw left on AZERTY), so there it stays a stick key only.
+ */
+export const ARROWS_AUTOPILOT_KEY = 'a';
+
+/** Whether `key` toggles the autopilot under the given layout. */
+export function isAutopilotKey(key: string, layoutId: KeyboardControlLayoutId): boolean {
+    return key === AUTOPILOT_KEY
+        || (layoutId === KeyboardControlLayoutId.ARROWS && key === ARROWS_AUTOPILOT_KEY);
+}
+
+/**
  * Wheel brakes only, never a stick key: what the touch BRAKE button presses.
  * The keyboard's own brake key ('w') is pitch-down in the air on QWERTY and
  * QWERTZ (throttle-up on AZERTY); a finger on BRAKE must not push the nose over.

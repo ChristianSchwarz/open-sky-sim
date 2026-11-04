@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-    AUTOPILOT_KEY, COCKPIT_ACTION_KEYS, KeyboardControlLayoutId, KeyboardControlLayouts, WHEEL_BRAKE_ONLY_KEY,
+    ARROWS_AUTOPILOT_KEY, AUTOPILOT_KEY, COCKPIT_ACTION_KEYS, isAutopilotKey, KeyboardControlLayoutId,
+    KeyboardControlLayouts, WHEEL_BRAKE_ONLY_KEY,
 } from './keyboardLayouts';
 
 const layouts = [...KeyboardControlLayouts.entries()]
@@ -23,6 +24,16 @@ test('the autopilot key is no stick key in any layout', () => {
         assert.ok(!keys.includes(AUTOPILOT_KEY), `${name} flies the stick with '${AUTOPILOT_KEY}'`);
     }
     assert.notEqual(AUTOPILOT_KEY, 'a');
+});
+
+test('A toggles the autopilot in the Arrows layout only, and is no stick key there', () => {
+    for (const [id, layout] of KeyboardControlLayouts) {
+        const flies = Object.values(layout).includes(ARROWS_AUTOPILOT_KEY);
+        assert.equal(isAutopilotKey(ARROWS_AUTOPILOT_KEY, id), id === KeyboardControlLayoutId.ARROWS);
+        if (id === KeyboardControlLayoutId.ARROWS) assert.ok(!flies, 'Arrows flies the stick with a');
+        assert.ok(isAutopilotKey(AUTOPILOT_KEY, id));
+    }
+    assert.ok(!COCKPIT_ACTION_KEYS.includes(ARROWS_AUTOPILOT_KEY));
 });
 
 test('a layout binds each key once', () => {

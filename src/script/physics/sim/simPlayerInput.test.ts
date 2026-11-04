@@ -163,6 +163,20 @@ test('rolling left on QWERTY leaves the autopilot alone; its own key toggles it'
     assert.equal(toggles, 1);
 });
 
+test('in the Arrows layout A toggles the autopilot, on and off', () => {
+    const input = new SimPlayerInput();
+    input.setKeyboardLayout(KeyboardControlLayoutId.ARROWS);
+    let toggles = 0;
+    const manual: SimPlayerInputSink = { ...sink, toggleAutopilot: () => { toggles++; } };
+    input.keyDown('a', false, manual);
+    assert.equal(toggles, 1, 'a did not engage the autopilot');
+    assert.equal(input.tick(0.016, manual).roll, 0, 'a moved the stick');
+    input.keyUp('a', manual);
+    const flying: SimPlayerInputSink = { ...manual, control: 'ai' };
+    input.keyDown('a', false, flying);
+    assert.equal(toggles, 2, 'a did not hand control back');
+});
+
 test('the brake-only key brakes on the ground and never pushes the nose over', () => {
     const input = new SimPlayerInput();
     input.setKeyboardLayout(KeyboardControlLayoutId.QWERTY);

@@ -102,7 +102,7 @@ const SYSTEMS_HELP: HelpEntry[] = [
     { keys: ['T'], action: 'Select target' },
     { keys: ['I'], action: 'Target night view' },
     { keys: ['H'], action: 'Tailhook' },
-    { keys: ['P'], action: 'Autopilot (takes off, flies home, lands)' },
+    { keys: ['P'], action: 'Autopilot (takes off, flies home, lands); also A in the Arrows layout' },
     { keys: ['U'], action: 'Cycle HUD focus' },
     { keys: ['Shift+F9'], action: 'Import or delete terrain areas (opens the World tab)' },
     { keys: ['Shift+F10'], action: 'Import aircraft mod (.zip)' },
