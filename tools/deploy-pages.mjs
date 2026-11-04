@@ -82,7 +82,8 @@ try {
     run('git add -A', dir);
     run(`git commit -q -m "Deploy ${source}"`, dir);
     run(`git fetch -q "${dir}" gh-pages`);
-    const tree = out('git rev-parse FETCH_HEAD^{tree}');
+    // %T, not FETCH_HEAD^{tree}: cmd.exe eats the caret.
+    const tree = out('git log -1 --format=%T FETCH_HEAD');
     // On top of the live build, so a plain push publishes it. Git keeps each
     // unchanged file once, so a deploy adds only what changed (mostly the bundle).
     let parent = '';
