@@ -6,6 +6,7 @@ import { PlayerEntity } from "../../scene/entities/player";
 import { clamp, equals } from "../../utils/math";
 import type { TouchControlsMode } from "../../config/settingsStorage";
 import { AUTOPILOT_KEY, WHEEL_BRAKE_ONLY_KEY } from "../keyboardLayouts";
+import { TiltAngles, tiltAngles, tiltStick, upInScreen } from "../tiltAxes";
 
 /** Stick throw in CSS pixels from centre to full deflection. */
 const STICK_RADIUS_PX = 64;
@@ -46,7 +47,8 @@ export const TOUCH_BUTTONS: readonly HoldButton[] = [
  * On-screen flight controls for touch screens: a stick that springs back
  * under the left thumb, a throttle that stays where it is left and a rudder
  * strip on the right, and buttons for the aircraft's keys: FIRE and BRAKE
- * always, the rest behind a MORE button on top of the throttle.
+ * always, the rest behind a MORE button on top of the throttle. TILT, among
+ * them, flies pitch and roll by tilting the phone instead of the stick.
  *
  * The analog controls post their own axes to the worker (a real gamepad still
  * wins over them, and they over the keyboard); the buttons press the same keys
@@ -66,6 +68,15 @@ export class TouchControlDevice implements KernelTask {
     private readonly morePanel: HTMLDivElement;
     private readonly moreButton: HTMLDivElement;
     private moreOpen = false;
+
+    /** Tilt steering: pitch and roll from how the phone is held, while no thumb is on the stick. */
+    private readonly tiltButton: HTMLDivElement;
+    private tiltOn = false;
+    /** Where the phone was held when tilt was switched on; taken from the first reading. */
+    private tiltNeutral: TiltAngles | undefined;
+    private tiltPitch = 0;
+    private tiltRoll = 0;
+    private readonly onOrientation = (event: DeviceOrientationEvent) => this.readTilt(event);
 
     private mode: TouchControlsMode = 'auto';
     private readonly coarsePointer = window.matchMedia('(pointer: coarse)');
@@ -151,6 +162,12 @@ export class TouchControlDevice implements KernelTask {
         for (const spec of TOUCH_BUTTONS) {
             (spec.primary ? primary : this.morePanel).appendChild(this.makeKeyButton(spec));
         }
+        // A click, not a pointerdown: iOS grants the motion-sensor permission
+        // only from a gesture that has ended.
+        this.tiltButton = button('TILT');
+        this.tiltButton.addEventListener('pointerdown', event => event.preventDefault());
+        this.tiltButton.addEventListener('click', () => this.setTiltOn(!this.tiltOn));
+        this.morePanel.appendChild(this.tiltButton);
         const view = button('VIEW');
         view.addEventListener('pointerdown', event => {
             event.preventDefault();
@@ -210,6 +227,51 @@ export class TouchControlDevice implements KernelTask {
         this.moreButton.style.background = open ? BUTTON_PRESSED : BUTTON_BACKGROUND;
     }
 
+    /**
+     * Switches tilt steering. Switching it on takes the way the phone is held
+     * now as centre stick; switch it off and on again to re-centre.
+     */
+    private setTiltOn(on: boolean): void {
+        if (on) {
+            // iOS sends no readings until this is granted; asked in the same click.
+            // Where the browser has the call but sends readings anyway (or never
+            // answers), tilt is already on: only a refusal switches it off again.
+            const orientation = DeviceOrientationEvent as typeof DeviceOrientationEvent & {
+                requestPermission?: () => Promise<'granted' | 'denied'>;
+            };
+            orientation.requestPermission?.()
+                .then(answer => {
+                    if (answer === 'denied' && this.tiltOn) {
+                        this.setTiltOn(false);
+                    }
+                })
+                .catch(() => undefined);
+            this.tiltNeutral = undefined;
+            window.addEventListener('deviceorientation', this.onOrientation);
+        } else {
+            window.removeEventListener('deviceorientation', this.onOrientation);
+            if (this.stickPointer === undefined) {
+                this.pitch = 0;
+                this.roll = 0;
+            }
+        }
+        this.tiltOn = on;
+        this.tiltPitch = 0;
+        this.tiltRoll = 0;
+        this.tiltButton.style.background = on ? BUTTON_PRESSED : BUTTON_BACKGROUND;
+    }
+
+    private readTilt(event: DeviceOrientationEvent): void {
+        if (event.beta === null || event.gamma === null) {
+            return;
+        }
+        const angles = tiltAngles(upInScreen(event.beta, event.gamma, screenAngle()));
+        this.tiltNeutral ??= angles;
+        const stick = tiltStick(angles, this.tiltNeutral);
+        this.tiltPitch = shapeAxis(stick.pitch);
+        this.tiltRoll = shapeAxis(stick.roll);
+    }
+
     setMode(mode: TouchControlsMode): void {
         this.mode = mode;
         this.updateVisibility();
@@ -226,6 +288,13 @@ export class TouchControlDevice implements KernelTask {
             // Next time the controls are taken the throttle starts from the aircraft's.
             this.deactivate();
             return;
+        }
+        // The thumb on the stick wins over the tilt; the tilt takes the controls
+        // like a touch does, once it has a centre to measure from.
+        if (this.tiltOn && this.tiltNeutral !== undefined && this.stickPointer === undefined) {
+            this.activate();
+            this.pitch = this.tiltPitch;
+            this.roll = this.tiltRoll;
         }
         if (!this.active) {
             this.throttle = clamp(this.player.throttleUnit, 0, 1);
@@ -506,6 +575,17 @@ function pressKey(type: 'keydown' | 'keypress' | 'keyup', key: string): void {
     // A key no keyboard has (the brake-only one) has no physical code either.
     const code = key === ' ' ? 'Space' : key.length === 1 ? `Key${key.toUpperCase()}` : '';
     document.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true }));
+}
+
+/** The screen's rotation in degrees (90: landscape with the device's top to the left). */
+function screenAngle(): number {
+    const angle = screen.orientation?.angle;
+    if (angle !== undefined) {
+        return angle;
+    }
+    // Older iOS: window.orientation, where landscape top-left is 90 and top-right -90.
+    const legacy = (window as Window & { orientation?: number }).orientation;
+    return legacy === undefined ? 0 : (legacy + 360) % 360;
 }
 
 async function toggleFullscreen(): Promise<void> {
