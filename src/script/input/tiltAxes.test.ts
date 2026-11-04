@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { tiltAngles, tiltStick, upInScreen, TILT_FULL_THROW_RAD } from './tiltAxes';
+import { tiltAngles, tiltStick, upFromGravity, upInScreen, TILT_FULL_THROW_RAD } from './tiltAxes';
 
 const DEG = Math.PI / 180;
 
@@ -56,6 +56,24 @@ test('full throw at the limit and no further', () => {
     assert.equal(tiltStick(tiltAngles(upInScreen(-30, 0, 0)), neutral).pitch, -1);
     // Positive gamma is the right edge down (the spec's "tilted right").
     assert.equal(tiltStick(tiltAngles(upInScreen(45, 60, 0)), neutral).roll, 1);
+});
+
+test('gravity from the accelerometer gives the same up as the orientation angles', () => {
+    for (const angle of [0, 90, 180, 270]) {
+        for (const [beta, gamma] of [[45, 0], [30, -20], [80, 60], [-10, 15]]) {
+            const fromAngles = upInScreen(beta, gamma, angle);
+            // What a resting phone's accelerometer reads in device axes at that pose.
+            const b = beta * DEG;
+            const g = gamma * DEG;
+            const fromGravity = upFromGravity(
+                -Math.cos(b) * Math.sin(g) * 9.81, Math.sin(b) * 9.81, Math.cos(b) * Math.cos(g) * 9.81, angle);
+            assert.ok(fromGravity !== null);
+            for (let i = 0; i < 3; i++) {
+                close(fromGravity[i], fromAngles[i], `angle ${angle} beta ${beta} gamma ${gamma} axis ${i}`);
+            }
+        }
+    }
+    assert.equal(upFromGravity(0, 0, 0, 0), null, 'no reading, no up');
 });
 
 /**

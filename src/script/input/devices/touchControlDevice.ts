@@ -6,7 +6,7 @@ import { PlayerEntity } from "../../scene/entities/player";
 import { clamp, equals } from "../../utils/math";
 import type { TouchControlsMode } from "../../config/settingsStorage";
 import { AUTOPILOT_KEY, WHEEL_BRAKE_ONLY_KEY } from "../keyboardLayouts";
-import { TiltAngles, tiltAngles, tiltStick, upInScreen } from "../tiltAxes";
+import { TiltAngles, tiltAngles, tiltStick, upFromGravity, upInScreen } from "../tiltAxes";
 import { toggleFullscreen, TouchStartGate } from "../touchStartGate";
 
 /** Stick throw in CSS pixels from centre to full deflection. */
@@ -15,6 +15,12 @@ const STICK_RADIUS_PX = 64;
 const STICK_DEAD_ZONE = 0.06;
 /** Cubic share of the response curve: fine near centre, full throw at the edge. */
 const STICK_EXPO = 0.4;
+/** How long tilt waits for orientation readings before falling back to the accelerometer. */
+const TILT_ORIENTATION_GRACE_MS = 500;
+/** How long tilt waits for any reading before it gives up and says so. */
+const TILT_NO_SENSOR_MS = 3000;
+/** Share of each accelerometer reading taken into the up vector (~60 Hz: about 0.1 s lag). */
+const TILT_GRAVITY_SMOOTHING = 0.15;
 
 /** What the game must answer for the overlay; Game implements it. */
 export interface TouchControlHost {
@@ -77,7 +83,17 @@ export class TouchControlDevice implements KernelTask {
     private tiltNeutral: TiltAngles | undefined;
     private tiltPitch = 0;
     private tiltRoll = 0;
-    private readonly onOrientation = (event: DeviceOrientationEvent) => this.readTilt(event);
+    /**
+     * Where the readings come from: the fused orientation where the phone has
+     * a gyroscope, else the accelerometer's gravity. Decided by the first
+     * reading, since the two need not agree on signs and the centre is per source.
+     */
+    private tiltSource: 'orientation' | 'motion' | undefined;
+    /** Smoothed up vector from the accelerometer, which also feels the hand's shake. */
+    private tiltGravityUp: [number, number, number] | undefined;
+    private tiltStartedAt = 0;
+    private readonly onOrientation = (event: DeviceOrientationEvent) => this.readOrientation(event);
+    private readonly onMotion = (event: DeviceMotionEvent) => this.readMotion(event);
 
     private mode: TouchControlsMode = 'auto';
     private readonly coarsePointer = window.matchMedia('(pointer: coarse)');
@@ -165,9 +181,9 @@ export class TouchControlDevice implements KernelTask {
             (spec.primary ? primary : this.morePanel).appendChild(this.makeKeyButton(spec));
         }
         // A click, not a pointerdown: iOS grants the motion-sensor permission
-        // only from a gesture that has ended.
+        // only from a gesture that has ended. And no preventDefault on the
+        // pointerdown, which in Safari can cancel that click.
         this.tiltButton = button('TILT');
-        this.tiltButton.addEventListener('pointerdown', event => event.preventDefault());
         this.tiltButton.addEventListener('click', () => this.setTiltOn(!this.tiltOn));
         this.morePanel.appendChild(this.tiltButton);
         const view = button('VIEW');
@@ -217,25 +233,30 @@ export class TouchControlDevice implements KernelTask {
      * Switches tilt steering. Switching it on takes the way the phone is held
      * now as centre stick; switch it off and on again to re-centre.
      */
-    private setTiltOn(on: boolean): void {
+    private setTiltOn(on: boolean, why?: string): void {
         if (on) {
             // iOS sends no readings until this is granted; asked in the same click.
             // Where the browser has the call but sends readings anyway (or never
             // answers), tilt is already on: only a refusal switches it off again.
-            const orientation = DeviceOrientationEvent as typeof DeviceOrientationEvent & {
-                requestPermission?: () => Promise<'granted' | 'denied'>;
-            };
-            orientation.requestPermission?.()
-                .then(answer => {
-                    if (answer === 'denied' && this.tiltOn) {
-                        this.setTiltOn(false);
-                    }
-                })
-                .catch(() => undefined);
+            for (const type of [DeviceOrientationEvent, window.DeviceMotionEvent]) {
+                const withPermission = type as { requestPermission?: () => Promise<'granted' | 'denied'> } | undefined;
+                withPermission?.requestPermission?.()
+                    .then(answer => {
+                        if (answer === 'denied' && this.tiltOn) {
+                            this.setTiltOn(false, 'DENIED');
+                        }
+                    })
+                    .catch(() => undefined);
+            }
             this.tiltNeutral = undefined;
+            this.tiltSource = undefined;
+            this.tiltGravityUp = undefined;
+            this.tiltStartedAt = performance.now();
             window.addEventListener('deviceorientation', this.onOrientation);
+            window.addEventListener('devicemotion', this.onMotion);
         } else {
             window.removeEventListener('deviceorientation', this.onOrientation);
+            window.removeEventListener('devicemotion', this.onMotion);
             if (this.stickPointer === undefined) {
                 this.pitch = 0;
                 this.roll = 0;
@@ -245,13 +266,49 @@ export class TouchControlDevice implements KernelTask {
         this.tiltPitch = 0;
         this.tiltRoll = 0;
         this.tiltButton.style.background = on ? BUTTON_PRESSED : BUTTON_BACKGROUND;
+        // Says why tilt went off again, until the next press; 'TILT' otherwise.
+        this.tiltButton.textContent = why ?? 'TILT';
+        this.tiltButton.style.fontSize = why ? '9px' : '11px';
     }
 
-    private readTilt(event: DeviceOrientationEvent): void {
-        if (event.beta === null || event.gamma === null) {
+    private readOrientation(event: DeviceOrientationEvent): void {
+        if (event.beta === null || event.gamma === null || this.tiltSource === 'motion') {
             return;
         }
-        const angles = tiltAngles(upInScreen(event.beta, event.gamma, screenAngle()));
+        this.tiltSource = 'orientation';
+        this.applyTilt(upInScreen(event.beta, event.gamma, screenAngle()));
+    }
+
+    private readMotion(event: DeviceMotionEvent): void {
+        if (this.tiltSource === 'orientation') {
+            return;
+        }
+        const g = event.accelerationIncludingGravity;
+        const up = g && g.x !== null && g.y !== null && g.z !== null
+            ? upFromGravity(g.x, g.y, g.z, screenAngle())
+            : null;
+        if (up === null) {
+            return;
+        }
+        // Give a gyroscope's orientation readings the first moment to arrive:
+        // they are steadier, and only phones without one fall back to this.
+        if (this.tiltSource === undefined) {
+            if (performance.now() - this.tiltStartedAt < TILT_ORIENTATION_GRACE_MS) {
+                return;
+            }
+            this.tiltSource = 'motion';
+        }
+        const previous = this.tiltGravityUp;
+        this.tiltGravityUp = previous === undefined ? up : [
+            previous[0] + (up[0] - previous[0]) * TILT_GRAVITY_SMOOTHING,
+            previous[1] + (up[1] - previous[1]) * TILT_GRAVITY_SMOOTHING,
+            previous[2] + (up[2] - previous[2]) * TILT_GRAVITY_SMOOTHING,
+        ];
+        this.applyTilt(this.tiltGravityUp);
+    }
+
+    private applyTilt(up: readonly [number, number, number]): void {
+        const angles = tiltAngles(up);
         this.tiltNeutral ??= angles;
         const stick = tiltStick(angles, this.tiltNeutral);
         this.tiltPitch = shapeAxis(stick.pitch);
@@ -270,6 +327,11 @@ export class TouchControlDevice implements KernelTask {
 
     update(_delta: number): void {
         this.updateVisibility();
+        if (this.tiltOn && this.tiltSource === undefined
+            && performance.now() - this.tiltStartedAt > TILT_NO_SENSOR_MS) {
+            // No browser says it has no sensors; it just never sends a reading.
+            this.setTiltOn(false, 'NO SENSOR');
+        }
         if (!this.visible || !this.player.controlsEnabled || this.player.isAutopilotEnabled
             || this.player.isCrashed) {
             // Next time the controls are taken the throttle starts from the aircraft's.

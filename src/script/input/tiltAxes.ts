@@ -25,8 +25,29 @@ export function upInScreen(betaDeg: number, gammaDeg: number, screenAngleDeg: nu
     const dx = -Math.cos(beta) * Math.sin(gamma);
     const dy = Math.sin(beta);
     const dz = Math.cos(beta) * Math.cos(gamma);
-    // A screen turned by `angle` (90 = landscape with the device's top to the
-    // left) has its right along the device's -y and its up along the device's +x.
+    return deviceToScreen(dx, dy, dz, screenAngleDeg);
+}
+
+/**
+ * The world's up direction in screen axes from a `devicemotion` event's
+ * `accelerationIncludingGravity` (device axes; a phone lying face up reads
+ * +9.81 on z). For phones without a gyroscope, which send no orientation:
+ * the accelerometer alone still knows where up is while the phone is not
+ * being shaken. Null when the reading has no length.
+ */
+export function upFromGravity(ax: number, ay: number, az: number, screenAngleDeg: number): [number, number, number] | null {
+    const length = Math.hypot(ax, ay, az);
+    if (!(length > 0.5)) {
+        return null;
+    }
+    return deviceToScreen(ax / length, ay / length, az / length, screenAngleDeg);
+}
+
+/**
+ * A screen turned by `angle` (90 = landscape with the device's top to the
+ * left) has its right along the device's -y and its up along the device's +x.
+ */
+function deviceToScreen(dx: number, dy: number, dz: number, screenAngleDeg: number): [number, number, number] {
     const a = screenAngleDeg * Math.PI / 180;
     const c = Math.cos(a);
     const s = Math.sin(a);
