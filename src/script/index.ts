@@ -10,6 +10,7 @@ import { HD_FPS_CAP, H_RES, V_RES } from './defs';
 import { JoystickControlDevice } from './input/devices/joystickControlDevice';
 import { KeyboardControlDevice } from './input/devices/keyboardControlDevice';
 import { TouchControlDevice } from './input/devices/touchControlDevice';
+import { TouchStartGate } from './input/touchStartGate';
 import { setBootProgress, setBootStreaming } from './osd/bootProgress';
 import { setupOSD } from './osd/osdPanel';
 import { CombatSimClient } from './physics/sim/combatSimClient';
@@ -36,6 +37,8 @@ import { FlightModels, TechProfiles } from './state/gameDefs';
 import { DETAIL_DISTANCE_OFF } from './terrain/lod';
 async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, JoystickControlDevice, TouchControlDevice, Game, AudioSystem]> {
     const settings = loadSettings();
+    // Before anything loads: a phone gets tap-to-start (fullscreen) and landscape only.
+    const touchGate = new TouchStartGate(settings.touchControls);
     // Single authoritative combat sim worker. The player's FM2/DEBUG models are
     // render-side proxies bound to it (id PLAYER_SIM_ID). AI opponents register
     // with the same client (see Game.setupCombat).
@@ -132,6 +135,7 @@ async function setup(): Promise<[Kernel, ConfigService, KeyboardControlDevice, J
         combatSim,
         game.getPlayer(),
         game,
+        touchGate,
         PLAYER_SIM_ID,
         () => config.flightModels.getActive() instanceof SimProxyFlightModel,
     );

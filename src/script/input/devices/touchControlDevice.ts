@@ -7,6 +7,7 @@ import { clamp, equals } from "../../utils/math";
 import type { TouchControlsMode } from "../../config/settingsStorage";
 import { AUTOPILOT_KEY, WHEEL_BRAKE_ONLY_KEY } from "../keyboardLayouts";
 import { TiltAngles, tiltAngles, tiltStick, upInScreen } from "../tiltAxes";
+import { toggleFullscreen, TouchStartGate } from "../touchStartGate";
 
 /** Stick throw in CSS pixels from centre to full deflection. */
 const STICK_RADIUS_PX = 64;
@@ -107,6 +108,7 @@ export class TouchControlDevice implements KernelTask {
         private readonly combatSim: CombatSimClient,
         private readonly player: PlayerEntity,
         private readonly host: TouchControlHost,
+        private readonly gate: TouchStartGate,
         private readonly simId: string = PLAYER_SIM_ID,
         private readonly isWorkerControlled: () => boolean = () =>
             player.getFlightModel() instanceof SimProxyFlightModel,
@@ -201,24 +203,8 @@ export class TouchControlDevice implements KernelTask {
         document.body.appendChild(this.root);
         this.coarsePointer.addEventListener('change', () => this.updateVisibility());
         window.addEventListener('blur', () => this.releaseAll());
-        this.enterFullscreenOnFirstTouch();
-    }
-
-    /**
-     * Fullscreen from the start on touch screens. Browsers only allow it from a user
-     * gesture, so the first tap anywhere enters it; leaving it later is the player's call.
-     */
-    private enterFullscreenOnFirstTouch(): void {
-        if (!document.fullscreenEnabled) {
-            return;
-        }
-        const onTap = () => {
-            document.removeEventListener('pointerup', onTap, true);
-            if (this.wanted() && !document.fullscreenElement) {
-                void toggleFullscreen();
-            }
-        };
-        document.addEventListener('pointerup', onTap, true);
+        // Nothing stays held under the turn-it-sideways screen.
+        this.gate.onBlock = () => this.releaseAll();
     }
 
     private setMoreOpen(open: boolean): void {
@@ -275,6 +261,7 @@ export class TouchControlDevice implements KernelTask {
     setMode(mode: TouchControlsMode): void {
         this.mode = mode;
         this.updateVisibility();
+        this.gate.setMode(mode);
     }
 
     getMode(): TouchControlsMode {
@@ -586,19 +573,4 @@ function screenAngle(): number {
     // Older iOS: window.orientation, where landscape top-left is 90 and top-right -90.
     const legacy = (window as Window & { orientation?: number }).orientation;
     return legacy === undefined ? 0 : (legacy + 360) % 360;
-}
-
-async function toggleFullscreen(): Promise<void> {
-    try {
-        if (document.fullscreenElement) {
-            await document.exitFullscreen();
-            return;
-        }
-        await document.documentElement.requestFullscreen();
-        // Android locks to landscape in fullscreen; iOS and desktops refuse, which is fine.
-        const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
-        await orientation.lock?.('landscape').catch(() => undefined);
-    } catch {
-        // Fullscreen is a convenience; the controls work without it.
-    }
 }
