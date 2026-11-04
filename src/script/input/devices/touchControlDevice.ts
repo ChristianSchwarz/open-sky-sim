@@ -24,14 +24,16 @@ export interface HoldButton {
     label: string;
     key: string;
     hold: boolean;
+    /** Always on screen; the others sit in the panel the MORE button opens. */
+    primary?: boolean;
 }
 
 // None of these may be a stick key in any layout (keyboardLayouts.test.ts):
 // a button press is a key press, and the worker runs the layout keys on it too.
 // So BRAKE presses the brake-only key, not the keyboard's 'w'.
 export const TOUCH_BUTTONS: readonly HoldButton[] = [
-    { label: 'FIRE', key: ' ', hold: true },
-    { label: 'BRAKE', key: WHEEL_BRAKE_ONLY_KEY, hold: true },
+    { label: 'FIRE', key: ' ', hold: true, primary: true },
+    { label: 'BRAKE', key: WHEEL_BRAKE_ONLY_KEY, hold: true, primary: true },
     { label: 'GEAR', key: 'g', hold: false },
     { label: 'FLAPS', key: 'f', hold: false },
     { label: 'AIRBRK', key: 'b', hold: false },
@@ -43,7 +45,8 @@ export const TOUCH_BUTTONS: readonly HoldButton[] = [
 /**
  * On-screen flight controls for touch screens: a stick that springs back
  * under the left thumb, a throttle that stays where it is left and a rudder
- * strip on the right, and buttons for the aircraft's keys.
+ * strip on the right, and buttons for the aircraft's keys: FIRE and BRAKE
+ * always, the rest behind a MORE button on top of the throttle.
  *
  * The analog controls post their own axes to the worker (a real gamepad still
  * wins over them, and they over the keyboard); the buttons press the same keys
@@ -60,6 +63,9 @@ export class TouchControlDevice implements KernelTask {
     private readonly throttleTrack: HTMLDivElement;
     private readonly rudderKnob: HTMLDivElement;
     private readonly rudderTrack: HTMLDivElement;
+    private readonly morePanel: HTMLDivElement;
+    private readonly moreButton: HTMLDivElement;
+    private moreOpen = false;
 
     private mode: TouchControlsMode = 'auto';
     private readonly coarsePointer = window.matchMedia('(pointer: coarse)');
@@ -135,27 +141,45 @@ export class TouchControlDevice implements KernelTask {
         this.root.appendChild(this.rudderTrack);
         this.bindRudder();
 
-        // Buttons: a low block left of the throttle, kept short for a phone held sideways.
-        const buttons = div('position:absolute;right:80px;bottom:72px;display:grid;'
-            + 'grid-template-columns:repeat(5,52px);gap:6px;pointer-events:auto;touch-action:none');
-        for (const button of TOUCH_BUTTONS) {
-            buttons.appendChild(this.makeKeyButton(button));
+        // Buttons: FIRE and BRAKE always, in a row left of the throttle; the
+        // aircraft's other keys in a panel above them that MORE opens and closes,
+        // so the view stays clear until they are wanted.
+        const primary = div('position:absolute;right:80px;bottom:72px;display:flex;gap:6px;'
+            + 'pointer-events:auto;touch-action:none');
+        this.morePanel = div('position:absolute;right:80px;bottom:114px;display:none;'
+            + 'grid-template-columns:repeat(4,52px);gap:6px;pointer-events:auto;touch-action:none');
+        for (const spec of TOUCH_BUTTONS) {
+            (spec.primary ? primary : this.morePanel).appendChild(this.makeKeyButton(spec));
         }
         const view = button('VIEW');
         view.addEventListener('pointerdown', event => {
             event.preventDefault();
             this.host.cycleTouchView();
         });
-        buttons.appendChild(view);
+        this.morePanel.appendChild(view);
         if (document.fullscreenEnabled) {
             const full = button('FULL');
             full.addEventListener('pointerdown', event => {
                 event.preventDefault();
                 void toggleFullscreen();
             });
-            buttons.appendChild(full);
+            this.morePanel.appendChild(full);
         }
-        this.root.appendChild(buttons);
+        this.root.appendChild(primary);
+        this.root.appendChild(this.morePanel);
+
+        // MORE: on top of the throttle track, where the right thumb already is.
+        this.moreButton = button('MORE');
+        this.moreButton.style.position = 'absolute';
+        this.moreButton.style.right = '16px';
+        this.moreButton.style.bottom = 'calc(72px + 40% + 8px)';
+        this.moreButton.style.pointerEvents = 'auto';
+        this.moreButton.style.touchAction = 'none';
+        this.moreButton.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            this.setMoreOpen(!this.moreOpen);
+        });
+        this.root.appendChild(this.moreButton);
 
         document.body.appendChild(this.root);
         this.coarsePointer.addEventListener('change', () => this.updateVisibility());
@@ -178,6 +202,12 @@ export class TouchControlDevice implements KernelTask {
             }
         };
         document.addEventListener('pointerup', onTap, true);
+    }
+
+    private setMoreOpen(open: boolean): void {
+        this.moreOpen = open;
+        this.morePanel.style.display = open ? 'grid' : 'none';
+        this.moreButton.style.background = open ? BUTTON_PRESSED : BUTTON_BACKGROUND;
     }
 
     setMode(mode: TouchControlsMode): void {
