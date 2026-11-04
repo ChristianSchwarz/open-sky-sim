@@ -130,7 +130,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     treeDensity: TREE_DENSITY_MULTIPLIER_DEFAULT,
     colourAdjust: defaultColourAdjust(),
     aircraftId: 'f22',
-    spawnMode: 'headon',
+    spawnMode: 'runway',
     daytime: DEFAULT_SUN_HOURS,
     terrainArea: '',
     terrainTree: '',

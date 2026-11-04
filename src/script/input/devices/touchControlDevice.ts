@@ -7,7 +7,7 @@ import { clamp, equals } from "../../utils/math";
 import type { TouchControlsMode } from "../../config/settingsStorage";
 import { AUTOPILOT_KEY, WHEEL_BRAKE_ONLY_KEY } from "../keyboardLayouts";
 import { TiltAngles, tiltAngles, tiltStick, upFromGravity, upInScreen } from "../tiltAxes";
-import { toggleFullscreen, TouchStartGate } from "../touchStartGate";
+import { TouchStartGate } from "../touchStartGate";
 
 /** Stick throw in CSS pixels from centre to full deflection. */
 const STICK_RADIUS_PX = 64;
@@ -192,14 +192,8 @@ export class TouchControlDevice implements KernelTask {
             this.host.cycleTouchView();
         });
         this.morePanel.appendChild(view);
-        if (document.fullscreenEnabled) {
-            const full = button('FULL');
-            full.addEventListener('pointerdown', event => {
-                event.preventDefault();
-                void toggleFullscreen();
-            });
-            this.morePanel.appendChild(full);
-        }
+        // No fullscreen button: on a touch screen the game is always
+        // fullscreen, and the next touch would only put it back (touchStartGate.ts).
         this.root.appendChild(primary);
         this.root.appendChild(this.morePanel);
 

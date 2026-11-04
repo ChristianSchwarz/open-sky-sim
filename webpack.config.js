@@ -104,6 +104,7 @@ module.exports = (_env, argv) => ({
                             .replace('href="./bundle.css"', `href="./bundle.css?v=${v}"`);
                     },
                 },
+                { from: 'src/manifest.webmanifest', to: 'manifest.webmanifest' },
                 {
                     from: 'assets/*',
                     to: 'assets/[name][ext]',

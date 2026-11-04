@@ -25,7 +25,7 @@
         "sky": { "hue": 5, "saturation": 2, "brightness": 1 }
     },
     "aircraftId": "f22",
-    "spawnMode": "headon",
+    "spawnMode": "runway",
     "daytime": 14,
     "terrainArea": "",
     "terrainTree": "",

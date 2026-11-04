@@ -12,8 +12,8 @@
 //                                   first-run settings for players who have
 //                                   saved none (settingsStorage.ts)
 //
-// The branch holds only the built site (one fresh commit each deploy, force
-// pushed), so the baked terrain never lands in the source history. The game is
+// The branch holds only the built site (one commit per deploy on top of the
+// last, plain pushed), so the baked terrain never lands in the source history. The game is
 // static and uses relative URLs, so it runs from /<repo>/ unchanged; /api is
 // dev-server only and the UI already hides import features without it.
 import { execSync } from 'node:child_process';
@@ -81,10 +81,22 @@ try {
     run('git init -q -b gh-pages', dir);
     run('git add -A', dir);
     run(`git commit -q -m "Deploy ${source}"`, dir);
-    run(`git fetch -q "${dir}" gh-pages:gh-pages --force`);
+    run(`git fetch -q "${dir}" gh-pages`);
+    const tree = out('git rev-parse FETCH_HEAD^{tree}');
+    // On top of the live build, so a plain push publishes it. Git keeps each
+    // unchanged file once, so a deploy adds only what changed (mostly the bundle).
+    let parent = '';
+    try {
+        execSync('git fetch -q origin gh-pages', { cwd: root, stdio: 'ignore' });
+        parent = ` -p ${out('git rev-parse FETCH_HEAD')}`;
+    } catch {
+        // No gh-pages on origin yet: the first deploy starts the branch.
+    }
+    const commit = out(`git commit-tree ${tree}${parent} -m "Deploy ${source}"`);
+    run(`git update-ref refs/heads/gh-pages ${commit}`);
     console.log(`gh-pages now holds the build of ${source}`);
     if (push) {
-        run('git push --force origin gh-pages');
+        run('git push origin gh-pages');
     }
 } finally {
     rmSync(dir, { recursive: true, force: true });
