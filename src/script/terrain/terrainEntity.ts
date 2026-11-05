@@ -2186,22 +2186,42 @@ export class TerrainEntity implements Entity {
     /**
      * Mark what this reconcile uses as recent for the streamer's eviction:
      * every drawn tile, plus the resident tiles next to it in the tree - its
-     * parent (what the budget fold and a zoom-out take over with) and its
      * children (resident ones waiting on a sibling before they can take
-     * over, which are neither drawn nor wanted meanwhile).
+     * over, which are neither drawn nor wanted meanwhile), every ancestor up
+     * to the root, and all four children of each ancestor. The parent is
+     * what the budget fold and a zoom-out take over with; the rest is what
+     * the quadtree refined through, which it does only while all four
+     * children of a node are resident - including those culled off screen,
+     * which are never drawn. Marking the parent alone let such a tile go
+     * idle and be evicted once the cache was over budget, and the next
+     * reconcile collapsed everything under its parent to one coarse tile
+     * until it was back: the view flicked to coarse untextured tiles and
+     * back every few seconds.
      */
     private markDrawnTiles(): void {
+        const marked = this.markedAncestors;
+        marked.clear();
         for (const node of this.drawList) {
             this.streamer.markUsed(node.id);
-            const parent = parentOf(node.id);
-            if (parent !== undefined) {
-                this.streamer.markUsed(parent);
+            for (let up = parentOf(node.id); up !== undefined; up = parentOf(up)) {
+                const key = tileKeyString(up);
+                if (marked.has(key)) {
+                    break;
+                }
+                marked.add(key);
+                this.streamer.markUsed(up);
+                for (const sibling of childrenOf(up)) {
+                    this.streamer.markUsed(sibling);
+                }
             }
             for (const child of node.children ?? []) {
                 this.streamer.markUsed(child.id);
             }
         }
     }
+
+    /** markDrawnTiles' ancestors already marked this reconcile; reused, not reallocated. */
+    private readonly markedAncestors = new Set<string>();
 
     private deepestDrawnZoom(): number {
         let z = 0;
