@@ -619,6 +619,23 @@ export class Renderer {
         this.pendingSky.set(layer.target, { texture: small.texture, target: renderTarget.target });
     }
 
+    /**
+     * Storage for a target the scene is drawn into.
+     *
+     * sRGB-encoded 8 bits where WebGL2 has it: the GPU encodes on write and
+     * decodes on read, so blending and mip filtering stay linear while the
+     * dark end keeps the precision the screen has. Plain 8-bit linear holds
+     * only a step or two below the night palette, and shading that wobbles
+     * across one step flips a pixel between black and 13/255 - the night
+     * flickered. SRGB8 alone is not renderable, hence RGBA. WebGL1 has no
+     * sRGB targets and keeps the old linear RGB.
+     */
+    private sceneColourFormat(): { format: THREE.PixelFormat; colorSpace?: THREE.ColorSpace } {
+        return this.isWebGL2
+            ? { format: THREE.RGBAFormat, colorSpace: THREE.SRGBColorSpace }
+            : { format: THREE.RGBFormat as THREE.PixelFormat };
+    }
+
     private backgroundSkyTargetFor(key: string, renderTarget: WebGLRenderTarget): THREE.WebGLRenderTarget {
         const width = Math.max(1, Math.round(renderTarget.width * Renderer.BACKGROUND_SKY_SCALE));
         const height = Math.max(1, Math.round(renderTarget.height * Renderer.BACKGROUND_SKY_SCALE));
@@ -628,7 +645,7 @@ export class Renderer {
                 minFilter: THREE.LinearFilter,
                 magFilter: THREE.LinearFilter,
                 generateMipmaps: false,
-                format: THREE.RGBFormat,
+                ...this.sceneColourFormat(),
             });
             this.backgroundSkyTargets.set(key, small);
         } else if (small.width !== width || small.height !== height) {
@@ -830,7 +847,7 @@ export class Renderer {
                 minFilter: mipmapped ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter,
                 magFilter: THREE.NearestFilter,
                 generateMipmaps: mipmapped,
-                format: THREE.RGBFormat,
+                ...this.sceneColourFormat(),
                 // Depth as a texture rather than a renderbuffer, so a later
                 // pass in this same target can be told what it is covering
                 // (SceneDepthPass).

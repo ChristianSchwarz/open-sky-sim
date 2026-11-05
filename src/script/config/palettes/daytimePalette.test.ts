@@ -51,10 +51,10 @@ describe('blendPalettes', () => {
     it('lands the halfway sky between the two authored skies, in linear light', () => {
         const half = PaletteColor(
             blendPalettes(HDNoonPalette, HDMidnightPalette, plainSky(0.5)), PaletteCategory.SKY);
-        // #7aa3c4 / #182028 mixed as light, not as gamma-encoded bytes. Brighter
+        // #7aa3c4 / #04060a mixed as light, not as gamma-encoded bytes. Brighter
         // than the componentwise sRGB midpoint (#496276) would be, which is the
         // point: half the light left is not half the encoded value.
-        assert.strictEqual(half, '#5a7992');
+        assert.strictEqual(half, '#587790');
     });
 
     it('switches HUD colours instead of interpolating them', () => {

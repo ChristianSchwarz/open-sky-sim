@@ -489,15 +489,18 @@ ${EARTH_MAP_PARS_FRAGMENT}
     float weight = openSky ? uSkyWeight : uWeight;
     gl_FragColor = mix(vec4(toned * weight, alpha * weight), globeColour, globe);
 
-    // The scene target holds linear colour in 8 bits, so the dark end of the
-    // sky - a few 1/255 steps, each a big jump once encoded to sRGB - comes
-    // out as coloured bands. A triangular dither of one step breaks them up.
-    // It fades out towards zero so black space stays black.
+    // A triangular dither of one 8-bit sRGB step against banding in the
+    // smooth sky gradient. The scene target stores sRGB (WebGL2), so the step
+    // is taken in that encoding and converted back to linear here; a step of
+    // the old linear storage is many sRGB steps at the dark end and showed as
+    // grain. The step shrinks to nothing at zero, so black space stays black.
     vec2 fc = gl_FragCoord.xy;
     float n = fract(52.9829189 * fract(dot(fc, vec2(0.06711056, 0.00583715))))
       + fract(52.9829189 * fract(dot(fc + vec2(47.0, 17.0), vec2(0.06711056, 0.00583715)))) - 1.0;
-    vec3 c = gl_FragColor.rgb;
-    gl_FragColor.rgb = max(c + n * min(c * 255.0, vec3(1.0)) / 255.0, 0.0);
+    vec3 c = max(gl_FragColor.rgb, 0.0);
+    vec3 s = pow(c, vec3(1.0 / 2.2));
+    vec3 stepLinear = pow(s + 1.0 / 255.0, vec3(2.2)) - c;
+    gl_FragColor.rgb = max(c + n * stepLinear * min(s * 255.0, vec3(1.0)), 0.0);
   }
 `;
 
