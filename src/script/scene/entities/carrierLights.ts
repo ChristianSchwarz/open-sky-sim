@@ -51,13 +51,14 @@ const LIP_SPACING_M = 2.5;
  * outboard of the foul line - out past the port deck edge, on its post.
  */
 export const LUNA_STATION_M = 114;
-const LUNA_OUTBOARD_M = 19;
-/** Cell spacing and datum arms (m): larger than the real lens so it reads on a screen from a mile. */
-const LUNA_CELL_SPACING_M = 0.9;
+const LUNA_OUTBOARD_M = 14;
+/** Cell spacing and datum arms (m), and the lights' size: LUNA_SCALE of what first read on a screen from a mile. */
+const LUNA_SCALE = 0.7;
+const LUNA_CELL_SPACING_M = 0.9 * LUNA_SCALE;
 const LUNA_CELLS = 5;
 const LUNA_DATUM_LIGHTS = 4;
-const LUNA_DATUM_SPACING_M = 1.4;
-const LUNA_DATUM_GAP_M = 1.5;
+const LUNA_DATUM_SPACING_M = 1.4 * LUNA_SCALE;
+const LUNA_DATUM_GAP_M = 1.5 * LUNA_SCALE;
 /** Height of the datum row above the deck (m). */
 const LUNA_DATUM_HEIGHT_M = 3;
 /** Degrees off the path per cell; the bottom cell (and below) is red. */
@@ -65,7 +66,7 @@ export const LUNA_DEG_PER_CELL = 0.4;
 /** Seen only from within this angle either side of the approach (deg). */
 const LUNA_AZIMUTH_HALF_DEG = 25;
 /** The Luna's lights: bigger and lit by day; gone a little past the 2.5 km approach start. */
-const LUNA_SIZE: LightSize = { sizeM: 0.7, sizePx: 4, maxPx: 14, fadeM: [0, 6000] };
+const LUNA_SIZE: LightSize = { sizeM: 0.7 * LUNA_SCALE, sizePx: 3, maxPx: Math.round(14 * LUNA_SCALE), fadeM: [0, 6000] };
 
 /** Navigation light positions on the island (carrier-local, from kuz.glb). */
 const MASTHEAD = new THREE.Vector3(30.08, 53.4, -0.04);
