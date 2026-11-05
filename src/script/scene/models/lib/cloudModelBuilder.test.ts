@@ -22,19 +22,23 @@ describe('cloud haze', () => {
         const hazes = lod.slice(0, 3).map(level => level.volumes[1] as THREE.Mesh);
         const ranges = hazes.map(h => h.geometry.drawRange.count);
         assert.ok(ranges[0] > ranges[1] && ranges[1] > ranges[2] && ranges[2] > 0, `${ranges}`);
-        const levels = hazes[0].geometry.getAttribute('ditherLevel');
+        const geometry = hazes[0].geometry;
+        const levels = geometry.getAttribute('ditherLevel');
+        const index = geometry.getIndex()!;
         assert.equal(levels, hazes[2].geometry.getAttribute('ditherLevel'), 'levels share one buffer');
         // Densest first: the three-tier level holds the three densest tiers only.
         const seen = new Set<number>();
-        for (let v = 0; v < ranges[2]; v++) {
-            seen.add(levels.getX(v));
+        for (let i = 0; i < ranges[2]; i++) {
+            seen.add(levels.getX(index.getX(i)));
         }
-        assert.deepEqual([...seen].sort(), [0.88, 0.95, 0.98].map(Math.fround));
+        assert.deepEqual([...seen].sort(), [0.5, 0.6, 0.88].map(Math.fround));
         // Whole puffs: every triangle sits in one tier.
-        for (let v = 0; v < ranges[0]; v += 3) {
-            assert.equal(levels.getX(v), levels.getX(v + 2));
+        for (let i = 0; i < ranges[0]; i += 3) {
+            assert.equal(levels.getX(index.getX(i)), levels.getX(index.getX(i + 2)));
         }
-        assert.equal(ranges[0], levels.count);
+        assert.equal(ranges[0], index.count);
+        // Puffs share their corners: 12 vertices to every 20 triangles.
+        assert.equal(levels.count * 20, index.count / 3 * 12);
     });
 
     it('gives all levels one material that takes its opacity per vertex', () => {

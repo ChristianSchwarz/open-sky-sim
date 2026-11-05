@@ -5,7 +5,6 @@ import { SceneMaterialManager, SceneMaterialPrimitiveType } from "../../material
 import { updateUniforms } from '../../utils';
 import { SUN_UNIFORMS, SUN_VISIBILITY } from '../../materials/shaders/sun';
 import { Model, ModelLibBuilder } from "../models";
-import { mergeGeometries } from './vegetationModelBuilder';
 
 /** Share of its light a cloud keeps when the sun is wholly hidden from the viewer. */
 const HIDDEN_SUN_CLOUD_LIGHT = 0.35;
@@ -288,8 +287,12 @@ interface HazeTier {
  * than cutting off at one uniform transparency.
  */
 const HAZE_TIERS: HazeTier[] = [
-    { puffsPerLobe: 4, alphaDither: 0.98, distMin: 0.15, distMax: 0.28, radiusMin: 0.45, radiusMax: 0.65 },
-    { puffsPerLobe: 4, alphaDither: 0.95, distMin: 0.25, distMax: 0.4, radiusMin: 0.4, radiusMax: 0.6 },
+    // The densest tiers are many small puffs sitting on the lobe's surface.
+    // They were 4 puffs of 0.4-0.65r each, centred inside the lobe: hidden on
+    // high lobes, but on a lobe at the flat base the clamp below lifted them
+    // clear of it, where they read as one big, near-opaque blob on top.
+    { puffsPerLobe: 8, alphaDither: 0.6, distMin: 0.8, distMax: 0.95, radiusMin: 0.14, radiusMax: 0.22 },
+    { puffsPerLobe: 8, alphaDither: 0.5, distMin: 0.9, distMax: 1.05, radiusMin: 0.12, radiusMax: 0.2 },
     { puffsPerLobe: 4, alphaDither: 0.88, distMin: 0.35, distMax: 0.5, radiusMin: 0.35, radiusMax: 0.55 },
     { puffsPerLobe: 5, alphaDither: 0.75, distMin: 0.5, distMax: 0.68, radiusMin: 0.3, radiusMax: 0.48 },
     { puffsPerLobe: 5, alphaDither: 0.6, distMin: 0.68, distMax: 0.88, radiusMin: 0.26, radiusMax: 0.42 },
@@ -307,19 +310,27 @@ const HAZE_TIERS: HazeTier[] = [
     { puffsPerLobe: 3, alphaDither: 0.18, distMin: 1.2, distMax: 1.5, radiusMin: 0.14, radiusMax: 0.24, thetaMin: HAZE_SCATTER_HALF_ANGLE, thetaMax: HAZE_SIDE_MAX_ANGLE },
 ];
 
+/** One haze puff: an icosahedron of radius `r` centred at (x, y, z). */
+interface HazePuff {
+    x: number;
+    y: number;
+    z: number;
+    r: number;
+}
+
 /**
  * Extra icosahedron puffs — same construction as the solid lobes, just
  * smaller and scattered over each lobe's top and sides (confined to an angle
  * band off straight-up that never reaches past the horizon, so they never
  * wrap onto the underside). Each puff's own bottom is then clamped to stay
  * at or above the cluster's flat base (`minY`), so a wide-angle puff on a low
- * lobe can never dip below the solid body's underside. Rendered separately
- * per tier with a dithered stipple (see build()) so they read as soft,
- * semi-transparent growth billowing off the cloud, thinning out with
- * distance from the solid body.
+ * lobe can never dip below the solid body's underside. Rendered with a
+ * dithered stipple (see build()) so they read as soft, semi-transparent
+ * growth billowing off the cloud, thinning out with distance from the solid
+ * body.
  */
-function buildHazeTierGeometry(lobes: CloudPuffLobe[], tier: HazeTier, tierIndex: number, minY: number): THREE.BufferGeometry {
-    const puffs: THREE.BufferGeometry[] = [];
+function placeHazeTierPuffs(lobes: CloudPuffLobe[], tier: HazeTier, tierIndex: number, minY: number): HazePuff[] {
+    const puffs: HazePuff[] = [];
     const thetaMin = tier.thetaMin ?? 0;
     const thetaMax = tier.thetaMax ?? HAZE_SCATTER_HALF_ANGLE;
     for (let li = 0; li < lobes.length; li++) {
@@ -338,55 +349,164 @@ function buildHazeTierGeometry(lobes: CloudPuffLobe[], tier: HazeTier, tierIndex
             // as holes in the underside. This keeps every puff's whole body
             // clear of it with room to spare.
             const puffY = Math.max(l.y + dirY * dist, minY + puffR * 1.6);
-
-            // Detail 0 (20 tri) rather than 1 (80 tri): these puffs are
-            // stippled/alpha-discarded and never inspected up close (see
-            // SceneryField's clouds lodBias), so the coarser facets are lost
-            // in the dither while the 4x triangle cut matters a lot — a
-            // nearby large cloud's haze alone can otherwise run into the tens
-            // of thousands of triangles (see cloud/cirrus __fieldStats).
-            const g = new THREE.IcosahedronGeometry(puffR, 0);
-            g.translate(l.x + dirX * dist, puffY, l.z + dirZ * dist);
-            puffs.push(g);
+            puffs.push({ x: l.x + dirX * dist, y: puffY, z: l.z + dirZ * dist, r: puffR });
         }
     }
-    return mergeGeometries(puffs);
+    return puffs;
 }
 
 /**
- * Every haze tier in one buffer, densest first, with each puff's dither level
- * in a `ditherLevel` attribute (see vertexAlphaDither). Answers a geometry per
- * tier count that draws the first that many tiers: they share the buffers.
+ * The solid volume of one lobe as drawn: its icosphere, cut flat at `cutY`.
+ * `inner` is the radius of the largest sphere the faceted icosphere encloses.
  */
-function buildHazeLevels(lobes: CloudPuffLobe[], minY: number): (tierCount: number) => THREE.BufferGeometry {
-    const tiers = HAZE_TIERS.map((tier, i) => buildHazeTierGeometry(lobes, tier, i, minY));
-    const merged = mergeGeometries(tiers);
-    const levels = new Float32Array(merged.getAttribute('position').count);
+interface SolidLobe {
+    x: number;
+    y: number;
+    z: number;
+    inner: number;
+    cutY: number;
+}
+
+/** Margin (m) a point must clear a lobe's surfaces by to count as buried in it. */
+const BURIED_MARGIN_M = 0.05;
+
+/** Whether a sphere of radius `r` at (x, y, z) lies wholly inside one lobe's solid volume. */
+function buriedInLobe(x: number, y: number, z: number, r: number, l: SolidLobe): boolean {
+    return Math.hypot(x - l.x, y - l.y, z - l.z) + r < l.inner - BURIED_MARGIN_M
+        && y - r > l.cutY + BURIED_MARGIN_M;
+}
+
+/** Radius of the sphere a unit icosphere of this detail encloses: its nearest face plane. */
+function icosphereInradius(detail: number): number {
+    const pos = new THREE.IcosahedronGeometry(1, detail).getAttribute('position');
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    const n = new THREE.Vector3(), e = new THREE.Vector3();
+    let min = 1;
+    for (let i = 0; i < pos.count; i += 3) {
+        a.fromBufferAttribute(pos, i);
+        b.fromBufferAttribute(pos, i + 1);
+        c.fromBufferAttribute(pos, i + 2);
+        n.subVectors(b, a).cross(e.subVectors(c, a)).normalize();
+        min = Math.min(min, Math.abs(n.dot(a)));
+    }
+    return min;
+}
+
+/**
+ * The unit detail-0 icosahedron, welded: 12 shared corners, 20 triangles.
+ * Detail 0 rather than 1 (80 tri): the puffs are stippled and never
+ * inspected up close (see SceneryField's clouds lodBias), so the coarser
+ * facets are lost in the dither (see cloud/cirrus __fieldStats).
+ */
+const UNIT_PUFF = mergeVertices(new THREE.IcosahedronGeometry(1, 0).deleteAttribute('normal').deleteAttribute('uv'));
+
+/**
+ * Every haze tier in one indexed buffer, densest first, with each puff's
+ * dither level in a `ditherLevel` attribute (see vertexAlphaDither). Answers a
+ * geometry per tier count that draws the first that many tiers: they share
+ * the buffers.
+ *
+ * Puffs share their corners (12 vertices each, not 60): the haze shader is
+ * unlit, so a puff needs no per-face normals. A puff wholly inside one solid
+ * lobe is left out, since the body writes depth and it could never be seen.
+ */
+function buildHazeLevels(lobes: CloudPuffLobe[], solids: SolidLobe[], minY: number): (tierCount: number) => THREE.BufferGeometry {
+    const tiers = HAZE_TIERS.map((tier, i) =>
+        placeHazeTierPuffs(lobes, tier, i, minY).filter(p => !solids.some(l => buriedInLobe(p.x, p.y, p.z, p.r, l))));
+    const unitPos = UNIT_PUFF.getAttribute('position');
+    const unitIndex = UNIT_PUFF.getIndex()!;
+    const puffCount = tiers.reduce((n, t) => n + t.length, 0);
+    const vertexCount = puffCount * unitPos.count;
+    const positions = new Float32Array(vertexCount * 3);
+    const normals = new Float32Array(vertexCount * 3);
+    const levels = new Float32Array(vertexCount);
+    const index = vertexCount > 65535
+        ? new Uint32Array(puffCount * unitIndex.count)
+        : new Uint16Array(puffCount * unitIndex.count);
     const ends: number[] = [];
-    let end = 0;
-    tiers.forEach((g, i) => {
-        const count = g.getAttribute('position').count;
-        levels.fill(HAZE_TIERS[i].alphaDither, end, end + count);
-        end += count;
-        ends.push(end);
-        g.dispose();
+    let p = 0;
+    tiers.forEach((puffs, ti) => {
+        for (const puff of puffs) {
+            const v0 = p * unitPos.count;
+            for (let v = 0; v < unitPos.count; v++) {
+                const nx = unitPos.getX(v), ny = unitPos.getY(v), nz = unitPos.getZ(v);
+                positions.set([puff.x + nx * puff.r, puff.y + ny * puff.r, puff.z + nz * puff.r], (v0 + v) * 3);
+                normals.set([nx, ny, nz], (v0 + v) * 3);
+                levels[v0 + v] = HAZE_TIERS[ti].alphaDither;
+            }
+            for (let i = 0; i < unitIndex.count; i++) {
+                index[p * unitIndex.count + i] = v0 + unitIndex.getX(i);
+            }
+            p++;
+        }
+        ends.push(p * unitIndex.count);
     });
-    merged.setAttribute('ditherLevel', new THREE.BufferAttribute(levels, 1));
+    const positionAttr = new THREE.BufferAttribute(positions, 3);
+    const normalAttr = new THREE.BufferAttribute(normals, 3);
+    const levelAttr = new THREE.BufferAttribute(levels, 1);
+    const indexAttr = new THREE.BufferAttribute(index, 1);
+    const bounds = new THREE.BufferGeometry();
+    bounds.setAttribute('position', positionAttr);
+    bounds.computeBoundingSphere();
+    bounds.computeBoundingBox();
     return tierCount => {
         const g = new THREE.BufferGeometry();
-        for (const name of ['position', 'normal', 'ditherLevel']) {
-            g.setAttribute(name, merged.getAttribute(name));
-        }
+        g.setAttribute('position', positionAttr);
+        g.setAttribute('normal', normalAttr);
+        g.setAttribute('ditherLevel', levelAttr);
+        g.setIndex(indexAttr);
         g.setDrawRange(0, ends[tierCount - 1]);
-        g.boundingSphere = merged.boundingSphere;
-        g.boundingBox = merged.boundingBox;
-        if (g.boundingSphere === null) {
-            merged.computeBoundingSphere();
-            g.boundingSphere = merged.boundingSphere;
-        }
+        g.boundingSphere = bounds.boundingSphere;
+        g.boundingBox = bounds.boundingBox;
         return g;
     };
 }
+
+/**
+ * Drops every body triangle that lies wholly inside another lobe's solid
+ * volume, then every vertex no triangle uses any more. A triangle is convex
+ * and so is a cut sphere, so three buried corners bury the whole triangle;
+ * the lobe around it writes depth, so it was never visible. Normals were
+ * welded before this, so the shading of what remains is unchanged.
+ */
+function cullBuriedTriangles(geometry: THREE.BufferGeometry, solids: SolidLobe[]): THREE.BufferGeometry {
+    const pos = geometry.getAttribute('position');
+    const nrm = geometry.getAttribute('normal');
+    const index = geometry.getIndex()!;
+    const buried = new Uint8Array(pos.count);
+    for (let v = 0; v < pos.count; v++) {
+        const x = pos.getX(v), y = pos.getY(v), z = pos.getZ(v);
+        buried[v] = solids.some(l => buriedInLobe(x, y, z, 0, l)) ? 1 : 0;
+    }
+    const kept: number[] = [];
+    for (let i = 0; i < index.count; i += 3) {
+        const a = index.getX(i), b = index.getX(i + 1), c = index.getX(i + 2);
+        if (!(buried[a] && buried[b] && buried[c])) {
+            kept.push(a, b, c);
+        }
+    }
+    const remap = new Int32Array(pos.count).fill(-1);
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const newIndex = kept.map(v => {
+        if (remap[v] < 0) {
+            remap[v] = positions.length / 3;
+            positions.push(pos.getX(v), pos.getY(v), pos.getZ(v));
+            normals.push(nrm.getX(v), nrm.getY(v), nrm.getZ(v));
+        }
+        return remap[v];
+    });
+    const out = new THREE.BufferGeometry();
+    out.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    out.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    out.setIndex(newIndex);
+    out.computeBoundingSphere();
+    out.computeBoundingBox();
+    return out;
+}
+
+/** Icosphere detail of the solid body; see build(). */
+const BODY_DETAIL = 2;
 
 /**
  * Progressive haze-tier budgets, closest LOD first: 12, 8, 3 and no tiers.
@@ -425,15 +545,19 @@ export class CloudModelLibBuilder implements ModelLibBuilder {
         // that the lowest disc always wins cleanly.
         const baseRank = new Map(
             [...this.lobes].sort((a, b) => b.r - a.r).map((l, i) => [l, i] as const));
-        const geometry = mergeGeometriesSmooth(this.lobes.map(l => {
-            // Detail 2 (vs. the haze puffs' detail 1) so the solid body's
+        const cutY = (l: CloudPuffLobe) => baseY + baseRank.get(l)! * BASE_STACK_M;
+        const inradius = icosphereInradius(BODY_DETAIL);
+        const solids: SolidLobe[] = this.lobes.map(l =>
+            ({ x: l.x, y: l.y, z: l.z, inner: l.r * inradius, cutY: cutY(l) }));
+        const geometry = cullBuriedTriangles(mergeGeometriesSmooth(this.lobes.map(l => {
+            // Detail 2 (vs. the haze puffs' detail 0) so the solid body's
             // Gouraud shading picks up finer gradients across each lobe —
             // still low-poly, just a denser vertex grain to shade across.
-            const g = new THREE.IcosahedronGeometry(l.r, 2);
-            flattenBase(g, baseY + baseRank.get(l)! * BASE_STACK_M - l.y);
+            const g = new THREE.IcosahedronGeometry(l.r, BODY_DETAIL);
+            flattenBase(g, cutY(l) - l.y);
             g.translate(l.x, l.y, l.z);
             return g;
-        }));
+        })), solids);
         const mesh = new THREE.Mesh(geometry, materials.build({
             type: SceneMaterialPrimitiveType.MESH,
             category: PaletteCategory.SKY_CLOUD,
@@ -467,7 +591,7 @@ export class CloudModelLibBuilder implements ModelLibBuilder {
             vertexAlphaDither: true,
             colorDither: true,
         });
-        const hazeLevels = buildHazeLevels(this.lobes, baseY);
+        const hazeLevels = buildHazeLevels(this.lobes, solids, baseY);
         const hazeMeshes = LOD_HAZE_TIER_COUNTS.map(count => {
             if (count === 0) {
                 return undefined;
