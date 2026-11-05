@@ -10,7 +10,7 @@ import {
 } from '../../defs';
 import {
     getKeyboardLayout, isAutopilotKey, KeyboardControlAction, KeyboardControlLayout,
-    KeyboardControlLayoutId, KeyboardPitchStickMode, WHEEL_BRAKE_ONLY_KEY,
+    KeyboardControlLayoutId, KeyboardPitchStickMode, WHEEL_BRAKE_ONLY_KEY, WING_FOLD_KEY,
 } from '../../input/keyboardLayouts';
 import { clamp } from '../../utils/math';
 import { SimControlInputs, SimControlMode } from './simTypes';
@@ -40,6 +40,7 @@ export interface SimPlayerInputSink {
     toggleFlaps(): void;
     toggleAirbrakes(): void;
     toggleHook(): void;
+    toggleWingFold(): void;
     toggleAutopilot(): void;
     setPitchLimiterMode(mode: FcsPitchLimiter): void;
 }
@@ -528,6 +529,9 @@ export class SimPlayerInput {
                 break;
             case 'h':
                 sink.toggleHook();
+                break;
+            case WING_FOLD_KEY:
+                sink.toggleWingFold();
                 break;
             case 'l':
                 this.toggleLimiters();

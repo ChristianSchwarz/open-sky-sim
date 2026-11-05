@@ -59,6 +59,8 @@ export const AC = {
     hookDeployed: 53,
     /** Barricade engagement: 0 free, 1 paying out, 2 held (BarricadeEngagement). */
     barricade: 54,
+    /** Wings folded for parking (carrier aircraft, R key). */
+    wingsFolded: 55,
 } as const;
 
 /** Floats per projectile row: position (3) + quaternion (4). */

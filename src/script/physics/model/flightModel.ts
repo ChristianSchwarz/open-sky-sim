@@ -150,6 +150,9 @@ export abstract class FlightModel {
     /** Sim-owned tailhook state, or null when this model is not sim-owned. */
     getSimHookDeployed(): boolean | null { return null; }
 
+    /** Sim-owned wing fold state, or null when this model is not sim-owned. */
+    getSimWingsFolded(): boolean | null { return null; }
+
     reset() {
         this.obj.position.set(0, 0, 0);
         this.obj.quaternion.setFromAxisAngle(UP, 0);

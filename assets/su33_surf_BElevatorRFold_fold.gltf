@@ -1,0 +1,358 @@
+{
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0,
+        1,
+        2
+      ],
+      "name": "0"
+    },
+    {
+      "name": "1",
+      "nodes": []
+    },
+    {
+      "name": "2",
+      "nodes": []
+    },
+    {
+      "name": "3",
+      "nodes": []
+    },
+    {
+      "name": "4",
+      "nodes": []
+    },
+    {
+      "name": "5",
+      "nodes": []
+    }
+  ],
+  "asset": {
+    "version": "2.0",
+    "generator": "https://github.com/mikedh/trimesh"
+  },
+  "accessors": [
+    {
+      "componentType": 5125,
+      "type": "SCALAR",
+      "bufferView": 0,
+      "count": 3,
+      "max": [
+        2
+      ],
+      "min": [
+        0
+      ]
+    },
+    {
+      "componentType": 5126,
+      "type": "VEC3",
+      "byteOffset": 0,
+      "bufferView": 1,
+      "count": 3,
+      "max": [
+        0.0,
+        0.06271115690469742,
+        1.032941460609436
+      ],
+      "min": [
+        -0.21810650825500488,
+        0.005590714979916811,
+        0.2791305482387543
+      ]
+    },
+    {
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3",
+      "byteOffset": 0,
+      "bufferView": 2,
+      "max": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "min": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "componentType": 5125,
+      "type": "SCALAR",
+      "bufferView": 3,
+      "count": 21,
+      "max": [
+        20
+      ],
+      "min": [
+        0
+      ]
+    },
+    {
+      "componentType": 5126,
+      "type": "VEC3",
+      "byteOffset": 0,
+      "bufferView": 4,
+      "count": 21,
+      "max": [
+        0.0,
+        0.07119283080101013,
+        0.801515519618988
+      ],
+      "min": [
+        -1.1201143264770508,
+        -0.011722401715815067,
+        -1.0515146255493164
+      ]
+    },
+    {
+      "componentType": 5126,
+      "count": 21,
+      "type": "VEC3",
+      "byteOffset": 0,
+      "bufferView": 5,
+      "max": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "min": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "componentType": 5125,
+      "type": "SCALAR",
+      "bufferView": 6,
+      "count": 48,
+      "max": [
+        47
+      ],
+      "min": [
+        0
+      ]
+    },
+    {
+      "componentType": 5126,
+      "type": "VEC3",
+      "byteOffset": 0,
+      "bufferView": 7,
+      "count": 48,
+      "max": [
+        0.0,
+        0.07119283080101013,
+        1.032941460609436
+      ],
+      "min": [
+        -1.2670676708221436,
+        -0.014543022029101849,
+        -1.1067674160003662
+      ]
+    },
+    {
+      "componentType": 5126,
+      "count": 48,
+      "type": "VEC3",
+      "byteOffset": 0,
+      "bufferView": 8,
+      "max": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "min": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    }
+  ],
+  "meshes": [
+    {
+      "name": "0_#3396bb",
+      "extras": {},
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 1,
+            "NORMAL": 2
+          },
+          "indices": 0,
+          "mode": 4,
+          "material": 0
+        }
+      ]
+    },
+    {
+      "name": "1_#73cdec",
+      "extras": {},
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 4,
+            "NORMAL": 5
+          },
+          "indices": 3,
+          "mode": 4,
+          "material": 1
+        }
+      ]
+    },
+    {
+      "name": "2_#bacdd8",
+      "extras": {},
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 7,
+            "NORMAL": 8
+          },
+          "indices": 6,
+          "mode": 4,
+          "material": 2
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "#3396bb",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.2,
+          0.5882352941176471,
+          0.7333333333333333,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "#73cdec",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.45098039215686275,
+          0.803921568627451,
+          0.9254901960784314,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "#bacdd8",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.7294117647058823,
+          0.803921568627451,
+          0.8470588235294118,
+          1.0
+        ]
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "name": "0_0_#3396bb",
+      "mesh": 0
+    },
+    {
+      "name": "0_1_#73cdec",
+      "mesh": 1
+    },
+    {
+      "name": "0_2_#bacdd8",
+      "mesh": 2
+    }
+  ],
+  "buffers": [
+    {
+      "uri": "su33_surf_BElevatorRFold_fold_buffer_0.bin",
+      "byteLength": 12
+    },
+    {
+      "uri": "su33_surf_BElevatorRFold_fold_buffer_1.bin",
+      "byteLength": 36
+    },
+    {
+      "uri": "su33_surf_BElevatorRFold_fold_buffer_2.bin",
+      "byteLength": 36
+    },
+    {
+      "uri": "su33_surf_BElevatorRFold_fold_buffer_3.bin",
+      "byteLength": 84
+    },
+    {
+      "uri": "su33_surf_BElevatorRFold_fold_buffer_4.bin",
+      "byteLength": 252
+    },
+    {
+      "uri": "su33_surf_BElevatorRFold_fold_buffer_5.bin",
+      "byteLength": 252
+    },
+    {
+      "uri": "su33_surf_BElevatorRFold_fold_buffer_6.bin",
+      "byteLength": 192
+    },
+    {
+      "uri": "su33_surf_BElevatorRFold_fold_buffer_7.bin",
+      "byteLength": 576
+    },
+    {
+      "uri": "su33_surf_BElevatorRFold_fold_buffer_8.bin",
+      "byteLength": 576
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 12
+    },
+    {
+      "buffer": 1,
+      "byteOffset": 0,
+      "byteLength": 36
+    },
+    {
+      "buffer": 2,
+      "byteOffset": 0,
+      "byteLength": 36
+    },
+    {
+      "buffer": 3,
+      "byteOffset": 0,
+      "byteLength": 84
+    },
+    {
+      "buffer": 4,
+      "byteOffset": 0,
+      "byteLength": 252
+    },
+    {
+      "buffer": 5,
+      "byteOffset": 0,
+      "byteLength": 252
+    },
+    {
+      "buffer": 6,
+      "byteOffset": 0,
+      "byteLength": 192
+    },
+    {
+      "buffer": 7,
+      "byteOffset": 0,
+      "byteLength": 576
+    },
+    {
+      "buffer": 8,
+      "byteOffset": 0,
+      "byteLength": 576
+    }
+  ]
+}

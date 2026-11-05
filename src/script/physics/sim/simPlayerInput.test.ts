@@ -23,6 +23,7 @@ const sink: SimPlayerInputSink = {
     toggleFlaps: () => {},
     toggleAirbrakes: () => {},
     toggleHook: () => {},
+    toggleWingFold: () => {},
     toggleAutopilot: () => {},
     setPitchLimiterMode: (_mode: FcsPitchLimiter) => {},
 };

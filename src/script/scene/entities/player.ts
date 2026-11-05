@@ -49,6 +49,7 @@ const FLAPS_ANIM_DURATION = 2; // Seconds
 const FLAPS_EXTENDED_ANGLE = Math.PI / 5; // Radians
 const AIRBRAKE_ANIM_DURATION = 1.5; // Seconds
 const TAILHOOK_ANIM_DURATION = 1.5; // Seconds
+const WING_FOLD_SECONDS = 8; // Full fold or spread (R key)
 
 /**
  * Visible roll-deflection gains (fraction of a surface's hinge range at full
@@ -138,6 +139,9 @@ export class PlayerEntity implements Entity {
     private wingSweepUnit = 0;
     private wingSweepMode = WingSweepMode.AUTO;
     private swingWings: SwingWingsConfig | undefined;
+    /** Visible wing fold [0,1] (0 spread, 1 folded) and the sim's commanded state (R key). */
+    private wingFoldUnit = 0;
+    private wingFoldTarget = false;
     /** Tailhook: sim owns the commanded state, this is the visible swing. */
     private hookState: AircraftDeviceState = AircraftDeviceState.RETRACTED;
     private hookProgress = 0;
@@ -425,6 +429,8 @@ export class PlayerEntity implements Entity {
             case 'slats': return sign * this.slatDeploymentUnit();
             case 'airbrake': return sign * this.airbrakesProgressUnit;
             case 'sweep': return sign * this.wingSweepUnit;
+            // Smoothstep so the panels ease off and settle like hydraulics.
+            case 'fold': return sign * this.wingFoldUnit * this.wingFoldUnit * (3 - 2 * this.wingFoldUnit);
             // Flaperons: flap camber blended with the ailerons' SHARE of the roll.
             // Roll is tail-dominant (~20% aileron), so the flaperon shows only a
             // small roll deflection.
@@ -507,6 +513,10 @@ export class PlayerEntity implements Entity {
             if (hook !== null) {
                 this.setHookDeployed(hook);
             }
+            const folded = this.flightModel.getSimWingsFolded();
+            if (folded !== null) {
+                this.wingFoldTarget = folded;
+            }
         }
 
         this.obj.position.copy(this.flightModel.position);
@@ -531,7 +541,16 @@ export class PlayerEntity implements Entity {
             this.updateAirbrakes(delta);
             this.updateTailhook(delta);
             this.updateWingSweep(delta);
+            this.updateWingFold(delta);
         }
+    }
+
+    /** Move the wing fold toward the sim's state at a fixed rate (a full fold takes WING_FOLD_SECONDS). */
+    private updateWingFold(delta: number) {
+        const step = delta / WING_FOLD_SECONDS;
+        this.wingFoldUnit = this.wingFoldTarget
+            ? Math.min(1, this.wingFoldUnit + step)
+            : Math.max(0, this.wingFoldUnit - step);
     }
 
     private updateWingSweep(delta: number) {
@@ -699,6 +718,8 @@ export class PlayerEntity implements Entity {
         this.airbrakesProgressUnit = 0;
         this.wingSweepUnit = 0;
         this.wingSweepMode = WingSweepMode.AUTO;
+        this.wingFoldUnit = 0;
+        this.wingFoldTarget = false;
         this.hookState = AircraftDeviceState.RETRACTED;
         this.hookProgress = 0;
         this.hookProgressUnit = 0;

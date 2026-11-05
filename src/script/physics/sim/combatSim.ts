@@ -74,6 +74,10 @@ import type { BarricadeWebSnapshot } from './simTypes';
 const PROJECTILE_LIFESPAN = 2.5;
 /** Max ship-relative groundspeed (m/s) before kinematic deck park engages. */
 const CARRIER_PARK_REL_SPEED_MPS = 2.0;
+/** Wings fold (R) only on the wheels at or below this throttle... */
+const WING_FOLD_MAX_THROTTLE = 0.3;
+/** ...and spread by themselves above this one (takeoff power). */
+const WING_UNFOLD_THROTTLE = 0.6;
 /** The frame a fixed (land) arrestor field holds an aircraft in. */
 const ZERO_VELOCITY: Readonly<THREE.Vector3> = new THREE.Vector3();
 const PROJECTILE_GRAVITY = 9.80665;
@@ -287,6 +291,8 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     private inAirbrakes = false;
     /** Tailhook lowered (player 'H'); AI pilots auto-hook with the gear. */
     private inHook = false;
+    /** Wings folded (player 'R'); only parked or taxiing, see toggleWingFold. */
+    private inWingFold = false;
     private inBrakes = false;
     private inLimiterMode = FcsPitchLimiter.SOFT;
     private inLimiters = true;
@@ -385,6 +391,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.inFlaps = !spawn.airborne;
         this.inAirbrakes = false;
         this.inHook = false;
+        this.inWingFold = false;
         if (spawn.airborne) {
             this.model.syncEffectiveThrottle();
             this.model.snapPhysicsState();
@@ -398,6 +405,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         this.inBrakes = false;
         this.inAirbrakes = false;
         this.inHook = false;
+        this.inWingFold = false;
         this.gun?.reset();
         this.applySpawn(spawn);
         this.enabled = true;
@@ -500,6 +508,32 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
 
     setHookDeployed(deployed: boolean): void {
         this.inHook = deployed;
+    }
+
+    /**
+     * Fold or spread the wings. Folding needs the aircraft on its wheels with
+     * the throttle near idle (parked or taxiing; throttle rather than speed, so
+     * it works on a moving carrier deck); spreading always works. Aircraft
+     * without folding wings carry the flag harmlessly (nothing draws it).
+     */
+    toggleWingFold(): void {
+        if (this.inWingFold) {
+            this.inWingFold = false;
+        } else if (this.model.isLanded() && this.inThrottle <= WING_FOLD_MAX_THROTTLE) {
+            this.inWingFold = true;
+        }
+    }
+
+    spreadWings(): void {
+        this.inWingFold = false;
+    }
+
+    /** Folded wings spread by themselves on takeoff power or once off the ground. */
+    isWingsFolded(): boolean {
+        if (this.inWingFold && (!this.model.isLanded() || this.inThrottle > WING_UNFOLD_THROTTLE)) {
+            this.inWingFold = false;
+        }
+        return this.inWingFold;
     }
 
     /**
@@ -643,6 +677,7 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
         out[base + AC.hookY] = this.hookNow.y;
         out[base + AC.hookZ] = this.hookNow.z;
         out[base + AC.barricade] = this.barricadeState;
+        out[base + AC.wingsFolded] = this.isWingsFolded() ? 1 : 0;
     }
 }
 
@@ -1175,6 +1210,7 @@ export class CombatSim implements ProjectileSink {
         a.setLandingGearDeployed(true);
         a.setFlapsExtended(true);
         a.setHookDeployed(false);
+        a.spreadWings();
         a.health = a.maxHealth;
         a.resetGun();
         this.playerInputs.get(id)?.syncThrottle(throttle);

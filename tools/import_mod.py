@@ -1359,6 +1359,88 @@ def load_aircraft2_animated_parts(bundle_path: str, hints: list[str]) -> list[di
     return best or []
 
 
+def _strip_json_line_comments(text: str) -> str:
+    """Drop `// ...` comments outside strings (the Su-33's Aircraft2 JSON has them)."""
+    out: list[str] = []
+    i, n, in_str = 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == '\\' and i + 1 < n:
+                out.append(text[i + 1])
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+            out.append(c)
+        elif c == '/' and text.startswith('//', i):
+            while i < n and text[i] not in '\r\n':
+                i += 1
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return ''.join(out)
+
+
+def aircraft2_animated_mesh_names(bundle_path: str, hints: list[str]) -> set[str]:
+    """Every mesh/bone this aircraft's AnimatedParts move on their own (Name, Part, Part sans B).
+
+    Used only to tell which child meshes must NOT ride rigidly on their parent
+    surface, e.g. a speed brake strut that counter-rotates.
+    """
+    names: set[str] = set()
+    for e in aircraft2_animated_parts_lenient(bundle_path, hints):
+        for key in ('Name', 'Part'):
+            v = str(e.get(key) or '')
+            if v:
+                names.add(v)
+                if v.startswith('B'):
+                    names.add(v[1:])
+    return names
+
+
+def aircraft2_animated_parts_lenient(bundle_path: str, hints: list[str]) -> list[dict]:
+    """This aircraft's AnimatedParts, read leniently (`//` comments allowed).
+
+    Kept apart from `load_aircraft2_animated_parts`, whose result decides the
+    control surfaces: that path mislabels parts on files it can already read
+    (see the Su-27S), so it must not suddenly start reading more of them.
+    """
+    if not bundle_path or not str(bundle_path).lower().endswith('.zip') or not os.path.isfile(bundle_path):
+        return []
+    hint_tokens = {_normalize_aircraft_token(h) for h in hints if h}
+    hint_tokens = {t for t in hint_tokens if len(t) >= 3}
+    best: list[dict] = []
+    best_score = -1
+    try:
+        with zipfile.ZipFile(bundle_path) as z:
+            for name in z.namelist():
+                norm = name.replace('\\', '/')
+                if '/Aircraft2/' not in norm or not norm.lower().endswith('.json') \
+                        or '/campaign/' in norm.lower():
+                    continue
+                try:
+                    text = _strip_json_line_comments(z.read(name).decode('utf-8', errors='ignore'))
+                    data = json.loads(_strip_json_trailing_commas(text))
+                except Exception:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                candidates = [str(data.get('Name') or ''), str(data.get('DisplayName') or ''),
+                              os.path.splitext(os.path.basename(norm))[0]]
+                score = _aircraft2_hint_score(candidates, hint_tokens)
+                if (score < 3 and hint_tokens) or score <= best_score:
+                    continue
+                ap = data.get('AnimatedParts') or []
+                best_score, best = score, [e for e in ap if isinstance(e, dict)]
+    except Exception:
+        return []
+    return best
+
+
 def _aircraft2_hint_score(candidates: list[str], hint_tokens: set[str]) -> int:
     score = 0
     for c in candidates:
@@ -2888,10 +2970,126 @@ def import_mod(cfg: dict, bundle: Bundle | None = None) -> int:
                   f'({", ".join(sd["role"] for sd in swing_defs)}), '
                   f'{swing_manifest["minKias"]:.0f}-{swing_manifest["maxKias"]:.0f} KIAS')
 
+    # ---- Folding wings: carrier aircraft (Su-33) fold the outer wing and the
+    # stabilator tips up about a fore-aft hinge. TCA mods drive these bones from
+    # the nozzle control (`AngleByNozzle`), so pick out nozzle-driven bones with
+    # a longitudinal axis and meshes under them. Each becomes a `fold` surface;
+    # surfaces under the bone (aileron, flap) ride on it, and a fold bone that
+    # itself sits under a surface (the stabilator tip under the elevator) rides
+    # on that surface.
+    if flyable.get('autoWingFold', True) is not False:
+        surface_defs = list(surface_defs)
+        fold_entries = [e for e in aircraft2_animated_parts_lenient(bundle_path, aircraft2_hints)
+                        if e.get('AngleByNozzle') and e.get('Part')]
+        plane_roots = {_root_of(p['tpid']) for p in visual_parts if p.get('tpid') is not None}
+        for entry in fold_entries:
+            bone = str(entry['Part'])
+            try:
+                local_axis = np.asarray(entry.get('RotationAxis'), dtype=np.float64)
+            except (TypeError, ValueError):
+                continue
+            if local_axis.shape != (3,) or float(np.linalg.norm(local_axis)) < 1e-6:
+                continue
+            node = None
+            for root_pid in plane_roots or {None}:
+                node = find_node_pid(bundle, bone, root_pid)
+                if node is not None and (root_pid is None
+                                         or transform_root(node, bundle.transforms) == root_pid):
+                    break
+                node = None
+            if node is None:
+                continue
+            wm = _FLIP_X @ world_matrix(node, bundle.transforms, world_cache) @ _FLIP_X
+            axis = wm[:3, :3] @ (local_axis / float(np.linalg.norm(local_axis)))
+            axis = axis / max(float(np.linalg.norm(axis)), 1e-9)
+            if abs(axis[2]) < 0.7:
+                continue  # not a fore-aft fold hinge (e.g. a vectoring nozzle)
+            members = [p for p in visual_parts
+                       if p.get('tpid') is not None and p['name'] not in gear_names
+                       and transform_is_under(bundle, p['tpid'], node)]
+            if not members:
+                continue  # e.g. the mod's shadow-only bones
+            range_rad, _ = _curve_range_sign(entry.get('AngleByNozzle'))
+            # Fold direction from geometry: the outboard tip must rise.
+            pivot = wm[:3, 3] * scale
+            v = np.vstack([p['world_v'] for p in members]) - pivot
+            tip = v[int(np.argmax(np.abs(v[:, 0])))]
+            sign = 1 if float(np.cross(axis, tip)[1]) > 0.0 else -1
+            role = ''.join(c if c.isalnum() or c in '-_' else '_' for c in bone) + '_fold'
+            names: list[str] = []
+            for p in members:
+                if p['name'] not in names:
+                    names.append(p['name'])
+            claimed: set[str] = set()
+            for sd in surface_defs:
+                if sd.get('control') != 'fold' and not sd.get('sweepParent') \
+                        and any(pn in names for pn in sd.get('parts', [])):
+                    sd['sweepParent'] = role
+                    claimed.update(sd.get('parts', []))
+            fold_def = {
+                'role': role,
+                'parts': [n for n in names if n not in claimed],
+                'control': 'fold',
+                'hingePart': bone,
+                'axis': [float(x) for x in axis],
+                'sign': sign,
+                'rangeRad': range_rad,
+            }
+            # The surface whose mesh is the bone's nearest ancestor carries the fold.
+            cur = bundle.transforms[node].m_Father.path_id if node in bundle.transforms else 0
+            seen_f: set[int] = set()
+            while cur and cur in bundle.transforms and cur not in seen_f and 'sweepParent' not in fold_def:
+                owner = next((p['name'] for p in visual_parts if p.get('tpid') == cur), None)
+                if owner is not None:
+                    host = next((sd for sd in surface_defs
+                                 if owner in sd.get('parts', []) and sd.get('control') != 'fold'), None)
+                    if host is not None:
+                        fold_def['sweepParent'] = host['role']
+                seen_f.add(cur)
+                cur = bundle.transforms[cur].m_Father.path_id
+            if not fold_def['parts']:
+                continue
+            surface_defs.append(fold_def)
+            print(f'  wing fold "{role}": {len(fold_def["parts"])} mesh(es), '
+                  f'{math.degrees(range_rad):.0f} deg'
+                  + (f', on "{fold_def["sweepParent"]}"' if 'sweepParent' in fold_def else ''))
+
     surface_of_part: dict[str, int] = {}
     for si, sd in enumerate(surface_defs):
         for pn in sd.get('parts', []):
             surface_of_part[pn] = si
+
+    # A surface carries the meshes parented under it: the Su-33 stabilator's
+    # folding tip (ElevatorL/BElevatorLFold/ElevatorLE) is its own mesh, and
+    # naming only ElevatorL left the tip frozen in the body. Each such mesh
+    # joins the surface of its NEAREST surface ancestor, as `childParts` (they
+    # move with it but do not shift its geometry-derived pivot). Meshes the mod
+    # animates on their own (a counter-rotating speed brake strut) stay put.
+    surface_defs = list(surface_defs)  # never edit the config's own list
+    surface_of_tpid: dict[int, int] = {}
+    for p in visual_parts:
+        si = surface_of_part.get(p['name'])
+        if si is not None and p.get('tpid') is not None:
+            surface_of_tpid[p['tpid']] = si
+    if surface_of_tpid and flyable.get('surfaceChildren', True) is not False:
+        self_animated = aircraft2_animated_mesh_names(bundle_path, aircraft2_hints)
+        for p in visual_parts:
+            name, tpid = p['name'], p.get('tpid')
+            if (tpid is None or name in surface_of_part or name in gear_names
+                    or name in self_animated):
+                continue
+            seen: set[int] = set()
+            cur = bundle.transforms[tpid].m_Father.path_id if tpid in bundle.transforms else 0
+            while cur and cur in bundle.transforms and cur not in seen:
+                si = surface_of_tpid.get(cur)
+                if si is not None:
+                    surface_defs[si] = dict(surface_defs[si])
+                    surface_defs[si]['childParts'] = list(surface_defs[si].get('childParts', [])) + [name]
+                    surface_of_part[name] = si
+                    print(f'  surface "{surface_defs[si].get("role", si)}" takes child mesh "{name}"')
+                    break
+                seen.add(cur)
+                cur = bundle.transforms[cur].m_Father.path_id
 
     # ---- Flyable: split into body / per-surface / gear sub-models + manifest.
     out_dir = os.path.dirname(out)
@@ -2937,6 +3135,7 @@ def import_mod(cfg: dict, bundle: Bundle | None = None) -> int:
     surfaces_manifest = []
     for si, sd in enumerate(surface_defs):
         members = [p for pn in sd.get('parts', []) for p in visual_parts if p['name'] == pn]
+        children = [p for pn in sd.get('childParts', []) for p in visual_parts if p['name'] == pn]
         if not members:
             print(f'WARNING: surface "{sd.get("role", si)}" matched no parts; skipping.')
             continue
@@ -3007,7 +3206,7 @@ def import_mod(cfg: dict, bundle: Bundle | None = None) -> int:
             translate = -pivot_world
 
         surf_path = f'{prefix}_surf_{role}.gltf'
-        surf_keys = emit(members, translate, surf_path, bp(surf_path))
+        surf_keys = emit(members + children, translate, surf_path, bp(surf_path))
         if not surf_keys:
             print(f'WARNING: surface "{role}" produced no geometry; skipping.')
             continue
@@ -3312,8 +3511,13 @@ def import_mod(cfg: dict, bundle: Bundle | None = None) -> int:
     if fx.get('wingtips') is None:
         auto_wingtips, wingtip_src = trail_node_origins(np.asarray(ground_translate))
         if not auto_wingtips:
+            # Folding outer wings are split out of the body but are the real
+            # tips; their meshes are still in the spread (flying) pose here.
+            fold_names = {pn for sd in surface_defs if sd.get('control') == 'fold'
+                          for pn in sd.get('parts', [])}
+            tip_search = body_parts + [p for p in visual_parts if p['name'] in fold_names]
             auto_wingtips, wingtip_src = wingtip_trail_origins(
-                body_parts, np.asarray(ground_translate))
+                tip_search, np.asarray(ground_translate))
         if auto_wingtips:
             fx['wingtips'] = auto_wingtips
             print(f'Wingtip trails ({wingtip_src}): {auto_wingtips}')

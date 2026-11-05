@@ -116,6 +116,9 @@ export function isAutopilotKey(key: string, layoutId: KeyboardControlLayoutId): 
  */
 export const WHEEL_BRAKE_ONLY_KEY = 'wheelbrake';
 
+/** Folds / spreads the wings of a carrier aircraft (the Su-33), parked or taxiing. */
+export const WING_FOLD_KEY = 'r';
+
 /**
  * Every key the cockpit takes outside the stick layouts (the worker's action
  * keys, the player's and the game's keypress keys). A layout key that is one
@@ -125,7 +128,7 @@ export const WHEEL_BRAKE_ONLY_KEY = 'wheelbrake';
  */
 export const COCKPIT_ACTION_KEYS: readonly string[] = [
     ' ', 'f', 'g', 'b', 'h', 'l', AUTOPILOT_KEY, '1', '2', '3',
-    't', 'i', 'u', 'k', '4', 'n', 'v', 'm',
+    't', 'i', 'u', 'k', '4', 'n', 'v', 'm', WING_FOLD_KEY,
 ];
 
 /** How pitch keys map to stick deflection. */

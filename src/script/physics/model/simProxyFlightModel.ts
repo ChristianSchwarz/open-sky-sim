@@ -28,6 +28,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
     private simStateReady = false;
     private simAirbrakesExtended = false;
     private simHookDeployed = false;
+    private simWingsFolded = false;
     private simFiring = false;
     private simHealth = 100;
     private simAmmo = 0;
@@ -96,6 +97,7 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
         this.simFlapsExtended = buf[base + AC.flapsExtended] !== 0;
         this.simAirbrakesExtended = buf[base + AC.airbrakesExtended] !== 0;
         this.simHookDeployed = buf[base + AC.hookDeployed] !== 0;
+        this.simWingsFolded = buf[base + AC.wingsFolded] !== 0;
         this.simStateReady = true;
         this.simFiring = buf[base + AC.firing] !== 0;
         this.simHealth = buf[base + AC.health];
@@ -169,6 +171,10 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
 
     getSimHookDeployed(): boolean | null {
         return this.simStateReady ? this.simHookDeployed : null;
+    }
+
+    getSimWingsFolded(): boolean | null {
+        return this.simStateReady ? this.simWingsFolded : null;
     }
 
     /** Clear mirrored gear/flaps until the next worker snapshot (e.g. after respawn). */

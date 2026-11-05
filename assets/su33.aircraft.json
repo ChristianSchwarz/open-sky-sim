@@ -49240,7 +49240,8 @@
       ],
       "control": "roll",
       "sign": 1,
-      "rangeRad": 0.4
+      "rangeRad": 0.4,
+      "sweepParent": "BWingLFold_fold"
     },
     {
       "role": "aileronRight",
@@ -49257,7 +49258,8 @@
       ],
       "control": "roll",
       "sign": -1,
-      "rangeRad": 0.4
+      "rangeRad": 0.4,
+      "sweepParent": "BWingRFold_fold"
     },
     {
       "role": "flapLeft",
@@ -49274,7 +49276,8 @@
       ],
       "control": "flaps",
       "sign": -1,
-      "rangeRad": 0.5
+      "rangeRad": 0.5,
+      "sweepParent": "BWingLFold_fold"
     },
     {
       "role": "flapRight",
@@ -49291,7 +49294,8 @@
       ],
       "control": "flaps",
       "sign": -1,
-      "rangeRad": 0.5
+      "rangeRad": 0.5,
+      "sweepParent": "BWingRFold_fold"
     },
     {
       "role": "speedbrake",
@@ -49309,6 +49313,76 @@
       "control": "airbrake",
       "sign": 1,
       "rangeRad": 0.55
+    },
+    {
+      "role": "BWingLFold_fold",
+      "path": "assets/su33_surf_BWingLFold_fold.gltf",
+      "pivot": [
+        3.368,
+        0.41,
+        -3.2772
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "control": "fold",
+      "sign": -1,
+      "rangeRad": 2.0943951023931953
+    },
+    {
+      "role": "BWingRFold_fold",
+      "path": "assets/su33_surf_BWingRFold_fold.gltf",
+      "pivot": [
+        -3.368,
+        0.4101,
+        -3.2772
+      ],
+      "axis": [
+        0.0,
+        -0.0,
+        1.0
+      ],
+      "control": "fold",
+      "sign": -1,
+      "rangeRad": 2.0943951023931953
+    },
+    {
+      "role": "BElevatorLFold_fold",
+      "path": "assets/su33_surf_BElevatorLFold_fold.gltf",
+      "pivot": [
+        3.368,
+        -0.2521,
+        -8.2991
+      ],
+      "axis": [
+        -0.0,
+        0.0,
+        -1.0
+      ],
+      "control": "fold",
+      "sign": -1,
+      "rangeRad": 1.5707963267948966,
+      "sweepParent": "elevatorLeft"
+    },
+    {
+      "role": "BElevatorRFold_fold",
+      "path": "assets/su33_surf_BElevatorRFold_fold.gltf",
+      "pivot": [
+        -3.368,
+        -0.2521,
+        -8.2991
+      ],
+      "axis": [
+        0.0,
+        -0.0,
+        1.0
+      ],
+      "control": "fold",
+      "sign": -1,
+      "rangeRad": 1.5707963267948966,
+      "sweepParent": "elevatorRight"
     }
   ],
   "swingWings": null,
