@@ -75,9 +75,9 @@ const PROJECTILE_LIFESPAN = 2.5;
 /** Max ship-relative groundspeed (m/s) before kinematic deck park engages. */
 const CARRIER_PARK_REL_SPEED_MPS = 2.0;
 /** Wings fold (R) only on the wheels at or below this throttle... */
-const WING_FOLD_MAX_THROTTLE = 0.3;
+const WING_FOLD_MAX_THROTTLE = 0.5;
 /** ...and spread by themselves above this one (takeoff power). */
-const WING_UNFOLD_THROTTLE = 0.6;
+const WING_UNFOLD_THROTTLE = 0.8;
 /** The frame a fixed (land) arrestor field holds an aircraft in. */
 const ZERO_VELOCITY: Readonly<THREE.Vector3> = new THREE.Vector3();
 const PROJECTILE_GRAVITY = 9.80665;
