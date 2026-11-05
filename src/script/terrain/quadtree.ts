@@ -26,7 +26,7 @@ import {
     TileKey, approxTileEdgeMetres, childrenOf, rootTiles, tileKeyString,
 } from './tiling';
 import { TileWant } from './tileStreamer';
-import { LeafZoomOf, leafZoomOf } from './leafZoom';
+import { LeafZoomOf, TouchesAreaOf, leafZoomOf, touchesAreaOf } from './leafZoom';
 
 export interface QuadNode {
     id: TileKey;
@@ -151,11 +151,14 @@ export class Quadtree {
     private readonly maxZoom: number;
     /** Each tile's finest zoom: an area can stop short of maxZoom (leafZoom.ts). */
     private readonly leafZoomAt: LeafZoomOf;
+    /** Whether a tile overlaps any area, under which alone tiles are baked. */
+    private readonly touchesArea: TouchesAreaOf;
     private generation = 0;
 
     constructor(private readonly opts: QuadtreeOptions) {
         this.maxZoom = opts.maxZoom ?? opts.manifest.mesh.maxZoom;
         this.leafZoomAt = leafZoomOf(opts.manifest.areas, this.maxZoom);
+        this.touchesArea = touchesAreaOf(opts.manifest.areas);
         this.roots = rootTiles().map(id => this.makeNode(id));
     }
 
@@ -372,8 +375,15 @@ export class Quadtree {
             // into the tiles that carry the 512-texel ones (see coarseBeyond).
             const coarse = this.coarseBeyond;
             const bandCapped = !mapLod && coarse !== undefined && node.id.z + 1 >= coarse.zoom && d > coarse.fromM;
+            // An ocean node may still hold a baked coast below it, so inside
+            // an area it refines on the land error too. Clear of every area
+            // nothing is baked below it, and that error rates no mesh at all:
+            // near sea level, where the altitude cap allows the leaf, it split
+            // the open sea around Mallorca into 11,800 z12 patches out to
+            // 400 km (2026-11-05, 3 fps).
+            const openSea = node.ocean && (mapLod || !this.touchesArea(node.id));
             const wouldRefine = node.id.z < zoomCap && (
-                !(mapLod && node.ocean) && !bandCapped && shouldRefine(
+                !openSea && !bandCapped && shouldRefine(
                     this.drawErrorM(node, leafScale), d, screenHeightPx, fovYDeg, farScale,
                 )
                 || node.ocean && shouldRefine(

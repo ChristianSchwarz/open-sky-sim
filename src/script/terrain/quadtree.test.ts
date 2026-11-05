@@ -247,6 +247,50 @@ describe('Quadtree', () => {
             );
         });
 
+        /**
+         * Open sea at the full z12 depth, near sea level: what the Mallorca
+         * tree draws outside its box. The land error stays in the kilometres
+         * all the way down (2.4 km at z12 there), while a z12 patch's
+         * sagitta is half a metre.
+         */
+        function deepSea(areas?: TerrainManifest['areas']): number {
+            const levelGeometricErrorM = [
+                2149.93, 2149.93, 1742.49, 1153.07, 1001.83, 534.29, 421.53,
+                2400, 2400, 2400, 2400, 2400, 2392,
+            ];
+            const tree = new Quadtree({
+                manifest: { ...manifest(12), mesh: { ...manifest(12).mesh, levelGeometricErrorM }, areas },
+                // One tile per level ahead (the x = y = 0 corner, clear of
+                // the area below), its siblings behind the camera: a tree
+                // refined to z12 everywhere would not fit in memory.
+                tilePosition: (id) => new THREE.Vector3(0, 0, id.x === 0 && id.y === 0 ? 100_000 : -100_000),
+                tileRadius: () => 5000,
+                isResident: () => false,
+                isOcean: () => true,
+                earthCenter: new THREE.Vector3(0, -6378137, 0),
+                maxZoom: 12,
+            });
+            const camera = horizonCamera();
+            camera.position.y = 5;
+            camera.updateMatrixWorld(true);
+            return Math.max(...tree.update(camera, 1300, 50, 1).draw.map(n => n.id.z));
+        }
+
+        it('refines open sea clear of every area on its sagitta alone', () => {
+            // Nothing is baked outside the areas, so the level's land error
+            // rates no mesh there. Refining on it split the open sea around
+            // Mallorca to the leaf out to 400 km (2026-11-05, 3 fps).
+            const away = [{ name: 'far', west: 100, south: 10, east: 101, north: 11 }];
+            assert.equal(deepSea(), 12, 'the setup no longer reaches the leaf on the land error');
+            const open = deepSea(away);
+            assert.ok(open < 12, `open sea 100 km out still refined to z${open}`);
+        });
+
+        it('keeps refining sea inside an area on the land error, for the coast under it', () => {
+            const everywhere = [{ name: 'all', west: -180, south: -90, east: 180, north: 90 }];
+            assert.equal(deepSea(everywhere), deepSea());
+        });
+
         it('still lets the governor coarsen baked terrain', () => {
             // The bound is specific to patches -- baked terrain stays tunable,
             // or the governor would have no way left to recover frame time.

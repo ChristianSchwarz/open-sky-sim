@@ -47,6 +47,27 @@ export function leafZoomOf(
     };
 }
 
+/** Whether the tile `id` overlaps an area's box at all, edges included. */
+export type TouchesAreaOf = (id: TileId) => boolean;
+
+/**
+ * Whether anything can be baked under the tile `id`: only areas are, so a
+ * tile clear of every area's box is open sea all the way down. With no
+ * areas listed nothing is known, and every tile might hold something.
+ */
+export function touchesAreaOf(areas: readonly LonLatBounds[] | undefined): TouchesAreaOf {
+    if (areas === undefined || areas.length === 0) {
+        return () => true;
+    }
+    return ({ z, x, y }) => {
+        const span = 180 / (1 << z);
+        const west = -180 + x * span;
+        const north = 90 - y * span;
+        return areas.some(a => west <= a.east && west + span >= a.west
+            && north >= a.south && north - span <= a.north);
+    };
+}
+
 /** True for the finest tiles of their area. */
 export function isLeafTile(leafZoom: LeafZoomOf, id: TileId): boolean {
     return id.z === leafZoom(id);
