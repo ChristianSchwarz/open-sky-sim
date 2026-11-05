@@ -190,3 +190,52 @@ Each step is independently testable and leaves the game working.
   since the LOD cut keeps a tile near a texel per pixel; if it shimmers,
   switch minification to linear-between-mips for rgb only (class stays
   nearest by taking it from the finer mip).
+
+## Roads, airfields and water, supersampled (2026-11-05)
+
+Every road and railway class the stroke mesh draws, at its true width, and
+the paved runways, taxiways and aprons from `airfields.json`, are painted
+into each leaf raster as it is read, after the water and before the fold
+(`tools/bake/pavementTex.ts`, called from `leafRaster` in
+`bake_planet_tex.ts`; `--no-roads` and `--no-airfields` leave them out).
+Like the water, they are not in the leaf cache, so a change to them needs no
+leaf re-rasterised, only a re-fold. This replaces the earlier per-level
+painting of major roads as crisp one-texel lines at z10 and z11.
+
+- Coverage: 4x4 samples per texel. The colour is a coverage-weighted mix of
+  pavement and ground, and the class becomes `TerrainClass.Ground` (drawn in
+  its own rgb in every mode) at half coverage or more. A 5 m street is a
+  tint of a 6 m leaf texel and fades through the fold; a motorway stays
+  visible to about z10. Over no-data or water texels, pavement is painted
+  only where it covers at least half.
+- Shapes: roads and taxiways are capsules per segment, split into pieces
+  about two texels long so a diagonal segment does not test its whole
+  bounding box. Runways are quads between their thresholds, and aprons are
+  their rings. Runways paint after roads.
+- Airfield tones match the 3D model: runways in their own surface (asphalt
+  `#5d5d5d`, concrete `#a59f90`), taxiways and aprons in the field's
+  pavement, which is concrete when the primary runway is. Grass and gravel
+  strips, unpaved taxiways and aprons, and the metal deck are left out.
+- Water is supersampled too (`paintWater`, 2x2 by default, the same 4x as
+  the ground): a texel is water at half coverage, and a shore texel with
+  less keeps its land class with its colour mixed toward the water. The
+  sample mask is reused between leaves, and only the triangles' window is
+  reduced and cleared; allocating it per leaf was most of the cost.
+- Building leaves ship their `.ptx` as the fold reads them, so no leaf is
+  read and painted twice.
+
+### The leaves' parents on the tile pool
+
+Reading and painting four leaves per parent is nearly all of a bake, and it
+ran on the bake's own thread (about 95 z11 parents a minute, five hours for
+the whole tree). Every parent with a leaf child is now a tile pool job, kind
+`texfold` (`tools/bake/texFold.ts`): local workers and, with `--satellites`,
+the LAN satellites, about 1,060 a minute with one 8-thread satellite. The job
+paints its leaves, ships the building leaves' `.ptx`, and writes the parent;
+it only writes, and an empty parent comes back `emptied` for the bake to
+delete, so a satellite is never sent old textures. Its inputs are each leaf
+child's cached raster, `.ptm`, `.rvr` and `.pbh`, or a non-leaf child's
+`.ptx`. The config goes per tile, holding only the airfields over that tile.
+The coarser levels fold on the bake's thread from the parents' `.ptx` on
+disk. A scoped run now also repaints building leaves just outside its box,
+when they share a parent with one inside it.

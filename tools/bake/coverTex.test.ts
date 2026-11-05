@@ -339,6 +339,16 @@ describe('paintWater', () => {
         }
     });
 
+    it('tints a shore texel the water only partly covers, keeping it land', async () => {
+        const { paintWater, WATER_TEXEL_RGB } = await import('./coverTex');
+        const { raster, tile } = await waterLeaf();
+        paintWater(raster, SIZE, tile, BASIS, 4);
+        // The thin course catches one sample column of four in texel 14.
+        const [r, g, b, cls] = texel(raster, SIZE, 14, 8);
+        assert.equal(cls, 3);
+        assert.deepEqual([r, g, b], [0, 1, 2].map(i => Math.round([10, 20, 30][i] + (WATER_TEXEL_RGB[i] - [10, 20, 30][i]) * 0.25)));
+    });
+
     it('survives the fold as an area', async () => {
         const { paintWater, PTX_WATER } = await import('./coverTex');
         const { raster, tile } = await waterLeaf();

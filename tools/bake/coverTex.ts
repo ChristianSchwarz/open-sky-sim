@@ -445,6 +445,21 @@ export function paintRoads(
     return painted;
 }
 
+let waterScratchOf: { size: number; mask: Uint8Array; height: Float32Array } | undefined;
+
+/**
+ * paintWater's sample mask and height buffer, kept between calls: at 4x4
+ * samples a 512 leaf is a 2048^2 mask, and allocating and clearing it was
+ * most of a leaf's cost. paintWater hands it back clean - every sample it
+ * set is reset as it is counted.
+ */
+function waterScratch(size: number): { mask: Uint8Array; height: Float32Array } {
+    if (waterScratchOf?.size !== size) {
+        waterScratchOf = { size, mask: emptyRaster(size), height: new Float32Array(size * size).fill(-Infinity) };
+    }
+    return waterScratchOf;
+}
+
 /** A water texel's rgb: the noon palette's TERRAIN_WATER, for readers of the raw bytes. */
 export const WATER_TEXEL_RGB: readonly [number, number, number] = [0x16, 0x35, 0x5e];
 
@@ -457,11 +472,23 @@ export const WATER_TEXEL_RGB: readonly [number, number, number] = [0x16, 0x35, 0
  * drawing those strokes (riverStrokeRange).
  *
  * After the leaf's own facets and over them, since water is drawn on top of
- * the ground in the leaf too. Painted into the leaf before the fold, unlike
- * roads: water is an area, and the 2x2 vote keeps an area right at every
- * level. Returns the texels painted.
+ * the ground in the leaf too. Painted into the leaf before the fold:
+ * water is an area, and the 2x2 vote keeps an area right at every level.
+ *
+ * Supersampled: drawn at `supersample` samples per texel along each axis
+ * into a mask, a texel turns water where half its samples are, and a shore
+ * texel with less keeps its land class with its colour mixed toward the
+ * water by the share - so a coast or a narrow river antialiases instead of
+ * stair-stepping on the texel grid. Returns the texels painted.
  */
-export function paintWater(out: Uint8Array, size: number, tile: PtmTile, basis: EnuBasis): number {
+export function paintWater(out: Uint8Array, outSize: number, tile: PtmTile, basis: EnuBasis, supersample = 2): number {
+    if (tile.waterIndices.length === 0 && tile.riverIndices.length === 0) {
+        return 0;
+    }
+    const size = outSize * supersample;
+    const { mask, height } = waterScratch(size);
+    // The texel window the triangles touch: all that is reduced and reset.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     const bounds = tileBounds(tile.id.z, tile.id.x, tile.id.y);
     const lonSpan = bounds.east - bounds.west;
     const latSpan = bounds.north - bounds.south;
@@ -481,8 +508,6 @@ export function paintWater(out: Uint8Array, size: number, tile: PtmTile, basis: 
         into[at + 1] = ((bounds.north - g.lat) / latSpan) * size;
     };
     // Every texel a triangle covers is painted: the height test is moot.
-    const height = new Float32Array(size * size).fill(-Infinity);
-    const before = countWater(out);
     const [r, g, b] = WATER_TEXEL_RGB;
     const fill = (t: Float64Array, indices: ArrayLike<number>, keep?: (i: number) => boolean): void => {
         for (let i = 0; i + 2 < indices.length; i += 3) {
@@ -490,7 +515,9 @@ export function paintWater(out: Uint8Array, size: number, tile: PtmTile, basis: 
                 continue;
             }
             const a = indices[i] * 2, c = indices[i + 1] * 2, d = indices[i + 2] * 2;
-            fillTriangle(out, height, size, t[a], t[a + 1], 0, t[c], t[c + 1], 0, t[d], t[d + 1], 0, r, g, b, PTX_WATER);
+            minX = Math.min(minX, t[a], t[c], t[d]); maxX = Math.max(maxX, t[a], t[c], t[d]);
+            minY = Math.min(minY, t[a + 1], t[c + 1], t[d + 1]); maxY = Math.max(maxY, t[a + 1], t[c + 1], t[d + 1]);
+            fillTriangle(mask, height, size, t[a], t[a + 1], 0, t[c], t[c + 1], 0, t[d], t[d + 1], 0, r, g, b, PTX_WATER);
         }
     };
     const q = tile.quantScale;
@@ -524,15 +551,43 @@ export function paintWater(out: Uint8Array, size: number, tile: PtmTile, basis: 
         );
     }
     fill(ribbon, tile.riverIndices, v => dirs[v * 4 + 3] === PTM_STROKE_KIND_WATER);
-    return countWater(out) - before;
-}
 
-function countWater(texels: Uint8Array): number {
-    let n = 0;
-    for (let i = 3; i < texels.length; i += 4) {
-        if (texels[i] === PTX_WATER) {
-            n++;
+    // The mask down to texels, over the window the triangles touched.
+    const samples = supersample * supersample;
+    let painted = 0;
+    const tx0 = Math.max(0, Math.floor(minX / supersample)), tx1 = Math.min(outSize - 1, Math.floor(maxX / supersample));
+    const ty0 = Math.max(0, Math.floor(minY / supersample)), ty1 = Math.min(outSize - 1, Math.floor(maxY / supersample));
+    for (let ty = ty0; ty <= ty1; ty++) {
+        for (let tx = tx0; tx <= tx1; tx++) {
+            let n = 0;
+            for (let sy = 0; sy < supersample; sy++) {
+                const row = (ty * supersample + sy) * size + tx * supersample;
+                for (let sx = 0; sx < supersample; sx++) {
+                    const m = (row + sx) * 4 + 3;
+                    if (mask[m] === PTX_WATER) {
+                        n++;
+                        mask[m] = PTX_NO_DATA;
+                        height[row + sx] = -Infinity;
+                    }
+                }
+            }
+            if (n === 0) {
+                continue;
+            }
+            const o = (ty * outSize + tx) * 4;
+            const share = n / samples;
+            if (share >= 0.5) {
+                if (out[o + 3] !== PTX_WATER) {
+                    out[o] = r; out[o + 1] = g; out[o + 2] = b;
+                    out[o + 3] = PTX_WATER;
+                    painted++;
+                }
+            } else if (out[o + 3] < PTX_WATER) {
+                out[o] = Math.round(out[o] + (r - out[o]) * share);
+                out[o + 1] = Math.round(out[o + 1] + (g - out[o + 1]) * share);
+                out[o + 2] = Math.round(out[o + 2] + (b - out[o + 2]) * share);
+            }
         }
     }
-    return n;
+    return painted;
 }

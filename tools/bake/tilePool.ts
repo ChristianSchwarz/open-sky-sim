@@ -564,7 +564,7 @@ export class TilePool<R> {
      * and the ground colours, megabytes, the same for every tile).
      */
     private wire(kind: RemoteKind, key: TileKey): { cfgText?: string; cfgSha?: string } {
-        const perTile = kind === 'grade1' || kind === 'grade2';
+        const perTile = kind === 'grade1' || kind === 'grade2' || kind === 'texfold';
         const known = perTile ? undefined : this.wires.get(kind);
         if (known) {
             return known;

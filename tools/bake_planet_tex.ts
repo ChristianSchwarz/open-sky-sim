@@ -23,6 +23,8 @@
  *     --near-zoom N    first level counted as near       (default 10)
  *     --min-zoom N     coarsest level that gets one      (default 4)
  *     --no-buildings   leave the .pbh building footprints out of the leaf rasters
+ *     --no-airfields   leave the airfield pavement (airfields.json) out of them
+ *     --no-roads       leave the roads and railways (.rvr) out of them
  *     --bboxes FILE    many boxes, one w,s,e,n a line, as one run (tools/bake/bboxes.ts)
  *     --bbox w,s,e,n   re-rasterise only the leaves in this box, refold their
  *                      ancestors, and merge the index with what is there
@@ -47,20 +49,22 @@ import { decodePbh } from '../src/script/terrain/pbh';
 import { TileKey, decodeTileIndex, encodeTileIndex } from './bake/index';
 import {
     PTX_FLAG_WATER, PTX_HEADER_BYTES, boundsOf, decodePtx, emptyRaster, encodePtx, isEmptyRaster,
-    mergeQuadrant, paintRoads, paintWater, quadrantOf, rasterizeLeaf, shrinkTo,
+    mergeQuadrant, paintWater, quadrantOf, rasterizeLeaf, shrinkTo,
 } from './bake/coverTex';
 import { decodeRvr } from './bake/rvr';
+import { AirfieldPavementSource, Pavement, airfieldPavement, overlapsBounds, paintPavement, roadPavement } from './bake/pavementTex';
 import { LonLatBounds } from './bake/shoreline';
-import { ROAD_MAJOR_MAX_CLASS } from '../src/script/terrain/ptr';
-import { TerrainClass } from '../src/script/terrain/tones';
 import { LeafZoomArea, isLeafTile, leafZoomOf } from '../src/script/terrain/leafZoom';
 import { TexLeafConfig, TexLeafResult } from './bake/texLeaf';
+import { PaintCounts, Raster, TexFoldConfig, TexFoldResult, childrenOf, paintedLeaf, readPtx, writePtx } from './bake/texFold';
 import { DEFAULT_SATELLITE_PORT, TilePool } from './bake/tilePool';
 import { GB_PER_WORKER, localJobs } from './bake/localJobs';
 import { writeManifestBlock } from './bake/manifestBlock';
 
 const WORKER_SOURCE = path.join(__dirname, 'bake', 'texLeafWorker.ts');
 const WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'texLeafWorker.cjs');
+const FOLD_WORKER_SOURCE = path.join(__dirname, 'bake', 'remoteJobWorker.ts');
+const FOLD_WORKER_BUNDLE = path.join(__dirname, 'bake', '.build', 'texFoldWorker.cjs');
 
 const DEFAULT_SIZE = 256;
 /**
@@ -84,7 +88,8 @@ const DEFAULT_MIN_ZOOM = 4;
 /**
  * Leaf rasters are drawn at twice their size and box-filtered down: 4x SSAA.
  * Every 256 and 512 texture is folded from these, so all of them get it.
- * Roads are painted per level afterwards and stay crisp, one texel wide.
+ * Water, roads and airfields are painted onto the cached raster as it is
+ * read, each supersampled on its own (paintWater, pavementTex.ts).
  */
 const LEAF_SUPERSAMPLE = 2;
 const CACHE_META_FILE = 'meta.json';
@@ -98,6 +103,8 @@ interface Args {
     nearZoom: number;
     minZoom: number;
     buildings: boolean;
+    airfields: boolean;
+    roads: boolean;
     jobs?: number;
     noBundle: boolean;
     satellitePort?: number;
@@ -134,6 +141,8 @@ function parseArgs(argv: string[]): Args {
         nearZoom: DEFAULT_NEAR_ZOOM,
         minZoom: DEFAULT_MIN_ZOOM,
         buildings: true,
+        airfields: true,
+        roads: true,
     };
     for (let i = 0; i < argv.length; i++) {
         const k = argv[i];
@@ -146,6 +155,8 @@ function parseArgs(argv: string[]): Args {
         else if (k === '--near-zoom') a.nearZoom = Number(next());
         else if (k === '--min-zoom') a.minZoom = Number(next());
         else if (k === '--no-buildings') a.buildings = false;
+        else if (k === '--no-airfields') a.airfields = false;
+        else if (k === '--no-roads') a.roads = false;
         else if (k === '--jobs') a.jobs = Math.max(0, Number(next()));
         else if (k === '--no-bundle') a.noBundle = true;
         else if (k === '--satellites') a.satellitePort ??= DEFAULT_SATELLITE_PORT;
@@ -217,42 +228,21 @@ const keyOf = (k: TileKey) => `${k.z}/${k.x}/${k.y}`;
 const tilePath = (dir: string, k: TileKey, ext: string) =>
     path.join(dir, String(k.z), String(k.x), `${k.y}${ext}`);
 
-interface Raster {
-    texels: Uint8Array;
-    size: number;
-}
-
-function readPtx(p: string): Raster | undefined {
-    if (!fs.existsSync(p)) {
-        return undefined;
-    }
-    const { texels, size } = decodePtx(zlib.gunzipSync(fs.readFileSync(p)));
-    return { texels, size };
-}
-
-/** A shipped raster: every one carries the leaves' water (leafRaster paints it in). */
-function writePtx(p: string, id: TileKey, size: number, texels: Uint8Array): number {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    const gz = zlib.gzipSync(encodePtx(id, size, texels, PTX_FLAG_WATER), { level: 9 });
-    fs.writeFileSync(p, gz);
-    return gz.byteLength;
-}
-
-async function prepareWorker(noBundle: boolean): Promise<{ file: string; execArgv: string[] }> {
+async function prepareWorker(noBundle: boolean, source = WORKER_SOURCE, bundle = WORKER_BUNDLE): Promise<{ file: string; execArgv: string[] }> {
     if (!noBundle) {
         try {
             const esbuild = await import('esbuild');
-            fs.mkdirSync(path.dirname(WORKER_BUNDLE), { recursive: true });
+            fs.mkdirSync(path.dirname(bundle), { recursive: true });
             await esbuild.build({
-                entryPoints: [WORKER_SOURCE], outfile: WORKER_BUNDLE, bundle: true, platform: 'node', format: 'cjs',
+                entryPoints: [source], outfile: bundle, bundle: true, platform: 'node', format: 'cjs',
                 target: `node${process.versions.node.split('.')[0]}`, logLevel: 'silent',
             });
-            return { file: WORKER_BUNDLE, execArgv: [] };
+            return { file: bundle, execArgv: [] };
         } catch (err) {
             console.warn(`warning: could not bundle the texture worker (${(err as Error).message}); running it under tsx`);
         }
     }
-    return { file: WORKER_SOURCE, execArgv: process.execArgv };
+    return { file: source, execArgv: process.execArgv };
 }
 
 async function main(): Promise<void> {
@@ -309,11 +299,10 @@ async function main(): Promise<void> {
         const key = keyOf(k);
         const known = cacheMeta[key];
         const cachePath = tilePath(args.cache, k, '.ptx');
-        // Leaf rasters hold ground only. Roads are painted per level after
-        // the fold (see paintLevelRoads): painted here, every 2x2 fold
-        // averaged a one-texel road into its neighbours until z10 kept 53
-        // road texels of Berlin. A cache entry from that bake carries a
-        // `roads` key and is re-rasterised clean.
+        // Leaf rasters hold ground and buildings only; water, roads and
+        // airfields go on as the raster is read (leafRaster). A cache entry
+        // from a bake that drew one-texel roads into it carries a `roads`
+        // key and is re-rasterised clean.
         const pbhPath = tilePath(args.dir, k, '.pbh');
         const pbhStat = args.buildings && fs.existsSync(pbhPath) ? fs.statSync(pbhPath) : undefined;
         const pbhSig = pbhStat ? `${pbhStat.size}:${pbhStat.mtimeMs}` : undefined;
@@ -360,62 +349,125 @@ async function main(): Promise<void> {
     console.log(`  rasterised ${rasterised}, cached ${fromCache}`
         + (missing > 0 ? `, ${missing} listed but absent` : ''));
 
+    // --- pavement -----------------------------------------------------------
+    // Roads and airfields are painted into each leaf as it is read, after the
+    // water and like it, so a change to them needs no leaf re-rasterised
+    // (tools/bake/pavementTex.ts). At true width, supersampled; the fold
+    // carries them to every level.
+    const airfieldsBlock = manifest.airfields as { path?: string } | undefined;
+    const airfieldsPath = path.join(args.dir, airfieldsBlock?.path ?? 'airfields.json');
+    const pavements: Pavement[] = [];
+    if (args.airfields && fs.existsSync(airfieldsPath)) {
+        const file = JSON.parse(fs.readFileSync(airfieldsPath, 'utf8')) as { items?: AirfieldPavementSource[] };
+        for (const item of file.items ?? []) {
+            const p = airfieldPavement(item);
+            if (p !== undefined) {
+                pavements.push(p);
+            }
+        }
+    }
+    console.log(`  airfield pavement: ${pavements.length} fields`);
+    const leafKeys = new Set(leaves.map(keyOf));
+    const shipsLeaf = (k: TileKey) => args.buildings && leafKeys.has(keyOf(k)) && fs.existsSync(tilePath(args.dir, k, '.pbh'));
+    const leafDone = new Set<string>();
+    const leafShipped: TileKey[] = [];
+    const leafShippedKeys = new Set<string>();
+    let leafGz = 0;
+    const shipLeaf = (k: TileKey, texels: Uint8Array, size: number) => {
+        leafDone.add(keyOf(k));
+        if (!isEmptyRaster(texels)) {
+            leafGz += writePtx(tilePath(args.dir, k, '.ptx'), k, size, texels);
+            leafShipped.push(k);
+            leafShippedKeys.add(keyOf(k));
+        }
+    };
+
     // --- the pyramid --------------------------------------------------------
     // A level's rasters are kept only until its parents are folded. A child
     // outside a scoped run's box is read back from its .ptx on disk, or from
     // the leaf cache, so the parent still sees all four quadrants.
+    const counts: PaintCounts = { water: 0, roads: 0, airfields: 0 };
     const leafRaster = (k: TileKey): Raster | undefined => {
-        const p = tilePath(args.cache, k, '.ptx');
-        if (!fs.existsSync(p)) {
-            return undefined;
+        const r = paintedLeaf(args, basis, k, args.roads, pavements, counts);
+        if (r !== undefined && shipsLeaf(k) && !leafDone.has(keyOf(k))) {
+            shipLeaf(k, r.texels, r.size);
         }
-        const bytes = fs.readFileSync(p);
-        // A cache written before it was compressed is still readable.
-        const { texels, size } = decodePtx(bytes[0] === 0x1f && bytes[1] === 0x8b ? zlib.gunzipSync(bytes) : bytes);
-        // The cache holds ground only; the water goes on here, so a change to
-        // it needs no leaf re-rasterised (see paintWater).
-        const ptmPath = tilePath(args.dir, k, '.ptm');
-        if (fs.existsSync(ptmPath)) {
-            if (paintWater(texels, size, decodePtm(zlib.gunzipSync(fs.readFileSync(ptmPath))), basis) > 0) {
-                waterLeaves++;
-            }
-        }
-        return { texels, size };
-    };
-    let waterLeaves = 0;
-    /**
-     * A copy of `texels` with the major roads of tile `k` painted in, or
-     * `texels` itself where the road bake wrote nothing for it.
-     *
-     * Per level rather than once at the leaf, because the fold is a 2x2
-     * average: a road painted into the leaf halves in contrast at every
-     * level and loses the class vote to the ground either side. And with
-     * the Ground class, which the shader paints in its own colour in every
-     * mode; the built-up class it had put it through the urban palette tone,
-     * grey on grey over a city.
-     */
-    let roadTiles = 0;
-    const paintLevelRoads = (k: TileKey, texels: Uint8Array, size: number): Uint8Array => {
-        const rvrPath = tilePath(args.src, k, '.rvr');
-        if (!fs.existsSync(rvrPath)) {
-            return texels;
-        }
-        const out = texels.slice();
-        const painted = paintRoads(out, size, boundsOf(k), decodeRvr(fs.readFileSync(rvrPath)),
-            ROAD_MAJOR_MAX_CLASS, TerrainClass.Ground);
-        return painted > 0 ? out : texels;
+        return r;
     };
     let previous = new Map<string, Raster>();
     const written: TileKey[] = [];
     const emptied: TileKey[] = [];
     const perLevel: Array<{ z: number; size: number; count: number; raw: number; gz: number }> = [];
+    // The parents of leaves read and paint four leaf rasters each - nearly
+    // all the bake's time - so they go to the tile pool (texFold.ts); they
+    // write their .ptx, and the next level reads it back from disk.
+    const foldCfg: TexFoldConfig = {
+        dir: args.dir, cache: args.cache, src: args.src, enuOrigin: manifest.enuOrigin,
+        leafZoom, areas: manifest.areas, size: args.size, nearSize: args.nearSize, nearZoom: args.nearZoom,
+        buildings: args.buildings, roads: args.roads, pavements,
+    };
+    let foldPool: TilePool<TexFoldResult> | undefined;
     for (let z = leafZoom - 1; z >= args.minZoom; z--) {
         const current = new Map<string, Raster>();
-        const parents = (meshByLevel.get(z) ?? []).filter(k => inScope(k) && !isLeaf(k));
+        const all = (meshByLevel.get(z) ?? []).filter(k => inScope(k) && !isLeaf(k));
         const size = sizeAt(z);
         let raw = 0;
         let gz = 0;
         let count = 0;
+        const pooled = all.filter(k => childrenOf(k).some(isLeaf));
+        const parents = all.filter(k => !childrenOf(k).some(isLeaf));
+        if (pooled.length > 0) {
+            if (!foldPool) {
+                const jobs = Math.max(args.satellitePort ? 0 : 1, args.jobs ?? localJobs(GB_PER_WORKER.tex));
+                foldPool = new TilePool<TexFoldResult>({
+                    local: { ...await prepareWorker(args.noBundle, FOLD_WORKER_SOURCE, FOLD_WORKER_BUNDLE), jobs, workerData: { kind: 'texfold', cfg: foldCfg } },
+                    cfg: foldCfg, kindOf: () => 'texfold',
+                    roots: { terrain: args.dir, texcache: args.cache, planet: args.src },
+                    satellites: args.satellitePort ? { port: args.satellitePort, discovery: !args.noDiscovery } : undefined,
+                    diskLow: () => false, label: () => `z${z} fold `, t0,
+                });
+                await foldPool.start();
+            }
+            const { results, errors } = await foldPool.runPass(pooled, 1);
+            if (errors.length > 0) {
+                await foldPool.close();
+                for (const e of errors.slice(0, 10)) {
+                    console.error(`error: ${e}`);
+                }
+                throw new Error(`${errors.length} z${z} tiles failed to fold`);
+            }
+            const byKey = new Map(pooled.map(k => [keyOf(k), k]));
+            for (const r of results) {
+                if (!r) {
+                    continue;
+                }
+                const k = byKey.get(r.key)!;
+                counts.water += r.counts.water;
+                counts.roads += r.counts.roads;
+                counts.airfields += r.counts.airfields;
+                for (const l of r.leaves) {
+                    leafDone.add(l);
+                }
+                for (const sh of r.shipped) {
+                    const [lz, lx, ly] = sh.key.split('/').map(Number);
+                    leafGz += sh.gz;
+                    leafShipped.push({ z: lz, x: lx, y: ly });
+                    leafShippedKeys.add(sh.key);
+                }
+                if (r.emptied) {
+                    const outPath = tilePath(args.dir, k, '.ptx');
+                    if (fs.existsSync(outPath)) {
+                        fs.unlinkSync(outPath);
+                    }
+                    emptied.push(k);
+                } else {
+                    gz += r.gz;
+                    raw += r.raw;
+                    count++;
+                    written.push(k);
+                }
+            }
+        }
         for (const k of parents) {
             const parent = emptyRaster(size);
             for (let dy = 0; dy < 2; dy++) {
@@ -426,9 +478,8 @@ async function main(): Promise<void> {
                     if (raster === undefined) {
                         raster = isLeaf(child)
                             ? leafRaster(child)
-                            // A shipped child, roads painted in: a scoped run
-                            // folds these for siblings outside its box, which
-                            // leaves a faint trace of their roads one level up.
+                            // A shipped child: a scoped run folds these for
+                            // siblings outside its box.
                             : readPtx(tilePath(args.dir, child, '.ptx'));
                     }
                     if (raster === undefined) {
@@ -448,15 +499,8 @@ async function main(): Promise<void> {
                 emptied.push(k);
                 continue;
             }
-            // The unpainted raster is what the next level folds. The near (512)
-            // levels ship with their roads drawn crisp, one texel wide; the far
-            // (256) levels are purely the unpainted 512 downsampled, no roads.
             current.set(keyOf(k), { texels: parent, size });
-            const shipped = size === args.nearSize ? paintLevelRoads(k, parent, size) : parent;
-            if (shipped !== parent) {
-                roadTiles++;
-            }
-            gz += writePtx(outPath, k, size, shipped);
+            gz += writePtx(outPath, k, size, parent);
             raw += PTX_HEADER_BYTES + parent.byteLength;
             count++;
             written.push(k);
@@ -464,27 +508,26 @@ async function main(): Promise<void> {
         perLevel.push({ z, size, count, raw, gz });
         previous = current;
     }
+    await foldPool?.close();
 
     // --- sparse leaf textures -----------------------------------------------
     // Leaves that carry buildings also ship their raster: their own facets and
     // 3D houses cover the near field, this the far field where the houses are
-    // cut. Every other leaf has none, and drops a stale one.
-    const leafShipped: TileKey[] = [];
+    // cut. Every other leaf has none, and drops a stale one. Most were
+    // shipped already, as the fold read them (shipLeaf).
     const leafDropped: TileKey[] = [];
-    let leafGz = 0;
     for (const k of leaves) {
+        if (shipsLeaf(k) && !leafDone.has(keyOf(k))) {
+            // leafRaster ships it; absent from the cache, it stays unshipped.
+            leafRaster(k);
+        }
         const leafOut = tilePath(args.dir, k, '.ptx');
-        const pbhPath = tilePath(args.dir, k, '.pbh');
-        const r = args.buildings && fs.existsSync(pbhPath) ? leafRaster(k) : undefined;
-        if (r !== undefined && !isEmptyRaster(r.texels)) {
-            leafGz += writePtx(leafOut, k, r.size, paintLevelRoads(k, r.texels, r.size));
-            leafShipped.push(k);
-        } else if (fs.existsSync(leafOut)) {
+        if (!leafShippedKeys.has(keyOf(k)) && fs.existsSync(leafOut)) {
             fs.unlinkSync(leafOut);
             leafDropped.push(k);
         }
     }
-    console.log(`  leaf textures: ${leafShipped.length} shipped (${(leafGz / 1048576).toFixed(1)} MB gz), ${leafDropped.length} dropped; water painted in ${waterLeaves} leaf reads`);
+    console.log(`  leaf textures: ${leafShipped.length} shipped (${(leafGz / 1048576).toFixed(1)} MB gz), ${leafDropped.length} dropped; water painted in ${counts.water} leaf reads, airfields in ${counts.airfields}, roads in ${counts.roads}`);
 
     // --- index and manifest -------------------------------------------------
     const indexPath = path.join(args.dir, 'index_tex.bin');
@@ -541,7 +584,7 @@ async function main(): Promise<void> {
             + `- ${emptied.length} emptied -> ${all.length} tiles`);
     }
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    console.log(`wrote ${written.length} textures (${roadTiles} with roads), ${mb(totalGz)} MB in ${secs}s`);
+    console.log(`wrote ${written.length} textures, ${mb(totalGz)} MB in ${secs}s`);
 }
 
 main().catch(err => {

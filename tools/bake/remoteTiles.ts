@@ -31,17 +31,20 @@ import { GradeConfig, GradeResult, PASS1_EXT, bedsOfTile, gradeTile } from './gr
 import { MeshTileConfig, TileProcessResult, processTile } from './meshTile';
 import { MIN_SEAM_ZOOM } from './borderConform';
 import { TexLeafConfig, TexLeafResult, texLeaf } from './texLeaf';
+import { TexFoldConfig, TexFoldResult, childrenOf, isFoldLeaf, texFold } from './texFold';
+import { boundsOf } from './coverTex';
+import { overlapsBounds } from './pavementTex';
 import { PY_STAGES, PyLeafConfig, PyLeafKind, PyLeafResult, pyLeaf } from './pyLeaf';
 import { PyChunkConfig, PyChunkResult, chunkInputs, chunkOutputs, pyChunk } from './pyChunk';
 import { localPyImports } from './pyServe';
 import { TileKey } from '../../src/script/terrain/tiling';
 
 export type RemoteRoot = 'terrain' | 'lidar' | 'bstore' | 'planet' | 'texcache' | 'pytools' | 'pbf';
-export type RemoteKind = 'grade1' | 'grade2' | 'farland' | 'mesh' | 'texleaf' | PyLeafKind | 'pychunk';
+export type RemoteKind = 'grade1' | 'grade2' | 'farland' | 'mesh' | 'texleaf' | 'texfold' | PyLeafKind | 'pychunk';
 
 /** What a kind's config looks like on the wire: its directories are root names, not paths. */
-export type RemoteConfig = GradeConfig | FarLandConfig | MeshTileConfig | TexLeafConfig | PyLeafConfig | PyChunkConfig;
-export type RemoteResult = GradeResult | FarLandResult | TileProcessResult | TexLeafResult | PyLeafResult | PyChunkResult | undefined;
+export type RemoteConfig = GradeConfig | FarLandConfig | MeshTileConfig | TexLeafConfig | TexFoldConfig | PyLeafConfig | PyChunkConfig;
+export type RemoteResult = GradeResult | FarLandResult | TileProcessResult | TexLeafResult | TexFoldResult | PyLeafResult | PyChunkResult | undefined;
 
 const isPyLeaf = (kind: RemoteKind): kind is PyLeafKind => kind in PY_STAGES;
 
@@ -97,6 +100,27 @@ export function inputsOf(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): strin
         // texLeaf.ts: the leaf's land, and its footprints when buildings are painted.
         return (cfg as TexLeafConfig).buildings ? [rel('terrain', k, '.ptm'), rel('terrain', k, '.pbh')] : [rel('terrain', k, '.ptm')];
     }
+    if (kind === 'texfold') {
+        // texFold.ts: each leaf child's cached raster, land (for its water),
+        // road vectors and footprints (whether it ships); any other child's
+        // texture, folded a level below.
+        const c = cfg as TexFoldConfig;
+        const out: string[] = [];
+        for (const child of childrenOf(k)) {
+            if (isFoldLeaf(c, child)) {
+                out.push(rel('texcache', child, '.ptx'), rel('terrain', child, '.ptm'));
+                if (c.roads) {
+                    out.push(rel('planet', child, '.rvr'));
+                }
+                if (c.buildings) {
+                    out.push(rel('terrain', child, '.pbh'));
+                }
+            } else {
+                out.push(rel('terrain', child, '.ptx'));
+            }
+        }
+        return out;
+    }
     if (kind === 'farland') {
         // The tile's own sidecar too: a leaf with nothing worth simplifying removes it.
         return [rel('terrain', k, '.ptm'), rel('terrain', k, '.ptr'), rel('terrain', k, FAR_LAND_EXT)];
@@ -128,6 +152,7 @@ export function outputsOf(kind: RemoteKind, k: TileKey, cfg?: RemoteConfig): str
         case 'farland': return [rel('terrain', k, FAR_LAND_EXT)];
         case 'mesh': return [rel('terrain', k, '.ptm')];
         case 'texleaf': return [rel('texcache', k, '.ptx')];
+        case 'texfold': return [rel('terrain', k, '.ptx'), ...childrenOf(k).map(c => rel('terrain', c, '.ptx'))];
         case 'lidarleaf':
         case 'roofleaf': return [rel(PY_STAGES[kind].storeRoot, k, PY_STAGES[kind].storeExt)];
     }
@@ -143,6 +168,12 @@ export function wireConfig(kind: RemoteKind, cfg: RemoteConfig, k: TileKey): Rem
     }
     if (kind === 'texleaf') {
         return { ...(cfg as TexLeafConfig), dir: 'terrain', cache: 'texcache' };
+    }
+    if (kind === 'texfold') {
+        // Per tile: only the airfields over it.
+        const c = cfg as TexFoldConfig;
+        const b = boundsOf(k);
+        return { ...c, dir: 'terrain', cache: 'texcache', src: 'planet', pavements: c.pavements.filter(p => overlapsBounds(p.bounds, b)) };
     }
     if (isPyLeaf(kind)) {
         return { ...(cfg as PyLeafConfig), planet: 'planet', store: PY_STAGES[kind].storeRoot, pytools: 'pytools' };
@@ -187,6 +218,10 @@ export function runRemoteJob(kind: RemoteKind, cfg: RemoteConfig, k: TileKey, jo
     if (kind === 'texleaf') {
         const t = cfg as TexLeafConfig;
         return texLeaf({ ...t, dir: path.join(jobDir, t.dir), cache: path.join(jobDir, t.cache) }, k);
+    }
+    if (kind === 'texfold') {
+        const t = cfg as TexFoldConfig;
+        return texFold({ ...t, dir: path.join(jobDir, t.dir), cache: path.join(jobDir, t.cache), src: path.join(jobDir, t.src) }, k);
     }
     if (kind === 'farland') {
         const f = cfg as FarLandConfig;

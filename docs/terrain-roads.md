@@ -50,6 +50,12 @@ are. Two reasons, both about performance in the wide sense:
    leaf rasters was tried first: each fold averaged the line away (Berlin
    z10 kept 53 road texels of 262k) and the built-up class put it through
    the urban palette tone, grey on grey.
+   **Since 2026-11-05** every class is painted into the leaf at its true
+   width, with 4x4 coverage per texel, and folds from there
+   (`tools/bake/pavementTex.ts`; see docs/terrain-far-textures.md). The fold
+   now averages a real width rather than a one-texel line, so a road fades
+   with distance in proportion to its width instead of vanishing, and the
+   class becomes Ground only where the road holds half a texel.
 5. **Draped-line simplification.** After sampling at facet crossings,
    `simplifyDraped` drops every sample the straight chord between its
    neighbours passes within half the lift of. On flat Berlin the crossings
@@ -1021,7 +1027,7 @@ it on a graded pyramid.
 
 ```
 npm run bake:roads -- --bbox w,s,e,n          # OSM -> assets/planet/{z}/{x}/{y}.rvr
-npm run bake:tex -- --bbox w,s,e,n            # paints major roads into the far rasters
+npm run bake:tex -- --bbox w,s,e,n            # paints all roads into the far rasters
 npm run bake:road-strokes -- --bbox w,s,e,n   # .ptm + .rvr -> assets/terrain/{z}/{x}/{y}.ptr
 npm run bake:lidar -- --bbox w,s,e,n          # .rvr + .rbr + lidar -> data/imports/lidar/store/12/x/y.lms
 npm run bake:bridges -- --bbox w,s,e,n        # .rbr + .ptm (+ store) -> .pbr bridges, deck heights
