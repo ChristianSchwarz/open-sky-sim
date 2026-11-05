@@ -201,6 +201,7 @@ export type SimToWorkerMessage =
     | { type: 'touchAxes'; id: string; pitch: number; roll: number; yaw: number; throttle: number; active: boolean }
     | { type: 'inputBlur'; id: string }
     | { type: 'setInputEnabled'; id: string; enabled: boolean }
+    | { type: 'setPitchTrim'; id: string; trim: number; idleOnTouchdown: boolean; flaps?: boolean }
     | { type: 'setForceVectorsRequested'; id: string; want: boolean };
 
 // --- Worker -> main thread messages ------------------------------------------

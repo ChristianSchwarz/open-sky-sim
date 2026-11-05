@@ -95,12 +95,12 @@ const HELIPAD_LIGHTS_PER_SIDE = 3;
  * distance they fade out over: dimming evenly from the camera to gone, the
  * brighter the farther.
  */
-const STEADY = { sizeM: 1.2, sizePx: 2, maxPx: 6, fadeM: [0, 16000] as const };
-const BRIGHT = { sizeM: 2, sizePx: 2, maxPx: 8, fadeM: [0, 24000] as const };
-const FLASH = { sizeM: 4, sizePx: 3, maxPx: 12, fadeM: [0, 32000] as const };
+export const STEADY = { sizeM: 1.2, sizePx: 2, maxPx: 6, fadeM: [0, 16000] as const };
+export const BRIGHT = { sizeM: 2, sizePx: 2, maxPx: 8, fadeM: [0, 24000] as const };
+export const FLASH = { sizeM: 4, sizePx: 3, maxPx: 12, fadeM: [0, 32000] as const };
 /** Taxiway lights are a fraction of a runway light's intensity: a pixel from afar. */
-const DIM = { sizeM: 0.8, sizePx: 1, maxPx: 4, fadeM: [0, 8000] as const };
-type LightSize = { sizeM: number; sizePx: number; maxPx: number; fadeM: readonly [number, number] };
+export const DIM = { sizeM: 0.8, sizePx: 1, maxPx: 4, fadeM: [0, 8000] as const };
+export type LightSize = { sizeM: number; sizePx: number; maxPx: number; fadeM: readonly [number, number] };
 
 /** A runway is lit when OSM says so, or when it is a paved runway of some length at a field that is not a club strip. */
 export function runwayIsLit(runway: AirfieldRunway, airfield: Airfield): boolean {
@@ -165,14 +165,20 @@ export function papiWhite(units: readonly THREE.Vector3[], settingsDeg: readonly
     });
 }
 
-/** Points with something to do before each draw, given the eye and the time. */
-class LightPoints extends THREE.Points {
+/**
+ * Points with something to do before each draw, given the eye and the time.
+ * Night-only unless `allDay` (a landing sight is lit by day too).
+ */
+export class LightPoints extends THREE.Points {
     constructor(
         geometry: THREE.BufferGeometry, material: THREE.Material,
         readonly onEye?: (points: LightPoints, eye: THREE.Vector3, timeS: number) => void,
+        allDay = false,
     ) {
         super(geometry, material);
-        this.userData.time = PaletteTime.NIGHT;
+        if (!allDay) {
+            this.userData.time = PaletteTime.NIGHT;
+        }
         this.onBeforeRender = (renderer, scene, camera, g, m, group) => {
             updateUniforms.call(this as unknown as THREE.Mesh, renderer, scene, camera, g, m, group as THREE.Group);
             if (this.onEye !== undefined) {
@@ -204,7 +210,7 @@ interface LightGroup {
  * Shown only to an eye on the far side of the line through `at` square to
  * `facing` - the side `facing` points to.
  */
-function facingOnly(at: THREE.Vector3, facing: THREE.Vector3) {
+export function facingOnly(at: THREE.Vector3, facing: THREE.Vector3) {
     const tip = at.clone().add(facing);
     return (points: LightPoints, eye: THREE.Vector3) => {
         const a = points.world(at, _a);

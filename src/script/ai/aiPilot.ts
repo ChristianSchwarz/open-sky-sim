@@ -19,6 +19,7 @@ import {
     specificEnergyHeight,
     trackingAngle,
 } from './dogfightGeometry';
+import { CARRIER_GLIDESLOPE_TAN } from '../scene/entities/carrierDeckLayout';
 
 /**
  * Hierarchical flight phases. Mission logic sets high-level setpoints (heading,
@@ -214,6 +215,10 @@ const MAX_BANK_NAV = 45 * Math.PI / 180;
 const MAX_BANK_COMBAT = 85 * Math.PI / 180;  // near knife-edge for min turn radius
 const MAX_BANK_APPROACH = 25 * Math.PI / 180;
 const GLIDESLOPE = Math.tan(3 * Math.PI / 180);
+/** The glidepath's slope (tan) to a runway: a carrier's deck has its own, steeper one. */
+function slopeOf(rwy: Runway): number {
+    return rwy.carrier ? CARRIER_GLIDESLOPE_TAN : GLIDESLOPE;
+}
 /** Centreline offset (m) -> intercept angle toward it (rad/m). Big enough that a few metres
  * off clears the heading loop's 1 deg deadband: at 0.001 it settled 17 m to one side. */
 const APPROACH_INTERCEPT_PER_M = 0.003;
@@ -324,6 +329,43 @@ const FLARE_MAX_FLOAT = 900;
 const BOUNCE_HEIGHT = 3;
 /** The approach aims this far (m) past the threshold ... */
 const TOUCHDOWN_FROM_THRESHOLD = 300;
+
+// --- Carrier recovery (a runway with `carrier` set: the angled deck) ---------
+/** On a carrier the CG aims this far (m) past the stern: the hook, trailing it, meets wires 1-2. */
+const CARRIER_AIM_FROM_STERN = 60;
+/** At the gate, at most this far (m) off the angled centreline: the deck is 27 m wide. */
+const CARRIER_GATE_MAX_LATERAL = 25;
+/** Not on the deck this far (m) past the aim point: a bolter. */
+const CARRIER_MAX_OVERRUN = 60;
+/** Slower than this (m/s, through the air; the ship makes ~11) the hook has it: power off, brakes on. */
+const CARRIER_ARRESTED_SPEED = 35;
+/** Still faster than this (m/s) this long (s) after touchdown: no wire, a bolter. */
+const CARRIER_BOLTER_SPEED = 45;
+const CARRIER_BOLTER_AFTER_S = 2;
+/**
+ * The deck glidepath puts the CG this high (m) above the deck at the aim point
+ * and goes on down past it, without the level-off that floats a runway landing
+ * down the deck past the wires. Higher than the hook's ~2.3 m under the CG:
+ * flown at the top of its lift curve the jet always arrives 1.5-4.5 m under
+ * its path over the last few hundred metres, and on a path aimed lower that
+ * put the gear into the stern. From this one the CG crosses the ramp 4-7 m
+ * up, and the hook still meets the deck short of the wires.
+ */
+const CARRIER_PATH_ABOVE_DECK = 3;
+/**
+ * The deck glidepath is held this many times tighter than a runway's (height
+ * loop and its trim): a runway's sat a steady ~7 m high, a long landing on
+ * 3 km of concrete and a bolter on 200 m of deck.
+ */
+const CARRIER_PATH_GAIN = 3;
+/** The deck's measured velocity is smoothed over this (s): it is moved in steps, per message. */
+const DECK_VELOCITY_TAU_S = 0.5;
+/** A carrier final is flown this much (m/s) above Vref ... */
+const CARRIER_VREF_BONUS = 3.5;
+/** ... but at least this far (m/s) under the airframe's touchdown limit. */
+const CARRIER_TOUCHDOWN_SPEED_MARGIN = 1.5;
+/** Already on final this far out (m) or closer, lined up: the approach is joined there, with no pattern. */
+const CARRIER_JOIN_ON_FINAL_M = 5000;
 /** ... unless something stands this far (m) above the runway surface ... */
 const RUNWAY_OBSTRUCTION_M = 1;
 /** ... within this far (m) beyond it, which moves the aim this far (m) past that. */
@@ -654,6 +696,8 @@ export class AiPilot implements AiPilotController {
     private spoolTimer = 0;
     /** Lowest height (m AGL) since touchdown: the CG on its wheels, for the bounce check. */
     private rolloutRestAgl = Infinity;
+    /** Seconds on the deck since a carrier touchdown (see doRollout). */
+    private rolloutTime = 0;
     /** Leg of the way round to final being flown in RTB (see {@link doRtb}). */
     private rtbLeg = RtbLeg.PLAN;
     /** Side of the centreline the downwind and base turn are on: +1 along (cos h, -sin h), -1 the other. */
@@ -804,6 +848,12 @@ export class AiPilot implements AiPilotController {
         this.formationLead = lead;
     }
 
+    /** See AiPilotController.seedPitchStick. */
+    seedPitchStick(stick: number): void {
+        this.pitchCmdState = clamp(stick, -1, 1);
+        this.pitchTrimI = clamp(stick, -PITCH_TRIM_MAX_FLARE, PITCH_TRIM_MAX_FLARE);
+    }
+
     setRoute(route: AiRoute | undefined): void {
         this.route = route;
     }
@@ -873,6 +923,9 @@ export class AiPilot implements AiPilotController {
         }
 
         this.readState(delta);
+        if (this.phase === AiFlightPhase.RTB && this.rtbLeg === RtbLeg.PLAN) {
+            this.joinCarrierFinal();
+        }
 
         // Safety layer: predictive terrain/ground pull-up pre-empts any airborne
         // mission phase (but not deliberate ground contact near the runway).
@@ -907,7 +960,7 @@ export class AiPilot implements AiPilotController {
             case AiFlightPhase.RTB: this.doRtb(delta); break;
             case AiFlightPhase.APPROACH: this.doApproach(delta); break;
             case AiFlightPhase.FLARE: this.doFlare(delta); break;
-            case AiFlightPhase.ROLLOUT: this.doRollout(); break;
+            case AiFlightPhase.ROLLOUT: this.doRollout(delta); break;
             case AiFlightPhase.GO_AROUND: this.doGoAround(delta); break;
             case AiFlightPhase.WAYPOINT: this.doWaypoint(delta); break;
         }
@@ -1288,14 +1341,15 @@ export class AiPilot implements AiPilotController {
         if (this.phase !== AiFlightPhase.APPROACH) {
             return this.hardDeck;
         }
-        const td = this.touchdownPoint(this.homeRunway());
+        const home = this.homeRunway();
+        const td = this.touchdownPoint(home);
         const fwdX = Math.sin(td.heading);
         const fwdZ = Math.cos(td.heading);
         const distToTouchdown = -((x - td.x) * fwdX + (z - td.z) * fwdZ);
         if (distToTouchdown <= 0) {
             return -1;
         }
-        const glidepathHeight = td.y + distToTouchdown * GLIDESLOPE - this.world.groundHeightAt(x, z);
+        const glidepathHeight = td.y + distToTouchdown * slopeOf(home) - this.world.groundHeightAt(x, z);
         return clamp(glidepathHeight * APPROACH_DECK_FRACTION, 0, this.hardDeck);
     }
 
@@ -2189,6 +2243,13 @@ export class AiPilot implements AiPilotController {
         if (cached !== undefined) {
             return cached;
         }
+        if (rwy.carrier) {
+            // The deck: no obstruction scan (the stern edge reads as sea, and a
+            // runway end over water as a wall), and the aim is at the wires.
+            const layout = { aim: CARRIER_AIM_FROM_STERN, clearFrom: -Infinity };
+            this.touchdownDistances.set(rwy, layout);
+            return layout;
+        }
         const fwdX = Math.sin(rwy.heading);
         const fwdZ = Math.cos(rwy.heading);
         const length = 2 * rwy.halfLength;
@@ -2293,7 +2354,7 @@ export class AiPilot implements AiPilotController {
         // At the join height alone, among GCXO's hills, the terrain guard
         // kept taking over with wings-level pull-ups and the pattern never
         // closed.
-        const joinHeight = td.y + JOIN_DISTANCE * GLIDESLOPE;
+        const joinHeight = td.y + JOIN_DISTANCE * slopeOf(rwy);
         const safe = Math.max(this.terrainAhead(this.heading, PATTERN_MSA_LOOKAHEAD),
             this.terrainAhead(desiredHeading, PATTERN_MSA_LOOKAHEAD)) + PATTERN_MSA_CLEARANCE;
         this.commandVerticalSpeed(clamp((Math.max(joinHeight, safe) - this.pos.y) * VS_PER_ALT, -MAX_VS, MAX_VS), true);
@@ -2350,6 +2411,12 @@ export class AiPilot implements AiPilotController {
      * Counted here, so a bounce and an unstable gate both count.
      */
     private goAround(reason: string): void {
+        if (this.aircraft.isArrested?.()) {
+            // A wire or the barricade has it: full power now would pull it
+            // off the wire once stopped and run it off the deck.
+            if (this.phase !== AiFlightPhase.ROLLOUT) this.enterRollout();
+            return;
+        }
         this.phase = AiFlightPhase.GO_AROUND;
         this.goAroundReason = reason;
         this.goArounds++;
@@ -2357,6 +2424,11 @@ export class AiPilot implements AiPilotController {
     }
 
     private doGoAround(delta: number): void {
+        if (this.aircraft.isArrested?.()) {
+            // Caught after all (the hook was down going round over the deck).
+            this.enterRollout();
+            return;
+        }
         const rwy = this.homeRunway();
         const td = this.touchdownPoint(rwy);
         const vref = approachSpeed(this.aircraft.getSlowSpeeds());
@@ -2427,7 +2499,11 @@ export class AiPilot implements AiPilotController {
         // angle. Rolling on the raw offset instead saturates the bank anywhere
         // more than a few hundred metres out: the aircraft crosses the
         // centreline at right angles and never settles on it.
-        const intercept = clamp(lateral * APPROACH_INTERCEPT_PER_M, -APPROACH_MAX_INTERCEPT, APPROACH_MAX_INTERCEPT);
+        // A deck moving under the final slides sideways across it (the ship
+        // steams at an angle to the angled deck): a runway's gain let that
+        // settle 5-10 m off a centreline with 13.5 m either side of it.
+        const interceptPerM = APPROACH_INTERCEPT_PER_M * (rwy.carrier ? CARRIER_PATH_GAIN : 1);
+        const intercept = clamp(lateral * interceptPerM, -APPROACH_MAX_INTERCEPT, APPROACH_MAX_INTERCEPT);
         this.commandHeading(rwy.heading - intercept, MAX_BANK_APPROACH);
 
         // 3-degree glideslope down to the runway surface at the touchdown point.
@@ -2436,7 +2512,9 @@ export class AiPilot implements AiPilotController {
         // off just above the flare gate. The integral trim takes out what the
         // feed-forward leaves, as on a formation slot.
         const groundY = this.world.groundHeightAt(this.pos.x, this.pos.z);
-        const glidepath = td.y + Math.max(2, distToTouchdown * GLIDESLOPE);
+        const glidepath = rwy.carrier
+            ? td.y + CARRIER_PATH_ABOVE_DECK + distToTouchdown * CARRIER_GLIDESLOPE_TAN
+            : td.y + Math.max(2, distToTouchdown * GLIDESLOPE);
         // Never below the terrain ahead on the final: a ridge under the
         // approach is crossed above it, and the glidepath taken from above
         // once past. The look-ahead shrinks to nothing short of the runway.
@@ -2452,22 +2530,26 @@ export class AiPilot implements AiPilotController {
         // glidepath once past.
         if (onGlidepath && Math.abs(targetAlt - this.pos.y) < APPROACH_TRIM_BAND) {
             this.approachAltTrim = clamp(
-                this.approachAltTrim + (targetAlt - this.pos.y) * APPROACH_ALT_TRIM_RATE * delta,
+                this.approachAltTrim + (targetAlt - this.pos.y) * APPROACH_ALT_TRIM_RATE * (rwy.carrier ? CARRIER_PATH_GAIN : 1) * delta,
                 -APPROACH_ALT_TRIM_MAX, APPROACH_ALT_TRIM_MAX);
         }
-        const groundSpeed = Math.hypot(this.vel.x, this.vel.z);
-        const pathVs = distToTouchdown > 0 && onGlidepath ? -groundSpeed * GLIDESLOPE : 0;
+        // How fast the touchdown point comes closer: on a carrier the deck
+        // steams away from the jet, and a sink set from the ground speed
+        // alone put it ~0.8 m/s too steep, 3-5 m low over the stern.
+        const deckVel = this.deckVelocity(rwy, delta);
+        const groundSpeed = Math.hypot(this.vel.x - deckVel.x, this.vel.z - deckVel.z);
+        const pathVs = (distToTouchdown > 0 || rwy.carrier) && onGlidepath ? -groundSpeed * slopeOf(rwy) : 0;
         // High, it comes down to the glidepath at a limited extra sink rather
         // than diving at it.
         const vsCmd = clamp(
-            pathVs + (targetAlt + this.approachAltTrim - this.pos.y) * APPROACH_VS_PER_ALT,
+            pathVs + (targetAlt + this.approachAltTrim - this.pos.y) * APPROACH_VS_PER_ALT * (rwy.carrier ? CARRIER_PATH_GAIN : 1),
             pathVs - APPROACH_MAX_EXTRA_SINK, MAX_VS);
         this.commandVerticalSpeed(vsCmd, true);
         // Vref from the airframe, reached by VREF_BY_DISTANCE: the RTB speed
         // ramp carries on down the slope rather than stepping to Vref, which
         // undershot it and sank off the glidepath. The speedbrake holds it
         // there, where idle alone lets a clean-winged jet run away.
-        const vrefNow = approachSpeed(this.aircraft.getSlowSpeeds());
+        const vrefNow = this.carrierAware(rwy, approachSpeed(this.aircraft.getSlowSpeeds()));
         this.commandSpeedWithAirbrakes(
             vrefNow + clamp((distToTouchdown - VREF_BY_DISTANCE) * RTB_SPEED_PER_M, 0, RTB_IAF_SPEED_MARGIN), delta, AIRFIELD_THROTTLE_KP);
 
@@ -2483,13 +2565,21 @@ export class AiPilot implements AiPilotController {
         // Stabilised by the gate or go round: on the centreline, lined up, on
         // the glidepath and at Vref. Below it nothing is corrected any more,
         // only flown down; a landing from outside these is a guess.
-        const vref = approachSpeed(this.aircraft.getSlowSpeeds());
+        const vref = this.carrierAware(rwy, approachSpeed(this.aircraft.getSlowSpeeds()));
         const airspeed = this.aircraft.getAirspeed();
         // Height above the runway, not the ground below: over a valley short of
         // the field the gate would otherwise only be checked once over it.
         const aboveRunway = this.pos.y - td.y;
-        if (aboveRunway < GATE_HEIGHT && agl > flareHeight) {
-            const unstable = Math.abs(lateral) > GATE_MAX_LATERAL ? 'LATERAL'
+        // On a deck the gate is for the final, not for the deck itself: a hook
+        // that takes a wire just before the wheels slows the jet hard, which
+        // read as SLOW and went round at full power on the wire.
+        const onDeck = rwy.carrier && Math.abs(groundY - td.y) < 2;
+        // Into a rigged barricade the arrival is committed: only being off the
+        // landing area sends it round - high, slow or fast, the net takes it.
+        const committed = rwy.carrier && this.aircraft.isBarricadeRigged?.() === true;
+        if (aboveRunway < GATE_HEIGHT && agl > flareHeight && !onDeck) {
+            const unstable = Math.abs(lateral) > (rwy.carrier ? CARRIER_GATE_MAX_LATERAL : GATE_MAX_LATERAL) ? 'LATERAL'
+                : committed ? undefined
                 : Math.abs(wrapPi(rwy.heading - this.heading)) > GATE_MAX_HEADING_ERROR ? 'HEADING'
                     : Math.abs(this.pos.y - targetAlt) > GATE_MAX_HEIGHT_ERROR ? 'GLIDEPATH'
                         : airspeed > vref + GATE_MAX_FAST ? 'FAST'
@@ -2500,8 +2590,21 @@ export class AiPilot implements AiPilotController {
             }
         }
         // Past the touchdown point without having flared: high, long or both.
-        if (distToTouchdown < -APPROACH_MAX_OVERRUN) {
-            this.goAround('LONG');
+        // Into a rigged barricade there is no bolter: whatever is left of the
+        // deck runs into the net, which is the point.
+        const intoNet = rwy.carrier && this.aircraft.isBarricadeRigged?.() === true;
+        if (!intoNet && distToTouchdown < -(rwy.carrier ? CARRIER_MAX_OVERRUN : APPROACH_MAX_OVERRUN)) {
+            this.goAround(rwy.carrier ? 'BOLTER' : 'LONG');
+            return;
+        }
+        if (rwy.carrier) {
+            // No flare on a deck: the glidepath is flown into it, the hook
+            // trailing for the wires. Only lined up on the landing area -
+            // checked over the deck, not over the sea astern of it.
+            const overDeck = Math.abs(groundY - td.y) < 2;
+            if (overDeck && agl < flareHeight && Math.abs(lateral) > rwy.halfWidth - FLARE_EDGE_MARGIN) {
+                this.goAround('EDGE');
+            }
             return;
         }
 
@@ -2570,10 +2673,14 @@ export class AiPilot implements AiPilotController {
     private enterRollout(): void {
         this.phase = AiFlightPhase.ROLLOUT;
         this.rolloutRestAgl = Infinity;
+        this.rolloutTime = 0;
     }
 
-    private doRollout(): void {
+    private doRollout(delta: number): void {
         const rwy = this.homeRunway();
+        if (rwy.carrier && this.doCarrierRollout(delta, rwy)) {
+            return;
+        }
         // Bounced back into the air: power up and go round rather than come
         // down again further along, nose high and slower. Measured from how
         // high the aircraft sits on its wheels here, not from the ground: the
@@ -2603,6 +2710,98 @@ export class AiPilot implements AiPilotController {
         if (this.aircraft.getAirspeed() < 2) {
             this.phase = AiFlightPhase.GROUND_IDLE;
         }
+    }
+
+    /**
+     * The runway's own velocity (m/s, horizontal): a carrier's deck is moved
+     * in place as the ship steams, measured here from frame to frame; zero
+     * for a runway on the ground.
+     */
+    private deckVelocity(rwy: Runway, delta: number): { x: number; z: number } {
+        const v = this.deckVel;
+        if (!rwy.carrier) {
+            v.x = 0;
+            v.z = 0;
+            return v;
+        }
+        if (this.deckVelFor === rwy && delta > 1e-4) {
+            const k = Math.min(1, delta / DECK_VELOCITY_TAU_S);
+            v.x += ((rwy.center.x - this.deckPrev.x) / delta - v.x) * k;
+            v.z += ((rwy.center.z - this.deckPrev.z) / delta - v.z) * k;
+        } else if (this.deckVelFor !== rwy) {
+            v.x = 0;
+            v.z = 0;
+        }
+        this.deckVelFor = rwy;
+        this.deckPrev.x = rwy.center.x;
+        this.deckPrev.z = rwy.center.z;
+        return v;
+    }
+    private readonly deckVel = { x: 0, z: 0 };
+    private readonly deckPrev = { x: 0, z: 0 };
+    private deckVelFor: Runway | undefined;
+
+    /**
+     * Vref for this runway: on a carrier, faster by CARRIER_VREF_BONUS but
+     * under the touchdown limit. At Vref the jet holds the glidepath at
+     * ~19° angle of attack, near the top of its lift curve, and sagged 3-5 m
+     * low over the stern with nothing left to pull; a ramp is not a runway's
+     * thousand metres of undershoot.
+     */
+    private carrierAware(rwy: Runway, vref: number): number {
+        if (!rwy.carrier) return vref;
+        return Math.max(vref, Math.min(vref + CARRIER_VREF_BONUS,
+            this.aircraft.getSlowSpeeds().maxTouchdownSpeed - CARRIER_TOUCHDOWN_SPEED_MARGIN));
+    }
+
+    /**
+     * Already in the groove to a carrier (the barricade arrival, the autopilot
+     * switched on short of the ship): fly the approach from here, rather than
+     * climb away for an 8 km pattern. Ahead of the terrain guard, which at
+     * groove height sees the deck coming and pulls up.
+     */
+    private joinCarrierFinal(): void {
+        const rwy = this.homeRunway();
+        if (!rwy.carrier) return;
+        const td = this.touchdownPoint(rwy);
+        const f = runwayFrame(td.x, td.z, rwy.heading, this.pos.x, this.pos.z, this.heading);
+        if (f.toTouchdown > 0 && f.toTouchdown < CARRIER_JOIN_ON_FINAL_M
+            && Math.abs(f.lateral) < CARRIER_GATE_MAX_LATERAL
+            && Math.abs(f.headingError) < ESTABLISHED_HEADING_ERROR
+            && Math.abs(this.pos.y - (td.y + CARRIER_PATH_ABOVE_DECK + f.toTouchdown * CARRIER_GLIDESLOPE_TAN)) < GATE_MAX_HEIGHT_ERROR) {
+            this.phase = AiFlightPhase.APPROACH;
+            this.approachAltTrim = 0;
+        }
+    }
+
+    /**
+     * On the deck: full power as the wheels touch, so a missed wire is a
+     * bolter and not a jet rolling off the angled deck into the sea; power off
+     * and brakes on once the wire (or the barricade) has it. True while this
+     * is still deciding (the caller's rollout follows once it is arrested).
+     */
+    private doCarrierRollout(delta: number, rwy: Runway): boolean {
+        this.rolloutTime += delta;
+        if (this.aircraft.isArrested?.() || this.aircraft.getAirspeed() < CARRIER_ARRESTED_SPEED) {
+            return false;
+        }
+        if (this.aircraft.isBarricadeRigged?.()) {
+            // Rolling into the net: power off, as a hands-off arrival does.
+            return false;
+        }
+        if (this.rolloutTime > CARRIER_BOLTER_AFTER_S && this.aircraft.getAirspeed() > CARRIER_BOLTER_SPEED) {
+            this.goAround('BOLTER');
+            return true;
+        }
+        this.throttleCmd = 1;
+        this.aircraft.setThrottle(1);
+        this.aircraft.setWheelBrakes(false);
+        this.airbrakesLatched = false;
+        this.aircraft.setAirbrakesExtended(false);
+        this.aircraft.setLandingGearDeployed(true);
+        this.aircraft.setYaw(clamp(wrapPi(rwy.heading - this.heading) * 1.5, -1, 1));
+        this.wingsLevel();
+        return true;
     }
 
     /** Altitude hold that never commands below the local terrain hard deck. */

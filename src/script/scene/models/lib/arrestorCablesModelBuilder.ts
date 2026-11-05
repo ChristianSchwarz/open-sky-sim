@@ -1,5 +1,5 @@
 /**
- * Four lateral arrestor cables for the carrier landing deck.
+ * Four arrestor cables across the carrier's angled landing deck.
  * Built as thin unshaded volume strips so they sit above the Kuznetsov hull
  * mesh (EntityVolumes). Flats would paint first and get overwritten by the deck.
  * Layout matches {@link arrestorCableLocals} so visuals align with trap physics.
@@ -41,7 +41,8 @@ export class ArrestorCablesModelLibBuilder implements ModelLibBuilder {
                 (c.ay + c.by) * 0.5,
                 (c.az + c.bz) * 0.5,
             );
-            // Lateral cables run along +X; BoxGeometry length is local X.
+            // BoxGeometry length is local X: yaw it onto the wire (square to the angled deck).
+            mesh.rotation.y = Math.atan2(-(c.bz - c.az), c.bx - c.ax);
             mesh.onBeforeRender = updateUniforms;
             cables.push(mesh);
         }

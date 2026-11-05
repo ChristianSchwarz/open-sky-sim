@@ -5,11 +5,18 @@
 import * as THREE from 'three';
 import { Fm2AircraftConfig, defaultFm2Config } from '../../physics/fm2/fm2AircraftConfig';
 import { DEFAULT_ENGINE_NOZZLES } from './afterburnerCones';
+import {
+    ANGLED_DECK_AXIS,
+    ANGLED_DECK_RIGHT,
+    ARRESTOR_WIRE_STATIONS_M,
+    angledDeckPoint,
+} from './carrierDeckLayout';
 
-/** Approximate Kuznetsov deck mid-X (see KUZ_HULL in game.ts). */
-export const ARRESTOR_DECK_MID_X = (-34.33 + 43.83) * 0.5;
-/** Half-width of each cable across the landing lane (m). */
-export const ARRESTOR_HALF_SPAN_M = 18;
+/**
+ * Half-length of each wire, centre to sheave (m): about 34 m from end to end
+ * on the plan view, across the angled landing area.
+ */
+export const ARRESTOR_HALF_SPAN_M = 17;
 /**
  * Cable height in carrier-local Y.
  * Real kuz deck under the wires is ~13.55 m; landed hook sits ~deck+1.0
@@ -18,8 +25,6 @@ export const ARRESTOR_HALF_SPAN_M = 18;
  * {@link ARRESTOR_CATCH_VERT_M} covers the offset.
  */
 export const ARRESTOR_CABLE_Y = 13.85;
-/** Local Z of the four wires, stern → bow (landing along −Z). */
-export const ARRESTOR_CABLE_LOCAL_Z = [95, 83, 71, 59] as const;
 
 /** Max horizontal miss from cable for a catch (m). */
 export const ARRESTOR_CATCH_RADIUS_M = 2.0;
@@ -31,8 +36,12 @@ const ARRESTOR_MIN_SNAG_SPEED_MPS = 15;
 export const ARRESTOR_STOP_SPEED_MPS = 0.5;
 /** After a completed trap, drop the cable once groundspeed exceeds this (m/s). */
 export const ARRESTOR_RELEASE_SPEED_MPS = 3.0;
-/** Deck run-out from snag to full stop (m). */
-export const ARRESTOR_PULL_OUT_M = 140;
+/**
+ * Deck run-out from snag to full stop (m). On the angled deck it has to end
+ * before the axis runs off the port edge (station ~198 m): from the last wire
+ * that leaves about 20 m. About 3 g from 75 m/s.
+ */
+export const ARRESTOR_PULL_OUT_M = 95;
 /** Cap on arrest deceleration (m/s²); ~4 g. */
 const ARRESTOR_MAX_DECEL_MPS2 = 4.0 * 9.80665;
 
@@ -264,15 +273,17 @@ export interface ArrestorCableField {
     fixed?: boolean;
 }
 
-/** Four lateral cables in carrier-local space. */
+/** Four wires across the angled deck, square to its axis, in carrier-local space. */
 export function arrestorCableLocals(): ArrestorCableLocal[] {
-    const mid = ARRESTOR_DECK_MID_X;
     const hs = ARRESTOR_HALF_SPAN_M;
     const y = ARRESTOR_CABLE_Y;
-    return ARRESTOR_CABLE_LOCAL_Z.map(z => ({
-        ax: mid - hs, ay: y, az: z,
-        bx: mid + hs, by: y, bz: z,
-    }));
+    return ARRESTOR_WIRE_STATIONS_M.map(station => {
+        const c = angledDeckPoint(station);
+        return {
+            ax: c.x - ANGLED_DECK_RIGHT.x * hs, ay: y, az: c.z - ANGLED_DECK_RIGHT.z * hs,
+            bx: c.x + ANGLED_DECK_RIGHT.x * hs, by: y, bz: c.z + ANGLED_DECK_RIGHT.z * hs,
+        };
+    });
 }
 
 /** Build world segments from a carrier origin (optional yaw/orientation). */
@@ -280,7 +291,7 @@ export function buildArrestorCableField(
     originX: number,
     originY: number,
     originZ: number,
-    deckAxis: THREE.Vector3 = new THREE.Vector3(0, 0, -1),
+    deckAxis: THREE.Vector3 = ANGLED_DECK_AXIS.clone(),
     orientation?: THREE.Quaternion,
 ): ArrestorCableField {
     const locals = arrestorCableLocals();

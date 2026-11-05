@@ -18,14 +18,58 @@
  * aircraft the sim has no collider for.
  */
 import * as THREE from 'three';
-import { ARRESTOR_CABLE_LOCAL_Z, ARRESTOR_DECK_MID_X } from './arrestorCables';
+import { ANGLED_DECK_YAW_RAD, ARRESTOR_WIRE_STATIONS_M, angledDeckPoint } from './carrierDeckLayout';
 
-/** Stanchion pair centre, carrier-local X (the landing centreline). */
-export const BARRICADE_MID_X = ARRESTOR_DECK_MID_X;
-/** Half the distance between the stanchions (m); the wires' lane is ±18 m too. */
+/*
+ * Everything below is laid out in the BARRICADE FRAME: carrier-local axes as
+ * they were when the landing deck ran straight down the ship (landing along
+ * −Z, stanchions along X). The frame itself is the carrier's pose turned onto
+ * the 7° angled deck and moved to where the net is rigged there
+ * ({@link barricadeFrameInCarrier}), so the webbing, its deck map and the sim
+ * work unchanged in it.
+ */
+
+/** Stanchion pair centre, barricade-frame X (the landing centreline). */
+export const BARRICADE_MID_X = 4.75;
+/** Half the distance between the stanchions (m); the wires' lane is about as wide. */
 export const BARRICADE_HALF_SPAN_M = 18;
-/** Carrier-local Z of the webbing: rigged across wire 4, the forward-most wire, landing along −Z. */
-export const BARRICADE_LOCAL_Z = ARRESTOR_CABLE_LOCAL_Z[3];
+/** Barricade-frame Z of the webbing, landing along −Z. */
+export const BARRICADE_LOCAL_Z = 59;
+/** Angled-deck station the net is rigged at: across wire 4, the forward-most wire. */
+export const BARRICADE_STATION_M = ARRESTOR_WIRE_STATIONS_M[3];
+
+const _yaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), ANGLED_DECK_YAW_RAD);
+
+/**
+ * The barricade frame in carrier-local terms: a barricade-frame point p sits
+ * at `position + quaternion · p` on the ship.
+ */
+export function barricadeFrameInCarrier(): { position: THREE.Vector3; quaternion: THREE.Quaternion } {
+    const at = angledDeckPoint(BARRICADE_STATION_M);
+    const pivot = new THREE.Vector3(BARRICADE_MID_X, 0, BARRICADE_LOCAL_Z).applyQuaternion(_yaw);
+    return {
+        position: new THREE.Vector3(at.x - pivot.x, 0, at.z - pivot.z),
+        quaternion: _yaw.clone(),
+    };
+}
+
+const _frame = barricadeFrameInCarrier();
+
+/** World pose of the barricade frame from the carrier's world pose. */
+export function barricadeFrameWorld(
+    carrierPosition: { x: number; y: number; z: number },
+    carrierQuaternion: THREE.Quaternion | undefined,
+    outPosition: THREE.Vector3,
+    outQuaternion: THREE.Quaternion,
+): void {
+    outQuaternion.copy(carrierQuaternion ?? _identity);
+    outPosition.copy(_frame.position).applyQuaternion(outQuaternion)
+        .add(carrierPosition as THREE.Vector3);
+    outQuaternion.multiply(_frame.quaternion);
+}
+
+const _identity = new THREE.Quaternion();
+
 /** Deck height under the barricade, carrier-local Y (as under the wires). */
 export const BARRICADE_DECK_Y = 13.55;
 /** Stanchion and upper-strap height above the deck (20 ft). */

@@ -73,6 +73,12 @@ export class SimPlayerInput {
 
     private pitch = 0;
     private pitchStickUnits = 0;
+    /** See setPitchTrim; zeroed on touchdown. */
+    private pitchTrim = 0;
+    /** Seen airborne since the trim was set: only then is ground contact a touchdown. */
+    private trimAirborne = false;
+    /** See setPitchTrim. */
+    private idleOnTouchdown = false;
     private roll = 0;
     private yaw = 0;
     private throttle = 0;
@@ -82,7 +88,7 @@ export class SimPlayerInput {
     private firing = false;
     private forceVectorsRequested = false;
 
-    private inputEnabled = true;
+    private inputEnabledFlag = true;
 
     /** Gamepad axes, or NaN when disconnected. */
     private gamepadPitch = NaN;
@@ -106,8 +112,26 @@ export class SimPlayerInput {
         this.setPitchDeflection(0);
     }
 
+    /**
+     * Aft stick held on top of the pilot's until the wheels next touch, so a
+     * spawn on a final holds its glide path hands off (the FCS has no auto
+     * trim: neutral stick is a neutral stabilator, and the nose falls).
+     * `idleOnTouchdown`: the spawn's approach power comes off then too, so a
+     * hands-off arrival is not still driving into the barricade.
+     */
+    setPitchTrim(trim: number, idleOnTouchdown = false): void {
+        this.pitchTrim = clamp(trim, -1, 1);
+        this.trimAirborne = false;
+        this.idleOnTouchdown = idleOnTouchdown;
+    }
+
+    /** Not paused (the spawn's streaming hold, the menu). */
+    get inputEnabled(): boolean {
+        return this.inputEnabledFlag;
+    }
+
     setInputEnabled(enabled: boolean): void {
-        this.inputEnabled = enabled;
+        this.inputEnabledFlag = enabled;
         if (!enabled) {
             this.clearSticks();
         }
@@ -161,7 +185,7 @@ export class SimPlayerInput {
         }
         this.keysDown.add(key);
 
-        if (!this.inputEnabled) {
+        if (!this.inputEnabledFlag) {
             return;
         }
         // The one key the autopilot leaves live is its own: with every key
@@ -193,7 +217,7 @@ export class SimPlayerInput {
     keyUp(key: string, sink: SimPlayerInputSink): void {
         this.keysDown.delete(key);
 
-        if (!this.inputEnabled || sink.control === 'ai') {
+        if (!this.inputEnabledFlag || sink.control === 'ai') {
             return;
         }
         if (sink.health <= 0 || sink.isCrashed()) {
@@ -218,7 +242,7 @@ export class SimPlayerInput {
         if (sink.health <= 0 || sink.isCrashed()) {
             return this.neutralInputs(false, sink);
         }
-        if (!this.inputEnabled || sink.control === 'ai') {
+        if (!this.inputEnabledFlag || sink.control === 'ai') {
             return this.neutralInputs(false, sink);
         }
 
@@ -243,8 +267,21 @@ export class SimPlayerInput {
             this.tickKeyboardSticks(delta, sink);
         }
 
+        if (this.pitchTrim !== 0 || this.idleOnTouchdown) {
+            // The spawn's reset arrives before its airborne state, so ground
+            // contact counts only once the jet has been seen in the air.
+            if (!(sink.isLanded() || sink.isOnGround())) {
+                this.trimAirborne = true;
+            } else if (this.trimAirborne) {
+                this.pitchTrim = 0;
+                if (this.idleOnTouchdown) {
+                    this.idleOnTouchdown = false;
+                    this.throttle = 0;
+                }
+            }
+        }
         return {
-            pitch: this.pitch,
+            pitch: clamp(this.pitch + this.pitchTrim, -1, 1),
             roll: this.roll,
             yaw: this.yaw,
             throttle: this.throttle,

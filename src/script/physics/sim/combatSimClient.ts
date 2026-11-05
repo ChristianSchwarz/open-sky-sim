@@ -52,6 +52,17 @@ export interface SimAircraftProxy {
  * double-buffer so pose can be applied every tick without waiting for a starved
  * worker `onmessage`.
  */
+/**
+ * The sim time a frame of `delta` (s) is worth. After tab resume / long
+ * stalls, clamp so one huge frame cannot enqueue a multi-hundred-ms step (and
+ * never console.warn here — DevTools makes that a hitch loop). Anything that
+ * moves alongside the sim (the carrier) must use the same, or below 10 fps it
+ * runs away from the aircraft.
+ */
+export function simStepFor(delta: number): number {
+    return delta > 0.1 ? 0.05 : delta;
+}
+
 export class CombatSimClient {
 
     private readonly worker: Worker;
@@ -420,6 +431,10 @@ export class CombatSimClient {
         this.post({ type: 'inputBlur', id });
     }
 
+    setPitchTrim(id: string, trim: number, idleOnTouchdown: boolean, flaps?: boolean): void {
+        this.post({ type: 'setPitchTrim', id, trim, idleOnTouchdown, flaps });
+    }
+
     setInputEnabled(id: string, enabled: boolean): void {
         this.post({ type: 'setInputEnabled', id, enabled });
     }
@@ -430,11 +445,7 @@ export class CombatSimClient {
 
     /** Pump one frame of accumulated time into the worker. Called once per frame. */
     tick(delta: number): void {
-        // After tab resume / long stalls, clamp so one huge frame cannot enqueue a
-        // multi-hundred-ms step (and never console.warn here — DevTools makes that a hitch loop).
-        if (delta > 0.1) {
-            delta = 0.05;
-        }
+        delta = simStepFor(delta);
         // Pull pose from SAB before flush so a delayed onmessage cannot freeze the aircraft.
         this.pullSharedPose();
         this.syncBusyFromShared();

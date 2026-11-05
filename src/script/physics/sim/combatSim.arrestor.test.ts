@@ -5,12 +5,11 @@ import { Faction } from '../../weapons/combatant';
 import { FcsPitchLimiter } from '../fm2/fcs';
 import { defaultFm2Config, fm2GroundRestHeight } from '../fm2/fm2AircraftConfig';
 import {
-    ARRESTOR_CABLE_LOCAL_Z,
     ARRESTOR_CABLE_Y,
     ARRESTOR_CARRIER_ORIGIN,
-    ARRESTOR_DECK_MID_X,
     DEFAULT_ARRESTOR_HOOK_BODY,
 } from '../../scene/entities/arrestorCables';
+import { ANGLED_DECK_AXIS, ARRESTOR_WIRE_STATIONS_M, angledDeckPoint } from '../../scene/entities/carrierDeckLayout';
 import { CarrierMeshCollider } from '../../scene/entities/carrierDeck';
 import { CombatSim } from './combatSim';
 import { defaultArrestorCableField, serializeWorld } from './serializedWorld';
@@ -56,23 +55,23 @@ describe('CombatSim arrestor trap', () => {
             halfWidth: 20,
         }], [], [], [field]));
 
-        const cableZ = origin.z + ARRESTOR_CABLE_LOCAL_Z[0];
+        // Down the angled deck, the hook 0.8 m short of wire 1's middle.
+        const wire = angledDeckPoint(ARRESTOR_WIRE_STATIONS_M[0] - 0.8);
         const hookY = origin.y + ARRESTOR_CABLE_Y;
-        const midX = origin.x + ARRESTOR_DECK_MID_X;
-        const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
-        const vel = new THREE.Vector3(0, 0, -55);
+        const heading = Math.atan2(ANGLED_DECK_AXIS.x, ANGLED_DECK_AXIS.z);
+        const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), heading);
+        const vel = ANGLED_DECK_AXIS.clone().multiplyScalar(55);
 
-        // heading π: body hook maps to world offset applied below.
+        // Body hook maps to world offset applied below.
         const hookBodyWorld = new THREE.Vector3(
             DEFAULT_ARRESTOR_HOOK_BODY[0],
             DEFAULT_ARRESTOR_HOOK_BODY[1],
             DEFAULT_ARRESTOR_HOOK_BODY[2],
         ).applyQuaternion(quat);
-        const startHookZ = cableZ + 0.8;
         const cg = new THREE.Vector3(
-            midX - hookBodyWorld.x,
+            origin.x + wire.x - hookBodyWorld.x,
             hookY - hookBodyWorld.y,
-            startHookZ - hookBodyWorld.z,
+            origin.z + wire.z - hookBodyWorld.z,
         );
 
         sim.addAircraft({
@@ -124,7 +123,7 @@ describe('CombatSim arrestor trap', () => {
                 }>;
             }).aircraft.get('trap-test')!;
             if (snap.arrestorLatch >= 0) latched = true;
-            const along = -snap.model.velocityVector.z;
+            const along = snap.model.velocityVector.dot(ANGLED_DECK_AXIS);
             if (latched && along < 1 && snap.model.isLanded()) {
                 stopped = true;
                 assert.equal(snap.arrestorLatch >= 0, true, 'cable should stay latched while stopped');

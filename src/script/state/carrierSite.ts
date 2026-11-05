@@ -19,7 +19,7 @@ const BOW_CLEAR_M = 1500;
 /**
  * How far ahead of the bow open water is required before a berth counts as
  * sea: the ship steams along its heading, so a berth with a coast a few
- * kilometres ahead is a ship about to run aground (45 km/h is 13 minutes).
+ * kilometres ahead is a ship about to run aground (40 km/h is about 13 minutes).
  */
 const SEA_RUN_M = 9000;
 /** How far astern the final approach is kept clear (m). */

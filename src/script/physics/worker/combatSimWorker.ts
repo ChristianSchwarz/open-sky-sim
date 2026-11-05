@@ -165,6 +165,9 @@ function handleMessage(data: SimToWorkerMessage): void {
         case 'setInputEnabled':
             sim.setInputEnabled(data.id, data.enabled);
             break;
+        case 'setPitchTrim':
+            sim.setPitchTrim(data.id, data.trim, data.idleOnTouchdown, data.flaps);
+            break;
         case 'setForceVectorsRequested':
             sim.setForceVectorsRequested(data.id, data.want);
             break;

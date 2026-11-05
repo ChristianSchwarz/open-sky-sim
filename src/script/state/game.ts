@@ -62,15 +62,19 @@ import { setCoverUnderlay, setLeafCoverFromM } from '../terrain/coverTextures';
 import { setBuildingsAtOnce } from '../terrain/buildingMeshes';
 import { ArrestorCablesEntity } from '../scene/entities/arrestorCablesEntity';
 import { BarricadeEntity, BarricadeRigPhase } from '../scene/entities/barricadeEntity';
+import { CarrierDeckEntity } from '../scene/entities/carrierDeckEntity';
 import type { AirframeCollider } from '../physics/barricade/webBarricade';
 import { WebDeck } from '../physics/barricade/webDeck';
-import { BarricadeEngagement, BARRICADE_DECK_Y } from '../scene/entities/barricadeSpec';
+import { BarricadeEngagement, BARRICADE_DECK_Y, barricadeFrameWorld } from '../scene/entities/barricadeSpec';
+import {
+    ANGLED_DECK_AXIS, CARRIER_GLIDESLOPE_TAN, HOOK_TOUCHDOWN_STATION_M, KUZ_DECK_Y, TAKEOFF_POSITIONS, angledDeckPoint, headingAlong,
+} from '../scene/entities/carrierDeckLayout';
 import { ARRESTOR_CARRIER_ORIGIN, ArrestorCarrierPose } from '../scene/entities/arrestorCables';
 import { ShipWakeEntity } from '../scene/entities/shipWake';
 import {
     CockpitEntity, CockpitMFD2X, CockpitMFD2Y, CockpitMFDSize,
 } from '../scene/entities/overlay/cockpit';
-import { ILS_GLIDESLOPE_TAN } from '../scene/entities/overlay/approachAids';
+import { CARRIER_CG_ABOVE_HOOK_M, ILS_GLIDESLOPE_TAN } from '../scene/entities/overlay/approachAids';
 import { ExteriorDataEntity } from '../scene/entities/overlay/exteriorData';
 import { HUDEntity } from '../scene/entities/overlay/hud';
 import { PerfHudEntity } from '../scene/entities/overlay/perfHud';
@@ -138,7 +142,7 @@ import { mountMissionPanel } from '../ui/mission/missionLauncher';
 import { WeaponsField } from '../scene/entities/weaponsField';
 import { advanceFxClock } from '../scene/fxClock';
 import { Faction } from '../weapons/combatant';
-import { CombatSimClient } from '../physics/sim/combatSimClient';
+import { CombatSimClient, simStepFor } from '../physics/sim/combatSimClient';
 import { SimProxyFlightModel } from '../physics/model/simProxyFlightModel';
 import { SerializedWorld, serializeStaticColliders, serializeWorld, defaultArrestorCableField, serializeArrestorCables } from '../physics/sim/serializedWorld';
 import { LandArrestorWire, landArrestorFields, landArrestorWiresOf, landWireById } from '../scene/entities/landArrestorWires';
@@ -383,8 +387,6 @@ const TOWER_CARRIER_OFFSET_M = 80;
 const TOWER_CARRIER_HEIGHT_M = CARRIER_DECK_Y + 30;
 /** Final approach distance to the carrier stern threshold (m). */
 const CARRIER_APPROACH_FINAL_DISTANCE_M = 3500;
-/** Carrier final altitude (m); ~3° glide to the deck over {@link CARRIER_APPROACH_FINAL_DISTANCE_M}. */
-const CARRIER_APPROACH_ALTITUDE_M = CARRIER_DECK_Y + 183;
 const PLAYER_STARTING_HEADING = 0;
 /** Land approach final distance — keep the airport in view at spawn. */
 const LAND_APPROACH_FINAL_M = 4500;
@@ -434,48 +436,58 @@ const LOCATION_SPAWN_AGL_M = 600;
 /** North: scene headings face +Z at 0, and north is scene -Z. */
 const LOCATION_SPAWN_HEADING = Math.PI;
 
-/** Kuznetsov cruise speed (45 km/h → m/s), bow heading world −Z at identity. */
-const CARRIER_SPEED_KMH = 45;
+/** Kuznetsov cruise speed (40 km/h → m/s), bow heading world −Z at identity. */
+const CARRIER_SPEED_KMH = 40;
 const CARRIER_SPEED_MPS = CARRIER_SPEED_KMH / 3.6;
 
-/** Carrier landing: final toward the ski-jump bow along -Z. */
-const PLAYER_CARRIER_HEADING = Math.PI;
+/** Carrier landing: final down the angled deck, 7° to port of the bow (the ship standing still; see carrierFinalVelocity). */
+const PLAYER_CARRIER_HEADING = headingAlong(ANGLED_DECK_AXIS.x, ANGLED_DECK_AXIS.z);
 /** Within this of the ship (m), with the barricade going up or standing, the player's drawn airframe goes to the sim for the webbing. */
 const BARRICADE_AIRFRAME_BAKE_M = 3000;
 
 /**
- * Barricade spawn: in the groove, {@link CARRIER_GROOVE_DISTANCE_M} astern of
- * the ramp, hook stowed and the net already across the deck. Under two seconds
- * of flying, which is the whole point — a hook-failure arrival, with none of
- * the 2.5 km pattern in front of it.
+ * Barricade spawn: a short final, {@link CARRIER_GROOVE_DISTANCE_M} astern of
+ * the ramp on the angled-deck line and the glide path, hook stowed and the
+ * net already across the deck: a few seconds to line up and fly the ball
+ * into the webbing. Trimmed (below), so hands off it still gets there.
  */
-const CARRIER_GROOVE_DISTANCE_M = 20;
+const CARRIER_GROOVE_DISTANCE_M = 300;
+/** The barricade arrival starts this far nose up (deg). */
+const CARRIER_GROOVE_PITCH_DEG = 5;
+/** How a flight model's barricade arrival is set up, so that hands off it flies the 4° path into the net. */
+interface CarrierGrooveSetup {
+    /** Airspeed (km/h) on the final. */
+    speedKmh: number;
+    throttle: number;
+    /** Stick held until the wheels touch (FlightModel.setPitchTrim). */
+    pitchTrim: number;
+    flaps: boolean;
+}
 /**
- * On-speed, not the 400 km/h the other airborne spawns transit at: from here
- * there is no room to slow down, and the flight model wrecks any touchdown
- * above its landing envelope (90 m/s / 324 km/h — see
- * `F16_PROFILE.landingMaxSpeedMps`).
- */
-const CARRIER_GROOVE_SPEED_KMH = 250;
-const CARRIER_GROOVE_SPEED_MPS = CARRIER_GROOVE_SPEED_KMH / 3.6;
-/**
- * Spawn height: level, the wheels 3.5 m over the deck (the CG rides ~2.05 m
- * above it on the gear), which clears the ramp and then lets the jet settle.
+ * Per flight model: the same airframe flies differently on each, and the net
+ * (the rigid-body webbing) stops a jet within the deck only up to about
+ * 290 km/h relative to it. Found hands-off in the sim against that webbing,
+ * a still and a steaming ship and three airframes (combatSim.carrier.test.ts).
  *
- * Hands off, the FCS lets the nose fall to near zero AoA, which at approach
- * speed holds up only about half the weight: the jet sinks away from where it
- * points at ~5 m/s², and the sink keeps growing until it meets the deck. So it
- * must meet it early. A 3° path aimed at the webbing met the deck ~30 m short
- * at 8.2 m/s, past the gear's 8 m/s limit; aimed higher it only met it later
- * and harder (9–10 m/s, before or just after the net). From this height the
- * wheels touch ~1 s in, ~70 m short of the net, at ~6 m/s, and roll into it.
+ * FM2: its FCS holds a neutral stick at ~0 AoA and needs 0.72 of aft stick;
+ * at 250 km/h even full aft stick could not hold the path, so 290 km/h.
+ * FM3: on FM2's set-up it zoomed to 370 m; clean it reached ~350 km/h and ran
+ * through the net off the end of the deck. Slower, flaps down and a little
+ * forward stick it holds the path and the net stops it short of the edge.
+ * The window is narrow - ~0.05 of trim either side and it floats or sinks.
  */
-const CARRIER_GROOVE_ALTITUDE_M = BARRICADE_DECK_Y + 2.05 + 3.5;
+const CARRIER_GROOVE_SETUP: Partial<Record<SimFlightModelKind, CarrierGrooveSetup>> & { fm2: CarrierGrooveSetup } = {
+    fm2: { speedKmh: 290, throttle: 0.5, pitchTrim: 0.72, flaps: true },
+    fm3: { speedKmh: 260, throttle: 0.4, pitchTrim: -0.125, flaps: true },
+};
 
-/** On-deck takeoff: 120 m aft of the bow tip, facing the ski jump (-Z). */
-const CARRIER_TAKEOFF_FROM_BOW_M = 120;
-const PLAYER_CARRIER_TAKEOFF_HEADING = Math.PI;
-const PLAYER_CARRIER_TAKEOFF_LOCAL_Z = KUZ_HULL.minZ + CARRIER_TAKEOFF_FROM_BOW_M;
+/** On-deck takeoff: take-off position 1 (port, ~116 m from the lip), facing up its lane. */
+const CARRIER_TAKEOFF_POSITION = TAKEOFF_POSITIONS[0];
+const PLAYER_CARRIER_TAKEOFF_HEADING = headingAlong(
+    CARRIER_TAKEOFF_POSITION.lane[1].x - CARRIER_TAKEOFF_POSITION.start.x,
+    CARRIER_TAKEOFF_POSITION.lane[1].z - CARRIER_TAKEOFF_POSITION.start.z);
+const PLAYER_CARRIER_TAKEOFF_LOCAL_X = CARRIER_TAKEOFF_POSITION.start.x;
+const PLAYER_CARRIER_TAKEOFF_LOCAL_Z = CARRIER_TAKEOFF_POSITION.start.z;
 
 enum PlayerViewState {
     CRASHED,
@@ -1675,7 +1687,7 @@ export class Game {
         if (spawn === 'carrierTakeoff') {
             const pose = this.carrierPose();
             return {
-                x: pose.position.x + KUZ_DECK_MID_X,
+                x: pose.position.x + PLAYER_CARRIER_TAKEOFF_LOCAL_X,
                 z: pose.position.z + PLAYER_CARRIER_TAKEOFF_LOCAL_Z,
             };
         }
@@ -2143,55 +2155,85 @@ export class Game {
             ? fm2GroundRestHeight(this.currentDef.flight)
             : PLANE_DISTANCE_TO_GROUND;
         const pose = this.carrierPose();
-        const x = pose.position.x + KUZ_DECK_MID_X;
+        const x = pose.position.x + PLAYER_CARRIER_TAKEOFF_LOCAL_X;
         const z = pose.position.z + PLAYER_CARRIER_TAKEOFF_LOCAL_Z;
         return new THREE.Vector3(x, this.groundHeightAt(x, z) + gearY, z);
     }
 
+    /**
+     * On the angled-deck line `astern` m behind the ramp, the CG exactly on
+     * the glide path the HUD and the Luna fly (so the ball starts centred).
+     */
+    private carrierGlidePathSpawnPosition(astern: number): THREE.Vector3 {
+        const pose = this.carrierPose();
+        const at = angledDeckPoint(-astern);
+        const height = KUZ_DECK_Y + CARRIER_CG_ABOVE_HOOK_M
+            + (astern + HOOK_TOUCHDOWN_STATION_M) * CARRIER_GLIDESLOPE_TAN;
+        return new THREE.Vector3(at.x, height, at.z)
+            .applyQuaternion(pose.quaternion ?? KUZ_IDENTITY_QUAT)
+            .add(pose.position as THREE.Vector3);
+    }
+
     /** Final approach spawn relative to the live carrier stern. */
     private carrierApproachSpawnPosition(): THREE.Vector3 {
-        const pose = this.carrierPose();
-        return new THREE.Vector3(
-            pose.position.x + KUZ_DECK_MID_X,
-            pose.position.y + CARRIER_APPROACH_ALTITUDE_M,
-            pose.position.z + KUZ_HULL.maxZ + CARRIER_APPROACH_FINAL_DISTANCE_M,
-        );
+        return this.carrierGlidePathSpawnPosition(CARRIER_APPROACH_FINAL_DISTANCE_M);
     }
 
     /**
-     * Short-final spawn: on the glideslope and centreline, a few seconds astern
+     * Short-final spawn: on the glide path down the angled deck, 300 m astern
      * of the ramp. Stern Z is taken from the live pose, so it tracks the ship.
      */
     private carrierBarricadeSpawnPosition(): THREE.Vector3 {
-        const pose = this.carrierPose();
-        return new THREE.Vector3(
-            pose.position.x + KUZ_DECK_MID_X,
-            pose.position.y + CARRIER_GROOVE_ALTITUDE_M,
-            pose.position.z + KUZ_HULL.maxZ + CARRIER_GROOVE_DISTANCE_M,
-        );
+        return this.carrierGlidePathSpawnPosition(CARRIER_GROOVE_DISTANCE_M);
     }
 
     /**
-     * Short final: on speed, level, over the ramp.
-     *
-     * The 2.5 km spawn starts fast and lets the pilot fly the ball down. From
-     * a second out there is no time for that, and hands off the jet sinks on
-     * its own ({@link CARRIER_GROOVE_ALTITUDE_M}), so it starts level and low
-     * and settles onto the deck before the sink builds, then rolls into the net.
+     * World velocity for a final at `airspeed` (the air is still, so that is
+     * the world speed) whose track over the moving deck runs straight down the
+     * angled centreline: flown on the angled heading through the air, the ship
+     * steaming out from under it would leave the jet ~1.5° to port, 6-8 m off
+     * the centreline by the ramp. The ship's velocity comes from its heading
+     * and set speed, not the per-frame value, which is still zero before the
+     * first frame after boot.
      */
-    private carrierBarricadeSpawn(): PlayerSpawnState {
-        const speed = this.carrierSpeedMps + CARRIER_GROOVE_SPEED_MPS;
-        const velocity = FORWARD.clone()
-            .applyAxisAngle(UP, PLAYER_CARRIER_HEADING)
-            .multiplyScalar(speed);
-        return { velocity, throttle: 0.3, airborne: true };
+    private carrierFinalVelocity(airspeed: number): THREE.Vector3 {
+        const q = this.kuz?.quaternion ?? KUZ_IDENTITY_QUAT;
+        const axis = new THREE.Vector3().copy(ANGLED_DECK_AXIS as THREE.Vector3).applyQuaternion(q);
+        const ship = new THREE.Vector3(0, 0, -1).applyQuaternion(q).multiplyScalar(this.carrierSpeedMps);
+        // |k·axis + ship| = airspeed, k > 0: the closing speed down the deck.
+        const b = axis.dot(ship);
+        const k = -b + Math.sqrt(Math.max(0, b * b - ship.lengthSq() + airspeed * airspeed));
+        return axis.multiplyScalar(k).add(ship);
     }
 
-    /** Approach airspeed in world frame (ship speed + relative groove speed). */
-    private carrierApproachSpawn(): PlayerSpawnState {
-        const speed = this.carrierSpeedMps + APPROACH_SPEED_MPS;
+    /** Heading (rad) the nose points on a carrier final at `airspeed`: along its velocity. */
+    private carrierFinalHeading(airspeed: number): number {
+        const v = this.carrierFinalVelocity(airspeed);
+        return headingAlong(v.x, v.z);
+    }
+
+    /** Short final: on speed, descending down the glide path, trimmed for it. */
+    private carrierBarricadeSpawn(): PlayerSpawnState {
+        const setup = this.carrierGrooveSetup();
+        const speed = setup.speedKmh / 3.6;
+        const velocity = this.carrierFinalVelocity(speed);
+        velocity.y = -speed * CARRIER_GLIDESLOPE_TAN;
         return {
-            velocity: FORWARD.clone().applyAxisAngle(UP, PLAYER_CARRIER_HEADING).multiplyScalar(speed),
+            velocity, throttle: setup.throttle, airborne: true,
+            pitchDeg: CARRIER_GROOVE_PITCH_DEG, idleOnTouchdown: true,
+            pitchTrim: setup.pitchTrim, flaps: setup.flaps,
+        };
+    }
+
+    /** The barricade arrival's set-up for the flight model flying it. */
+    private carrierGrooveSetup(): CarrierGrooveSetup {
+        return CARRIER_GROOVE_SETUP[this.playerSimModelKind()] ?? CARRIER_GROOVE_SETUP.fm2;
+    }
+
+    /** Approach: the ship's speed plus the groove speed, tracking down the angled deck. */
+    private carrierApproachSpawn(): PlayerSpawnState {
+        return {
+            velocity: this.carrierFinalVelocity(this.carrierSpeedMps + APPROACH_SPEED_MPS),
             throttle: 0.38,
             airborne: true,
         };
@@ -2662,6 +2704,14 @@ export class Game {
     /** Steam the Kuznetsov at {@link CARRIER_SPEED_MPS} along its bow (−Z at identity). */
     private advanceCarrier(delta: number): void {
         if (!this.kuz) return;
+        // The ship holds still while the flight does (the spawn's streaming
+        // hold and countdown, the menu, a pause): steaming on under a frozen
+        // jet left the barricade arrival hundreds of metres further astern
+        // than spawned, and off its glide path, by the time it was let go.
+        if (!this.player.controlsEnabled) return;
+        // On the sim's clock: below 10 fps a frame is worth less sim time
+        // than wall time, and the ship ran ahead of the jets on it.
+        delta = simStepFor(delta);
         if (this.carrierSpeedMps > 0 && this.landAheadOfCarrier()) {
             // Land across the bow: drop anchor rather than steam into it.
             this.carrierSpeedMps = 0;
@@ -2671,6 +2721,18 @@ export class Game {
         this.kuz.position.addScaledVector(this.carrierVelocity, delta);
         this.seatCarrierOnSea();
     }
+
+    /**
+     * The barricade's frame: the carrier's pose turned onto the angled deck
+     * and moved to where the net is rigged (see barricadeSpec.ts).
+     */
+    private barricadePose(): { position: THREE.Vector3; quaternion: THREE.Quaternion; velocity: THREE.Vector3 } {
+        const ship = this.carrierPose();
+        barricadeFrameWorld(ship.position, ship.quaternion, this.barricadePosition, this.barricadeQuaternion);
+        return { position: this.barricadePosition, quaternion: this.barricadeQuaternion, velocity: this.carrierVelocity };
+    }
+    private readonly barricadePosition = new THREE.Vector3();
+    private readonly barricadeQuaternion = new THREE.Quaternion();
 
     /** Carrier pose for arrestor visuals / latched hook (always live). */
     private carrierPose(): ArrestorCarrierPose {
@@ -2758,8 +2820,7 @@ export class Game {
         this.barricadeSentArmed = armed;
         this.barricadeSentGeneration = rig.generation;
         this.barricadeSentWebbing = webbing;
-        const p = this.kuz.position;
-        const q = this.kuz.quaternion;
+        const { position: p, quaternion: q } = this.barricadePose();
         this.combatSim.setBarricades([{
             originX: p.x, originY: p.y, originZ: p.z,
             quaternion: [q.x, q.y, q.z, q.w],
@@ -2854,7 +2915,10 @@ export class Game {
         }
         const deck = this.barricadeDeck ??= new WebDeck(
             (x, z) => sampleCarrierMeshSurfaceYMax(x, z, this.carrierMeshes),
-            () => ({ origin: kuz.position, quaternion: kuz.quaternion }));
+            () => {
+                const pose = this.barricadePose();
+                return { origin: pose.position, quaternion: pose.quaternion };
+            });
         const t0 = performance.now();
         while (performance.now() - t0 < 0.5 && !deck.fill(4)) { /* more */ }
         return deck;
@@ -4953,13 +5017,13 @@ export class Game {
             } else if (spawn === 'carrier') {
                 this.player.reset(
                     this.carrierApproachSpawnPosition(),
-                    PLAYER_CARRIER_HEADING,
+                    this.carrierFinalHeading(this.carrierSpeedMps + APPROACH_SPEED_MPS),
                     this.carrierApproachSpawn(),
                 );
             } else if (spawn === 'carrierBarricade') {
                 this.player.reset(
                     this.carrierBarricadeSpawnPosition(),
-                    PLAYER_CARRIER_HEADING,
+                    this.carrierFinalHeading(this.carrierGrooveSetup().speedKmh / 3.6),
                     this.carrierBarricadeSpawn(),
                 );
             } else if (spawn === 'carrierTakeoff') {
@@ -6553,6 +6617,10 @@ export class Game {
             carrierUpdater.setCarrier(kuz);
         }
         scene.add(kuz);
+        // Deck paint, lights and the Luna landing sight, laid on the hull's own deck.
+        if (kuzCollision) {
+            scene.add(new CarrierDeckEntity(this.materials, () => this.carrierPose(), kuzCollision.triangles));
+        }
 
         const arrestorCables = new ArrestorCablesEntity(
             this.materials,
@@ -6567,7 +6635,7 @@ export class Game {
 
         const barricade = new BarricadeEntity(
             this.materials,
-            () => this.carrierPose(),
+            () => this.barricadePose(),
             () => {
                 const w = this.combatSim.getBarricadeWeb();
                 // With the player where it is drawn, for the webbing to go with it (BarricadeEntity.webToDrawn).
@@ -6599,8 +6667,8 @@ export class Game {
         (globalThis as Record<string, unknown>).__barricadeDeckGap = () => {
             const w = this.combatSim.getBarricadeWeb();
             if (!w) return undefined;
-            const pose = this.carrierPose();
-            const cq = pose.quaternion ?? new THREE.Quaternion();
+            const pose = this.barricadePose();
+            const cq = pose.quaternion;
             const p = new THREE.Vector3();
             const gaps = (pos: ArrayLike<number>) => {
                 let worst = Infinity, at = -1, deck = NaN, local: number[] = [];

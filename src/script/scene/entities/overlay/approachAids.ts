@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { AIRBASE_RUNWAY, RUNWAY_HALF_LENGTH_M } from '../../../defs';
 import { WeaponsTarget } from '../weaponsTarget';
 import { ARRESTOR_CARRIER_ORIGIN } from '../arrestorCables';
+import { CARRIER_GLIDESLOPE_DEG, CARRIER_GLIDESLOPE_TAN, HOOK_TOUCHDOWN_STATION_M, KUZ_DECK_Y, angledDeckCoords } from '../carrierDeckLayout';
 
 /** Visual / ILS glideslope angle (degrees). */
 export const ILS_GLIDESLOPE_DEG = 3.0;
@@ -24,8 +25,9 @@ export const CARRIER_AOA_ON_SPEED_MAX_DEG = 8.5;
 
 /** Nominal carrier approach speed (KIAS); mid of the 130–145 band. */
 export const CARRIER_APPROACH_SPEED_KIAS = 137;
-/** Nominal approach sink rate down the groove (ft/min). */
-const CARRIER_APPROACH_SINK_FPM = 700;
+/** Nominal approach sink rate down the groove (ft/min): the target speed down the carrier's glide path. */
+const CARRIER_APPROACH_SINK_FPM = Math.round(
+    (CARRIER_APPROACH_SPEED_KIAS * 0.514444 * Math.tan((CARRIER_GLIDESLOPE_DEG * Math.PI) / 180)) / 0.00508);
 
 const KIAS_TO_MPS = 0.514444;
 const FPM_TO_MPS = 0.00508;
@@ -40,12 +42,35 @@ const LOC_FULL_SCALE_M = 90;
 /** Full-scale glideslope deflection ≈ this altitude miss (m). */
 const GS_FULL_SCALE_M = 40;
 
-/** Kuznetsov hull extents in carrier-local space (matches game.ts). */
-const KUZ_HULL = { minX: -34.33, maxX: 43.83, minZ: -177.88, maxZ: 124.28 };
-const KUZ_DECK_MID_X = (KUZ_HULL.minX + KUZ_HULL.maxX) * 0.5;
-/** Touchdown aiming point near the stern threshold. */
-const KUZ_TOUCHDOWN_LOCAL_Z = KUZ_HULL.maxZ - 30;
-const KUZ_DECK_Y = 13.55;
+/**
+ * How far above the hook the CG flies down the groove (m): the hook hangs
+ * about 1 m under the CG on the deck and some 7 m aft, which the approach
+ * attitude drops another metre or so.
+ */
+export const CARRIER_CG_ABOVE_HOOK_M = 2.3;
+/** How far above the hook the pilot's eye is in the groove (m); the Luna's ball is flown with it. */
+export const CARRIER_EYE_ABOVE_HOOK_M = 3.6;
+
+/**
+ * Where a point is against the carrier's glide path down the angled deck,
+ * in carrier-local metres (the ship unturned). `aboveHookM` says what the
+ * point is (CG, eye): the path is the hook's, aimed between wires 2 and 3,
+ * lifted by it.
+ *
+ * Returns the distance short of the aim point along the axis, the offset to
+ * starboard of the axis, and the height above the path (m), plus the angle
+ * the point sits at above the aim point (deg).
+ */
+export function carrierGlidePathLocal(
+    x: number, y: number, z: number, aboveHookM: number,
+): { short: number; offset: number; above: number; angleDeg: number } {
+    const { station, offset } = angledDeckCoords(x, z);
+    const short = HOOK_TOUCHDOWN_STATION_M - station;
+    const height = y - (KUZ_DECK_Y + aboveHookM);
+    const above = height - Math.max(0, short) * CARRIER_GLIDESLOPE_TAN;
+    const angleDeg = (Math.atan2(height, Math.max(short, 1e-3)) * 180) / Math.PI;
+    return { short, offset, above, angleDeg };
+}
 
 export type AoaIndexerCue = 'slow' | 'onSpeed' | 'fast';
 
@@ -154,17 +179,13 @@ function carrierIls(
     position: THREE.Vector3,
     origin: { x: number; y: number; z: number },
 ): IlsDeviation {
-    // Approach along −Z (heading π); touchdown near stern.
-    const centerX = origin.x + KUZ_DECK_MID_X;
-    const touchZ = origin.z + KUZ_TOUCHDOWN_LOCAL_Z;
-    const distToTouch = Math.max(0, position.z - touchZ);
-    const desiredAlt = origin.y + KUZ_DECK_Y + distToTouch * ILS_GLIDESLOPE_TAN;
-    // Facing −Z: world +X is left of aircraft → invert lateral sense.
-    const lateral = position.x - centerX;
-    const altErr = position.y - desiredAlt;
+    // Down the angled deck (7° to port of the bow), aimed between wires 2 and 3.
+    const g = carrierGlidePathLocal(
+        position.x - origin.x, position.y - origin.y, position.z - origin.z, CARRIER_CG_ABOVE_HOOK_M);
+    // Same sense as airbaseIls flown at heading π (which is what this was before the angled deck).
     return {
-        localizer: clamp1(lateral / LOC_FULL_SCALE_M),
-        glideslope: clamp1(-altErr / GS_FULL_SCALE_M),
+        localizer: clamp1(g.offset / LOC_FULL_SCALE_M),
+        glideslope: clamp1(-g.above / GS_FULL_SCALE_M),
     };
 }
 

@@ -16,7 +16,8 @@ import { SceneMaterialManager, SceneMaterialPrimitiveType } from '../materials/m
 import { updateUniforms } from '../utils';
 import { Entity } from '../entity';
 import { Scene, SceneLayers } from '../scene';
-import { ARRESTOR_DECK_MID_X, ArrestorCarrierPose } from './arrestorCables';
+import { ArrestorCarrierPose } from './arrestorCables';
+import { KUZ_CENTRELINE_X } from './carrierDeckLayout';
 import { SternWakeRibbon } from './sternWake';
 import { seaLevelSceneY } from '../../terrain/geodesy';
 
@@ -41,8 +42,8 @@ type FoamEmitter = {
 const KELVIN_FULL_ANGLE_DEG = 38.94;
 const KELVIN_HALF_ANGLE_DEG = KELVIN_FULL_ANGLE_DEG * 0.5;
 
-/** Lateral centreline of the kuz hull / landing deck (not model X=0). */
-const MID_X = ARRESTOR_DECK_MID_X;
+/** The kuz hull's centreline (the keel; not model X=0). */
+const MID_X = KUZ_CENTRELINE_X;
 
 /** Carrier-local Z (bow -Z, stern +Z) where the stern wake and its trail start. */
 const STERN_WAKE_Z = 112;

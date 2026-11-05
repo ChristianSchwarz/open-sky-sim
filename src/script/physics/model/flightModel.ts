@@ -280,6 +280,16 @@ export abstract class FlightModel {
         this.throttle = throttle;
     }
 
+    /**
+     * Hold this much aft stick (−1..1, added to the pilot's) until the wheels
+     * next touch: a spawn trimmed for its flight path. `idleOnTouchdown` also
+     * pulls the throttle to idle then; `flaps`, when given, sets the flaps
+     * for the spawn (the reset puts them down). Only the sim flies it.
+     */
+    setPitchTrim(_trim: number, _idleOnTouchdown = false, _flaps?: boolean): void {
+        //
+    }
+
     /** Match spooled engine state to commanded throttle (e.g. airborne spawn). */
     syncEffectiveThrottle() {
         this.effectiveThrottle = this.throttle;

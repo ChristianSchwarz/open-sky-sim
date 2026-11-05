@@ -3,6 +3,7 @@ import { CarrierMeshCollider, MeshColliderIndex, sampleCarrierMeshSurfaceYMax } 
 import { HillCollider, sampleHillSurfaceY } from '../scene/entities/hillCollider';
 import { SurfacePadCollider, SurfacePadIndex } from '../scene/entities/surfacePad';
 import { SkiJumpCollider, sampleSkiJumpSurfaceYMax } from '../scene/entities/skiJump';
+import { KUZ_DECK_Y, angledDeckRunwayLocal } from '../scene/entities/carrierDeckLayout';
 
 /** A static world obstacle approximated as an upright cylinder for avoidance. */
 export interface Obstacle {
@@ -24,6 +25,12 @@ export interface Runway {
     halfLength: number;
     /** Half the paved width across the runway axis (m). */
     halfWidth: number;
+    /**
+     * A carrier's angled deck: it moves with the ship (the same object, its
+     * centre updated in place), is landed on with the hook into the wires and
+     * no flare, and is a few hundred metres long.
+     */
+    carrier?: boolean;
 }
 
 /**
@@ -79,7 +86,23 @@ export class SceneWorldQuery implements WorldQuery {
     ) {
         this.padIndex = new SurfacePadIndex(surfacePads);
         this.sceneryIndex = new MeshColliderIndex(sceneryMeshes);
+        // Each carrier's angled deck is a runway too, after the airfields', so
+        // the area's main runway is still the first.
+        const deck = angledDeckRunwayLocal();
+        this.carrierRunways = carrierMeshes.map(c => ({
+            center: new THREE.Vector3(c.originX + deck.x, c.originY + KUZ_DECK_Y, c.originZ + deck.z),
+            heading: deck.heading,
+            halfLength: deck.halfLength,
+            halfWidth: deck.halfWidth,
+            carrier: true,
+        }));
+        this.allRunways = [...runwayList, ...this.carrierRunways];
     }
+
+    /** The carriers' angled decks, moved with their meshes (setCarrierMeshOrigins). */
+    private readonly carrierRunways: Runway[];
+    /** Airfield runways, then carrier decks. */
+    private readonly allRunways: readonly Runway[];
 
     /** Static scenery collision soups; grows as airfields stream in (addStaticColliders). */
     private readonly sceneryIndex: MeshColliderIndex;
@@ -139,18 +162,18 @@ export class SceneWorldQuery implements WorldQuery {
     }
 
     runways(): readonly Runway[] {
-        return this.runwayList;
+        return this.allRunways;
     }
 
     runway(): Runway {
-        return this.runwayList[0];
+        return this.runwayList[0] ?? this.allRunways[0];
     }
 
     nearestRunway(x: number, z: number): Runway {
-        let best = this.runwayList[0];
+        let best = this.allRunways[0];
         let bestSq = Infinity;
-        for (let i = 0; i < this.runwayList.length; i++) {
-            const r = this.runwayList[i];
+        for (let i = 0; i < this.allRunways.length; i++) {
+            const r = this.allRunways[i];
             const dx = r.center.x - x;
             const dz = r.center.z - z;
             const d = dx * dx + dz * dz;
@@ -167,6 +190,10 @@ export class SceneWorldQuery implements WorldQuery {
         for (let i = 0; i < this.carrierMeshes.length && i < origins.length; i++) {
             const c = this.carrierMeshes[i];
             const o = origins[i];
+            const r = this.carrierRunways[i];
+            r.center.x += o.originX - c.originX;
+            r.center.y += o.originY - c.originY;
+            r.center.z += o.originZ - c.originZ;
             c.originX = o.originX;
             c.originY = o.originY;
             c.originZ = o.originZ;

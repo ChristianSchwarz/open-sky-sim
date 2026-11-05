@@ -93,7 +93,17 @@ export interface PlayerSpawnState {
     velocity?: THREE.Vector3;
     throttle?: number;
     airborne?: boolean;
+    /** Nose-up attitude at the spawn (deg); level when absent. */
+    pitchDeg?: number;
+    /** Aft stick held until the wheels touch (see FlightModel.setPitchTrim); none when absent. */
+    pitchTrim?: number;
+    /** With pitchTrim: throttle to idle at that touchdown. */
+    idleOnTouchdown?: boolean;
+    /** Flaps up for this spawn (false); down, as every spawn has them, when absent. */
+    flaps?: boolean;
 }
+
+const _spawnEuler = new THREE.Euler();
 
 export class PlayerEntity implements Entity {
 
@@ -677,9 +687,11 @@ export class PlayerEntity implements Entity {
     reset(position: THREE.Vector3, heading: number, spawn?: PlayerSpawnState) {
         this.flightModel.reset();
         this.flightModel.position = position;
-        this.flightModel.quaternion = this._q.setFromAxisAngle(UP, heading);
+        // Euler X is nose-down here, so a nose-up attitude is its negative.
+        this._q.setFromEuler(_spawnEuler.set(-THREE.MathUtils.degToRad(spawn?.pitchDeg ?? 0), heading, 0, 'YXZ'));
+        this.flightModel.quaternion = this._q;
         this.obj.position.copy(position);
-        this.obj.quaternion.setFromAxisAngle(UP, heading);
+        this.obj.quaternion.copy(this._q);
 
         const airborne = spawn?.airborne ?? false;
         if (spawn?.velocity) {
@@ -689,6 +701,7 @@ export class PlayerEntity implements Entity {
             this.velocity.set(0, 0, 0);
         }
         this.flightModel.setLanded(!airborne);
+        this.flightModel.setPitchTrim(spawn?.pitchTrim ?? 0, spawn?.idleOnTouchdown ?? false, spawn?.flaps);
 
         this.pitch = 0;
         this.pitchStickUnits = 0;
@@ -710,9 +723,10 @@ export class PlayerEntity implements Entity {
         this.modelLandingGear?.setPlaybackPosition(1);
         this.landingGearProgress = LANDING_GEAR_ANIM_DURATION;
 
-        this.flapsState = AircraftDeviceState.EXTENDED;
-        this.flapsProgress = FLAPS_ANIM_DURATION;
-        this.flapsProgressUnit = 1.0;
+        const flapsDown = spawn?.flaps !== false;
+        this.flapsState = flapsDown ? AircraftDeviceState.EXTENDED : AircraftDeviceState.RETRACTED;
+        this.flapsProgress = flapsDown ? FLAPS_ANIM_DURATION : 0;
+        this.flapsProgressUnit = flapsDown ? 1.0 : 0;
         this.airbrakesState = AircraftDeviceState.RETRACTED;
         this.airbrakesProgress = 0;
         this.airbrakesProgressUnit = 0;

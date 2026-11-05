@@ -49,6 +49,10 @@ interface AircraftObservation {
     isGearDeployed(): boolean;
     isFlapsExtended(): boolean;
     isAirbrakesExtended(): boolean;
+    /** Held by an arrestor wire or a barricade: no going round now. Absent: never. */
+    isArrested?(): boolean;
+    /** A barricade is rigged: a carrier landing goes into the net, hook up, and is never a bolter. */
+    isBarricadeRigged?(): boolean;
     /** The slow end of the envelope, for flying an approach. */
     getSlowSpeeds(): AirframeSlowSpeeds;
 }

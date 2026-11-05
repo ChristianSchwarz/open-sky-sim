@@ -116,6 +116,10 @@ export class ShawAiPilot implements AiPilotController {
         this.classic.setFormationLead(lead);
     }
 
+    seedPitchStick(stick: number): void {
+        this.classic.seedPitchStick(stick);
+    }
+
     get isFiring(): boolean {
         return this.firing;
     }

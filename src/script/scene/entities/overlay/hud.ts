@@ -24,9 +24,9 @@ import {
     carrierApproachTargetSink,
     carrierApproachTargetSpeed,
     computeIlsDeviation,
-    ILS_GLIDESLOPE_DEG,
     isIlsApproachTarget,
 } from './approachAids';
+import { CARRIER_GLIDESLOPE_DEG } from '../carrierDeckLayout';
 
 
 const ALTITUDE_HEIGHT = 32;
@@ -942,7 +942,7 @@ export class HUDEntity implements Entity {
 
         painter.text(font, x, y, `TGT ${tgtSpeed}${speedUnit}`, hudColor, TextAlignment.RIGHT);
         painter.text(font, x, y + lineHeight, `VS ${tgtSink}${sinkUnit}`, hudSecondaryColor, TextAlignment.RIGHT);
-        painter.text(font, x, y + lineHeight * 2, `GS ${ILS_GLIDESLOPE_DEG.toFixed(1)}`, hudSecondaryColor, TextAlignment.RIGHT);
+        painter.text(font, x, y + lineHeight * 2, `GS ${CARRIER_GLIDESLOPE_DEG.toFixed(1)}`, hudSecondaryColor, TextAlignment.RIGHT);
     }
 
     /**

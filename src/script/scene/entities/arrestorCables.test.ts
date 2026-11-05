@@ -2,11 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import * as THREE from 'three';
 import {
-    ARRESTOR_CABLE_LOCAL_Z,
     ARRESTOR_CABLE_Y,
     ARRESTOR_CATCH_RADIUS_M,
     ARRESTOR_CARRIER_ORIGIN,
-    ARRESTOR_DECK_MID_X,
     ARRESTOR_HALF_SPAN_M,
     ARRESTOR_HOOK_HINGE_FWD_M,
     ARRESTOR_PULL_OUT_M,
@@ -14,6 +12,7 @@ import {
     DEFAULT_ARRESTOR_HOOK_BODY,
     TAILHOOK_ARM_LENGTH_M,
     applyArrestorVelocity,
+    arrestorCableLocals,
     arrestorHookPlacementForAircraft,
     buildArrestorCableField,
     distancePointToSegment,
@@ -23,34 +22,48 @@ import {
     trySnag,
 } from './arrestorCables';
 import { DEFAULT_ENGINE_NOZZLES } from './afterburnerCones';
+import {
+    ANGLED_DECK_AXIS,
+    ANGLED_DECK_END_STATION_M,
+    ARRESTOR_WIRE_STATIONS_M,
+    angledDeckCoords,
+} from './carrierDeckLayout';
 
 describe('arrestorCables', () => {
     const origin = { ...ARRESTOR_CARRIER_ORIGIN };
     const field = buildArrestorCableField(origin.x, origin.y, origin.z);
 
-    it('builds four lateral segments on the landing deck', () => {
+    it('lays four wires square across the angled deck at their stations', () => {
         assert.equal(field.segments.length, 4);
         for (let i = 0; i < 4; i++) {
             const seg = field.segments[i];
-            const z = origin.z + ARRESTOR_CABLE_LOCAL_Z[i];
-            assert.ok(Math.abs(seg.a.z - z) < 1e-6);
-            assert.ok(Math.abs(seg.b.z - z) < 1e-6);
+            const span = seg.b.clone().sub(seg.a);
+            assert.ok(Math.abs(span.length() - 2 * ARRESTOR_HALF_SPAN_M) < 1e-6);
+            assert.ok(Math.abs(span.dot(ANGLED_DECK_AXIS)) < 1e-6, 'square to the axis');
             assert.ok(Math.abs(seg.a.y - ARRESTOR_CABLE_Y) < 1e-6);
-            assert.ok(Math.abs(seg.a.x - (origin.x + ARRESTOR_DECK_MID_X - ARRESTOR_HALF_SPAN_M)) < 1e-6);
-            assert.ok(Math.abs(seg.b.x - (origin.x + ARRESTOR_DECK_MID_X + ARRESTOR_HALF_SPAN_M)) < 1e-6);
+            const mid = angledDeckCoords(
+                (seg.a.x + seg.b.x) * 0.5 - origin.x, (seg.a.z + seg.b.z) * 0.5 - origin.z);
+            assert.ok(Math.abs(mid.station - ARRESTOR_WIRE_STATIONS_M[i]) < 1e-6);
+            assert.ok(Math.abs(mid.offset) < 1e-6);
         }
+        assert.ok(field.deckAxis.distanceTo(ANGLED_DECK_AXIS as THREE.Vector3) < 1e-9);
+    });
+
+    it('stops a trap on the last wire before the angled deck runs off the port edge', () => {
+        const last = ARRESTOR_WIRE_STATIONS_M[ARRESTOR_WIRE_STATIONS_M.length - 1];
+        assert.ok(last + ARRESTOR_PULL_OUT_M < ANGLED_DECK_END_STATION_M - 10);
     });
 
     it('rotates cable field with carrier yaw', () => {
         const yaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
         const yawed = buildArrestorCableField(100, 0, 200, undefined, yaw);
-        // Local +X becomes world −Z after +90° yaw about Y.
-        const localAx = ARRESTOR_DECK_MID_X - ARRESTOR_HALF_SPAN_M;
-        const expected = new THREE.Vector3(localAx, ARRESTOR_CABLE_Y, ARRESTOR_CABLE_LOCAL_Z[0])
+        const c = arrestorCableLocals()[0];
+        const expected = new THREE.Vector3(c.ax, c.ay, c.az)
             .applyQuaternion(yaw)
             .add(new THREE.Vector3(100, 0, 200));
         assert.ok(yawed.segments[0].a.distanceTo(expected) < 1e-5);
-        assert.ok(Math.abs(yawed.deckAxis.x - (-1)) < 1e-5, 'deck axis should face −X');
+        const axis = ANGLED_DECK_AXIS.clone().applyQuaternion(yaw);
+        assert.ok(yawed.deckAxis.distanceTo(axis) < 1e-6, 'deck axis turns with the ship');
     });
 
     it('hookWorldPos transforms body offset by pose', () => {

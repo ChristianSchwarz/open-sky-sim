@@ -231,6 +231,10 @@ export class SimProxyFlightModel extends FlightModel implements SimAircraftProxy
             this.landed, this.throttle, this.modelKind);
     }
 
+    setPitchTrim(trim: number, idleOnTouchdown = false, flaps?: boolean): void {
+        this.client.setPitchTrim(this.simId, trim, idleOnTouchdown, flaps);
+    }
+
     syncEffectiveThrottle(): void {
         super.syncEffectiveThrottle();
         this.client.syncEffectiveThrottle(this.simId, this.throttle);

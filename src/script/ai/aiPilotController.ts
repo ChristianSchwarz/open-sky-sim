@@ -15,6 +15,12 @@ export interface AiPilotController {
      * bandit: a wingman needs both to peel off and to rejoin afterwards.
      */
     setFormationLead(lead: Combatant | undefined): void;
+    /**
+     * Take over a stick already held (the player's, autopilot switched on):
+     * start from it rather than from neutral, which on a trimmed final drops
+     * the nose before the integral has found the stick again.
+     */
+    seedPitchStick?(stick: number): void;
     /** A route for {@link AiFlightPhase.WAYPOINT}; only the classic pilot flies one. */
     setRoute?(route: AiRoute | undefined): void;
     getPhase(): AiFlightPhase;

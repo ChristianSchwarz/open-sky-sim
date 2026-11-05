@@ -80,6 +80,10 @@ const WING_FOLD_MAX_THROTTLE = 0.5;
 const WING_UNFOLD_THROTTLE = 0.8;
 /** The frame a fixed (land) arrestor field holds an aircraft in. */
 const ZERO_VELOCITY: Readonly<THREE.Vector3> = new THREE.Vector3();
+/** How fast (1/s) a wire being paid out matches the jet's sideways motion to the ship's. */
+const ARRESTOR_ACROSS_MATCH_PER_S = 4;
+/** After a respawn with the autopilot on, it takes over this far (s) into the flight. */
+const AUTOPILOT_RESPAWN_RESUME_S = 1;
 const PROJECTILE_GRAVITY = 9.80665;
 const PROJECTILE_POOL_SIZE = 480;
 /** Allow this much mesh–terrain overlap (m) when gear is down (spring travel). */
@@ -468,6 +472,8 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     // --- PilotableAircraft: control channel (pilot writes the buffer) ---------
 
     setPitch(pitch: number): void { this.inPitch = pitch; }
+    /** The pitch stick applied last step, by whoever flies. */
+    getPitchInput(): number { return this.inPitch; }
     setRoll(roll: number): void { this.inRoll = roll; }
     setYaw(yaw: number): void { this.inYaw = yaw; }
     setThrottle(throttle: number): void { this.inThrottle = throttle; }
@@ -545,12 +551,29 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     toggleAutopilot(): void {
         this.control = this.control === 'ai' ? 'external' : 'ai';
         if (this.control === 'ai' && this.pilot) {
-            // With a route left to fly (a mission's), that rather than home.
-            const routeLeft = this.route !== undefined && this.route.next < this.route.points.length;
-            this.pilot.setPhase(this.model.isLanded() ? AiFlightPhase.TAKEOFF_ROLL
-                : routeLeft ? AiFlightPhase.WAYPOINT : AiFlightPhase.RTB);
+            // From the stick the player held (a trimmed final's), not neutral.
+            this.pilot.seedPitchStick?.(this.inPitch);
+            this.giveAutopilotItsJob();
         }
     }
+
+    /**
+     * What an autopilot switched on now does: on the ground, take off; with
+     * a route left to fly (a mission's), that; otherwise fly home and land.
+     */
+    giveAutopilotItsJob(): void {
+        if (!this.pilot) return;
+        const routeLeft = this.route !== undefined && this.route.next < this.route.points.length;
+        this.pilot.setPhase(this.model.isLanded() ? AiFlightPhase.TAKEOFF_ROLL
+            : routeLeft ? AiFlightPhase.WAYPOINT : AiFlightPhase.RTB);
+    }
+
+    /**
+     * The player respawned with the autopilot on: seconds of flight left
+     * before it takes over again (see CombatSim.resetAircraft). Until then the
+     * player's input flies, with the spawn's trim.
+     */
+    autopilotResumeIn = 0;
 
     setPitchLimiterMode(mode: FcsPitchLimiter): void {
         this.inLimiterMode = mode;
@@ -582,9 +605,18 @@ class SimAircraft implements PilotableAircraft, Combatant, SimPlayerInputSink {
     isGearDeployed(): boolean { return this.inGear; }
     isFlapsExtended(): boolean { return this.inFlaps; }
     isAirbrakesExtended(): boolean { return this.inAirbrakes; }
+    isArrested(): boolean { return this.arrestorLatch >= 0 || this.barricadeState !== BarricadeEngagement.NONE; }
+    isBarricadeRigged(): boolean { return this.barricadeRigged; }
     getSlowSpeeds(): AirframeSlowSpeeds { return this.slowSpeeds; }
     /** AI pilots have no hook control of their own: theirs follows the gear. */
-    isHookDeployed(): boolean { return this.control === 'ai' ? this.inGear : this.inHook; }
+    /**
+     * The AI's hook goes down with its gear, except while a barricade is
+     * rigged: that is only done for an aircraft that cannot take a wire, so
+     * the AI then lands hook up, into the net.
+     */
+    isHookDeployed(): boolean { return this.control === 'ai' ? this.inGear && !this.barricadeRigged : this.inHook; }
+    /** A barricade is rigged somewhere (CombatSim.setBarricades). */
+    barricadeRigged = false;
 
     // --- Combatant -----------------------------------------------------------
 
@@ -940,6 +972,8 @@ export class CombatSim implements ProjectileSink {
             const armed = b.armed && this.barricadeExpended[i] !== b.generation;
             return buildBarricadeField(b.originX, b.originY, b.originZ, q, armed, b.generation);
         });
+        const rigged = this.barricadeFields.some(f => f.armed);
+        for (const a of this.aircraft.values()) a.barricadeRigged = rigged;
         // The rigid-body webbing: fresh for each generation laced, kept while it stands.
         this.barricadeFrames = barricades.map(b => {
             const quaternion = new THREE.Quaternion().fromArray(b.quaternion);
@@ -1036,6 +1070,8 @@ export class CombatSim implements ProjectileSink {
     }
 
     /** World-frame carrier velocity for ship-relative arrestor scrub. */
+    private readonly tmpArrestorAcross = new THREE.Vector3();
+
     setCarrierVelocity(vx: number, vy: number, vz: number): void {
         this.carrierVel.set(vx, vy, vz);
     }
@@ -1047,6 +1083,7 @@ export class CombatSim implements ProjectileSink {
             this.order.push(desc.id);
         }
         const added = new SimAircraft(desc, this.world, this);
+        added.barricadeRigged = this.barricadeFields.some(f => f.armed);
         added.model.setAltitudeAt(this.altitudeAt);
         this.aircraft.set(desc.id, added);
         if (desc.control === 'external') {
@@ -1076,6 +1113,9 @@ export class CombatSim implements ProjectileSink {
         const a = this.aircraft.get(id);
         if (a) {
             a.buildPilot(undefined, this.world);
+            if (control === 'ai' && a.control !== 'ai') {
+                a.pilot?.seedPitchStick?.(a.getPitchInput());
+            }
             a.control = control;
         }
     }
@@ -1118,6 +1158,12 @@ export class CombatSim implements ProjectileSink {
 
     inputBlur(id: string): void {
         this.playerInputs.get(id)?.blur();
+    }
+
+    /** A spawn's pitch trim for a player-flown aircraft (see SimPlayerInput.setPitchTrim). */
+    setPitchTrim(id: string, trim: number, idleOnTouchdown = false, flaps?: boolean): void {
+        this.playerInputs.get(id)?.setPitchTrim(trim, idleOnTouchdown);
+        if (flaps !== undefined) this.aircraft.get(id)?.setFlapsExtended(flaps);
     }
 
     setInputEnabled(id: string, enabled: boolean): void {
@@ -1214,6 +1260,22 @@ export class CombatSim implements ProjectileSink {
         a.health = a.maxHealth;
         a.resetGun();
         this.playerInputs.get(id)?.syncThrottle(throttle);
+        // A respawn with the autopilot on is a new flight for it too: the old
+        // pilot's phase (a rollout, a go-around) flew the new spawn - out of a
+        // barricade arrival it took the final for a bolter and left.
+        if (this.playerInputs.has(id) && a.pilot) {
+            a.pilot = undefined;
+            a.buildPilot(undefined, this.world);
+            // Taken over a moment into the new flight, as when switched on in
+            // it: from the spawn's first instant the jet is not yet flying
+            // its trim, and the pilot let it sink into the stern.
+            if (a.control === 'ai') {
+                a.control = 'external';
+                a.autopilotResumeIn = AUTOPILOT_RESPAWN_RESUME_S;
+            }
+        } else {
+            a.autopilotResumeIn = 0;
+        }
     }
 
     setAircraftConfig(
@@ -1403,6 +1465,16 @@ export class CombatSim implements ProjectileSink {
 
     step(delta: number, inputs: Record<string, SimControlInputs>): void {
         this.hits.length = 0;
+        // A respawn's autopilot, back on once the new flight is under way.
+        for (const [id, input] of this.playerInputs) {
+            const a = this.aircraft.get(id);
+            if (a && a.autopilotResumeIn > 0 && input.inputEnabled) {
+                a.autopilotResumeIn -= delta;
+                if (a.autopilotResumeIn <= 0 && a.control === 'external') {
+                    a.toggleAutopilot();
+                }
+            }
+        }
         // 0. Worker-side player input → control inputs for externally-flown aircraft.
         for (const [id, input] of this.playerInputs) {
             const a = this.aircraft.get(id);
@@ -1441,6 +1513,14 @@ export class CombatSim implements ProjectileSink {
                 a.slideFxCooldown = Math.max(0, a.slideFxCooldown - delta);
             }
             a.applyInputsToModel();
+            if (this.playerInputs.get(a.id)?.inputEnabled === false) {
+                // The player's flight is held (the spawn's streaming hold and
+                // countdown, the menu): the jet holds too. Flown on through it
+                // on neutral inputs - no power, flaps down, no trim - it was
+                // let go wherever that took it: the barricade arrival came out
+                // of a long hold ballooning over the net.
+                continue;
+            }
             if (a.model.isCrashed()) {
                 // FlightModel.step() no-ops once crashed, which would otherwise
                 // freeze the wreck in world space while the carrier sails on
@@ -1567,6 +1647,16 @@ export class CombatSim implements ProjectileSink {
             // A wire on land holds the aircraft at rest, not at the ship's speed.
             const frameVel = field.fixed ? ZERO_VELOCITY : this.carrierVel;
             const shipAlong = frameVel.dot(field.deckAxis);
+            // Across the wire's pull too, the wire carries the jet with the
+            // ship: on the angled deck the ship moves 1.35 m/s sideways under
+            // a jet matched along the pull alone, which slid a trapped jet
+            // 20-30 m across the deck. Eased in while pulling, held once stopped.
+            const across = this.tmpArrestorAcross.set(field.deckAxis.z, 0, -field.deckAxis.x);
+            if (across.lengthSq() > 1e-12) {
+                across.normalize();
+                const slip = frameVel.dot(across) - vel.dot(across);
+                vel.addScaledVector(across, a.arrestorHeld ? slip : slip * Math.min(1, ARRESTOR_ACROSS_MATCH_PER_S * delta));
+            }
             if (!a.arrestorHeld) {
                 const traveled = a.hookNow.dot(field.deckAxis) - a.arrestorSnagAlong;
                 const remaining = ARRESTOR_PULL_OUT_M - traveled;
@@ -1644,6 +1734,11 @@ export class CombatSim implements ProjectileSink {
             const field = this.barricadeFields[a.barricadeFieldIndex];
             const vel = a.model.velocityVector;
             const shipAlong = this.carrierVel.dot(field.deckAxis);
+            // Sideways too the webbing carries the jet with the ship (as the
+            // wires do, see resolveArrestor): the net is across the angled deck.
+            const slip = this.carrierVel.dot(field.lateralAxis) - vel.dot(field.lateralAxis);
+            vel.addScaledVector(field.lateralAxis, a.barricadeState === BarricadeEngagement.PULLING
+                ? slip * Math.min(1, ARRESTOR_ACROSS_MATCH_PER_S * delta) : slip);
             if (a.barricadeState === BarricadeEngagement.PULLING) {
                 const traveled = barricadeAlong(field, pos) - a.barricadeSnagAlong;
                 const stillPulling = applyArrestorVelocity(
@@ -1673,11 +1768,12 @@ export class CombatSim implements ProjectileSink {
                 this.leanInNet(a, THREE.MathUtils.smoothstep(t, 0, 1));
                 if (t >= 1) a.barricadeState = BarricadeEngagement.HELD;
             } else {
-                // Tangled in the webbing: no further forward than the ship, at any throttle.
+                // Tangled in the webbing: no further forward than the ship, at
+                // any throttle - and no further aft either. On FM3, which does
+                // not carry an aircraft on a deck with the ship as FM2 does,
+                // a held jet fell behind a steaming ship at 5 m/s.
                 const along = vel.dot(field.deckAxis);
-                if (along > shipAlong) {
-                    vel.addScaledVector(field.deckAxis, shipAlong - along);
-                }
+                vel.addScaledVector(field.deckAxis, shipAlong - along);
                 this.leanInNet(a, 1);
             }
         }
