@@ -10,6 +10,22 @@ const SIM_DELTA = 1.0 / SIM_FPS;
 const EMPTY_GEAR_COMPRESSION: ReadonlyArray<number> = Object.freeze([]);
 
 /**
+ * How fast the stick and pedals can move, in units of travel per second
+ * ([-1, 1] range, so 5/s = centre to stop in 0.2 s, stop to stop in 0.4 s).
+ * Keys, joystick flicks and AI commands all jump instantly; a real hand
+ * cannot, and an instant step reads as an unphysical snap into the FCS.
+ */
+export const STICK_RATE_PER_S = 5;
+export const PEDAL_RATE_PER_S = 5;
+
+function slew(current: number, target: number, maxStep: number): number {
+    const d = target - current;
+    if (d > maxStep) return current + maxStep;
+    if (d < -maxStep) return current - maxStep;
+    return target;
+}
+
+/**
  * The net force acting on a single body part, serialised for the debug overlay.
  * Origin and vector are both expressed in the aircraft body frame (metres and
  * newtons respectively). The overlay decomposes `vec` into its X/Y/Z body-axis
@@ -63,9 +79,20 @@ export abstract class FlightModel {
     protected elevatorCommandLimitHigh: number = 1;
     protected elevatorCommandLimitLow: number = -1;
 
+    /** Stick/pedal position the models fly, rate-limited toward the commanded value each step. */
     protected pitch: number = 0; // [-1, 1]
     protected roll: number = 0; // [-1, 1]
     protected yaw: number = 0; // [-1, 1]
+    /** Commanded stick/pedal from the pilot (keyboard, joystick, AI). */
+    protected pitchCommand: number = 0;
+    protected rollCommand: number = 0;
+    protected yawCommand: number = 0;
+    /**
+     * After a reset or teleport the stick starts where the pilot holds it:
+     * an airborne spawn trimmed for its glidepath otherwise spent its first
+     * 0.15 s slewing up from neutral and sank a metre under the path.
+     */
+    private snapControlsNext: boolean = true;
     protected throttle: number = 0; // [0, 1]
     protected effectiveThrottle: number = 0; // [0, 1]
 
@@ -171,6 +198,10 @@ export abstract class FlightModel {
         this.pitch = 0;
         this.roll = 0;
         this.yaw = 0;
+        this.pitchCommand = 0;
+        this.rollCommand = 0;
+        this.yawCommand = 0;
+        this.snapControlsNext = true;
         this.throttle = 0;
         this.effectiveThrottle = 0;
         this.angleOfAttackRad = 0;
@@ -189,6 +220,7 @@ export abstract class FlightModel {
     /** Align render interpolation after teleport or airborne spawn. */
     snapPhysicsState(): void {
         this.syncPreviousState();
+        this.snapControlsNext = true;
     }
 
     /**
@@ -215,6 +247,7 @@ export abstract class FlightModel {
         while (this.deltaRemainder >= SIM_DELTA) {
             this.hardLandingCooldownS = Math.max(0, this.hardLandingCooldownS - SIM_DELTA);
             this.savePreviousState();
+            this.slewControls(SIM_DELTA);
             this.step(SIM_DELTA);
             this.deltaRemainder -= SIM_DELTA;
         }
@@ -264,16 +297,30 @@ export abstract class FlightModel {
         this.prevVelocity.copy(this.velocity);
     }
 
+    /** Move the stick and pedals toward their commands at the hand's top speed. */
+    protected slewControls(delta: number): void {
+        if (this.snapControlsNext) {
+            this.snapControlsNext = false;
+            this.pitch = this.pitchCommand;
+            this.roll = this.rollCommand;
+            this.yaw = this.yawCommand;
+            return;
+        }
+        this.pitch = slew(this.pitch, this.pitchCommand, STICK_RATE_PER_S * delta);
+        this.roll = slew(this.roll, this.rollCommand, STICK_RATE_PER_S * delta);
+        this.yaw = slew(this.yaw, this.yawCommand, PEDAL_RATE_PER_S * delta);
+    }
+
     setPitch(pitch: number) {
-        this.pitch = pitch;
+        this.pitchCommand = pitch;
     }
 
     setRoll(roll: number) {
-        this.roll = roll;
+        this.rollCommand = roll;
     }
 
     setYaw(yaw: number) {
-        this.yaw = yaw;
+        this.yawCommand = yaw;
     }
 
     setThrottle(throttle: number) {

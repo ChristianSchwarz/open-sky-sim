@@ -14,6 +14,16 @@ import {
 const FIRE_PERMIT_ATA = 20 * Math.PI / 180;
 
 /**
+ * Turn (m/s² across its flight path) the bandit must be pulling before a
+ * low yo-yo is flown. The yo-yo cuts inside a turn; against a target flying
+ * straight there is no circle to cut, and dropping the nose 0.5 under the
+ * line of sight at 2 g only traded height for speed and back, holding
+ * ~2.6 km behind it for over a minute (red 600 m high, oblique) instead of
+ * closing in pursuit.
+ */
+const LOW_YO_YO_MIN_TURN = 8;
+
+/**
  * Shaw Fighter Combat tactical FSM: Offensive / Neutral / Defensive postures
  * with pursuit curves, yo-yos, lead turn, scissors, and defensive spiral.
  * Outputs {@link FlightCommand} setpoints only — never stick inputs.
@@ -106,7 +116,8 @@ export class FighterTacticalFSM {
             allowHardTurn = false;
         }
         // Low Yo-Yo: close distance while cutting the circle (Shaw p. 73).
-        else if (geom.range > 1500 && geom.range < 3000 && geom.energyDelta > -200) {
+        else if (geom.range > 1500 && geom.range < 3000 && geom.energyDelta > -200
+            && this.turnAccel(target) > LOW_YO_YO_MIN_TURN) {
             maneuver = 'LOW_YO_YO';
             this._dir.copy(geom.losVector).addScaledVector(self.up, -0.5).normalize();
             throttleSpeed = Math.min(this.maxSpeed, this.combatSpeed * 1.1);
@@ -141,6 +152,14 @@ export class FighterTacticalFSM {
             fireGuns,
             allowHardTurn,
         };
+    }
+
+    /** The bandit's acceleration across its flight path (m/s²); 0 when unknown. */
+    private turnAccel(target: AircraftSnapshot): number {
+        const a = target.acceleration;
+        if (!a) return 0;
+        this._tmp.copy(a).addScaledVector(target.forward, -a.dot(target.forward));
+        return this._tmp.length();
     }
 
     private executeNeutral(

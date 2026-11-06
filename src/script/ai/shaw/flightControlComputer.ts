@@ -52,10 +52,14 @@ const GRAVITY = 9.81;
  * hunted degrees off the lead and the pilots chased each other up into the
  * vertical until both hung at 10 m/s.
  */
-const TRACK_GAIN = 6;
+const TRACK_GAIN = 2.5;
 const AIM_RATE_EMA = 0.2;
-/** Damping (s) on the aim error (see AiPilot TRACK_DAMP_S). */
-const TRACK_DAMP_S = 0.1;
+/**
+ * Damping (s) on the aim error (see AiPilot TRACK_DAMP_S). Both were 6 and
+ * 0.1, as in AiPilot, until the stick was rate-limited; this computer's
+ * pilots track best with a little more damping than the classic one.
+ */
+const TRACK_DAMP_S = 0.25;
 /** Roll error (rad) past which the pull eases to {@link LIFT_ROLL_PULL} while the lift vector comes round ... */
 const LIFT_ROLL_FIRST = 90 * Math.PI / 180;
 /** ... and under which it pulls with everything. */
@@ -89,6 +93,13 @@ export const FIGHT_CORNER_SPEED = 238;
 /** Look-ahead (s) and miss distance (m) under which a pass with the bandit would be a collision. */
 const DECONFLICT_LOOKAHEAD_S = 4;
 const DECONFLICT_MISS_M = 150;
+/**
+ * ... and the clearance (m) a head-on gun pass breaks for. Wider than the
+ * rest since the stick was rate-limited: rolling the lift vector aside
+ * takes longer, and at 150 m a boom-and-zoom pass into the classic pilot
+ * on the beam merge collided in every seed.
+ */
+const DECONFLICT_PASS_MISS_M = 200;
 
 function wrapPi(a: number): number {
     while (a > Math.PI) a -= Math.PI * 2;
@@ -375,7 +386,8 @@ export class FlightControlComputer {
         if (tc <= 0 || tc > lookahead) return;
         this.rel.addScaledVector(this.relVel, tc);
         const miss = this.rel.length();
-        if (miss >= DECONFLICT_MISS_M) return;
+        const missM = this.gunPassActive ? DECONFLICT_PASS_MISS_M : DECONFLICT_MISS_M;
+        if (miss >= missM) return;
         // A gun pass passes beside it, never over or under (see AiPilot.deconflictAim).
         if (this.gunPassActive) {
             this.rel.y = 0;
@@ -391,7 +403,7 @@ export class FlightControlComputer {
         // lead turn) can point into the other aircraft's path however it is
         // nudged, and two mirrored pilots then turn into the same point.
         const along = Math.max(50, Math.sqrt(relSpeedSq) * tc);
-        this.liftDir.copy(this.vel).setLength(along).addScaledVector(this.rel, DECONFLICT_MISS_M - miss).normalize();
+        this.liftDir.copy(this.vel).setLength(along).addScaledVector(this.rel, missM - miss).normalize();
         const need = this.liftDir.dot(this.rel) - this.aimDir.dot(this.rel);
         if (need > 0) {
             this.aimDir.addScaledVector(this.rel, need).normalize();

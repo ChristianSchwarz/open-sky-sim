@@ -184,6 +184,12 @@ export interface PersonalityTuning {
     missMult: number;
     /** ... plus this (m). */
     missSlack: number;
+    /**
+     * The miss allowed is this many times wider in a head-on gun pass: the
+     * bandit flies into the stream and whoever opens fire first wins it, so a
+     * skilled pilot fires on a looser solution there than when tracking.
+     */
+    headOnMissMult: number;
 }
 
 export function personalityTuning(p: AiPersonality): PersonalityTuning {
@@ -212,5 +218,6 @@ export function personalityTuning(p: AiPersonality): PersonalityTuning {
         reversal: p.skill >= 0.4,
         missMult: mix(p.gunDiscipline, 3, 0.85),
         missSlack: mix(p.gunDiscipline, 8, 2),
+        headOnMissMult: mix(p.skill, 1, 1.4),
     };
 }

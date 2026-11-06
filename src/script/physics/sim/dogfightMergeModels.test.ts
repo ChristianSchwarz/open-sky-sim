@@ -17,11 +17,15 @@ const setup = (name: string) => MERGE_SETUPS.find(s => s.name === name)!;
  * One kill per model the bench shows it scoring (runs are seeded, so they repeat).
  * Since the gun fires its full cyclic rate, symmetric head-on gun passes often
  * end with both shot down (Shaw head-on and Ace low against Classic now do).
+ * Since the stick is rate-limited (2026-11-05) Aggressive and Ace lose the
+ * head-on one to Classic's equal pass, and win low (Aggressive also offset
+ * 600 m, red 600 m high, red fast, tail chase; Ace offset 600 m, beam,
+ * oblique, tail chase).
  */
 const KILLS: { model: AiPilotModels; red: AiPilotModels; setup: string }[] = [
     { model: AiPilotModels.SHAW, red: AiPilotModels.CLASSIC, setup: 'low' },
-    { model: AiPilotModels.AGGRESSIVE, red: AiPilotModels.CLASSIC, setup: 'head-on' },
-    { model: AiPilotModels.ACE, red: AiPilotModels.CLASSIC, setup: 'head-on' },
+    { model: AiPilotModels.AGGRESSIVE, red: AiPilotModels.CLASSIC, setup: 'low' },
+    { model: AiPilotModels.ACE, red: AiPilotModels.CLASSIC, setup: 'low' },
 ];
 
 for (const { model, red, setup: killSetup } of KILLS) {

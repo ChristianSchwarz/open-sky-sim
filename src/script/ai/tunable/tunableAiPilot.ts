@@ -166,7 +166,7 @@ export class TunableAiPilot implements AiPilotController {
         this.firing = !preempted
             && this.selfSnap.position.distanceTo(this.tgtSnap.position) <= maxRange
             && gunMissDistance(judged, this.tgtSnap, this.bulletSpeed)
-                <= this.target.getHitRadius() * this.tune.missMult + this.tune.missSlack;
+                <= (this.target.getHitRadius() * this.tune.missMult + this.tune.missSlack) * (this.fcc.gunPass ? this.tune.headOnMissMult : 1);
     }
 
     /**

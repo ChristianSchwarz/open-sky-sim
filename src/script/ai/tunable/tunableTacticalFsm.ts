@@ -204,7 +204,10 @@ export class TunableTacticalFSM {
         // Square to the nose on the bandit's side, so the roll has a side to go to.
         const side = self.right.dot(this._tmp) >= 0 ? 1 : -1;
         this._dir.copy(self.right).multiplyScalar(side).addScaledVector(this._tmp, 0.5).normalize();
-        this._dir.y = REVERSAL_CLIMB;
+        // Up toward a bandit above, as steep as the line of sight: aimed level,
+        // a reversal out of a diving pass held the nose 40 deg down at 85 deg
+        // of bank and spiralled 650 m under a Shaw that climbed away above it.
+        this._dir.y = Math.max(REVERSAL_CLIMB, geom.losVector.y);
         this._dir.normalize();
         return this.command(state, 'REVERSAL', this.tune.combatSpeed);
     }

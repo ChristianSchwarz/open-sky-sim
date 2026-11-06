@@ -415,6 +415,13 @@ const FIGHT_CLIMB_FLOOR = -15 * Math.PI / 180;
 /** Look-ahead (s) and miss distance (m) under which a pass would be a collision. */
 const DECONFLICT_LOOKAHEAD_S = 4;
 const DECONFLICT_MISS_M = 150;
+/**
+ * ... and the clearance (m) a head-on gun pass breaks for. Wider than the
+ * rest since the stick was rate-limited: rolling the lift vector aside
+ * takes longer, and at 150 m a boom-and-zoom pass into the classic pilot
+ * on the beam merge collided in every seed.
+ */
+const DECONFLICT_PASS_MISS_M = 200;
 
 const PITCH_KP = 1.0;                // pitch-angle error (rad) -> pitch command
 // No AI pitch-RATE damping by default: the FM2 FCS already damps the short period
@@ -492,8 +499,14 @@ const ONE_G_SPEED = 90;
  * error (to close it), plus 1 g. It replaced a hard turn that switched in at 8
  * deg and out at 5 over gentle heading/pitch loops: the nose hunted 3-9 deg
  * off the lead and almost never fired.
+ *
+ * Was 6 until the flight models rate-limited the stick (FlightModel
+ * STICK_RATE_PER_S): at 6 the head-on pass already flew bang-bang between
+ * full push and full aft at 3 Hz, and a stick that needs 0.3 s for that swing
+ * turned the cycle into misses (9 hits instead of the 13 that kill). At 2.5
+ * every model kills a straight-flying target from all twelve bench merges.
  */
-const TRACK_GAIN = 6;
+const TRACK_GAIN = 2.5;
 const GRAVITY = 9.81;
 const AIM_RATE_EMA = 0.2;
 /**
@@ -501,8 +514,9 @@ const AIM_RATE_EMA = 0.2;
  * far ahead. Without it a head-on pass, with almost no line-of-sight rate to
  * feed forward, rang at 2 Hz between -0.2 and 2.5 g and the nose hunted 1 deg
  * either side of the lead: 17 m at 1 km, outside the fire gate.
+ * 0.1 before the stick was rate-limited (see TRACK_GAIN).
  */
-const TRACK_DAMP_S = 0.1;
+const TRACK_DAMP_S = 0.2;
 /** Stick (negative) a tracking pilot may push for a small correction rather than rolling inverted. */
 const TRACK_PUSH_MAX = -0.4;
 /** Below this commanded g (and well over the top) tracking pushes instead of rolling round. */
@@ -1950,7 +1964,8 @@ export class AiPilot implements AiPilotController {
         // Target relative to us at the closest point; push our aim the other way.
         this.toPoint.addScaledVector(this.bulletVel, tc);
         const miss = this.toPoint.length();
-        if (miss >= DECONFLICT_MISS_M) return;
+        const missM = sideOnly ? DECONFLICT_PASS_MISS_M : DECONFLICT_MISS_M;
+        if (miss >= missM) return;
         // A gun pass passes beside it, never over or under: there is no time
         // to roll, and two mirrored passes that missed by a few metres
         // vertically split up and down and still collided. Anywhere else the
@@ -1966,7 +1981,7 @@ export class AiPilot implements AiPilotController {
             this.toPoint.set(Math.cos(this.heading), 0, -Math.sin(this.heading));
         }
         const along = Math.max(50, Math.sqrt(relSpeedSq) * tc);
-        this.aimDir.multiplyScalar(along).addScaledVector(this.toPoint, DECONFLICT_MISS_M - miss).normalize();
+        this.aimDir.multiplyScalar(along).addScaledVector(this.toPoint, missM - miss).normalize();
     }
 
     /** Turn/pitch toward `this.aim`, hold `desiredSpeed`, and fire on a predicted hit. */
