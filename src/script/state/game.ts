@@ -876,6 +876,8 @@ export class Game {
     private exteriorLockAircraft: AiAircraftEntity | undefined;
     /** Aircraft already locked in this Num Enter cycle; the cycle ends (unlocks) once all are. */
     private readonly exteriorLockVisited = new Set<AiAircraftEntity>();
+    /** The aircraft the F2 view follows; undefined is the player (see cycleExteriorSubject). */
+    private exteriorSubject: AiAircraftEntity | undefined;
     private cockpitPadlock = false;
     /** The left/right MFD overlay, for the keys that flip its pages. */
     private cockpit: CockpitEntity | undefined;
@@ -3326,8 +3328,11 @@ export class Game {
     // Orbits the active player camera around the view pivot by `viewYaw` (about the
     // world UP axis) and `viewPitch` (elevation), keeping the subject centred.
     private orbitCameraAroundAircraft() {
+        const f2Subject = this.isF2ExteriorView() ? this.exteriorSubjectFollowed() : undefined;
         if (this.view === PlayerViewState.AI_CHASE && this.aiOpponent) {
             this._orbitPivot.copy(this.aiOpponent.getDisplayPosition());
+        } else if (f2Subject) {
+            this._orbitPivot.copy(f2Subject.getDisplayPosition());
         } else if (this.view === PlayerViewState.CARRIER_OVER_STERN && this.kuz) {
             this._orbitPivot.copy(this.kuz.position);
         } else {
@@ -3381,13 +3386,14 @@ export class Game {
     }
 
     private nextExteriorLockAircraft(): AiAircraftEntity | undefined {
-        const p = this.player.getDisplayPosition();
+        const subject = this.exteriorSubjectFollowed();
+        const p = (subject ?? this.player).getDisplayPosition();
         const target = this.player.weaponsTarget;
         let best: AiAircraftEntity | undefined;
         let bestD = Infinity;
         for (const entity of this.scene.listByTag(ENTITY_TAGS.AIRCRAFT)) {
             if (!(entity instanceof AiAircraftEntity) || !entity.isAlive()
-                || this.exteriorLockVisited.has(entity)) {
+                || entity === subject || this.exteriorLockVisited.has(entity)) {
                 continue;
             }
             if (entity === (target as unknown)) {
@@ -3599,7 +3605,7 @@ export class Game {
                 case 'F2': {
                     event.preventDefault();
                     this.resetOrbit();
-                    this.setExteriorBehindFrontView();
+                    this.cycleExteriorSubject();
                     break;
                 }
                 // F3-F9 follow Flanker 1.5; see VIEWS_HELP for what stands in where.
@@ -4548,13 +4554,49 @@ export class Game {
         }
     }
 
-    private setExteriorBehindFrontView() {
+    /**
+     * F2: from any other view, behind the player; each further press moves on
+     * to the next aircraft still flying, and after the last back to the player.
+     */
+    private cycleExteriorSubject() {
         restoreMainCameraParameters(this.playerCamera.main);
-        if (this.view !== PlayerViewState.EXTERIOR_BEHIND) {
-            this.setExteriorView(PlayerViewState.EXTERIOR_BEHIND);
-        } else {
-            this.setExteriorView(PlayerViewState.EXTERIOR_FRONT);
+        let next: AiAircraftEntity | undefined;
+        if (this.isF2ExteriorView()) {
+            const aircraft = this.exteriorSubjectCandidates();
+            const current = this.exteriorSubject ? aircraft.indexOf(this.exteriorSubject) : -1;
+            // A subject gone since the last press counts as the player: start over.
+            next = this.exteriorSubject && current < 0 ? undefined : aircraft[current + 1];
         }
+        this.setExteriorView(PlayerViewState.EXTERIOR_BEHIND);
+        this.setExteriorSubject(next);
+    }
+
+    /** The other aircraft F2 steps through, in a stable (scene) order. */
+    private exteriorSubjectCandidates(): AiAircraftEntity[] {
+        const out: AiAircraftEntity[] = [];
+        for (const entity of this.scene.listByTag(ENTITY_TAGS.AIRCRAFT)) {
+            if (entity instanceof AiAircraftEntity && entity.enabled && entity.isAlive()) {
+                out.push(entity);
+            }
+        }
+        return out;
+    }
+
+    /** Whom the F2 view follows (undefined: the player); drops any lock, which was on the old one's line. */
+    private setExteriorSubject(subject: AiAircraftEntity | undefined) {
+        this.clearExteriorEnemyLock();
+        this.exteriorSubject = subject;
+        const follow = subject ? () => this.exteriorSubjectFollowed() : undefined;
+        (this.cameraUpdaters.get(PlayerViewState.EXTERIOR_BEHIND) as ExteriorFrontBehindCameraUpdater)
+            .setSubject(follow);
+        (this.cameraUpdaters.get(PlayerViewState.EXTERIOR_FRONT) as ExteriorFrontBehindCameraUpdater)
+            .setSubject(follow);
+    }
+
+    /** The F2 subject while it is alive; after that the camera returns to the player. */
+    private exteriorSubjectFollowed(): AiAircraftEntity | undefined {
+        const s = this.exteriorSubject;
+        return s?.enabled && s.isAlive() ? s : undefined;
     }
 
 
@@ -4653,6 +4695,9 @@ export class Game {
         this.leaveShowcaseIfActive();
         if (view !== PlayerViewState.EXTERIOR_BEHIND && view !== PlayerViewState.EXTERIOR_FRONT) {
             this.clearExteriorEnemyLock();
+            if (this.exteriorSubject) {
+                this.setExteriorSubject(undefined);
+            }
         }
         this.setCockpitPadlock(false);
         // The F4 chase and the padlock tilt it with the aircraft; views that

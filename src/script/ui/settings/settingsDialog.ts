@@ -127,7 +127,7 @@ const SPAWN_HELP: HelpEntry[] = [
 const VIEWS_HELP: HelpEntry[] = [
     { keys: ['N'], action: 'Day/night' },
     { keys: ['F1'], action: 'Cockpit (press again with a target to toggle padlock)' },
-    { keys: ['F2'], action: 'Exterior back/front' },
+    { keys: ['F2'], action: 'Exterior behind you; again: behind each other aircraft in turn, then back to you' },
     { keys: ['F3'], action: 'Fly-by (press again for a new pass)' },
     { keys: ['F4'], action: 'Close chase, rolling with the aircraft' },
     { keys: ['F5'], action: 'Combat: from behind you towards the target' },

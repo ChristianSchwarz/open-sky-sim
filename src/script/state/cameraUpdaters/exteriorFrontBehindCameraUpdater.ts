@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { PlayerEntity } from "../../scene/entities/player";
 import { FORWARD, UP } from '../../utils/math';
 import { CameraUpdater } from "./cameraUpdater";
+import type { ChaseTarget } from './aiExteriorCameraUpdater';
 
 /** Height the locked camera keeps over the ground (m). */
 export const LOCK_GROUND_CLEARANCE_M = 3;
@@ -16,6 +17,7 @@ export class ExteriorFrontBehindCameraUpdater extends CameraUpdater {
     private _v = new THREE.Vector3();
     private _p = new THREE.Vector3();
     private lookAtTarget: (() => THREE.Vector3 | undefined) | undefined;
+    private subject: (() => ChaseTarget | undefined) | undefined;
 
     constructor(
         actor: PlayerEntity,
@@ -31,8 +33,14 @@ export class ExteriorFrontBehindCameraUpdater extends CameraUpdater {
         this.lookAtTarget = target;
     }
 
+    /** The aircraft followed instead of the player (F2 cycling); undefined, or gone: the player. */
+    setSubject(subject: (() => ChaseTarget | undefined) | undefined): void {
+        this.subject = subject;
+    }
+
     update(delta: number): void {
-        const playerPos = this.actor.getDisplayPosition();
+        const followed: ChaseTarget = this.subject?.() ?? this.actor;
+        const playerPos = followed.getDisplayPosition();
 
         const enemyPos = this.lookAtTarget?.();
         if (enemyPos) {
@@ -41,7 +49,7 @@ export class ExteriorFrontBehindCameraUpdater extends CameraUpdater {
             // above or below alike, and the numpad orbit turns round it.
             this._v.subVectors(playerPos, enemyPos);
             if (this._v.lengthSq() < 1) {
-                this._v.copy(FORWARD).applyQuaternion(this.actor.getDisplayQuaternion()).negate();
+                this._v.copy(FORWARD).applyQuaternion(followed.getDisplayQuaternion()).negate();
             }
             this._v.normalize();
             this.camera.up.copy(UP);
@@ -60,7 +68,7 @@ export class ExteriorFrontBehindCameraUpdater extends CameraUpdater {
 
         this._v
             .copy(FORWARD)
-            .applyQuaternion(this.actor.getDisplayQuaternion())
+            .applyQuaternion(followed.getDisplayQuaternion())
             .setY(0)
             .normalize();
         this._p
