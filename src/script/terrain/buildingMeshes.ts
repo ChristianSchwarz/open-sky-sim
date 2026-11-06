@@ -16,7 +16,11 @@
  * first, so a far patch draws a prefix of its mesh - every building at least
  * BUILDING_MIN_PIXELS across at the patch's own near edge - and a frame that
  * would draw more than BUILDING_TRIANGLE_BUDGET raises that floor for every
- * patch alike until it fits. A patch out of view is not drawn and does not
+ * patch alike until it fits. Inside that prefix the vertex shader holds each
+ * building to the same floor at its own distance (the material's
+ * `prominenceCut`), so a house appears the frame its size earns it a place,
+ * big ones far out and small ones close in, never a whole patch at once.
+ * A patch out of view is not drawn and does not
  * count: the tile round the camera is mostly behind it. The terrain's own budget never counts
  * buildings: dropping a house must never coarsen the ground under it.
  */
@@ -40,23 +44,14 @@ export const BUILDING_TRIANGLE_BUDGET = 300_000;
 export const BUILDING_MIN_PIXELS = 2.5;
 /** Main-thread time a frame may spend extruding buildings. */
 export const BUILDING_BUILD_MS = 3;
-/**
- * Houses of one size cross the pixel floor together, so a hard cut brings a
- * whole town in at one frame. A tile adds its buildings at a steady rate
- * instead, biggest first: its whole count over this many seconds, and never
- * slower than `BUILDING_GROW_MIN_PER_S` so a small tile is not left waiting.
- */
-export const BUILDING_GROW_SECONDS = 8;
-const BUILDING_GROW_MIN_PER_S = 25;
 /** Main-thread time a frame may spend extruding buildings on the map; see setBuildingsAtOnce. */
 const MAP_BUILDING_BUILD_MS = 12;
 
 let atOnce = false;
 
 /**
- * The map mode: buildings come in whole, not grown in over
- * BUILDING_GROW_SECONDS, and extrude at MAP_BUILDING_BUILD_MS a frame. Both
- * paces are there to keep a flight smooth; on the map nobody is flying and a
+ * The map mode: buildings extrude at MAP_BUILDING_BUILD_MS a frame. The
+ * flight's pace is there to keep it smooth; on the map nobody is flying and a
  * town trickling in reads as the map being slow.
  */
 export function setBuildingsAtOnce(on: boolean): void {
@@ -242,6 +237,10 @@ function trianglesFor(patch: BuildingPatch, minProminence: number): number {
 
 const patchSphere = new THREE.Sphere();
 
+function clampInt16(v: number): number {
+    return Math.max(-32768, Math.min(32767, Math.round(v)));
+}
+
 export class BuildingMeshes {
     private readonly store: TileStore<PbhTile> | undefined;
     private readonly zoom: number;
@@ -256,11 +255,8 @@ export class BuildingMeshes {
     private tris = 0;
     private shownTris = 0;
     private minPixels = BUILDING_MIN_PIXELS;
-    private lastFrameMs = 0;
-    /** Fractions of a building owed to each patch between frames. */
-    private readonly owed = new WeakMap<BuildingPatch, number>();
-    /** This frame's patches of drawn leaves: their near-edge distance, and whether in view. */
-    private readonly frame: Array<{ patch: BuildingPatch; nearM: number; inView: boolean }> = [];
+    /** This frame's patches of drawn leaves: their near-edge and centre distances, and whether in view. */
+    private readonly frame: Array<{ patch: BuildingPatch; nearM: number; midM: number; inView: boolean }> = [];
     budget = BUILDING_TRIANGLE_BUDGET;
 
     constructor(opts: BuildingMeshesOptions) {
@@ -407,7 +403,7 @@ export class BuildingMeshes {
         }
         group.visible = this.on;
         const set: BuildingMeshSet = {
-            group, patches, triangles: soup.tris, bytes: soup.tris * 3 * (12 + 3 + 1 + 4),
+            group, patches, triangles: soup.tris, bytes: soup.tris * 3 * (12 + 3 + 1 + 4 + 8),
         };
         meshes.group.add(group);
         meshes.buildings = set;
@@ -458,6 +454,9 @@ export class BuildingMeshes {
             }
             const pos = new Float32Array(tris * 9), nrm = new Int8Array(tris * 9);
             const tone = new Uint8Array(tris * 3), raw = new Uint8Array(tris * 12);
+            // Per vertex, its building's centre (whole metres) and prominence
+            // (decimetres): the shader's own cut (prominenceCut).
+            const site = new Int16Array(tris * 3 * 4);
             const patchPrefix = new Uint32Array(list.length), patchProminence = new Float32Array(list.length);
             let at = 0;
             list.forEach((i, k) => {
@@ -466,6 +465,21 @@ export class BuildingMeshes {
                 nrm.set(soup.nrm.subarray(a * 9, b * 9), at * 9);
                 tone.set(soup.tone.subarray(a * 3, b * 3), at * 3);
                 raw.set(soup.raw.subarray(a * 12, b * 12), at * 12);
+                let lx = Infinity, ly = Infinity, lz = Infinity, hx = -Infinity, hy = -Infinity, hz = -Infinity;
+                for (let o = a * 9; o < b * 9; o += 3) {
+                    const x = soup.pos[o], y = soup.pos[o + 1], z = soup.pos[o + 2];
+                    lx = Math.min(lx, x); hx = Math.max(hx, x);
+                    ly = Math.min(ly, y); hy = Math.max(hy, y);
+                    lz = Math.min(lz, z); hz = Math.max(hz, z);
+                }
+                const sx = clampInt16((lx + hx) / 2), sy = clampInt16((ly + hy) / 2), sz = clampInt16((lz + hz) / 2);
+                const sw = clampInt16(prominence[i] * 10);
+                for (let v = at * 3; v < (at + b - a) * 3; v++) {
+                    site[v * 4] = sx;
+                    site[v * 4 + 1] = sy;
+                    site[v * 4 + 2] = sz;
+                    site[v * 4 + 3] = sw;
+                }
                 at += b - a;
                 patchPrefix[k] = at;
                 patchProminence[k] = prominence[i];
@@ -475,6 +489,7 @@ export class BuildingMeshes {
             geometry.setAttribute('normal', new THREE.BufferAttribute(nrm, 3, true));
             geometry.setAttribute('tone', new THREE.BufferAttribute(tone, 1));
             geometry.setAttribute('rawColor', new THREE.BufferAttribute(raw, 4, true));
+            geometry.setAttribute('site', new THREE.BufferAttribute(site, 4, false));
             const mesh = new THREE.Mesh(geometry, this.material);
             // Culled by the budget pass (endFrame), against its own bounds.
             mesh.frustumCulled = false;
@@ -532,7 +547,8 @@ export class BuildingMeshes {
             for (const patch of set.patches) {
                 const s = sphereInTile(patch.mesh, meshes.group, patchSphere);
                 this.frame.push({
-                    patch, nearM: Math.max(0, s.distanceToPoint(eye)), inView: frustum.intersectsSphere(s),
+                    patch, nearM: Math.max(0, s.distanceToPoint(eye)), midM: s.center.distanceTo(eye),
+                    inView: frustum.intersectsSphere(s),
                 });
             }
         }
@@ -544,11 +560,14 @@ export class BuildingMeshes {
      * budget. `pixelAngle` is ground metres per pixel per metre of range.
      */
     endFrame(pixelAngle: number): void {
+        // Costed at each patch's centre: the shader cuts every building at its
+        // own distance, and the near edge of the patch round the camera is 0 m,
+        // where no floor would ever bring it inside the budget.
         const total = (px: number) => {
             let sum = 0;
-            for (const { patch, nearM, inView } of this.frame) {
+            for (const { patch, nearM, midM, inView } of this.frame) {
                 if (inView && nearM <= this.rangeM) {
-                    sum += trianglesFor(patch, px * nearM * pixelAngle);
+                    sum += trianglesFor(patch, px * midM * pixelAngle);
                 }
             }
             return sum;
@@ -576,23 +595,16 @@ export class BuildingMeshes {
             this.shownTris = 0;
             return;
         }
-        const now = performance.now();
-        const dt = this.lastFrameMs === 0 ? 0 : Math.min(0.25, (now - this.lastFrameMs) / 1000);
-        this.lastFrameMs = now;
+        // Each building against the floor at its own distance, in the shader.
+        const u = (this.material as THREE.ShaderMaterial).uniforms;
+        if (u?.uProminencePerM) {
+            u.uProminencePerM.value = px * pixelAngle;
+            u.uProminenceRangeM.value = Math.min(this.rangeM, 1e30);
+        }
         for (const { patch, nearM, inView } of this.frame) {
-            // Out of view it still grows, so turning to it shows no fade-in.
-            const want = nearM > this.rangeM ? 0 : countAtLeast(patch.prominence, px * nearM * pixelAngle);
-            // Shrinking is at once, so the budget holds; growing is one by one.
-            if (want <= patch.count || atOnce) {
-                patch.count = want;
-                this.owed.delete(patch);
-            } else {
-                const rate = Math.max(BUILDING_GROW_MIN_PER_S, want / BUILDING_GROW_SECONDS);
-                const owe = (this.owed.get(patch) ?? 0) + rate * dt;
-                const add = Math.floor(owe);
-                this.owed.set(patch, owe - add);
-                patch.count = Math.min(want, patch.count + add);
-            }
+            // The patch's near edge is as close as any of its buildings gets,
+            // so this prefix holds every building the shader may keep.
+            patch.count = nearM > this.rangeM ? 0 : countAtLeast(patch.prominence, px * nearM * pixelAngle);
             const tris = patch.count > 0 ? patch.prefix[patch.count - 1] : 0;
             if (tris !== patch.shown) {
                 patch.shown = tris;

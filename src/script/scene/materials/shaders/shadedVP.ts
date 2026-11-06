@@ -75,9 +75,26 @@ export const ShadedVertProgram: string = `
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
   }
 #endif
+#ifdef PROMINENCE_CUT
+  // The object this vertex belongs to: its centre (mesh-local metres) and its
+  // prominence (decimetres). See \`prominenceCut\` in materials.ts.
+  attribute vec4 site;
+  uniform float uProminencePerM;
+  uniform float uProminenceRangeM;
+#endif
 ${LOG_DEPTH_PARS_VERTEX}
 ${HAZE_PARS_VERTEX}
   void main() {
+#ifdef PROMINENCE_CUT
+    // Camera-relative lists: the camera is at the origin.
+    float siteM = length((modelMatrix * vec4(site.xyz, 1.0)).xyz);
+    if (site.w * 0.1 < uProminencePerM * siteM || siteM > uProminenceRangeM) {
+      // Every vertex of the object lands on one point outside the clip volume:
+      // its triangles are degenerate and never rasterise.
+      gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+      return;
+    }
+#endif
 #ifdef VERTEX_TONES
     int toneIndex = int(tone + 0.5);
     vToneColor = uVertexTone[toneIndex];

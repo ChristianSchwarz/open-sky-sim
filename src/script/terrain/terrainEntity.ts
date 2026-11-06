@@ -1096,6 +1096,7 @@ export class TerrainEntity implements Entity {
             depthWrite: true,
             shaded: true as const,
             vertexTones: BUILDING_TONES,
+            prominenceCut: true,
         }) as THREE.ShaderMaterial;
         trackTerrainMaterial(buildingMaterial);
         this.buildingMaterial = buildingMaterial;

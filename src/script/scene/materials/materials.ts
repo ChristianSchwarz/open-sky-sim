@@ -123,6 +123,14 @@ type SceneMaterialMeshProperties = {
              * still picks the fog.
              */
             vertexTones?: readonly PaletteCategory[];
+            /**
+             * Hide whole objects too small for their distance, each on its own:
+             * every vertex carries its object's centre and size in a `site`
+             * attribute (xyz mesh-local metres, w decimetres), and the object is
+             * collapsed while w is under uProminencePerM times its camera
+             * distance, or it lies past uProminenceRangeM. Buildings.
+             */
+            prominenceCut?: boolean;
         }
         |
         {
@@ -503,6 +511,9 @@ export class SceneMaterialManager implements KernelTask {
         if (p.type === SceneMaterialPrimitiveType.MESH && p.shaded && !p.terrain && p.vertexTones) {
             material.defines = { ...material.defines, VERTEX_TONES: '' };
         }
+        if (p.type === SceneMaterialPrimitiveType.MESH && p.shaded && p.prominenceCut) {
+            material.defines = { ...material.defines, PROMINENCE_CUT: '' };
+        }
         if (!p.rawColor) {
             this.applyWaterTweak(p.category, material.uniforms as SceneMaterialUniforms);
         }
@@ -721,6 +732,10 @@ export class SceneMaterialManager implements KernelTask {
                 },
                 ...(properties.terrain ? this.buildTerrainUniforms(properties.terrain) : {}),
                 ...(properties.vertexTones ? this.buildVertexToneUniforms(properties.vertexTones) : {}),
+                ...(properties.prominenceCut ? {
+                    uProminencePerM: { value: 0 },
+                    uProminenceRangeM: { value: 1e30 },
+                } : {}),
             } : {
                 vCameraPos: { value: new THREE.Vector3() },
                 vCameraNormal: { value: new THREE.Vector3() },
