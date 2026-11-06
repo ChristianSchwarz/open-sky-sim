@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { describe, it } from 'node:test';
 import { Model } from '../scene/models/models';
-import { getLodLevel, resolveLodLevel } from './helpers';
+import { getLodLevel, LODHelper, resolveLodLevel } from './helpers';
 
 function modelWithLodLevels(populated: boolean[]): Model {
     return {
@@ -62,5 +62,52 @@ describe('getLodLevel + resolveLodLevel (imported aircraft)', () => {
         const forced = lodCount === 0 ? 0 : Math.min(requested, lodCount - 1);
         assert.equal(resolveLodLevel(model, forced), 0);
         assert.equal(resolveLodLevel(model, requested), 0);
+    });
+});
+
+describe('LODHelper.setHideStaticAtClipStart', () => {
+    /** A gear-like model: one door a clip swings, one bay mesh nothing moves. */
+    function gearModel(): { model: Model; door: THREE.Mesh; bay: THREE.Mesh } {
+        const door = new THREE.Mesh();
+        door.name = 'Door';
+        const bay = new THREE.Mesh();
+        bay.name = 'Bay';
+        const track = new THREE.NumberKeyframeTrack('.position[x]', [0, 1], [0, 1]);
+        const model: Model = {
+            lod: [{ flats: [], volumes: [door, bay] }],
+            animations: [new THREE.AnimationClip('DoorAction', 1, [track])],
+            maxSize: 16,
+            center: new THREE.Vector3(),
+        };
+        return { model, door, bay };
+    }
+
+    it('hides only the static meshes, and only while the clip is at its start', () => {
+        const { model, door, bay } = gearModel();
+        const helper = new LODHelper(model);
+        helper.setPlaybackDuration(3);
+        helper.setHideStaticAtClipStart(true);
+
+        helper.setPlaybackPosition(1); // gear down
+        assert.equal(bay.visible, true);
+
+        helper.playBackwards(); // retracting
+        assert.equal(bay.visible, true);
+        helper.update(1);
+        assert.equal(bay.visible, true, 'still moving');
+        helper.update(5);
+        assert.equal(bay.visible, false, 'retracted: doors closed over the bay');
+        assert.equal(door.visible, true);
+
+        helper.play(); // extending
+        assert.equal(bay.visible, true);
+        helper.update(5);
+        assert.equal(bay.visible, true, 'extended');
+
+        helper.setPlaybackPosition(0); // snapped up
+        assert.equal(bay.visible, false);
+
+        helper.setHideStaticAtClipStart(false);
+        assert.equal(bay.visible, true);
     });
 });

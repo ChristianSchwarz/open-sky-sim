@@ -70,6 +70,10 @@ export class LODHelper {
     private playback: PlaybackStatus = PlaybackStatus.STOPPED;
     private originalPlaybackDuration: number = 0; // seconds
     private playbackDuration: number = 0; // seconds
+    /** Clip time is at its start: every action parked or run back to 0. */
+    private atClipStart = false;
+    /** Meshes no clip moves, hidden while atClipStart (see setHideStaticAtClipStart). */
+    private staticMeshes: THREE.Object3D[] | undefined;
 
     constructor(public model: Model, private bias: number = DEFAULT_LOD_BIAS) {
         if (model.animations.length !== 0) {
@@ -93,6 +97,33 @@ export class LODHelper {
         });
     }
 
+    /**
+     * Hide the meshes no clip moves while the clip sits at its start. For an
+     * animated landing gear that start is gear up: the closed doors seal the
+     * bay, and the static bay interior has faces in the doors' very plane
+     * (the open bay's dark opening), which z-fight with the doors when both
+     * are drawn.
+     */
+    setHideStaticAtClipStart(hide: boolean): void {
+        if (!hide) {
+            this.staticMeshes?.forEach(m => { m.visible = true; });
+            this.staticMeshes = undefined;
+            return;
+        }
+        const animated = new Set(this.model.animations.map(clip => clip.name.replace('Action', '')));
+        const level = this.model.lod[0];
+        this.staticMeshes = level === undefined ? [] : [...level.flats, ...level.volumes].filter(m => !animated.has(m.name));
+        this.applyStaticVisibility();
+    }
+
+    private applyStaticVisibility(): void {
+        if (this.staticMeshes === undefined) return;
+        const visible = !this.atClipStart;
+        for (let i = 0; i < this.staticMeshes.length; i++) {
+            this.staticMeshes[i].visible = visible;
+        }
+    }
+
     update(delta: number): void {
         this.elapsed += delta;
         if (this.playback === PlaybackStatus.PLAYING) {
@@ -102,6 +133,10 @@ export class LODHelper {
                 if (this.animActions[i].isRunning()) {
                     this.playback = PlaybackStatus.PLAYING;
                 }
+            }
+            if (this.playback === PlaybackStatus.STOPPED) {
+                this.atClipStart = this.animActions.every(a => a.time <= 0);
+                this.applyStaticVisibility();
             }
         }
     }
@@ -114,6 +149,8 @@ export class LODHelper {
             this.animActions[i].play();
             this.animActions[i].paused = false;
         }
+        this.atClipStart = false;
+        this.applyStaticVisibility();
     }
 
     playBackwards() {
@@ -137,6 +174,8 @@ export class LODHelper {
             this.animMixers[i].setTime(this.animActions[i].getClip().duration * p / timeScale);
             this.animActions[i].paused = true;
         }
+        this.atClipStart = p <= 0;
+        this.applyStaticVisibility();
     }
 
     setPlaybackDuration(seconds: number) {

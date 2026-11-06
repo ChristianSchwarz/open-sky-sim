@@ -214,6 +214,7 @@ export class AiAircraftEntity implements Entity, Combatant, WeaponsTarget {
                 this.modelLandingGear = new LODHelper(model);
                 if (animated) {
                     this.modelLandingGear.setPlaybackDuration(LANDING_GEAR_ANIM_DURATION);
+                    this.modelLandingGear.setHideStaticAtClipStart(true);
                     this.gearAnimReady = true;
                     this.syncGearVisual(this.gearDeployed, false);
                 }

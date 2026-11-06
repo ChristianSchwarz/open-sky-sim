@@ -323,6 +323,7 @@ export class PlayerEntity implements Entity {
                 this.modelLandingGear = new LODHelper(model);
                 if (animated) {
                     this.modelLandingGear.setPlaybackDuration(LANDING_GEAR_ANIM_DURATION);
+                    this.modelLandingGear.setHideStaticAtClipStart(true);
                     this.modelLandingGear.setPlaybackPosition(1);
                 }
                 this.trackAircraftModel(model);
